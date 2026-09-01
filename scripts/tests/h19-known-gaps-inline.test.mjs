@@ -17,11 +17,11 @@
 //   (matches the existing lineage guard). NO site-based filtering until the
 //   schema gains an explicit gap scope/path field."
 //
-// The disclosed, ACCEPTED exclusion (53fd6f62): the probe-output/Bash pointer
-// path (h19-bash-delivery.mjs) stays gap-free — boarded as its own follow-up
-// (probe-output-seam-re-emission, f1489964). Test 7 pins that exclusion as
-// CURRENT, deliberate behavior so a future change to it is a decision, not a
-// silent drift.
+// The Bash pointer seam (h19-bash-delivery.mjs) was originally EXCLUDED
+// (53fd6f62's disclosed ship condition) and test 7 pinned that exclusion;
+// board f1489964 closed the seam on 2026-09-01 — test 7 was inverted at that
+// sanctioned moment (it now pins gap RE-EMISSION beside the pointer, with the
+// seam's own gap_articles dedup), and test 12 pins the drained rendering.
 //
 // known_gaps element shape (knowledge_schema feature_article):
 //   { site: string, kind: 'mutation_survivor' | 'other', evidence: string, recorded_run: string }
@@ -385,34 +385,35 @@ test('dedup: a second touch of the same article does not re-inline its gaps; a d
 
 // ---------------------------------------------------------------------------
 // (7) The probe-output/Bash pointer path stays gap-free — the accepted,
-// boarded exclusion (decision 53fd6f62; follow-up f1489964). This PINS
-// CURRENT behavior so a future change to it is deliberate, not silent drift.
-// PREDICTED: GREEN today (h19-bash-delivery.mjs already renders pointers only,
-// never article bodies or gap content) AND must stay green after the inline
-// feature ships elsewhere in the SAME hook family.
-// SABOTAGE: make h19-bash-delivery.mjs's pointer renderer also inline
-// known_gaps (e.g. reuse the same gap-rendering function used by the Read
-// path) → 'owner gap' and/or 'WRONG-ON-PURPOSE' leak into the pointer
-// payload, turning this red — the seam this test guards is exactly the one
-// the ruling says must not move without a deliberate decision.
+// boarded exclusion (decision 53fd6f62; follow-up f1489964). The exclusion
+// pin that stood here was INVERTED DELIBERATELY on 2026-09-01 when board
+// f1489964 shipped the seam closure — exactly the deliberate change the old
+// pin existed to force (its own header named f1489964 as the sanctioned
+// moment). The bash pointer path now RE-EMITS gap substance for a command
+// naming an owned path whose article carries non-empty known_gaps, with the
+// seam's OWN dedup namespace (gap_articles), never free-text output matching.
+// SABOTAGE: drop the budgetKnownGaps wiring in h19-bash-delivery.mjs (e.g.
+// budgetKnownGaps([])) → 'owner gap'/'WRONG-ON-PURPOSE' vanish from the
+// pointer payload, turning this red (probe-verified before application).
 // ---------------------------------------------------------------------------
 
-test('the probe-output/Bash pointer path stays gap-free (boarded seam f1489964) — pins current exclusion so a future change is deliberate', () => {
+test('the probe-output/Bash pointer path re-emits known_gaps substance beside its pointer (board f1489964 closes the seam the old pin held as excluded)', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'prompt' });
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
-    store.create(
+    const rec = store.create(
       article('owner', ['src/a.mjs'], {
-        known_gaps: [{ site: 'owner gap', kind: 'mutation_survivor', evidence: 'Owner has a gap that must never leak into a pointer payload.', recorded_run: 'r1' }],
+        known_gaps: [{ site: 'owner gap', kind: 'mutation_survivor', evidence: 'Owner has a gap that must now surface in a pointer payload.', recorded_run: 'r1' }],
       })
     );
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs'), dir);
     assert.equal(r.code, 0, 'AC7: delivery never blocks');
     const q = pendingOf(dir);
     assert.equal(q.length, 1, 'the bash touch queues exactly one pointer entry');
-    assert.doesNotMatch(q[0].payload, /owner gap/, 'gap site/evidence never leaks into a pointer-only payload');
-    assert.doesNotMatch(q[0].payload, /WRONG-ON-PURPOSE/, 'the mutation_survivor prefix never leaks into a pointer-only payload either');
+    assert.match(q[0].payload, /owner gap/, 'gap site now re-emits beside the pointer (board f1489964)');
+    assert.match(q[0].payload, /WRONG-ON-PURPOSE/, 'mutation_survivor framing re-emits too');
+    assert.match(q[0].payload, new RegExp(`knowledge_get ${rec.id}`), 'the article pointer is retained beside the gap');
   } finally {
     cleanup();
   }
@@ -569,9 +570,13 @@ test('drain-path gaps: known_gaps are computed LIVE at drain time — a gap edit
 // assertions stay green, isolating the zero-shown disclosure as the failure.
 // ---------------------------------------------------------------------------
 
-test('zero-budget disclosure: a second owning article whose gaps are entirely consumed by the first still renders its own KNOWN GAPS header and a 0-of-N elision — never a silent omission', () => {
+test('zero-budget disclosure: the owning article whose gaps are entirely consumed by the other still renders its own KNOWN GAPS header and a 0-of-N elision — never a silent omission (order-agnostic: the budget winner is decided by record id, random per fixture — measured flaky 2026-09-01 when this pin assumed alpha always led)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
+    // SYMMETRIC fixture: both articles carry 3 gaps, so whichever leads the
+    // deterministic-by-id ordering consumes the whole global budget of 3 and
+    // the other is ALWAYS zero-shown — the original asymmetric fixture (3+2)
+    // only produced a zero-shown loser when alpha happened to sort first.
     store.create(
       article('alpha', ['src/a.mjs'], {
         known_gaps: [
@@ -586,21 +591,23 @@ test('zero-budget disclosure: a second owning article whose gaps are entirely co
         known_gaps: [
           { site: 'b-gap-0', kind: 'other', evidence: 'Beta gap zero sentence.', recorded_run: 'r1' },
           { site: 'b-gap-1', kind: 'other', evidence: 'Beta gap one sentence.', recorded_run: 'r1' },
+          { site: 'b-gap-2', kind: 'other', evidence: 'Beta gap two sentence.', recorded_run: 'r1' },
         ],
       })
     );
     const ctx = ctxOf(runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir));
 
-    assert.match(ctx, /a-gap-0/);
-    assert.match(ctx, /a-gap-1/);
-    assert.match(ctx, /a-gap-2/);
-    assert.doesNotMatch(ctx, /b-gap-0/, "beta contributes 0 shown gaps once alpha's 3 exhaust the global budget");
-    assert.doesNotMatch(ctx, /b-gap-1/);
-
-    assert.match(ctx, /beta/i, 'the second owning article is still named — no silent disappearance');
-    assert.match(ctx, /known.?gap/i, "beta's own KNOWN GAPS header still renders even with 0 shown");
-    assert.match(ctx, /0\s*(?:of|\/)\s*2/, 'the elision states 0-of-N shown, substance not exact wording');
-    assert.doesNotMatch(ctx, /0\s*(?:of|\/)\s*3/, "alpha itself carries no zero-elision — it used its budget 3-of-3, not 0-of-N (rules out an unconditional 0-of-N stamp)");
+    const alphaWon = /a-gap-0/.test(ctx);
+    const [winner, loser] = alphaWon ? ['a', 'b'] : ['b', 'a'];
+    for (const i of [0, 1, 2]) {
+      assert.match(ctx, new RegExp(`${winner}-gap-${i}`), `the budget winner shows all 3 of its gaps`);
+      assert.doesNotMatch(ctx, new RegExp(`${loser}-gap-${i}`), 'the loser contributes 0 shown gaps once the winner exhausts the global budget');
+    }
+    assert.match(ctx, /alpha/i, 'both owning articles are named — no silent disappearance');
+    assert.match(ctx, /beta/i);
+    assert.match(ctx, /known.?gap/i, "the loser's own KNOWN GAPS header still renders even with 0 shown");
+    const zeroElisions = ctx.match(/0\s*(?:of|\/)\s*3/g) ?? [];
+    assert.equal(zeroElisions.length, 1, 'exactly ONE 0-of-3 elision — the loser discloses, the winner (3-of-3) carries none (rules out an unconditional 0-of-N stamp)');
   } finally {
     cleanup();
   }
@@ -697,6 +704,59 @@ test('site clipping: a gap site longer than ~120 chars and/or multiline renders 
     assert.ok(idx >= 0);
     const windowText = ctx.slice(idx, idx + 200);
     assert.match(windowText, /…|\.\.\./, 'the clip is disclosed with a marker, not a silent cut');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (12) DRAIN-PATH COVERAGE: postBash on a governed path whose owner carries a
+// mutation_survivor gap, drained (not just enqueued) — the KNOWN GAPS header
+// renders on its OWN line beneath the pointer, and a two-path command naming
+// the SAME owner still emits the gap block only ONCE.
+// SABOTAGE: revert bashPointerBlock to embedding the gap block into the
+// pointer entry's `line` via a joined newline (the pre-fix newline-smuggling
+// shape) instead of the separate `gapLines`/`gap_lines` field — the drain's
+// unconditional flattenToOneLine() on `line` then collapses the whole gap
+// block into the SAME line as the pointer, so the header-on-its-own-line
+// assertion goes red.
+// ---------------------------------------------------------------------------
+
+test('drain-path (newline-smuggling revert -> header lands mid-line): a two-path command naming one owner drains the KNOWN GAPS header on its own line beneath the pointer, emitted once', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'prompt' });
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    writeFileSync(join(dir, 'src', 'b.mjs'), 'x\n');
+    store.create(
+      article('owner', ['src/a.mjs', 'src/b.mjs'], {
+        known_gaps: [{ site: 'two-path-gap', kind: 'mutation_survivor', evidence: 'A mutation left this path standing.', recorded_run: 'r1' }],
+      })
+    );
+
+    // ONE command naming BOTH paths owned by the SAME article.
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'diff src/a.mjs src/b.mjs'), dir);
+    assert.equal(r.code, 0, 'AC7: delivery never blocks');
+    assert.equal(pendingOf(dir).length, 1, 'one queue batch for the one command');
+
+    const d = drain(dir);
+    assert.equal(d.code, 0, d.stderr);
+    const ctx = ctxOf(d);
+    const lines = ctx.split('\n');
+
+    const headerIdx = lines.findIndex((l) => l.trim() === 'KNOWN GAPS recorded for this territory:');
+    assert.ok(headerIdx >= 0, '(a) KNOWN GAPS header renders on its OWN line at drain, not mid-line');
+
+    const pointerIdx = lines.findIndex((l) => l.includes("article 'owner [owner]'"));
+    assert.ok(pointerIdx >= 0 && pointerIdx < headerIdx, "(b) the owner's pointer line precedes the KNOWN GAPS header");
+    const siteIdx = lines.findIndex((l) => l.includes('two-path-gap'));
+    assert.ok(siteIdx > headerIdx, '(b) the gap site renders BENEATH the pointer line, after the header');
+    assert.match(lines[siteIdx], /WRONG-ON-PURPOSE/, 'mutation_survivor framing present on the gap line');
+
+    const headerCount = lines.filter((l) => l.trim() === 'KNOWN GAPS recorded for this territory:').length;
+    const siteCount = lines.filter((l) => l.includes('two-path-gap')).length;
+    assert.equal(headerCount, 1, '(c) only ONE gap-block emission for a two-path command naming the same owner');
+    assert.equal(siteCount, 1, '(c) the gap site itself appears exactly once');
   } finally {
     cleanup();
   }

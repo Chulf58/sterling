@@ -82,9 +82,16 @@ export function pendingPath(cwd) {
  *  `records` on purpose: a Bash pointer must never consume the record's
  *  full-article guard entry, or pointing at a path would silently suppress the
  *  real delivery on a later Read of it — a pointer would then COST knowledge
- *  instead of adding it. Pointers dedupe per FILE; articles dedupe per RECORD. */
+ *  instead of adding it. Pointers dedupe per FILE; articles dedupe per RECORD.
+ *  `gap_articles` (board f1489964) is a THIRD, independent namespace: the
+ *  bash/probe-output seam's own known_gaps re-emission dedup, keyed per
+ *  ARTICLE (mirrors `slugs`' lineage keying) and deliberately separate from
+ *  both `pointer_files` (would starve the pointer line itself) and
+ *  `records`/`slugs` (the full-article Read-path guard — riding it would
+ *  either silently suppress the bash re-emission after an unrelated Read, or
+ *  vice versa; the board asks for this seam's OWN bounded dedup). */
 function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [] };
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 
 /** The lineage key for a record: its slug when it has one (feature_article,
@@ -113,6 +120,23 @@ export function markDelivered(guard, records) {
     if (!guard.records.includes(r.id)) guard.records.push(r.id);
     const key = lineageKey(r);
     if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
+}
+
+/** Bash/probe-output-seam known_gaps dedup (board f1489964) — its OWN bounded
+ *  register, mirroring isDelivered/markDelivered's lineage-keyed mechanism but
+ *  reading/writing the separate `gap_articles` namespace above. Never consult
+ *  or populate `records`/`slugs` here: this seam re-emits gap substance
+ *  independently of whether the article's full body was ever delivered via
+ *  the Read/Edit path (the high-signal exception the board item names). */
+export function isGapDelivered(guard, record) {
+  return guard.gap_articles.includes(lineageKey(record));
+}
+
+export function markGapDelivered(guard, records) {
+  for (const r of records) {
+    const key = lineageKey(r);
+    if (!guard.gap_articles.includes(key)) guard.gap_articles.push(key);
   }
 }
 
@@ -861,10 +885,17 @@ export const ARTICLE_SLUG_CLIP = 256;
 // (already guarded) never reaches renderArticle again, so its gaps never
 // re-render either — there is no separate per-gap ledger to maintain.
 //
-// DELIBERATELY EXCLUDED (accepted, boarded seam f1489964): the Bash pointer
-// path (h19-bash-delivery.mjs / bashPointerBlock below) never calls
-// renderArticle or this section at all — it renders a POINTER, not the
-// article — so known_gaps can never leak into a pointer-only payload.
+// THE BASH/PROBE-OUTPUT SEAM (board f1489964, closing what this section used
+// to describe as an accepted exclusion — decision known-gaps-inline-ships-
+// with-probe-seam-boarded 53fd6f62's ship condition): the Bash pointer path
+// (h19-bash-delivery.mjs / bashPointerBlock below) still never calls
+// renderArticle — a pointer stays a pointer, never the article body — but it
+// now reuses renderKnownGapsLines/budgetKnownGaps directly to append the SAME
+// gap substance (budget, normalization, WRONG-ON-PURPOSE prefix, cap
+// disclosure) beside its pointer line, through its OWN bounded dedup
+// (guard.gap_articles, see isGapDelivered/markGapDelivered above) — never the
+// records/slugs guard the paragraph above describes, which stays the
+// Read/Edit path's alone.
 // ---------------------------------------------------------------------------
 
 /** Global per-DELIVERY cap on inlined gaps — NOT per article, see header. */
@@ -989,7 +1020,7 @@ export function budgetKnownGaps(owners, budget = GAP_GLOBAL_BUDGET) {
  *  rendered") — a small article's normal render carries no pointer of its
  *  own today, so without this the reader would have nothing to follow back
  *  to the full record. */
-function renderKnownGapsLines(article, info) {
+export function renderKnownGapsLines(article, info) {
   if (!info) return [];
   const lines = ['KNOWN GAPS recorded for this territory:'];
   for (const gap of info.shown) lines.push(renderGapLine(gap));
@@ -1394,13 +1425,35 @@ export function extractCommandPathCandidates(command) {
  *  lines, not one pre-joined blob: to serve a still-active pointer verbatim while
  *  REPLACING a superseded one with a stub, it must know which line belongs to
  *  which id. `header` is producer chrome (two fixed sentences, no record field
- *  interpolated), which is why it can be replayed verbatim at drain. */
-export function bashPointerBlock(entries) {
+ *  interpolated), which is why it can be replayed verbatim at drain.
+ *
+ *  `gapsByOwner` (board f1489964, optional — omitted callers/entries with no
+ *  budgeted gap for an owner are byte-identical to before this addition): a
+ *  `budgetKnownGaps` Map keyed by owner id. When an owner's id has an entry,
+ *  its KNOWN GAPS lines (renderKnownGapsLines — the SAME shared renderer the
+ *  Read/Edit path uses, never a divergent copy) attach to that owner's OWN
+ *  pointer entry as a SEPARATE `gapLines` array (fixer round, board f1489964
+ *  HIGH finding) — NEVER embedded into `line` via a joined newline. This hook
+ *  ALWAYS enqueues, and the drain's rebuildPointerPayload unconditionally
+ *  flattenToOneLine()s each entry's `line` (F4, a security property against
+ *  record-derived text forging fake lines — never removed), so a newline
+ *  smuggled into `line` would collapse the whole gap block into one run-on at
+ *  drain, both losing the "one header line, no digit beside it" shape
+ *  renderGapLine relies on. Carrying gapLines as its own array lets the drain
+ *  render — and individually flatten (F4 preserved PER LINE) — each gap line
+ *  on its own, only when that owner's drain verdict is LIVE.
+ *
+ *  Attached to the FIRST pointer entry for a given owner id only (fixer round
+ *  MED finding): an owner reachable via two candidate paths in the same
+ *  command must not render its gap block twice. `gapAttached` tracks that
+ *  across the whole `entries` loop, not per-path. */
+export function bashPointerBlock(entries, { gapsByOwner } = {}) {
   const header = [
     'STERLING KNOWLEDGE POINTERS (H19) — governed paths named in a Bash command.',
     'This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here.',
   ].join('\n');
   const lines = [];
+  const gapAttached = new Set();
   for (const e of entries) {
     for (const h of e.hazards) {
       const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : (h.title ?? h.slug ?? h.id);
@@ -1415,10 +1468,15 @@ export function bashPointerBlock(entries) {
       // `state` (article build state) and the status bracket are distinct facts
       // — see renderArticle's header comment.
       const state = o.state ? ` (${o.state})` : '';
-      lines.push({
-        id: o.id,
-        line: `  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}${statusAnnotation(o)}`,
-      });
+      const line = `  • ${e.rel} — ${kind} '${label}'${state} · knowledge_get ${o.id}${statusAnnotation(o)}`;
+      const entry = { id: o.id, line };
+      const gapInfo = gapsByOwner?.get(o.id);
+      if (gapInfo && !gapAttached.has(o.id)) {
+        gapAttached.add(o.id);
+        const gapLines = renderKnownGapsLines(o, gapInfo);
+        if (gapLines.length) entry.gapLines = gapLines;
+      }
+      lines.push(entry);
     }
   }
   return { header, lines };
@@ -1426,9 +1484,17 @@ export function bashPointerBlock(entries) {
 
 /** Join a `{header, lines, tail}` pointer block into the payload text. ONE
  *  definition (invariant 1) shared by both pointer producers and by the payload
- *  they cache for the drain's fail-open arm. */
+ *  they cache for the drain's fail-open arm. Each entry's optional `gapLines`
+ *  (board f1489964) render as their OWN lines directly beneath `line`, never
+ *  joined into it — the enqueue-time cached payload keeps the same one-line-
+ *  per-array-element shape the drain now rebuilds from `gap_lines`. */
 export function joinPointerBlock({ header, lines = [], tail } = {}) {
-  return [header, ...lines.map((l) => l.line), ...(tail ? [tail] : [])].filter((s) => typeof s === 'string' && s).join('\n');
+  const body = [];
+  for (const l of lines) {
+    body.push(l.line);
+    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
+  }
+  return [header, ...body, ...(tail ? [tail] : [])].filter((s) => typeof s === 'string' && s).join('\n');
 }
 
 export function renderBashPointers(entries) {
@@ -1549,21 +1615,34 @@ export function rerenderRecipe({
 }
 
 /** Recipe for a POINTER-ONLY entry (Bash pointers, H23 output-axis). `entries`
- *  is `{id, line}[]` — the LINE THE PRODUCER RENDERED for that record, captured
- *  at enqueue — plus optional `header`/`tail` for the block's non-per-record
- *  chrome (the producer's fixed preamble; H23's '(+N more matched)' remainder).
+ *  is `{id, line, gap_lines?}[]` — the LINE THE PRODUCER RENDERED for that
+ *  record, captured at enqueue — plus optional `header`/`tail` for the block's
+ *  non-per-record chrome (the producer's fixed preamble; H23's '(+N more
+ *  matched)' remainder).
  *
  *  Storing the line per id is what lets the drain REBUILD rather than annotate:
  *  a live record's line is replayed verbatim, a superseded one is REPLACED by the
  *  stub, a missing one by the disclosure. v1's shape (bare `record_ids` + the
  *  whole cached blob) could only APPEND beneath text that still asserted the dead
- *  record — a stale serve with a footnote. */
+ *  record — a stale serve with a footnote.
+ *
+ *  `gap_lines` (board f1489964, optional — absent on every producer that never
+ *  attaches known_gaps, incl. every H23 entry, so a legacy or gap-free entry
+ *  is untouched by this field) rides the SAME per-id entry as `line` rather
+ *  than a parallel array, for the identical reason `line` itself is keyed by
+ *  id: the drain's live/superseded/missing verdict for one id must govern
+ *  both together — a superseded owner's stub replaces its pointer line AND
+ *  withholds its gap lines in the same step, never one without the other. */
 export function pointerVerifyRecipe({ header, entries, tail } = {}) {
   return {
     version: DELIVERY_RECIPE_VERSION,
     mode: 'pointer_verify',
     header: typeof header === 'string' ? header : '',
-    entries: (entries ?? []).map((e) => ({ id: e?.id, line: e?.line })),
+    entries: (entries ?? []).map((e) => {
+      const out = { id: e?.id, line: e?.line };
+      if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
+      return out;
+    }),
     tail: typeof tail === 'string' ? tail : '',
   };
 }
@@ -1624,6 +1703,12 @@ function validatePointerVerifyRecipe(r) {
     if (!e || typeof e !== 'object' || Array.isArray(e)) return 'an entries element is not an object';
     if (!isStr(e.id) || !e.id) return 'an entries element carries no string id';
     if (!isStr(e.line)) return 'an entries element carries no string line';
+    // `gap_lines` (board f1489964) is OPTIONAL — absent on every legacy/gap-free
+    // entry, which must validate exactly as before this field existed. Present
+    // means fully shaped (an array of strings), like every other optional array
+    // field on this recipe; a half-valid shape routes to the banner arm rather
+    // than being partially iterated.
+    if (e.gap_lines !== undefined && !isStrArray(e.gap_lines)) return 'an entries element carries a gap_lines that is not an array of strings';
   }
   return null;
 }
@@ -1836,6 +1921,16 @@ function rebuildPointerPayload(store, recipe) {
     // DISCLOSED. The non-active test IS statusAnnotation's own output, never a
     // second predicate beside it, so the two can never drift apart.
     if (statusAnnotation(served)) out.push(staleServedDisclosure(served));
+    // GAP LINES (board f1489964, fixer round HIGH finding): rendered ONLY when
+    // this id resolved LIVE (served, whatever its status) — a superseded or
+    // missing id already took the `continue` above and never reaches here, so
+    // its gap lines are withheld together with its pointer, never left
+    // standing beside a withdrawn/stubbed line. Each array element is its OWN
+    // line, flattened INDIVIDUALLY (F4 preserved per line, never re-joined
+    // into one run-on the way the withdrawn embedded-newline shape did).
+    if (Array.isArray(entry.gap_lines)) {
+      for (const gl of entry.gap_lines) out.push(flattenToOneLine(gl));
+    }
   }
   if (recipe.tail) out.push(recipe.tail);
   return out.join('\n');
