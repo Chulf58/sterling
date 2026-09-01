@@ -4101,7 +4101,7 @@ function toRepoRelative(absolutePath, repoRoot) {
 }
 
 // packages/schemas/dist/envelope.js
-var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
+var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
   target_id: external_exports.string().uuid()
@@ -4181,6 +4181,28 @@ var decisionSchema = base.extend({
   // records round-trip unchanged.
   authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
+var notApplicableExemptionSchema = external_exports.object({
+  not_applicable: external_exports.object({
+    reason: external_exports.string().min(1),
+    ruling_record_id: external_exports.string().optional()
+  }).strict()
+}).strict();
+var currentAcItemSchema = external_exports.object({
+  ac_id: external_exports.string().min(1),
+  text: external_exports.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: external_exports.object({
+    reason: external_exports.string().min(1),
+    blocking_record_id: external_exports.string().uuid()
+  }).strict().optional()
+});
+var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4202,22 +4224,16 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({
-    ac_id: external_exports.string().min(1),
-    text: external_exports.string().min(1),
-    verifiable_at: verifiableAt,
-    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
-    // test CAN cover this, because <ruling>" — strict (extra members
-    // refused) so a stray field cannot smuggle unreviewed prose past the
-    // one place a reader checks for a real blocking ruling. Optional:
-    // absent means the AC is ordinarily testable; when present both
-    // members are required, since a reason with no ruling to point at is
-    // just an excuse.
-    untestable_because: external_exports.object({
-      reason: external_exports.string().min(1),
-      blocking_record_id: external_exports.string().uuid()
-    }).strict().optional()
-  })),
+  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  // axis, subsuming concept_family's role there — concept_family itself is
+  // untouched, kept for compatibility (see below).
+  article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+  // Union with the structured not_applicable exemption (see
+  // notApplicableExemptionSchema above) — acceptance of the exemption
+  // branch, and rejection of an empty array, are both gated BY KIND in the
+  // superRefine below, since "which kind" is a whole-record fact a single
+  // field's shape cannot express alone.
+  current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4246,7 +4262,7 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  live_test_refs: external_exports.union([external_exports.array(liveTestRefItemSchema), notApplicableExemptionSchema]),
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
@@ -4255,6 +4271,29 @@ var featureArticleSchema = base.extend({
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+  }
+  const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+  const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
+  const gated = [
+    ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
+    ["current_ac", rec.current_ac, "real content (ac_id/text)"]
+  ];
+  for (const [field, value, contentHint] of gated) {
+    const exempt = isExempt(value);
+    if (exempt && !exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+      });
+    }
+    if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+      });
+    }
   }
 });
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
@@ -4344,6 +4383,44 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var openQuestionSchema = base.extend({
+  type: external_exports.literal("open_question"),
+  // Stable handle, minted from the question — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  // The question IS the identity, exactly as on research_finding and
+  // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+  // same way and why the digest leads with it).
+  question: external_exports.string().min(1),
+  // The LIVE candidates. Plural and ordered by the author; a question with no
+  // hypothesis yet is legitimate, so this defaults to [] rather than being
+  // required — what makes the record worth keeping is the EVIDENCE.
+  hypotheses: external_exports.array(external_exports.string().min(1)).default([]),
+  // What is already known: the measurements, the derived geometry, the probe
+  // output. Required — an unevidenced question is a board todo, not durable
+  // knowledge, and that boundary is the whole point of the type.
+  evidence: external_exports.string().min(1),
+  resolution_status: external_exports.enum(["open", "closed"]).default("open"),
+  // The TERMINAL home: closure means the question was answered, and an
+  // answered question is a research_finding. Its own field, never an id
+  // embedded in a status string (Codex refinement, thread 01a05710), so it is
+  // queryable and cannot rot inside prose.
+  closed_into: external_exports.string().min(1).optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  if (rec.resolution_status === "closed" && !rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+    });
+  }
+  if (rec.resolution_status !== "closed" && rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+    });
+  }
+});
 var attestationSchema = base.extend({
   type: external_exports.literal("attestation"),
   // Optional explicit handle. NEVER auto-minted (no title/question headline
@@ -4627,7 +4704,8 @@ var sessionEventSchema = external_exports.object({
     "concept_designed",
     "no_capture",
     "capture_pending",
-    "test_repair"
+    "test_repair",
+    "test_append"
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
@@ -4759,6 +4837,15 @@ var configSchema = external_exports.object({
   // not by article baselines. DELETION still flags (a vanished committed
   // deliverable is real drift regardless of how the file is produced).
   generated_projections: external_exports.array(external_exports.string()).default([]),
+  // Undeclared-source disclosure (decision
+  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
+  // 44ef6838): POSIX globs excluded from the live per-file source-extension
+  // coverage scan H1 (SessionStart) and init render — an excluded file never
+  // participates (neither covered nor uncovered), same precedence as
+  // classifyCoverage's excludeGlobs parameter in
+  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
+  // toolchain path_glob).
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),
@@ -5163,6 +5250,32 @@ function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
 }
+var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
+var GLOB_METACHAR_RE = /[*?[\]]/;
+function isRepoRelativePosixShape(p) {
+  if (typeof p !== "string" || p === "") return false;
+  if (GLOB_METACHAR_RE.test(p)) return false;
+  try {
+    return normalizeRepoPath(p) === p;
+  } catch {
+    return false;
+  }
+}
+function parseReviewTerritory(text) {
+  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
+  if (!match) return { present: false };
+  const raw = match[0];
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return { present: true, valid: false, raw };
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
+    return { present: true, valid: false, raw };
+  }
+  return { present: true, valid: true, files: parsed };
+}
 
 // scripts/lib/dispatch-register.mjs
 import { readFileSync as readFileSync3, existsSync as existsSync3 } from "node:fs";
@@ -5306,7 +5419,7 @@ function isReadOnlyDispatchType(type) {
   if (!type) return false;
   if (isReviewerClass(type)) return true;
   const lower = type.toLowerCase();
-  return lower === "explorer" || lower === "explore" || lower === "plan";
+  return lower === "explorer" || lower === "explore" || lower === "plan" || lower === "librarian";
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
@@ -5401,15 +5514,20 @@ try {
   }
   if (!existsSync4(join4(input.cwd ?? ".", ".sterling", "sterling.db"))) finish();
   if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) finish();
-  const candidates = extractPathCandidates(prompt);
-  const normalized = candidates.map((raw) => ({ raw, norm: repoRel(raw, input.cwd) })).filter((p) => p.norm).filter(
-    (p) => p.norm !== ".git" && !p.norm.startsWith(".git/") && !p.norm.startsWith(".sterling/") && !p.norm.startsWith("sterling/") && !p.norm.startsWith("git/")
-  );
-  const files = [
-    ...new Set(
-      normalized.filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false })).filter((p) => !EXECUTABLE_EXT_RE.test(p.norm)).filter((p) => hasNonRunMention(prompt, p.raw)).map((p) => p.norm)
-    )
-  ];
+  const dropGoverned = (norm) => norm !== ".git" && !norm.startsWith(".git/") && !norm.startsWith(".sterling/") && !norm.startsWith("sterling/") && !norm.startsWith("git/");
+  const territoryDecl = parseReviewTerritory(prompt);
+  let files;
+  if (territoryDecl.present && territoryDecl.valid) {
+    files = [...new Set(territoryDecl.files.map((raw) => repoRel(raw, input.cwd)).filter((norm) => norm && dropGoverned(norm)))];
+  } else {
+    const candidates = extractPathCandidates(prompt);
+    const normalized = candidates.map((raw) => ({ raw, norm: repoRel(raw, input.cwd) })).filter((p) => p.norm && dropGoverned(p.norm));
+    files = [
+      ...new Set(
+        normalized.filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false })).filter((p) => !EXECUTABLE_EXT_RE.test(p.norm)).filter((p) => hasNonRunMention(prompt, p.raw)).map((p) => p.norm)
+      )
+    ];
+  }
   if (!files.length) finish();
   const candidateSet = new Set(files);
   if (!live.length) finish();
@@ -5417,10 +5535,12 @@ try {
   const overlapPaths = /* @__PURE__ */ new Set();
   for (const e of live) {
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
+    if (isReadOnlyDispatchType(e.agent_type)) continue;
     if (e.attribution !== "block") continue;
-    const entryFiles = Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
+    const isDeclaredTerritory = e.files_source === "review-territory";
+    const entryFiles = isDeclaredTerritory ? e.files : Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
     const matchedExact = entryFiles.filter((f) => candidateSet.has(f));
-    const entryPrefixes = Array.isArray(e.claimed_glob_prefixes) ? e.claimed_glob_prefixes : [];
+    const entryPrefixes = isDeclaredTerritory ? [] : Array.isArray(e.claimed_glob_prefixes) ? e.claimed_glob_prefixes : [];
     const matchedPrefix = entryPrefixes.length ? files.filter((f) => entryPrefixes.some((p) => f === p || f.startsWith(`${p}/`))) : [];
     const matched = [.../* @__PURE__ */ new Set([...matchedExact, ...matchedPrefix])];
     if (matched.length) {

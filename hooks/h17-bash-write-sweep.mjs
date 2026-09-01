@@ -4209,6 +4209,28 @@ var decisionSchema = base.extend({
   // records round-trip unchanged.
   authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
+var notApplicableExemptionSchema = external_exports.object({
+  not_applicable: external_exports.object({
+    reason: external_exports.string().min(1),
+    ruling_record_id: external_exports.string().optional()
+  }).strict()
+}).strict();
+var currentAcItemSchema = external_exports.object({
+  ac_id: external_exports.string().min(1),
+  text: external_exports.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: external_exports.object({
+    reason: external_exports.string().min(1),
+    blocking_record_id: external_exports.string().uuid()
+  }).strict().optional()
+});
+var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4230,22 +4252,16 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({
-    ac_id: external_exports.string().min(1),
-    text: external_exports.string().min(1),
-    verifiable_at: verifiableAt,
-    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
-    // test CAN cover this, because <ruling>" — strict (extra members
-    // refused) so a stray field cannot smuggle unreviewed prose past the
-    // one place a reader checks for a real blocking ruling. Optional:
-    // absent means the AC is ordinarily testable; when present both
-    // members are required, since a reason with no ruling to point at is
-    // just an excuse.
-    untestable_because: external_exports.object({
-      reason: external_exports.string().min(1),
-      blocking_record_id: external_exports.string().uuid()
-    }).strict().optional()
-  })),
+  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  // axis, subsuming concept_family's role there — concept_family itself is
+  // untouched, kept for compatibility (see below).
+  article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+  // Union with the structured not_applicable exemption (see
+  // notApplicableExemptionSchema above) — acceptance of the exemption
+  // branch, and rejection of an empty array, are both gated BY KIND in the
+  // superRefine below, since "which kind" is a whole-record fact a single
+  // field's shape cannot express alone.
+  current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4274,7 +4290,7 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  live_test_refs: external_exports.union([external_exports.array(liveTestRefItemSchema), notApplicableExemptionSchema]),
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
@@ -4283,6 +4299,29 @@ var featureArticleSchema = base.extend({
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+  }
+  const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+  const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
+  const gated = [
+    ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
+    ["current_ac", rec.current_ac, "real content (ac_id/text)"]
+  ];
+  for (const [field, value, contentHint] of gated) {
+    const exempt = isExempt(value);
+    if (exempt && !exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+      });
+    }
+    if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+      });
+    }
   }
 });
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
@@ -4831,7 +4870,8 @@ var sessionEventSchema = external_exports.object({
     "concept_designed",
     "no_capture",
     "capture_pending",
-    "test_repair"
+    "test_repair",
+    "test_append"
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
