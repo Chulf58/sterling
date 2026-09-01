@@ -10,6 +10,7 @@ required_inputs:
   - the session scratchpad path (notes only — never an executable probe; the in-repo probe corridor is in Rubric 1)
   - H14 denies any argument of a DECLARED RUN COMMAND that resolves outside the project root (fs-helper and read-only-search invocations carry their own separate guards, not this escape check)
   - the project's declared toolchain run commands (they define what you may execute — see Rubric 1)
+  - single-instance-resource block, when the brief declares one (resource name, capacity, current holder, acquisition point, release condition — convention `single-instance-resources-brief-convention-not-mechanism`)
 hooks:
   PreToolUse:
     - matcher: "Edit|Write|MultiEdit"
@@ -64,6 +65,7 @@ Concretely: place the probe file inside the project root, name it so it does NOT
 5. Evidence over inference: every claim in the diagnosis cites a probe output, a test run, or a `file:line`. Never present an inference as if it were probe-backed.
 6. Fix ONLY if the work order says so, and then minimally; otherwise report the precise fix you would make.
 7. A denial that names an ENVIRONMENT DEFECT or MISSING PRE-EVIDENCE (abnormal) is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+8. If the brief declares a single-instance-resource block (name, capacity, current holder, acquisition point, release condition — convention `single-instance-resources-brief-convention-not-mechanism`), its acquisition/release protocol is binding before you run an exclusive command through the declared toolchain: do not run it until the brief names you as the current holder, and follow the stated release condition when finished. No enforcement mechanism exists behind this yet (deferred pending a second-project recurrence) — the brief's form is the only safeguard against two dispatches colliding on the resource.
 
 # Worked example
 
