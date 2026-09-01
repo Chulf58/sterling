@@ -19,6 +19,7 @@ export {
   researchFindingSchema,
   referenceMaterialSchema,
   disconfirmedHypothesisSchema,
+  openQuestionSchema,
   attestationSchema,
   featureArticleSchema,
   todoSchema,

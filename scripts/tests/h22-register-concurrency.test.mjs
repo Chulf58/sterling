@@ -380,7 +380,13 @@ test('C2: concurrent SubagentStop for N distinct reviewer-class entries — no l
       }
 
       const ledger = readLedger(dir);
-      const key = (e) => `${e.agent_type}::${e.at}`;
+      // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+      // standing): promoted entries are now v2-shaped (agent_type/at live under reviewer.agent_type/started_at),
+      // while the SEEDED register `entries` above stay flat — key() must read either shape. entry_id is unusable
+      // as the shared identity here: it exists ONLY on the promoted side (freshly minted per entry), so a seed
+      // entry has nothing to compare it against — the composite agent_type::at identity is what this test's
+      // intent actually needs (a stable value present on BOTH the seed and promoted sides), kept dual-shape-aware.
+      const key = (e) => `${e.reviewer?.agent_type ?? e.agent_type}::${e.started_at ?? e.at}`;
       const expectedKeys = new Set(entries.map(key));
       const actualKeys = new Set(ledger.map(key));
 
@@ -425,7 +431,9 @@ test('C3 (control): sequential single Start + matching reviewer Stop — one ent
 
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 1, 'exactly one receipt is promoted for the sole sequential reviewer Stop');
-    assert.equal(ledger[0].agent_type, 'reviewer-solo');
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): agent_type now lives at reviewer.agent_type on a v2-promoted entry (dual-shape, mirrors C2 above).
+    assert.equal(ledger[0].reviewer?.agent_type ?? ledger[0].agent_type, 'reviewer-solo');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -720,7 +728,10 @@ test("D3: a reviewer-class SubagentStop's receipt is STILL promoted to the ledge
     assert.equal(skipLines.length, 1, `D3 must also loudly disclose its own register-lock timeout exactly once, found ${skipLines.length}: ${JSON.stringify(r.stderr.split('\n'))}`);
 
     const ledger = readLedger(dir);
-    const promoted = ledger.find((e) => e.agent_type === entry.agent_type && e.at === entry.at);
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries agent_type/at at reviewer.agent_type/started_at; dual-shape lookup
+    // keeps this search working for either shape (mirrors the C2 fix in this same file).
+    const promoted = ledger.find((e) => (e.reviewer?.agent_type ?? e.agent_type) === entry.agent_type && (e.started_at ?? e.at) === entry.at);
     assert.ok(promoted, 'the reviewer-class receipt is promoted into the ledger even though the register removal was skipped under lock contention');
 
     const reg = readRegister(dir);
@@ -857,6 +868,47 @@ test('H10-TIMEOUT: while the register lock is held, an H10 Stop that would stamp
 });
 
 // ===========================================================================
+// DISPATCH-IDENTITY DISCRIMINATION — CONTROL, placed FIRST (Codex outside-
+// family review, thread 01a0586b + decision 57984926, cited 2026-08-31): the
+// LEDGER-IDEMPOTENCY pin below only ever re-seeds the SAME agent_id, so it
+// cannot distinguish "dedupe keys on dispatch identity" from "dedupe keys on
+// agent_type+at" — both readings produce the same green there. This CONTROL
+// varies agent_id while holding agent_type AND started_at (`at`) fixed: two
+// genuinely DISTINCT reviewer dispatches that collide on agent_type+at must
+// BOTH promote. A dedupe keyed on agent_type+at (instead of dispatch
+// identity) would silently discard the second receipt — real data loss, not
+// idempotency.
+// EXPECTED RED until dedupe keys on dispatch identity (agent_id), not on
+// agent_type+at.
+// SABOTAGE: key the ledger-append idempotency check on `${agent_type}::${at}`
+// instead of the dispatch identity — `ledger.length` stays 1 instead of 2.
+// ===========================================================================
+
+test('DISPATCH-IDENTITY (control): two DISTINCT reviewer dispatches sharing agent_type AND started_at (`at`) both promote — dedupe must key on dispatch identity, not on agent_type+at', () => {
+  const dir = makeProject();
+  try {
+    const sharedAt = '2026-08-29T00:00:00.000Z';
+    const entryA = { agent_id: 'rev-collide-a', agent_type: 'reviewer-collide', session_id: 's1', files: ['src/collide-a.mjs'], at: sharedAt };
+    const entryB = { agent_id: 'rev-collide-b', agent_type: 'reviewer-collide', session_id: 's1', files: ['src/collide-b.mjs'], at: sharedAt };
+    writeRegisterRaw(dir, [entryA, entryB]);
+
+    const stopA = runHookSync(HOOK_SCRIPT, h22Input(dir, { agent_id: entryA.agent_id, agent_type: entryA.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
+    assert.equal(stopA.code, 0, stopA.stderr);
+    const stopB = runHookSync(HOOK_SCRIPT, h22Input(dir, { agent_id: entryB.agent_id, agent_type: entryB.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
+    assert.equal(stopB.code, 0, stopB.stderr);
+
+    const ledger = readLedger(dir);
+    assert.equal(ledger.length, 2, 'two DISTINCT dispatches sharing agent_type+at must both promote — neither is a duplicate of the other');
+    const entryIds = ledger.map((e) => e.entry_id).filter(Boolean);
+    if (entryIds.length === ledger.length) {
+      assert.notEqual(entryIds[0], entryIds[1], 'two genuinely distinct promotions mint distinct entry_ids');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
 // LEDGER-IDEMPOTENCY — two Stops for the SAME reviewer agent_id (simulating
 // the skipped-removal retry shape: the register entry is re-seeded exactly
 // as a prior lock-timeout would have left it behind) must produce exactly
@@ -866,6 +918,13 @@ test('H10-TIMEOUT: while the register lock is held, an H10 Stop that would stamp
 // SABOTAGE (once shipped): drop the agent_id idempotency check from the
 // ledger append path — the second-Stop "still exactly one receipt"
 // assertion goes red.
+// STRENGTHENED 2026-08-31 (Codex outside-family review, thread 01a0586b +
+// decision 57984926): Codex called the old generic-word disclosure match
+// non-probative — it could pass under a wrong agent_type+at-keyed dedupe just
+// as easily as a correct agent_id-keyed one. The disclosure assertion below
+// now demands the actual duplicate IDENTITY (the literal agent_id) appear,
+// not merely a stock phrase; the DISPATCH-IDENTITY control above proves the
+// OTHER half (different identity, same type+time -> never treated as a dup).
 // ===========================================================================
 
 test('LEDGER-IDEMPOTENCY: two Stops for the same reviewer agent_id (simulating a skipped-removal retry) yield exactly ONE ledger receipt', () => {
@@ -889,7 +948,11 @@ test('LEDGER-IDEMPOTENCY: two Stops for the same reviewer agent_id (simulating a
 
     ledger = readLedger(dir);
     assert.equal(ledger.length, 1, 'the SECOND Stop for the same agent_id must be idempotent — the ledger must still hold exactly ONE receipt, not two');
-    assert.match(`${second.stdout}\n${second.stderr}`, /agent_id|idempot|already|duplicate|skip/i, 'the skipped duplicate promotion should be disclosed, not silent');
+    assert.match(
+      `${second.stdout}\n${second.stderr}`,
+      new RegExp(entry.agent_id),
+      `the disclosure must name the actual duplicate IDENTITY (its agent_id, "${entry.agent_id}"), not merely a generic word — proving the dedupe reasons about identity, not a stock phrase`
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

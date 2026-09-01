@@ -23,6 +23,23 @@ function harness() {
   return { store, tools, cleanup };
 }
 
+// Like harness(), but each now() call ticks one second — for pins whose
+// subject is ORDER under distinct timestamps (board abafbd48 paging pins).
+function steppedHarness() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-paging-'));
+  const store = new SterlingStore(join(dir, 'sterling.db'));
+  let tick = 0;
+  const tools = new SterlingTools({
+    store,
+    now: () => new Date(Date.UTC(2026, 0, 1, 0, 0, tick++)).toISOString(),
+  });
+  const cleanup = () => {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { tools, cleanup };
+}
+
 function harnessWithConfig(configOverrides: Record<string, unknown>) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-tools-'));
   const store = new SterlingStore(join(dir, 'sterling.db'));
@@ -894,7 +911,11 @@ test("board_query / maintenance_query take projection:'digest' — the 478 KB bo
       'a digested board is dramatically cheaper to hold'
     );
     const [item] = digest.records as Record<string, unknown>[];
-    assert.match(item.text as string, /^item 0/, 'the text is clipped, not dropped — triage needs to read it');
+    // /^item \d/ not /^item 0/: all five fixtures share one updated_at under the
+    // fixed clock, so WHICH item pages first is the (updated_at DESC, id DESC)
+    // total order's business (board abafbd48), not this pin's — its subject is
+    // the clip shape, which holds for whichever tied item leads.
+    assert.match(item.text as string, /^item \d/, 'the text is clipped, not dropped — triage needs to read it');
     assert.match(item.text as string, /…$/);
     assert.equal(item.priority, 'high', 'the fields you triage BY survive');
 
@@ -2380,6 +2401,72 @@ test('knowledge_edit refuses a miss and an AMBIGUOUS match, writing nothing eith
   }
 });
 
+// ===========================================================================
+// BOARD PAGING TOTAL ORDER + KEYSET (board abafbd48, Codex thread 01a05bc3).
+// Pin content authored by the implementing coder dispatch, probe-verified
+// (incl. mutation: aliasing cursor to offset turned the churn pin red) before
+// application; adapted to this file's harness by the conductor (the churn pin
+// uses steppedHarness since harness() pins NOW).
+// ===========================================================================
+
+test('board_query: identical-updated_at items page deterministically under the id DESC tiebreaker (sabotage: drop the tiebreaker — repeat reads may disagree / offset pages can gap or duplicate)', () => {
+  const { tools, cleanup } = harness(); // fixed NOW: both items tie on updated_at
+  try {
+    const a = (tools.boardAdd({ text: 'tie-a', source: 'user' }) as { record: { id: string } }).record;
+    const b = (tools.boardAdd({ text: 'tie-b', source: 'user' }) as { record: { id: string } }).record;
+    const [first, second] = a.id > b.id ? [a.id, b.id] : [b.id, a.id];
+    assert.equal((tools.boardQueryResult({ source: 'user', cap: 1 }).records[0] as { id: string }).id, first);
+    assert.equal((tools.boardQueryResult({ source: 'user', cap: 1 }).records[0] as { id: string }).id, first, 'repeatable');
+    assert.equal((tools.boardQueryResult({ source: 'user', cap: 1, offset: 1 }).records[0] as { id: string }).id, second);
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_query churn: offset walk misses a mid-walk-bumped tail item; cursor walk does not (sabotage: make cursor an alias for offset — the cursor arm misses item1 too)', () => {
+  // OFFSET ARM — documents the hazard.
+  const off = steppedHarness();
+  try {
+    const items: { id: string }[] = [];
+    for (let i = 0; i < 5; i++) items.push((off.tools.boardAdd({ text: `chn-${i}`, source: 'user' }) as { record: { id: string } }).record);
+    const off1 = off.tools.boardQueryResult({ source: 'user', cap: 2, offset: 0 });
+    off.tools.boardUpdate(items[0].id, { priority: 'high' }); // bump oldest to newest
+    const off2 = off.tools.boardQueryResult({ source: 'user', cap: 2, offset: 2 });
+    const seen = new Set([...off1.records, ...off2.records].map((r) => (r as { id: string }).id));
+    assert.ok(!seen.has(items[1].id), 'offset walk MISSES the item shifted across the page boundary');
+  } finally {
+    off.cleanup();
+  }
+
+  // CURSOR ARM — same churn, nothing behind the cursor is skipped.
+  const cur = steppedHarness();
+  try {
+    const items: { id: string }[] = [];
+    for (let i = 0; i < 5; i++) items.push((cur.tools.boardAdd({ text: `chn2-${i}`, source: 'user' }) as { record: { id: string } }).record);
+    const cur1 = cur.tools.boardQueryResult({ source: 'user', cap: 2 }) as unknown as { records: unknown[]; next_cursor?: string };
+    assert.ok(cur1.next_cursor, 'a capped page carries next_cursor');
+    cur.tools.boardUpdate(items[0].id, { priority: 'high' });
+    const cur2 = cur.tools.boardQueryResult({ source: 'user', cap: 2, cursor: cur1.next_cursor });
+    assert.ok(
+      cur2.records.map((r) => (r as { id: string }).id).includes(items[1].id),
+      'cursor walk does NOT miss the item behind the cursor'
+    );
+  } finally {
+    cur.cleanup();
+  }
+});
+
+test('board_query: cursor+offset together refused; malformed cursor refused naming the parameter (sabotage: silently ignore a malformed cursor — page serves as offset 0 instead of refusing)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.boardAdd({ text: 'x', source: 'user' });
+    assert.throws(() => tools.boardQueryResult({ source: 'user', cursor: 'a', offset: 0 }), /cursor.*offset|offset.*cursor/is);
+    assert.throws(() => tools.boardQueryResult({ source: 'user', cursor: 'not-base64!!' }), /cursor/i);
+  } finally {
+    cleanup();
+  }
+});
+
 test('knowledge_edit refuses a non-string field and an empty find', () => {
   const { tools, cleanup } = harness();
   try {
@@ -3082,6 +3169,69 @@ test("removes distinguish 'already removed' from 'never existed' via the drain-l
       () => tools.boardRemove(randomUUID()),
       /no trace of it in the drain log.*newest 50/s,
       "an unknown id says 'no recent trace', never claiming proof of non-existence"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('board_query: cursor walk across a same-updated_at tie visits every item exactly once, in strict id DESC order — no dups, no gaps (discriminates the JS tiebreaker in boardFiltered; the SQL ORDER BY id DESC layer only becomes observable past BOARD_SCAN_CAP truncation, out of unit-test reach)', () => {
+  const { tools, cleanup } = harness(); // fixed NOW: all items genuinely tied
+  try {
+    const items: { id: string; updated_at: string }[] = [];
+    for (let i = 0; i < 4; i++) items.push((tools.boardAdd({ text: `tie-walk-${i}`, source: 'user' }) as { record: { id: string; updated_at: string } }).record);
+    for (const it of items) assert.equal(it.updated_at, NOW, 'precondition: genuinely tied');
+    const expectedOrder = items.map((r) => r.id).slice().sort().reverse(); // id DESC
+
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let i = 0; i < items.length; i++) {
+      const page = tools.boardQueryResult(cursor ? { source: 'user', cap: 1, cursor } : { source: 'user', cap: 1 }) as unknown as { records: { id: string }[]; next_cursor?: string };
+      assert.equal(page.records.length, 1, `page ${i} returns exactly one item`);
+      seen.push(page.records[0].id);
+      cursor = page.next_cursor;
+    }
+    assert.deepEqual(seen, expectedOrder, 'strict id DESC order across the whole walk, no dups, no gaps');
+    assert.equal(cursor, undefined, 'the walk terminates cleanly — no next_cursor past the last item');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DIRECTION A: continuation from a STANDALONE-filtered cursor to an OMITTED-objective call is REFUSED (sabotage: collapse the objective identity to a bare null sentinel — omitted and standalone compare equal, continuation silently skips)', () => {
+  const { tools, cleanup } = harness(); // fixed now()
+  try {
+    tools.boardAdd({ text: 'ungrouped-1', source: 'user' });
+    tools.boardAdd({ text: 'ungrouped-2', source: 'user' });
+    tools.boardAdd({ text: 'ungrouped-3', source: 'user' });
+    tools.boardAdd({ text: 'grouped-1', source: 'user', objective: 'somegroup' });
+
+    const page1 = tools.boardQueryResult({ source: 'user', objective: 'standalone', cap: 1 }) as unknown as { next_cursor?: string };
+    assert.ok(page1.next_cursor);
+    assert.throws(
+      () => tools.boardQueryResult({ source: 'user', cap: 1, cursor: page1.next_cursor }),
+      /objective/i,
+      'continuing a standalone cursor WITHOUT the objective filter is refused, naming the mismatch'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('DIRECTION B: continuation from an OMITTED-objective cursor to a STANDALONE-filtered call is REFUSED (same sabotage as DIRECTION A, opposite direction)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.boardAdd({ text: 'ungrouped-1', source: 'user' });
+    tools.boardAdd({ text: 'ungrouped-2', source: 'user' });
+    tools.boardAdd({ text: 'grouped-1', source: 'user', objective: 'somegroup' });
+    tools.boardAdd({ text: 'grouped-2', source: 'user', objective: 'somegroup' });
+
+    const page1 = tools.boardQueryResult({ source: 'user', cap: 1 }) as unknown as { next_cursor?: string };
+    assert.ok(page1.next_cursor);
+    assert.throws(
+      () => tools.boardQueryResult({ source: 'user', objective: 'standalone', cap: 1, cursor: page1.next_cursor }),
+      /objective/i,
+      'continuing an omitted-objective cursor WITH the standalone filter is refused, naming the mismatch'
     );
   } finally {
     cleanup();

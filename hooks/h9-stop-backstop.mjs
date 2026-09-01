@@ -4083,7 +4083,7 @@ var repoPath = external_exports.string().transform((value, ctx) => {
 });
 
 // packages/schemas/dist/envelope.js
-var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
+var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
   target_id: external_exports.string().uuid()
@@ -4163,6 +4163,28 @@ var decisionSchema = base.extend({
   // records round-trip unchanged.
   authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
+var notApplicableExemptionSchema = external_exports.object({
+  not_applicable: external_exports.object({
+    reason: external_exports.string().min(1),
+    ruling_record_id: external_exports.string().optional()
+  }).strict()
+}).strict();
+var currentAcItemSchema = external_exports.object({
+  ac_id: external_exports.string().min(1),
+  text: external_exports.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: external_exports.object({
+    reason: external_exports.string().min(1),
+    blocking_record_id: external_exports.string().uuid()
+  }).strict().optional()
+});
+var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4184,22 +4206,16 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({
-    ac_id: external_exports.string().min(1),
-    text: external_exports.string().min(1),
-    verifiable_at: verifiableAt,
-    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
-    // test CAN cover this, because <ruling>" — strict (extra members
-    // refused) so a stray field cannot smuggle unreviewed prose past the
-    // one place a reader checks for a real blocking ruling. Optional:
-    // absent means the AC is ordinarily testable; when present both
-    // members are required, since a reason with no ruling to point at is
-    // just an excuse.
-    untestable_because: external_exports.object({
-      reason: external_exports.string().min(1),
-      blocking_record_id: external_exports.string().uuid()
-    }).strict().optional()
-  })),
+  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  // axis, subsuming concept_family's role there — concept_family itself is
+  // untouched, kept for compatibility (see below).
+  article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+  // Union with the structured not_applicable exemption (see
+  // notApplicableExemptionSchema above) — acceptance of the exemption
+  // branch, and rejection of an empty array, are both gated BY KIND in the
+  // superRefine below, since "which kind" is a whole-record fact a single
+  // field's shape cannot express alone.
+  current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4228,7 +4244,7 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  live_test_refs: external_exports.union([external_exports.array(liveTestRefItemSchema), notApplicableExemptionSchema]),
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
@@ -4237,6 +4253,29 @@ var featureArticleSchema = base.extend({
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+  }
+  const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+  const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
+  const gated = [
+    ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
+    ["current_ac", rec.current_ac, "real content (ac_id/text)"]
+  ];
+  for (const [field, value, contentHint] of gated) {
+    const exempt = isExempt(value);
+    if (exempt && !exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+      });
+    }
+    if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+      });
+    }
   }
 });
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
@@ -4326,6 +4365,44 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var openQuestionSchema = base.extend({
+  type: external_exports.literal("open_question"),
+  // Stable handle, minted from the question — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  // The question IS the identity, exactly as on research_finding and
+  // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+  // same way and why the digest leads with it).
+  question: external_exports.string().min(1),
+  // The LIVE candidates. Plural and ordered by the author; a question with no
+  // hypothesis yet is legitimate, so this defaults to [] rather than being
+  // required — what makes the record worth keeping is the EVIDENCE.
+  hypotheses: external_exports.array(external_exports.string().min(1)).default([]),
+  // What is already known: the measurements, the derived geometry, the probe
+  // output. Required — an unevidenced question is a board todo, not durable
+  // knowledge, and that boundary is the whole point of the type.
+  evidence: external_exports.string().min(1),
+  resolution_status: external_exports.enum(["open", "closed"]).default("open"),
+  // The TERMINAL home: closure means the question was answered, and an
+  // answered question is a research_finding. Its own field, never an id
+  // embedded in a status string (Codex refinement, thread 01a05710), so it is
+  // queryable and cannot rot inside prose.
+  closed_into: external_exports.string().min(1).optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  if (rec.resolution_status === "closed" && !rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+    });
+  }
+  if (rec.resolution_status !== "closed" && rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+    });
+  }
+});
 var attestationSchema = base.extend({
   type: external_exports.literal("attestation"),
   // Optional explicit handle. NEVER auto-minted (no title/question headline
@@ -4589,6 +4666,20 @@ var RECORD_TYPES = {
     // re-asked and re-answered the same wrong way.
     digest: { question: "clip", rejected_answer: "clip" }
   },
+  open_question: {
+    schema: openQuestionSchema,
+    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
+    // record — hypotheses get added and struck, evidence accumulates, and it
+    // eventually flips to closed. Supersession would mint a new record per
+    // measurement, which is exactly the churn the type exists to absorb.
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), r.hypotheses?.join("\n") ?? "", s(r.evidence)].join("\n"),
+    fileKeys: (r) => r.file_keys ?? [],
+    // The question is the identity (research_finding's rule); resolution_status
+    // rides along because whether a question is still OPEN decides whether it is
+    // worth reading at all — the same role research_finding's clocks play.
+    digest: { slug: "plain", question: "clip", resolution_status: "plain" }
+  },
   attestation: {
     schema: attestationSchema,
     // Point-in-time human ruling: supersession is the only change path, exactly
@@ -4733,7 +4824,8 @@ var sessionEventSchema = external_exports.object({
     "concept_designed",
     "no_capture",
     "capture_pending",
-    "test_repair"
+    "test_repair",
+    "test_append"
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
@@ -4865,6 +4957,46 @@ var configSchema = external_exports.object({
   // not by article baselines. DELETION still flags (a vanished committed
   // deliverable is real drift regardless of how the file is produced).
   generated_projections: external_exports.array(external_exports.string()).default([]),
+  // Undeclared-source disclosure (decision
+  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
+  // 44ef6838): POSIX globs excluded from the live per-file source-extension
+  // coverage scan H1 (SessionStart) and init render — an excluded file never
+  // participates (neither covered nor uncovered), same precedence as
+  // classifyCoverage's excludeGlobs parameter in
+  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
+  // toolchain path_glob).
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // Attestation disclosure (decision attestation-staleness-disclosure-only-
+  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
+  // POSIX globs whose touched paths get a comparable-human-record rollup at
+  // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
+  // field can ever refuse an operation; the refusing form of this feature was
+  // DECLINED, because a gate the conductor must pass turns the conductor into
+  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
+  // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
+  // Sterling's own config declares none — the feature exists for consuming
+  // projects with render/asset paths.
+  // `z.unknown()` IS THE POINT, AND IT IS DELIBERATE (Codex review HIGH-1 +
+  // roster MEDIUM-1, 2026-09-01). This field cannot validate ANYTHING here — not
+  // element type, not emptiness, not duplicates — because direct-merge.mjs and
+  // merge-gate.mjs run parseConfig through openProject() long before the
+  // disclosure's fail-open wrapper exists, so ANY refusal on this field kills the
+  // whole merge command. Measured shapes that must not do that: `["", …]`,
+  // duplicated globs, and the bracket-less hand-edit
+  // `"attestation_path_globs": "renders/**"` (a plain string, not an array).
+  // An ADVISORY declaration that can refuse a merge inverts this feature's own
+  // ruling, which is the one thing the design is not allowed to do.
+  // z.unknown().default([]) PRESERVES the declared value verbatim rather than
+  // coercing or dropping it, and it forces any future consumer of the PARSED
+  // config to narrow this field explicitly instead of assuming string[].
+  // WHERE THE REAL READ LIVES: readAttestationGlobs() in
+  // scripts/lib/attestation-inspection.mjs is the ONE place this field is
+  // interpreted — it re-reads .sterling/config.json itself, drops a non-array
+  // container, non-string members, empty strings and exact duplicates, and
+  // DISCLOSES every drop in the rollup. No surface may take these globs from the
+  // parsed config object instead.
+  attestation_path_globs: external_exports.unknown().default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),
@@ -5355,69 +5487,126 @@ var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
-function appendPathSegment(path, segment) {
-  if (typeof segment === "number")
+var COMPARE_WORK_BUDGET = 1e7;
+var COMPARE_OUTPUT_BUDGET = 5e4;
+var COMPARE_PATH_LENGTH_BUDGET = 1e6;
+var ComparisonBudgetExceededError = class extends Error {
+};
+function newComparisonBudget() {
+  let work = 0;
+  let output = 0;
+  return {
+    chargeWork() {
+      work += 1;
+      if (work > COMPARE_WORK_BUDGET) {
+        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its comparison work budget (${COMPARE_WORK_BUDGET} nodes/edges visited) \u2014 refusing rather than continuing an unaffordable comparison. This usually means the record body shares structure by reference in a way that re-walks the same subtree many times over; there is no partial result to return. Nothing was written \u2014 this throw always precedes the write transaction.`);
+      }
+    },
+    chargeOutput() {
+      output += 1;
+      if (output > COMPARE_OUTPUT_BUDGET) {
+        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) \u2014 refusing rather than returning a partial loss list. A legitimate loss report never needs this many entries; this means the comparison is enumerating a pathologically large or heavily-shared subtree. Nothing was written \u2014 this throw always precedes the write transaction.`);
+      }
+    },
+    chargePathLength(prospectiveLength) {
+      if (prospectiveLength > COMPARE_PATH_LENGTH_BUDGET) {
+        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its path-length budget (${COMPARE_PATH_LENGTH_BUDGET} characters in one accumulated key path) \u2014 refusing rather than building or returning an oversized path string. This means the record body's own keys are themselves very large strings, nested deep enough that concatenating them into one addressable path has grown past what any legitimate record address needs. Nothing was written \u2014 this throw always precedes the write transaction.`);
+      }
+    }
+  };
+}
+function depthBoundError() {
+  return new Error(`record body nesting exceeds the depth bound of ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+}
+function appendPathSegment(path, segment, budget) {
+  if (typeof segment === "number") {
+    if (budget)
+      budget.chargePathLength(path.length + 2 + String(segment).length);
     return `${path}[${segment}]`;
+  }
+  const prospectiveLength = path ? path.length + 1 + segment.length : segment.length;
+  if (budget)
+    budget.chargePathLength(prospectiveLength);
   return path ? `${path}.${segment}` : segment;
 }
-function allKeyPathsUnder(value, path, depth, out) {
-  if (depth > MAX_BODY_COMPARE_DEPTH) {
-    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+function emitTotalLoss(value, path, depth, out, budget) {
+  if (depth > MAX_BODY_COMPARE_DEPTH)
+    throw depthBoundError();
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
+  if (path !== "") {
+    budget.chargeOutput();
+    out.push(path);
   }
   if (value === null || typeof value !== "object")
-    return out;
+    return;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const here = appendPathSegment(path, i);
-      out.push(here);
-      allKeyPathsUnder(value[i], here, depth + 1, out);
+      emitTotalLoss(value[i], appendPathSegment(path, i, budget), depth + 1, out, budget);
     }
-    return out;
+    return;
   }
-  for (const key of Object.keys(value)) {
-    const here = appendPathSegment(path, key);
-    out.push(here);
-    allKeyPathsUnder(value[key], here, depth + 1, out);
+  for (const key in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, key))
+      continue;
+    emitTotalLoss(value[key], appendPathSegment(path, key, budget), depth + 1, out, budget);
   }
-  return out;
 }
-function droppedKeyPaths(before, after, path = "", depth = 0, out = []) {
-  if (depth > MAX_BODY_COMPARE_DEPTH) {
-    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
-  }
+function walkDropped(before, after, path, depth, out, budget) {
+  if (depth > MAX_BODY_COMPARE_DEPTH)
+    throw depthBoundError();
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
   if (before === null || typeof before !== "object")
-    return out;
+    return;
   if (Array.isArray(before)) {
-    if (!Array.isArray(after))
-      return allKeyPathsUnder(before, path, depth, out);
-    for (let i = 0; i < before.length; i++) {
-      const here = appendPathSegment(path, i);
-      if (i >= after.length)
-        out.push(here);
-      else
-        droppedKeyPaths(before[i], after[i], here, depth + 1, out);
+    if (!Array.isArray(after)) {
+      emitTotalLoss(before, path, depth, out, budget);
+      return;
     }
-    return out;
+    for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i, budget);
+      if (i >= after.length)
+        emitTotalLoss(before[i], here, depth + 1, out, budget);
+      else
+        walkDropped(before[i], after[i], here, depth + 1, out, budget);
+    }
+    return;
   }
   if (after === null || typeof after !== "object" || Array.isArray(after)) {
-    return allKeyPathsUnder(before, path, depth, out);
+    emitTotalLoss(before, path, depth, out, budget);
+    return;
   }
   const parsed = after;
-  for (const key of Object.keys(before)) {
-    const here = appendPathSegment(path, key);
+  for (const key in before) {
+    if (!Object.prototype.hasOwnProperty.call(before, key))
+      continue;
+    const here = appendPathSegment(path, key, budget);
     if (!Object.prototype.hasOwnProperty.call(parsed, key))
-      out.push(here);
+      emitTotalLoss(before[key], here, depth + 1, out, budget);
     else
-      droppedKeyPaths(before[key], parsed[key], here, depth + 1, out);
+      walkDropped(before[key], parsed[key], here, depth + 1, out, budget);
   }
+}
+function droppedKeyPaths(before, after) {
+  const out = [];
+  const budget = newComparisonBudget();
+  walkDropped(before, after, "", 0, out, budget);
   return out;
+}
+function renderCappedPathList(dropped, cap = 20) {
+  if (dropped.length <= cap)
+    return dropped.join(", ");
+  const remaining = dropped.length - cap;
+  return `${dropped.slice(0, cap).join(", ")}, \u2026 and ${remaining} more lost ${remaining === 1 ? "path" : "paths"}`;
 }
 function assertNoFieldLoss(op, before, after) {
   const dropped = droppedKeyPaths(before, after);
   if (dropped.length === 0)
     return;
   const type = typeof before.type === "string" ? before.type : "unknown";
-  throw new Error(`${op}: record type '${type}' does not define ${dropped.length === 1 ? "this field" : "these fields"}, and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${dropped.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
+  const pathList = renderCappedPathList(dropped);
+  throw new Error(`${op}: record type '${type}' would DROP ${dropped.length === 1 ? "this field" : "these fields"} on the way in \u2014 either the field is not defined by the schema, or its value's shape no longer matches the schema's definition (e.g. an object/array in place of the other) \u2014 and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${pathList}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
 }
 function unrecognizedKeyPaths(error) {
   const issues = error?.issues;
@@ -6412,7 +6601,7 @@ var SterlingStore = class _SterlingStore {
       orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
       overlapParams.push(...fileKeys);
     }
-    orderBy.push("r.updated_at DESC");
+    orderBy.push("r.updated_at DESC", "r.id DESC");
     const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
@@ -7281,7 +7470,8 @@ function verifyPromotionConditions({ store, config, run }) {
   if (article) {
     const tracedOn = /* @__PURE__ */ new Map();
     for (const a of articles) {
-      for (const ref of a.live_test_refs) {
+      const refs = Array.isArray(a.live_test_refs) ? a.live_test_refs : [];
+      for (const ref of refs) {
         if (Array.isArray(ref.test_paths) && ref.test_paths.length > 0 && !tracedOn.has(ref.ac_id)) {
           tracedOn.set(ref.ac_id, a.slug);
         }

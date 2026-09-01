@@ -431,9 +431,147 @@ export type ToolStore = Pick<
  *  recursion would turn a pathological (or corrupt) input into a RangeError +
  *  stack trace instead of the promised refusal. Exceeding the bound THROWS a
  *  plain message — the bound is far past any legal record shape, so hitting it
- *  is itself the finding. Same value and same reasoning as the reference
- *  implementation in scripts/domain-doctor.mjs (MAX_BODY_COMPARE_DEPTH). */
+ *  is itself the finding. This is the ONLY definition used by THIS LOSS WALK
+ *  (droppedKeyPaths/walkDropped/emitTotalLoss) — scripts/domain-doctor.mjs
+ *  imports droppedKeyPaths from this module rather than carrying its own copy
+ *  of the walk (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker),
+ *  but it KEEPS its own independent `MAX_BODY_COMPARE_DEPTH` for its unrelated
+ *  `deepEqual` structural-equality check (scripts/domain-doctor.mjs:~464) —
+ *  same value, same reasoning, deliberately a separate constant because
+ *  deepEqual is a different algorithm this module does not own. */
 const MAX_BODY_COMPARE_DEPTH = 64;
+
+/** WORK/EDGE budget (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker):
+ *  charged once per node/edge visited by EITHER walk below — the structural
+ *  compare walk and the total-loss emit walk — even when nothing is emitted.
+ *  Deliberately NO visited/memoized set (a shared subtree legitimately owns
+ *  multiple key paths that must all be reported), so a structure built by
+ *  reference-sharing re-walks its shared nodes once per path — exponential in
+ *  the sharing depth. This is what catches the case where two DIFFERENT
+ *  reference graphs are structurally IDENTICAL (near-zero output, so the
+ *  output budget below never fires): comparing two independently-built
+ *  depth-22 binary-sharing trees walks ~12.6M edges with zero drops. Measured
+ *  (probe, 2026-08-31): that comparison alone, uncapped, takes ~300-400ms for
+ *  the full walk, so 10,000,000 trips well before completion (guaranteeing the
+ *  `assert.throws`) while finishing in well under half a second — and a
+ *  realistic record body (hundreds of fields, depth <= 8) needs on the order
+ *  of a few thousand edges, thousands of times under this budget. */
+const COMPARE_WORK_BUDGET = 10_000_000;
+
+/** OUTPUT-PATH budget: charged once per lost path actually pushed onto the
+ *  result array, shared with the work budget above across one droppedKeyPaths
+ *  call. This is the budget that fires FIRST and fast on a genuinely
+ *  pathological total-loss enumeration (structure-sharing or wide fan-out),
+ *  because emitting a lost path is far more expensive than a bare comparison —
+ *  it builds and retains a string and grows the result array — and a realistic
+ *  loss report never legitimately needs anywhere near this many entries.
+ *  Measured (probe, 2026-08-31): 50,000 emitted paths costs single-digit
+ *  milliseconds; without this check the work budget alone still catches a
+ *  pathological emit (it is charged there too), but only after actually
+ *  building on the order of 10,000,000 output strings, which measured
+ *  ~2.1-2.9s — over the 2-second promptness bar this slice pins. */
+const COMPARE_OUTPUT_BUDGET = 50_000;
+
+/** PATH-LENGTH budget (Codex review, S2d fix round, HIGH — adopted): the
+ *  work/edge and output-path budgets above both count NODES, and neither
+ *  bounds the SIZE of an individual path STRING. A record whose keys are
+ *  themselves multi-hundred-KB strings, nested only a few levels deep, visits
+ *  very few nodes (well under either budget above) while the ACCUMULATED path
+ *  string built by repeated appendPathSegment concatenation grows without
+ *  bound — a failure class the node/edge-counting budgets cannot see at all,
+ *  because it is a property of one string, not a count of anything. Left
+ *  unchecked this either throws a raw V8 `RangeError: Invalid string length`
+ *  (a failure class outside this function's documented contract — it always
+ *  throws ComparisonBudgetExceededError, never a driver-level exception) or,
+ *  for sizes below V8's ceiling, succeeds slowly while retaining multi-MB
+ *  strings in the result array.
+ *
+ *  1,000,000 characters (~1MB) is the bound: far above any legitimate record
+ *  address (a real key path is at most a few hundred characters even at this
+ *  module's own MAX_BODY_COMPARE_DEPTH), and far below V8's actual string
+ *  ceiling (on the order of 2^29-1 characters, ~536M).
+ *
+ *  CHECKED BEFORE THE FIRST CONCATENATION, NOT AFTER (Codex delta verdict,
+ *  S2d micro-round — this is now genuinely unconditional, not merely "fires
+ *  first in practice"): every appendPathSegment call — including the very
+ *  first, at the root frame, where `path` is still `''` — computes the
+ *  PROSPECTIVE combined length from `.length` on the existing path and the
+ *  incoming segment ALONE, and charges/throws on that arithmetic before any
+ *  template-literal concatenation runs. No string longer than this budget is
+ *  ever built, not even transiently, so a single ~535M-character key cannot
+ *  RangeError inside that first concatenation the way it could when the
+ *  charge only ran on the already-built result — there is no window left in
+ *  which an oversized string could exist for the raw V8 ceiling to reject. */
+const COMPARE_PATH_LENGTH_BUDGET = 1_000_000;
+
+/** Thrown when any budget above is exhausted. Deliberately its own class
+ *  (not a plain Error, and never reusing the depth-bound message) so a caller
+ *  can tell "the comparison itself is unaffordable" apart from "the input
+ *  cycles" (MAX_BODY_COMPARE_DEPTH) — every message contains "budget",
+ *  the depth-bound message never does. FAILS CLOSED: this is always thrown,
+ *  never a partial loss list returned. */
+class ComparisonBudgetExceededError extends Error {}
+
+/** Shared, per-call counters for the three budgets above. Recreated once per
+ *  public droppedKeyPaths(before, after) call and threaded through every
+ *  recursive step of both walks — this is the "shared across one
+ *  droppedKeyPaths call" half of the ruling. */
+interface ComparisonBudget {
+  chargeWork(): void;
+  chargeOutput(): void;
+  /** `prospectiveLength` is a LENGTH, not a path — callers pass the length the
+   *  path WOULD have (or already has, for the entry-point backstop charge)
+   *  computed from `.length` alone, never a freshly concatenated string. */
+  chargePathLength(prospectiveLength: number): void;
+}
+
+function newComparisonBudget(): ComparisonBudget {
+  let work = 0;
+  let output = 0;
+  return {
+    chargeWork() {
+      work += 1;
+      if (work > COMPARE_WORK_BUDGET) {
+        throw new ComparisonBudgetExceededError(
+          `droppedKeyPaths exceeded its comparison work budget (${COMPARE_WORK_BUDGET} nodes/edges visited) — refusing ` +
+            `rather than continuing an unaffordable comparison. This usually means the record body shares structure by ` +
+            `reference in a way that re-walks the same subtree many times over; there is no partial result to return. ` +
+            `Nothing was written — this throw always precedes the write transaction.`
+        );
+      }
+    },
+    chargeOutput() {
+      output += 1;
+      if (output > COMPARE_OUTPUT_BUDGET) {
+        throw new ComparisonBudgetExceededError(
+          `droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) — refusing rather than ` +
+            `returning a partial loss list. A legitimate loss report never needs this many entries; this means the ` +
+            `comparison is enumerating a pathologically large or heavily-shared subtree. ` +
+            `Nothing was written — this throw always precedes the write transaction.`
+        );
+      }
+    },
+    chargePathLength(prospectiveLength: number) {
+      if (prospectiveLength > COMPARE_PATH_LENGTH_BUDGET) {
+        throw new ComparisonBudgetExceededError(
+          `droppedKeyPaths exceeded its path-length budget (${COMPARE_PATH_LENGTH_BUDGET} characters in one accumulated ` +
+            `key path) — refusing rather than building or returning an oversized path string. This means the record ` +
+            `body's own keys are themselves very large strings, nested deep enough that concatenating them into one ` +
+            `addressable path has grown past what any legitimate record address needs. ` +
+            `Nothing was written — this throw always precedes the write transaction.`
+        );
+      }
+    },
+  };
+}
+
+/** The depth-bound failure, kept distinct from ComparisonBudgetExceededError
+ *  (see above) — its message never contains "budget". */
+function depthBoundError(): Error {
+  return new Error(
+    `record body nesting exceeds the depth bound of ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`
+  );
+}
 
 /** THE ONE DEFINITION OF THE KEY-PATH NOTATION every refusal in this file
  *  reports: an array index appends '[i]', an object key appends '.key', and the
@@ -441,68 +579,117 @@ const MAX_BODY_COMPARE_DEPTH = 64;
  *  itself has no parent to dot onto ('slug', not '.slug').
  *
  *  Single-sourced ON PURPOSE. Three producers render these addresses —
- *  droppedKeyPaths (post-parse loss), allKeyPathsUnder (a whole subtree made
- *  unaddressable by a type change) and unrecognizedKeyPaths (a STRICT object
- *  that refused the key outright) — and an operator reading any of the three
- *  gets an address they can paste back into the record. Two hand-rolled
- *  renderings of one notation drift the moment either is touched, and the drift
- *  is invisible until a caller cannot find the field it was told about. */
-function appendPathSegment(path: string, segment: string | number): string {
-  if (typeof segment === 'number') return `${path}[${segment}]`;
+ *  droppedKeyPaths (post-parse loss), emitTotalLoss (a whole subtree made
+ *  unaddressable — by a type change, or by the containing key vanishing
+ *  outright) and unrecognizedKeyPaths (a STRICT object that refused the key
+ *  outright) — and an operator reading any of the three gets an address they
+ *  can paste back into the record. Two hand-rolled renderings of one notation
+ *  drift the moment either is touched, and the drift is invisible until a
+ *  caller cannot find the field it was told about. */
+/** `budget` is OPTIONAL and threaded only by the droppedKeyPaths walkers below
+ *  (walkDropped/emitTotalLoss) — the two callers whose `path`/`segment` values
+ *  are built from a CALLER-supplied record body nothing upstream has capped.
+ *  unrecognizedKeyPaths's calls (zod issue paths/keys) carry no budget and are
+ *  unaffected — those segments come from the schema's own shape, not an
+ *  arbitrarily large caller string, so that hazard does not apply there.
+ *
+ *  PRE-CONCATENATION CHECK (Codex delta verdict, S2d micro-round): computed
+ *  and charged from `.length` alone, on BOTH inputs, BEFORE the template
+ *  literal below ever concatenates them. Checking only the RESULT (as the
+ *  prior round did, via a charge on function entry to walkDropped/
+ *  emitTotalLoss) still lets one call build the oversized string first — a
+ *  single segment near V8's own string-length ceiling, appended to any
+ *  nonempty `path`, can throw a raw `RangeError: Invalid string length`
+ *  *inside this concatenation* before that entry charge is ever reached. No
+ *  string longer than the budget is ever constructed now — not even
+ *  transiently. */
+function appendPathSegment(path: string, segment: string | number, budget?: ComparisonBudget): string {
+  if (typeof segment === 'number') {
+    // '[' + digits + ']' — a safe-integer index is at most ~10 digits, so this
+    // branch never itself carries the multi-MB payload; `path` is what might be.
+    if (budget) budget.chargePathLength(path.length + 2 + String(segment).length);
+    return `${path}[${segment}]`;
+  }
+  const prospectiveLength = path ? path.length + 1 + segment.length : segment.length;
+  if (budget) budget.chargePathLength(prospectiveLength);
   return path ? `${path}.${segment}` : segment;
 }
 
-/** Every key path BENEATH a container value, in the same dotted/indexed
- *  notation droppedKeyPaths reports — 'files[0]', 'files[0].note'.
+/** A key path (or its container) plus every path beneath it, in the same
+ *  dotted/indexed notation droppedKeyPaths reports — 'files[0]',
+ *  'files[0].note'. Charges the shared budget on every node visited AND every
+ *  path pushed (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker)
+ *  — this is the "emit walk" half of that budget, deliberately charged even
+ *  though every call here also emits, so removing the output check alone still
+ *  leaves the work check as a (slower) backstop.
  *
- *  Used for one case only: `before` is a container and `after` is not the same
- *  kind of container, so nothing under `before` is addressable any more and the
- *  whole subtree is loss. Both the containers and their leaves are emitted,
- *  because 'files[0]' and 'files[0].note' are separately lost addresses and a
- *  caller told only about the outer one still cannot see what it must restore.
+ *  Used for TWO cases, both meaning "nothing under `path` is addressable in
+ *  `after` any more": (1) `before` is a container and `after` is not the same
+ *  kind of container (a type change is total loss of everything beneath it,
+ *  board 9f8d4c03), and (2) the key naming `path` is entirely ABSENT from
+ *  `after` — walkDropped used to report only the bare absent key and stop,
+ *  which under-reported: 'field150' being gone means 'field150.nested.deep'
+ *  is exactly as unreachable as 'field150' itself, so both must be named.
+ *
+ *  `path` itself is pushed (unless it is the empty root path, which has no
+ *  addressable identity of its own) — this is what makes the container's OWN
+ *  address appear alongside its children, not just the children.
  *
  *  Carries the SAME depth bound as droppedKeyPaths, and for the same reason:
  *  the input is a caller-supplied body nothing upstream has capped, so the walk
  *  that reports the loss must not itself blow the stack on a pathological
- *  shape. The empty-path arm lives in appendPathSegment and matters when the
- *  divergence is at the ROOT — the record body itself — where paths are bare
- *  field names. */
-function allKeyPathsUnder(value: unknown, path: string, depth: number, out: string[]): string[] {
-  if (depth > MAX_BODY_COMPARE_DEPTH) {
-    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
+ *  shape — checked FIRST, before any charge, so a cyclic `before` throws the
+ *  depth-bound error rather than a budget error (kept distinguishable on
+ *  purpose). */
+function emitTotalLoss(value: unknown, path: string, depth: number, out: string[], budget: ComparisonBudget): void {
+  if (depth > MAX_BODY_COMPARE_DEPTH) throw depthBoundError();
+  // Entry-point backstop charge on the ALREADY-BUILT `path` — defense in
+  // depth alongside the pre-concatenation check inside appendPathSegment
+  // below, which is what actually prevents an oversized string from ever
+  // being built in the first place (see COMPARE_PATH_LENGTH_BUDGET).
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
+  if (path !== '') {
+    // FAIL-CLOSED ORDER (roster review, S2d fix round, LOW): charge BEFORE
+    // pushing, never after — a throw here must mean `path` never entered
+    // `out`, not merely that the budget's own counter is now technically
+    // over. Pushing first and charging second would let one oversize/over-
+    // count entry land in the result the instant before the throw.
+    budget.chargeOutput();
+    out.push(path);
   }
-  if (value === null || typeof value !== 'object') return out;
+  if (value === null || typeof value !== 'object') return;
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) {
-      const here = appendPathSegment(path, i);
-      out.push(here);
-      allKeyPathsUnder(value[i], here, depth + 1, out);
+      emitTotalLoss(value[i], appendPathSegment(path, i, budget), depth + 1, out, budget);
     }
-    return out;
+    return;
   }
-  for (const key of Object.keys(value as Record<string, unknown>)) {
-    const here = appendPathSegment(path, key);
-    out.push(here);
-    allKeyPathsUnder((value as Record<string, unknown>)[key], here, depth + 1, out);
+  // for-in + own-property guard, not Object.keys (Codex delta verdict, S2d
+  // micro-round): identical own-enumerable-string-key semantics and order for
+  // a JSON-shaped object, but no full key-array materialization ahead of the
+  // pre-concatenation charge in appendPathSegment above — closes the
+  // allocation question structurally rather than by argument.
+  for (const key in value as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+    emitTotalLoss((value as Record<string, unknown>)[key], appendPathSegment(path, key, budget), depth + 1, out, budget);
   }
-  return out;
 }
 
-/** Every key path present in `before` that is ABSENT from `after` — the LOSS
- *  half of a round-trip comparison, and deliberately only that half.
+/** The structural compare walk: every key path present in `before` that is
+ *  reachable in `before` and NOT reachable the same way in `after`. Module-
+ *  internal since decision droppedkeypaths-arms-kept-budgeted-one-shared-walker
+ *  narrowed the public surface to droppedKeyPaths(before, after) — the
+ *  depth/budget plumbing below is not part of that surface.
  *
- *  LIFTED FROM scripts/domain-doctor.mjs's droppedKeyPaths (board bd3f0acf, the
- *  scripts/ half of this item), which is the measured reference implementation:
- *  the FIRST version of that guard used top-level `unknownFieldsIn()` and review
- *  caught that `files: [{path, role, note}]` sails straight through it while
- *  still losing `note`. zod strips at EVERY nesting level, so the detector must
- *  walk to every level too. Not imported — scripts/ is standalone `.mjs` with no
- *  workspace imports (invariant 4) — so the algorithm is lifted here, in the
- *  package that owns the write path, and both call sites share this one copy.
- *
- *  Reports dotted paths with array indices — 'files[0].note',
- *  'current_ac[2].ac_id' — because a bare field name at depth tells a caller
- *  nothing about which record part is about to be dropped.
+ *  ORIGIN: lifted from scripts/domain-doctor.mjs's droppedKeyPaths (board
+ *  bd3f0acf) — the first version of that guard used top-level
+ *  `unknownFieldsIn()` and review caught that `files: [{path, role, note}]`
+ *  sails straight through it while still losing `note`. zod strips at EVERY
+ *  nesting level, so the detector must walk to every level too.
+ *  scripts/domain-doctor.mjs no longer carries its own copy — it imports
+ *  droppedKeyPaths from this module, so this is the ONE walker both call
+ *  sites share.
  *
  *  PRESENCE, NEVER VALUE: a key whose VALUE changed is a normalization the
  *  schema boundary performs on purpose (normalizeRepoPath canonicalizes
@@ -514,19 +701,20 @@ function allKeyPathsUnder(value: unknown, path: string, depth: number, out: stri
  *  A source array LONGER than its parsed counterpart counts as loss too, so a
  *  dropped element cannot hide behind index-wise walking.
  *
- *  A TYPE CHANGE IS TOTAL LOSS OF EVERYTHING BENEATH IT (board 9f8d4c03). Both
- *  container arms used to `return out` bare when `after` was not the same kind
- *  of container, which reported ZERO loss for array→scalar and object→scalar:
- *  every key that lived inside the old container was gone and the write said
- *  SUCCESS — the exact false success this comparison exists to prevent. Such a
- *  divergence now enumerates every key path that existed under `before` (see
- *  allKeyPathsUnder), because after the change not one of them is addressable.
- *  Reporting stays reporting: this function RETURNS the paths and never throws
- *  on loss; assertNoFieldLoss decides what a loss means. */
-export function droppedKeyPaths(before: unknown, after: unknown, path = '', depth = 0, out: string[] = []): string[] {
-  if (depth > MAX_BODY_COMPARE_DEPTH) {
-    throw new Error(`record body nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
-  }
+ *  A TYPE CHANGE IS TOTAL LOSS OF EVERYTHING BENEATH IT (board 9f8d4c03), and
+ *  an ENTIRELY ABSENT KEY is no different — both hand off to emitTotalLoss so
+ *  the full subtree is named, not just the top address. Reporting stays
+ *  reporting: this function never throws on loss (only on exhausting the
+ *  shared depth/work/output budgets); assertNoFieldLoss decides what a loss
+ *  means. */
+function walkDropped(before: unknown, after: unknown, path: string, depth: number, out: string[], budget: ComparisonBudget): void {
+  if (depth > MAX_BODY_COMPARE_DEPTH) throw depthBoundError();
+  // Entry-point backstop charge on the ALREADY-BUILT `path` — the
+  // pre-concatenation check inside appendPathSegment (below, at each call
+  // site) is what actually prevents an oversized string from ever being
+  // built.
+  budget.chargePathLength(path.length);
+  budget.chargeWork();
   // THE REVERSE DIRECTIONS (scalar→array, scalar→object) ARE DELIBERATELY NOT
   // SYMMETRIC, and this line is where they land. A scalar `before` has no key
   // paths beneath it, so a scalar that becomes a container LOSES NOTHING — it
@@ -537,31 +725,78 @@ export function droppedKeyPaths(before: unknown, after: unknown, path = '', dept
   // change?" but "is a path that existed before now unreachable?" — and a
   // widening change leaves the answer no. A scalar whose VALUE became a
   // container is still a value change, which this function never reports.
-  if (before === null || typeof before !== 'object') return out;
+  if (before === null || typeof before !== 'object') return;
   if (Array.isArray(before)) {
     // Array → anything-not-an-array (scalar, null, or a plain object): no index
     // of `before` survives, so every path under it is dropped.
-    if (!Array.isArray(after)) return allKeyPathsUnder(before, path, depth, out);
-    for (let i = 0; i < before.length; i++) {
-      const here = appendPathSegment(path, i);
-      if (i >= after.length) out.push(here);
-      else droppedKeyPaths(before[i], after[i], here, depth + 1, out);
+    if (!Array.isArray(after)) {
+      emitTotalLoss(before, path, depth, out, budget);
+      return;
     }
-    return out;
+    for (let i = 0; i < before.length; i++) {
+      const here = appendPathSegment(path, i, budget);
+      if (i >= after.length) emitTotalLoss(before[i], here, depth + 1, out, budget);
+      else walkDropped(before[i], after[i], here, depth + 1, out, budget);
+    }
+    return;
   }
   // Object → scalar, null, or ARRAY: object keys are not array indices, so an
   // object that became an array loses its whole key set just as one that became
   // a scalar does.
   if (after === null || typeof after !== 'object' || Array.isArray(after)) {
-    return allKeyPathsUnder(before, path, depth, out);
+    emitTotalLoss(before, path, depth, out, budget);
+    return;
   }
   const parsed = after as Record<string, unknown>;
-  for (const key of Object.keys(before as Record<string, unknown>)) {
-    const here = appendPathSegment(path, key);
-    if (!Object.prototype.hasOwnProperty.call(parsed, key)) out.push(here);
-    else droppedKeyPaths((before as Record<string, unknown>)[key], parsed[key], here, depth + 1, out);
+  // for-in + own-property guard, not Object.keys (Codex delta verdict, S2d
+  // micro-round): identical own-enumerable-string-key semantics and order for
+  // a JSON-shaped object, but no full key-array materialization ahead of the
+  // pre-concatenation charge in appendPathSegment above — closes the
+  // allocation question structurally rather than by argument. The membership
+  // test against `parsed` (a DIFFERENT object) stays a `hasOwnProperty` call,
+  // unchanged — that check is not what for-in replaces.
+  for (const key in before as Record<string, unknown>) {
+    if (!Object.prototype.hasOwnProperty.call(before, key)) continue;
+    const here = appendPathSegment(path, key, budget);
+    if (!Object.prototype.hasOwnProperty.call(parsed, key)) emitTotalLoss((before as Record<string, unknown>)[key], here, depth + 1, out, budget);
+    else walkDropped((before as Record<string, unknown>)[key], parsed[key], here, depth + 1, out, budget);
   }
+}
+
+/** Every key path present in `before` that is ABSENT (or unreachable through a
+ *  type change) from `after` — the LOSS half of a round-trip comparison, and
+ *  deliberately only that half. PUBLIC SURFACE IS NARROW ON PURPOSE (decision
+ *  droppedkeypaths-arms-kept-budgeted-one-shared-walker): exactly these two
+ *  parameters — the path/depth/output/budget plumbing above is module-internal,
+ *  recreated fresh on every call so the budgets below are shared across the
+ *  WHOLE comparison and never leak between calls. FAILS CLOSED: on exhausting
+ *  either budget this throws ComparisonBudgetExceededError — it never returns
+ *  a partial loss list. */
+export function droppedKeyPaths(before: unknown, after: unknown): string[] {
+  const out: string[] = [];
+  const budget = newComparisonBudget();
+  walkDropped(before, after, '', 0, out, budget);
   return out;
+}
+
+/** Renders a droppedKeyPaths() result for an ERROR MESSAGE, capped at 20
+ *  entries with a "… and N more lost paths" tail (correctly singular at
+ *  N===1: "1 more lost path"). EXPORTED so every consumer of droppedKeyPaths
+ *  that renders its result into a thrown message shares this ONE capped
+ *  rendering — scripts/domain-doctor.mjs's migrate() refusal is the other
+ *  caller (roster review, S2d micro-round, MED): droppedKeyPaths can now
+ *  legitimately return up to COMPARE_OUTPUT_BUDGET (50,000) paths, each up to
+ *  COMPARE_PATH_LENGTH_BUDGET (~1MB) long, for one absent/type-changed
+ *  container's full subtree — joining ALL of them into one message would
+ *  itself build the unbounded string this module's own budgets exist to
+ *  refuse, so the refusal path could crash (or balloon) worse than the
+ *  hazard it guards. DETECTION is never affected by this — callers still see
+ *  the true, uncapped `dropped.length` for their own singular/plural wording
+ *  and handling; only the LIST TEXT here is capped. */
+export function renderCappedPathList(dropped: string[], cap = 20): string {
+  if (dropped.length <= cap) return dropped.join(', ');
+  const remaining = dropped.length - cap;
+  return `${dropped.slice(0, cap).join(', ')}, … and ${remaining} more lost ${remaining === 1 ? 'path' : 'paths'}`;
 }
 
 /** CREATE-TIME FIELD-LOSS REFUSAL (board bd3f0acf, narrowly amending decision
@@ -590,9 +825,26 @@ export function assertNoFieldLoss(op: string, before: Record<string, unknown>, a
   const dropped = droppedKeyPaths(before, after);
   if (dropped.length === 0) return;
   const type = typeof before.type === 'string' ? before.type : 'unknown';
+  // TWO DISTINCT LOSS CLASSES SHARE THIS ONE MESSAGE, and droppedKeyPaths'
+  // return value (a flat path list) does not carry which one applies to a
+  // given path: a field the schema never defines at all, and a field the
+  // schema DOES define but whose VALUE changed container type (a retyped
+  // container is total loss of everything beneath it — droppedKeyPaths'
+  // type-change arms, decision droppedkeypaths-arms-kept-budgeted-one-shared-walker).
+  // The old wording ("does not define this field") is only true of the first
+  // class — for the second, the field IS defined, its shape just does not
+  // match. Naming both possibilities is the truthful minimum without adding
+  // per-path classification nothing here needs yet.
+  //
+  // REPORTED LIST IS CAPPED via renderCappedPathList (see its doc) — DETECTION
+  // above (`dropped.length`) stays uncapped for this function's own
+  // singular/plural wording; only the rendered LIST TEXT is capped.
+  const pathList = renderCappedPathList(dropped);
   throw new Error(
-    `${op}: record type '${type}' does not define ${dropped.length === 1 ? 'this field' : 'these fields'}, and the ` +
-      `schema parse would DROP ${dropped.length === 1 ? 'it' : 'them'} silently: ${dropped.join(', ')}. ` +
+    `${op}: record type '${type}' would DROP ${dropped.length === 1 ? 'this field' : 'these fields'} on the way in ` +
+      `— either the field is not defined by the schema, or its value's shape no longer matches the schema's ` +
+      `definition (e.g. an object/array in place of the other) — and the ` +
+      `schema parse would DROP ${dropped.length === 1 ? 'it' : 'them'} silently: ${pathList}. ` +
       `Refused before the write — NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid ` +
       `set) or add the field to the registered schema; a write must never report success for what it discarded.`
   );
@@ -2085,7 +2337,14 @@ export class SterlingStore {
         return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body) as DurableRecord));
       }
     }
-    // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at desc.
+    // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at
+    // desc, then id desc as the FINAL tiebreaker (board abafbd48, Codex-
+    // adjudicated) — `updated_at DESC` alone is not a total order (two rows
+    // can share one updated_at), and board_query's keyset cursor paging
+    // (packages/mcp-server/src/tools.ts) needs a total, deterministic order to
+    // name an unambiguous resume point. Applies to BOTH the plain variant and
+    // the file_keys-overlap variant below, since both funnel through this same
+    // `orderBy` array and its shared trailing clauses.
     const orderBy: string[] = [];
     const overlapParams: string[] = [];
     if (fileKeys.length) {
@@ -2094,7 +2353,7 @@ export class SterlingStore {
       );
       overlapParams.push(...fileKeys);
     }
-    orderBy.push('r.updated_at DESC');
+    orderBy.push('r.updated_at DESC', 'r.id DESC');
     const sql = `SELECT r.body FROM records r WHERE ${where.join(' AND ')}
       ORDER BY ${orderBy.join(', ')} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string }[];

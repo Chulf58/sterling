@@ -254,13 +254,16 @@ test('A1 (DEFECT 1, RED at HEAD): a path deferred to a LIVE dispatch is SUBTRACT
 
     assert.equal(r.code, 2, 'the three NON-deferred unowned files still hit the threshold — the deferral must narrow the demand, never mute a duty another file legitimately owes');
     assert.match(r.stderr, /article demand/i, 'the demand for the non-deferred remainder still fires');
-    // Whole-stderr negative is safe: the deferral disclosure prints a COUNT and
-    // agent_ids, never paths — AC18 ("count + owning agent_id(s)"), the frozen
-    // h22 suite, and the HEAD output quoted on board cdaf2824 ("deferred: 4
-    // file(s) owned by live dispatch(es) [a773cd38…]") all agree. So ALPHA
-    // appearing anywhere in the demand output means the DEMAND named it.
+    // Since board cdaf2824's residual shipped, the deferral disclosure NAMES
+    // its paths (capped +N more), so a whole-stderr negative would false-fail
+    // on the deferral line itself. The property under test is unchanged — the
+    // ARTICLE DEMAND must not name a deferred path — so the negative is scoped
+    // to the demand section of the message.
+    const demandIdx = r.stderr.indexOf('article demand');
+    assert.ok(demandIdx >= 0, 'the demand marker must be present verbatim — a re-cased marker would make the slice below scan nothing and hollow the A1 pin');
+    const demandSection = r.stderr.slice(demandIdx);
     assert.doesNotMatch(
-      r.stderr,
+      demandSection,
       new RegExp(ALPHA.replace(/[.]/g, '\\.')),
       'DEFECT 1 SHAPE (this is the assertion that is RED at HEAD): the same Stop message named ALPHA as deferred to a live dispatch AND demanded an owning article for it — `unowned` is filtered by ownership only and never subtracts `deferredPaths`'
     );

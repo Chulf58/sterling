@@ -101,6 +101,15 @@ export function axisNarrowText(record: AxisRecord | null | undefined): string {
   // question, exactly the research_finding rule — rejected_answer/evidence are
   // discussion, matching them would be noise.
   if (record.type === 'disconfirmed_hypothesis') return `${record.question ?? ''}`;
+  // Board 4ffb95be: an open_question's subject is its question, the same rule as
+  // research_finding and disconfirmed_hypothesis — hypotheses/evidence are
+  // discussion, and matching them would be the noise this narrowing exists to
+  // avoid. Written AHEAD of its consuming surfaces (decision
+  // open-question-record-type-authorized scoped itself to the schema
+  // registration); NO LONGER DORMANT since board a9be48f2 wired them —
+  // knowledge_preflight's and H20's candidate sets both query open_question now,
+  // so this arm carries the live "is this already being investigated?" check.
+  if (record.type === 'open_question') return `${record.question ?? ''}`;
   return '';
 }
 
@@ -133,6 +142,10 @@ export function axisTitleText(record: AxisRecord | null | undefined): string {
   if (record.type === 'feature_article') return `${record.slug ?? ''} ${record.concept_family ?? ''}\n${record.title ?? ''}`;
   if (record.type === 'research_finding') return `${record.question ?? ''}`;
   if (record.type === 'disconfirmed_hypothesis') return `${record.question ?? ''}`;
+  // Subset-of-narrow-text holds trivially here: identical to axisNarrowText's
+  // open_question arm, because that text is already subject-only — the same
+  // no-op this doc comment records for the other three question-shaped types.
+  if (record.type === 'open_question') return `${record.question ?? ''}`;
   return '';
 }
 

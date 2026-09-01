@@ -512,3 +512,80 @@ test('H24 ALLOW: "node scripts/run-gate.mjs export && git add -A" — \'&&\' pro
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// WARN — a gate PIPED into another command (board 07deffab item 1, Codex
+// thread 01a05bbe A1). Distinct arm: exit 0 always, additionalContext carries
+// the advisory. Never confuse with the DENY arm above (different wording).
+// ---------------------------------------------------------------------------
+
+test('H24 WARN: "node --test x | tail" — gate piped, advisory fires, exit 0 (never deny)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node --test x | tail'), dir);
+    assert.equal(r.code, 0, `expected exit 0 (warn, never deny), got ${r.code}; stderr: ${r.stderr}`);
+    assert.match(r.stdout, /H24 ADVISORY/, 'advisory label distinct from the DENY wording');
+    assert.match(r.stdout, /'node --test' piped into 'tail'/, 'names the gate and the pipe target');
+    assert.match(r.stdout, /set -o pipefail/, 'names the pipefail-prefix safe rewrite');
+    assert.match(r.stdout, /out\.log/, 'names the redirect-then-inspect safe rewrite');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 WARN exemption: "set -o pipefail && node --test x | tail" stays silent', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'set -o pipefail && node --test x | tail'), dir);
+    assert.equal(r.code, 0, `expected exit 0, got ${r.code}; stderr: ${r.stderr}`);
+    assert.equal(r.stdout, '', 'no advisory when pipefail was established earlier in the same command string');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 WARN: no gate at all — "ls | grep foo" stays silent (gate-specific recognizer, not every pipe)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'ls | grep foo'), dir);
+    assert.equal(r.code, 0, `expected exit 0, got ${r.code}; stderr: ${r.stderr}`);
+    assert.equal(r.stdout, '', 'no advisory when the piped left side is not a recognized gate');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 DENY unchanged: "node --test x; echo $?" still exits 2 with the existing deny wording', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node --test x; echo $?'), dir);
+    assertDeny(r, { gate: 'node --test', construct: SEMI });
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 WARN: "node scripts/run-gate.mjs export | tail" — run-gate.mjs is recognized and warned like any other gate', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node scripts/run-gate.mjs export | tail'), dir);
+    assert.equal(r.code, 0, `expected exit 0, got ${r.code}; stderr: ${r.stderr}`);
+    assert.match(r.stdout, /H24 ADVISORY/);
+    assert.match(r.stdout, /run-gate/i, 'the piped run-gate invocation is recognized and named');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H24 WARN order (L4): "node --test x | tail; set -o pipefail" — pipefail set AFTER the pipeline exempts nothing', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = runHook(gateInput(dir, 'node --test x | tail; set -o pipefail'), dir);
+    assert.notEqual(r.code, 2, `must not deny — the pre-';' segment is 'tail', not a gate; stderr: ${r.stderr}`);
+    assert.equal(r.code, 0, `expected exit 0 (warn), got ${r.code}; stderr: ${r.stderr}`);
+    assert.match(r.stdout, /H24 ADVISORY/, 'advisory must fire — pipefail set AFTER the pipeline exempts nothing');
+    assert.match(r.stdout, /'node --test' piped into 'tail'/, 'names the gate and pipe target');
+  } finally {
+    cleanup();
+  }
+});

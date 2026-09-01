@@ -12,6 +12,7 @@ required_inputs:
   - the session scratchpad path (for notes/drafts only — see Rubric 8 for the in-repo probe corridor)
   - H14 denies any argument of a DECLARED RUN COMMAND that resolves outside the project root (fs-helper and read-only-search invocations carry their own separate guards, not this escape check)
   - in fixer-mode: the corrective brief (test output OR review objections — never both)
+  - single-instance-resource block, when the brief declares one (resource name, capacity, current holder, acquisition point, release condition — convention `single-instance-resources-brief-convention-not-mechanism`)
 hooks:
   PreToolUse:
     - matcher: "Edit|Write|MultiEdit"
@@ -70,13 +71,15 @@ Exactly the required-inputs manifest above. The knowledge pack's mandatory items
 4. Run only the allowlisted toolchain commands (H14): the declared test command, the fs helpers, and standalone read-only `grep`/`ls`.
 5. Honor staged decisions; if a decision blocks a correct implementation, exit `blocked` citing it — never silently contradict it.
 6. Tool-grant check: the platform may serve you WITHOUT the Grep/Glob tools despite this template listing them (verified platform bug — research_finding 12b5b741-5075-4b95-8d5c-28521d5653ff). Use them when present. When absent, H14 allowlists standalone `grep` and `ls` as the read-only substitutes — targeted paths, never a bare recursive grep at the repo root (huge output burns your context); pipes, redirection, and `find` stay denied, so one plain command per call. If search is essential and even those fail, exit `blocked` citing `tool_grant_missing` — a loud early exit beats a watchdog death.
-7. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+7. A denial that names an ENVIRONMENT DEFECT or MISSING PRE-EVIDENCE (abnormal) is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 8. A before/after demonstration or verification probe is a genuinely good instinct, but it must be EXECUTABLE — a file placed in the session scratchpad is not, because it never appears as an argument to any declared command.
+9. If the brief declares a single-instance-resource block (name, capacity, current holder, acquisition point, release condition — convention `single-instance-resources-brief-convention-not-mechanism`), its acquisition/release protocol is binding: do not run the exclusive command until the brief names you as the current holder, and follow the stated release condition when finished. There is no enforcement mechanism behind this yet (deferred pending a second-project recurrence) — the brief's form is the only thing preventing two dispatches from colliding on the resource.
 Probe corridor: IN-REPO; NOT *.test.{mjs,js,ts}; NOT under .sterling/.
 This is the corridor that works, measured twice across two model families (research_finding `agent-probe-write-execute-corridor-measured`, `9a5526f6`): satisfying all three conditions above is what lets a probe run — e.g. `node --test <repo>/scripts/zz-probe.mjs` passes H14+H15.
 H14's escape check applies only to arguments of a DECLARED RUN COMMAND — not to the fs helpers or read-only search calls, which carry their own separate guards.
 H14's escape check only denies arguments that resolve outside the project root — and the session scratchpad sits outside it, so nothing staged there can ever be reached by such a command.
 A probe you intend to delete is transient state, and P4 requires transient state to be removed by the mechanical event that ends its life, not by a remembered step — clean it up with the sanctioned fs helper, `node scripts/fs-remove.mjs scripts/zz-probe.mjs`, before you stop; a probe left in the repo tree is untracked source the moment you stop, and it will be treated as unowned territory, not as scratch work.
+A probe that DRIVES A HOOK never runs against the live checkout: hooks resolve `.sterling/` by walking UP from the stdin `cwd` to the nearest store, so a synthetic payload with the real repo (or any unisolated subdirectory) as `cwd` WRITES REAL SESSION STATE — measured 2026-08-31, a manual `h1-session-start` probe overwrote the live session cell and broke that session's commit gate (research_finding `h1-session-pollution-was-manual-probe-not-fixture-escape`). Build a throwaway fixture root the way every committed hook test does — `mkdtempSync(join(tmpdir(),...))` + `.sterling/config.json` + a store — and point the payload's `cwd` there.
 
 # Worked example
 

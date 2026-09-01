@@ -4108,9 +4108,23 @@ function matchesGlob(path, glob) {
   }
   return new RegExp("^" + re + "$").test(path.replace(/\\/g, "/"));
 }
+var normSep = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
+function foldPairForCompare(a, b) {
+  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
+  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
+}
+function toRepoRelative(absolutePath, repoRoot) {
+  const abs = normSep(absolutePath);
+  const root = normSep(repoRoot);
+  const [a, r] = foldPairForCompare(abs, root);
+  if (!(a === r || a.startsWith(r + "/"))) {
+    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
+  }
+  return normalizeRepoPath(abs.slice(root.length + 1));
+}
 
 // packages/schemas/dist/envelope.js
-var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes"];
+var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
 var linkSchema = external_exports.object({
   rel: external_exports.enum(LINK_RELS),
   target_id: external_exports.string().uuid()
@@ -4190,6 +4204,28 @@ var decisionSchema = base.extend({
   // records round-trip unchanged.
   authority: external_exports.enum(["standing", "session_scoped", "one_off"]).optional()
 }).superRefine(refineSupersession);
+var notApplicableExemptionSchema = external_exports.object({
+  not_applicable: external_exports.object({
+    reason: external_exports.string().min(1),
+    ruling_record_id: external_exports.string().optional()
+  }).strict()
+}).strict();
+var currentAcItemSchema = external_exports.object({
+  ac_id: external_exports.string().min(1),
+  text: external_exports.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: external_exports.object({
+    reason: external_exports.string().min(1),
+    blocking_record_id: external_exports.string().uuid()
+  }).strict().optional()
+});
+var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4211,22 +4247,16 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
-  current_ac: external_exports.array(external_exports.object({
-    ac_id: external_exports.string().min(1),
-    text: external_exports.string().min(1),
-    verifiable_at: verifiableAt,
-    // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
-    // test CAN cover this, because <ruling>" — strict (extra members
-    // refused) so a stray field cannot smuggle unreviewed prose past the
-    // one place a reader checks for a real blocking ruling. Optional:
-    // absent means the AC is ordinarily testable; when present both
-    // members are required, since a reason with no ruling to point at is
-    // just an excuse.
-    untestable_because: external_exports.object({
-      reason: external_exports.string().min(1),
-      blocking_record_id: external_exports.string().uuid()
-    }).strict().optional()
-  })),
+  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  // axis, subsuming concept_family's role there — concept_family itself is
+  // untouched, kept for compatibility (see below).
+  article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
+  // Union with the structured not_applicable exemption (see
+  // notApplicableExemptionSchema above) — acceptance of the exemption
+  // branch, and rejection of an empty array, are both gated BY KIND in the
+  // superRefine below, since "which kind" is a whole-record fact a single
+  // field's shape cannot express alone.
+  current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
   // Concept-article marker (domain decision 7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -4255,7 +4285,7 @@ var featureArticleSchema = base.extend({
   })).optional(),
   version: external_exports.number().int().positive(),
   history: external_exports.array(external_exports.object({ date: external_exports.string().datetime(), event: external_exports.string().min(1), target_id: external_exports.string().uuid().optional() })),
-  live_test_refs: external_exports.array(external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) })),
+  live_test_refs: external_exports.union([external_exports.array(liveTestRefItemSchema), notApplicableExemptionSchema]),
   // Board 6a8507f8: when an instrument-describing article's probe script was
   // last actually RUN — distinct from updated_at (when the record was
   // edited). Optional: most articles describe no probe at all.
@@ -4264,6 +4294,29 @@ var featureArticleSchema = base.extend({
   refineSupersession(rec, ctx);
   if (rec.state === "dormant" && (!rec.state_reason || !rec.wiring_todo_id)) {
     ctx.addIssue({ code: external_exports.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (\xA73.2.3)" });
+  }
+  const exemptKind = rec.article_kind === "probe" || rec.article_kind === "tool";
+  const isExempt = (v) => typeof v === "object" && v !== null && !Array.isArray(v) && "not_applicable" in v;
+  const gated = [
+    ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
+    ["current_ac", rec.current_ac, "real content (ac_id/text)"]
+  ];
+  for (const [field, value, contentHint] of gated) {
+    const exempt = isExempt(value);
+    if (exempt && !exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+      });
+    }
+    if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+      ctx.addIssue({
+        code: external_exports.ZodIssueCode.custom,
+        path: [field],
+        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+      });
+    }
   }
 });
 var isoDate = external_exports.string().regex(/^\d{4}-\d{2}-\d{2}/, "ISO date required");
@@ -4353,6 +4406,44 @@ var disconfirmedHypothesisSchema = base.extend({
   evidence: external_exports.string().min(1),
   file_keys: external_exports.array(repoPath).optional()
 }).superRefine(refineSupersession);
+var openQuestionSchema = base.extend({
+  type: external_exports.literal("open_question"),
+  // Stable handle, minted from the question — see decisionSchema.slug.
+  slug: external_exports.string().min(1).optional(),
+  // The question IS the identity, exactly as on research_finding and
+  // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+  // same way and why the digest leads with it).
+  question: external_exports.string().min(1),
+  // The LIVE candidates. Plural and ordered by the author; a question with no
+  // hypothesis yet is legitimate, so this defaults to [] rather than being
+  // required — what makes the record worth keeping is the EVIDENCE.
+  hypotheses: external_exports.array(external_exports.string().min(1)).default([]),
+  // What is already known: the measurements, the derived geometry, the probe
+  // output. Required — an unevidenced question is a board todo, not durable
+  // knowledge, and that boundary is the whole point of the type.
+  evidence: external_exports.string().min(1),
+  resolution_status: external_exports.enum(["open", "closed"]).default("open"),
+  // The TERMINAL home: closure means the question was answered, and an
+  // answered question is a research_finding. Its own field, never an id
+  // embedded in a status string (Codex refinement, thread 01a05710), so it is
+  // queryable and cannot rot inside prose.
+  closed_into: external_exports.string().min(1).optional(),
+  file_keys: external_exports.array(repoPath).optional()
+}).superRefine((rec, ctx) => {
+  refineSupersession(rec, ctx);
+  if (rec.resolution_status === "closed" && !rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)"
+    });
+  }
+  if (rec.resolution_status !== "closed" && rec.closed_into) {
+    ctx.addIssue({
+      code: external_exports.ZodIssueCode.custom,
+      message: "closed_into is set but resolution_status is 'open' \u2014 close the question or drop the terminus"
+    });
+  }
+});
 var attestationSchema = base.extend({
   type: external_exports.literal("attestation"),
   // Optional explicit handle. NEVER auto-minted (no title/question headline
@@ -4636,7 +4727,8 @@ var sessionEventSchema = external_exports.object({
     "concept_designed",
     "no_capture",
     "capture_pending",
-    "test_repair"
+    "test_repair",
+    "test_append"
   ]),
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
@@ -4768,6 +4860,46 @@ var configSchema = external_exports.object({
   // not by article baselines. DELETION still flags (a vanished committed
   // deliverable is real drift regardless of how the file is produced).
   generated_projections: external_exports.array(external_exports.string()).default([]),
+  // Undeclared-source disclosure (decision
+  // undeclared-source-disclosure-per-file-coverage-live-h1-scan, board
+  // 44ef6838): POSIX globs excluded from the live per-file source-extension
+  // coverage scan H1 (SessionStart) and init render — an excluded file never
+  // participates (neither covered nor uncovered), same precedence as
+  // classifyCoverage's excludeGlobs parameter in
+  // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
+  // toolchain path_glob).
+  undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // Attestation disclosure (decision attestation-staleness-disclosure-only-
+  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
+  // POSIX globs whose touched paths get a comparable-human-record rollup at
+  // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
+  // field can ever refuse an operation; the refusing form of this feature was
+  // DECLINED, because a gate the conductor must pass turns the conductor into
+  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
+  // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
+  // Sterling's own config declares none — the feature exists for consuming
+  // projects with render/asset paths.
+  // `z.unknown()` IS THE POINT, AND IT IS DELIBERATE (Codex review HIGH-1 +
+  // roster MEDIUM-1, 2026-09-01). This field cannot validate ANYTHING here — not
+  // element type, not emptiness, not duplicates — because direct-merge.mjs and
+  // merge-gate.mjs run parseConfig through openProject() long before the
+  // disclosure's fail-open wrapper exists, so ANY refusal on this field kills the
+  // whole merge command. Measured shapes that must not do that: `["", …]`,
+  // duplicated globs, and the bracket-less hand-edit
+  // `"attestation_path_globs": "renders/**"` (a plain string, not an array).
+  // An ADVISORY declaration that can refuse a merge inverts this feature's own
+  // ruling, which is the one thing the design is not allowed to do.
+  // z.unknown().default([]) PRESERVES the declared value verbatim rather than
+  // coercing or dropping it, and it forces any future consumer of the PARSED
+  // config to narrow this field explicitly instead of assuming string[].
+  // WHERE THE REAL READ LIVES: readAttestationGlobs() in
+  // scripts/lib/attestation-inspection.mjs is the ONE place this field is
+  // interpreted — it re-reads .sterling/config.json itself, drops a non-array
+  // container, non-string members, empty strings and exact duplicates, and
+  // DISCLOSES every drop in the rollup. No surface may take these globs from the
+  // parsed config object instead.
+  attestation_path_globs: external_exports.unknown().default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),
@@ -5127,6 +5259,16 @@ function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
 }
+function repoRel(toolPath, cwd) {
+  if (!toolPath) return null;
+  const fwd = String(toolPath).replace(/\\/g, "/");
+  try {
+    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
+    return normalizeRepoPath(fwd);
+  } catch {
+    return null;
+  }
+}
 
 // scripts/hooks/lib/advisory-counter.mjs
 import { appendFileSync, existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2 } from "node:fs";
@@ -5274,9 +5416,41 @@ function isReviewerClass(type) {
   return !!type && type.startsWith("reviewer-");
 }
 
+// scripts/hooks/lib/ledger.mjs
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { join as join3, dirname as dirname2 } from "node:path";
+function ledgerPath(cwd, runId, agentId) {
+  if (runId && agentId) return join3(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
+  if (agentId) return join3(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
+  return join3(cwd, ".sterling", "transient", "conductor-reads.json");
+}
+function readLedger(path) {
+  if (!existsSync3(path)) return [];
+  const raw = readFileSync3(path, "utf8");
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    try {
+      const salvaged = JSON.parse(raw.slice(0, raw.indexOf("]") + 1));
+      return Array.isArray(salvaged) ? salvaged : [];
+    } catch {
+      return [];
+    }
+  }
+}
+function fileHash(absPath) {
+  try {
+    return createHash("sha256").update(readFileSync3(absPath)).digest("hex");
+  } catch {
+    return void 0;
+  }
+}
+
 // scripts/hooks/h25-dispatch-capability.mjs
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, statSync } from "node:fs";
+import { join as join4 } from "node:path";
 var BUILTIN_AGENT_TYPES = /* @__PURE__ */ new Set([
   "general-purpose",
   "claude",
@@ -5329,7 +5503,8 @@ var MCP_SHORT_NAMES = [
   "run_escalate",
   "capture_pending",
   "concept_designed",
-  "no_capture"
+  "no_capture",
+  "knowledge_render"
 ];
 var KNOWN_TOOLS = [...PLATFORM_TOOLS, ...MCP_SHORT_NAMES];
 var MCP_SET = new Set(MCP_SHORT_NAMES);
@@ -5358,19 +5533,115 @@ function parseToolsLine(content) {
   if (!line) return void 0;
   return line[1].trim();
 }
+var SHELL_TOOLS = /* @__PURE__ */ new Set(["bash", "powershell"]);
+function hasShellCapability(grantList) {
+  return grantList.some((g) => SHELL_TOOLS.has(String(g).toLowerCase()));
+}
+var STRONG_SHAPE_STOPWORDS = [
+  "the",
+  "a",
+  "an",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "them",
+  "some",
+  "any",
+  "all",
+  "your",
+  "my",
+  "our",
+  "their",
+  "through",
+  "again",
+  "once",
+  "more",
+  "here",
+  "there",
+  "now",
+  "later",
+  "first",
+  "next",
+  "before",
+  "after",
+  "via",
+  "using",
+  "with",
+  "without",
+  "over",
+  "away",
+  "so"
+];
+var RUN_TOKEN_EXCLUDED_ALT = [...STRONG_SHAPE_STOPWORDS, ...MCP_SHORT_NAMES].map(escapeRe2).join("|");
+var RUN_TOKEN_RE = new RegExp(
+  `\\b(?:run|execute)\\s+\`?(?!(?:mcp__\\w+__)?(?:${RUN_TOKEN_EXCLUDED_ALT})\\b)([A-Za-z][\\w.-]*)\`?`,
+  "gi"
+);
+var NPM_RUN_RE = /\bnpm\s+run\b/gi;
+var NODE_PATH_RE = /\bnode\b\s+(?:--[\w-]+\s+)*(?:[\w.-]*\/[\w.-]+|[\w-]+\.(?:mjs|cjs|js|ts|py))\b/gi;
+var FENCE_RE = /```[\w-]*\n([\s\S]*?)```/g;
+var INLINE_BACKTICK_RE = /`([^`\n]+)`/g;
+var SHELL_ARG_OR_OP_RE = /[\s|&;<>$(){}]/;
+function firstToken(s) {
+  const m = String(s ?? "").trim().match(/^\w+/);
+  if (!m) return "";
+  return m[0].toLowerCase().replace(/^mcp__\w+?__/, "");
+}
+function isCommandShapedSpan(content) {
+  return SHELL_ARG_OR_OP_RE.test(content) && !MCP_SET.has(firstToken(content));
+}
+function locateClause(clauses, text, absIndex) {
+  let cursor = 0;
+  for (const c of clauses) {
+    const idx = text.indexOf(c.text, cursor);
+    if (idx === -1) continue;
+    if (absIndex >= idx && absIndex < idx + c.text.length) {
+      return { clauseText: c.text, localIndex: absIndex - idx };
+    }
+    cursor = idx + c.text.length;
+  }
+  return null;
+}
+function hasUnsuppressedFenceOrBacktick(text) {
+  const clauses = scanClauses(text);
+  FENCE_RE.lastIndex = 0;
+  let fm;
+  while (fm = FENCE_RE.exec(text)) {
+    if (!isCommandShapedSpan(fm[1])) continue;
+    const loc = locateClause(clauses, text, fm.index);
+    if (!loc || !isSuppressedContext(loc.clauseText, loc.localIndex, false)) return true;
+  }
+  const stripped = text.replace(FENCE_RE, " ");
+  const strippedClauses = scanClauses(stripped);
+  INLINE_BACKTICK_RE.lastIndex = 0;
+  let im;
+  while (im = INLINE_BACKTICK_RE.exec(stripped)) {
+    if (!isCommandShapedSpan(im[1])) continue;
+    const loc = locateClause(strippedClauses, stripped, im.index);
+    if (!loc || !isSuppressedContext(loc.clauseText, loc.localIndex, false)) return true;
+  }
+  return false;
+}
+function hasCommandShapeMention(text) {
+  const t = String(text ?? "");
+  if (!t) return false;
+  if (hasUnsuppressedMatch(t, RUN_TOKEN_RE, { checkSubjectVerb: false })) return true;
+  if (hasUnsuppressedMatch(t, NPM_RUN_RE, { checkSubjectVerb: false })) return true;
+  if (hasUnsuppressedMatch(t, NODE_PATH_RE, { checkSubjectVerb: false })) return true;
+  return hasUnsuppressedFenceOrBacktick(t);
+}
+function commandShapeAdvisory(prompt) {
+  if (!hasCommandShapeMention(prompt)) return null;
+  return `H25 COMMAND-SHAPE ADVISORY \u2014 the brief instructs running commands but the agent holds no shell execution tool (no Bash, no PowerShell in its installed grant). This is a SHAPE match \u2014 run/execute <token>, npm run, node <path>, or fenced/backticked command text \u2014 independent of the tool-NAME scan above, so it catches a brief that names a concrete command (e.g. a linter/formatter) without ever naming a platform tool. Warn-only, never a block: re-target the dispatch to an agent holding shell access, re-scope the brief, or confirm the command is not actually required.`;
+}
 var TEST_NOUN_RE_SRC = String.raw`(?:\btests\b|\btest\s+(?:cases?|files?|suites?)\b|\ba\s+(?:failing\s+)?test\b)`;
 var VERB_TRIGGER_RE = new RegExp(String.raw`\b(?:write|author|add|create)\b[^.!?\n]{0,40}` + TEST_NOUN_RE_SRC, "i");
 var TDD_TRIGGER_RE = /\bTDD\b[^.!?\n]{0,20}\b(?:start(?:ing)?|begin(?:ning)?|first|with\s+the\s+tests?)\b/i;
-var NEGATION_RE = /\b(?:do\s*not|don't|don’t|never)\b[^.!?\n]{0,40}\btests?\b/i;
-var LEAVE_ALONE_RE = /\bleave\b[^.!?\n]{0,40}\btests?\b[^.!?\n]{0,20}\balone\b/i;
-var CLAUSE_SPLIT_RE = /[.!?;\n–—]/;
 function hasVerbOrTddTrigger(text) {
-  const clauses = String(text ?? "").split(CLAUSE_SPLIT_RE);
-  for (const clause of clauses) {
-    if (NEGATION_RE.test(clause) || LEAVE_ALONE_RE.test(clause)) continue;
-    if (VERB_TRIGGER_RE.test(clause) || TDD_TRIGGER_RE.test(clause)) return true;
-  }
-  return false;
+  const t = String(text ?? "");
+  return hasUnsuppressedMatch(t, VERB_TRIGGER_RE, { checkSubjectVerb: false }) || hasUnsuppressedMatch(t, TDD_TRIGGER_RE, { checkSubjectVerb: false });
 }
 function extractPathCandidates2(text) {
   const matches = String(text ?? "").match(/[A-Za-z0-9_][A-Za-z0-9_.\-/]*\.[A-Za-z0-9]+/g) ?? [];
@@ -5398,6 +5669,57 @@ function testAuthoringAdvisory(subagentType, prompt, cwd) {
   if (!hasVerbOrTddTrigger(text) && !hasPathTrigger(text, cwd)) return null;
   return `H25 TEST-AUTHORING ADVISORY \u2014 this is the warn-only doer/checker role lint: you are about to dispatch '${subagentType}', and the brief appears to instruct test authoring, inferred from verbs/paths in the prompt text \u2014 not a claim that a test edit has occurred. Test authoring belongs to the test-writer role (doer/checker separation); if this dispatch proceeds and it edits a test path, H5 will deny that edit mid-work. This is a warning, not a denial \u2014 re-target the dispatch to test-writer, or state explicitly why this agent needs to touch tests.`;
 }
+var CITATION_RE = new RegExp(`(${PATH_CANDIDATE_RE.source}):(\\d+)(?:-\\d+)?`, "g");
+function extractCitedPaths(text) {
+  const found = String(text ?? "").match(CITATION_RE) ?? [];
+  return [...new Set(found.map((m) => m.replace(/:\d+(?:-\d+)?$/, "")))];
+}
+function latestHashedEntry(entries, relPath) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.path === relPath && e.sha256) return e;
+  }
+  return null;
+}
+function citationStalenessAdvisory(prompt, cwd) {
+  try {
+    const text = String(prompt ?? "");
+    if (!text || !cwd) return null;
+    const cited = extractCitedPaths(text);
+    if (!cited.length) return null;
+    let entries;
+    try {
+      entries = readLedger(ledgerPath(cwd));
+    } catch {
+      return null;
+    }
+    if (!entries.length) return null;
+    const stale = [];
+    for (const citedPath of cited) {
+      const rel = repoRel(citedPath, cwd);
+      if (!rel) continue;
+      const abs = join4(cwd, rel);
+      let stat;
+      try {
+        stat = statSync(abs);
+      } catch {
+        continue;
+      }
+      if (!stat.isFile()) continue;
+      const entry = latestHashedEntry(entries, rel);
+      if (!entry) continue;
+      const currentHash = fileHash(abs);
+      if (currentHash && currentHash !== entry.sha256) stale.push(rel);
+    }
+    if (!stale.length) return null;
+    const lines = stale.map((p) => `  - ${p}`).join("\n");
+    return `H25 CITATION-STALENESS ADVISORY \u2014 file changed since your last Read; remeasure these line citations:
+${lines}
+This does not claim the cited lines are wrong \u2014 only that the file's bytes moved since your last Read of it.`;
+  } catch {
+    return null;
+  }
+}
 var input;
 try {
   input = readStdin();
@@ -5416,15 +5738,19 @@ try {
   let finish = function(capabilityMessage) {
     const parts = [];
     if (capabilityMessage) parts.push(capabilityMessage);
+    if (commandShapeMsg) parts.push(commandShapeMsg);
     if (taAdvisory) parts.push(taAdvisory);
+    if (citeAdvisory) parts.push(citeAdvisory);
     if (parts.length) emit(parts.join("\n\n"));
     allow();
   };
   const subagentType = input.tool_input?.subagent_type;
   if (!subagentType) allow();
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  const agentPath = join3(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
-  if (!existsSync3(agentPath)) {
+  const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
+  let commandShapeMsg;
+  const agentPath = join4(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
+  if (!existsSync4(agentPath)) {
     if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
     finish(
       `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
@@ -5432,7 +5758,7 @@ try {
   }
   let content;
   try {
-    content = readFileSync3(agentPath, "utf8");
+    content = readFileSync4(agentPath, "utf8");
   } catch (e) {
     warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
   }
@@ -5440,6 +5766,7 @@ try {
   if (toolsRaw === void 0) finish();
   const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
   if (!grantList.length) finish();
+  if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
   const mentioned = findMentionedTools(input.tool_input?.prompt);
   if (!mentioned.length) finish();
   const missing = mentioned.filter((tool) => !isGranted(tool, grantList));

@@ -56,8 +56,9 @@
 //     than silently landing an unmergeable or under-verified commit (N2).
 //     Only on a successful verification does it CONSUME: RE-READ the ledger (it may have gained a fresh
 //     entry while `git commit` ran — hooks can take seconds) and write back
-//     every entry NOT identity-matched (agent_type + at) to the set just
-//     stamped, so a receipt promoted mid-commit survives — P4: the artifact
+//     every entry NOT identity-matched to the set just stamped (by entry_id for
+//     a v2 entry, else agent_type + at + the partition fields), so a receipt
+//     promoted mid-commit survives — P4: the artifact
 //     that uses the evidence removes exactly that evidence, nothing more.
 //     This read-modify-write is lock-guarded (withLedgerLock below) against
 //     a concurrent H22 promotion write.
@@ -73,14 +74,46 @@
 //     the same path, and any difference is named — the first check here that
 //     asks WHAT BYTES a receipt saw rather than only WHERE/WHOSE it is. That
 //     field is also what the 12h horizon now measures from when present, since
-//     `at` is stamped at the reviewer's DISPATCH, not its completion. WARN, not
-//     refuse, is pending an explicit strength ruling that board 0f448efb names
-//     as still open. None of them rejects an entry, refuses, or changes the
-//     no-dedupe rule: the `files` attribution is known-unreliable, so a gate
-//     keyed on it would discard real reviews. The whole block is FAIL-OPEN
-//     (guarded interpolation + a try/catch that degrades to one stderr note),
-//     because a warning-only check that can abort a commit inverts its own
-//     ruling.
+//     `at` is stamped at the reviewer's DISPATCH, not its completion. THE
+//     WARN-VS-REFUSE RULING HAS LANDED AND REVIEWED-BYTES IS NO LONGER PART OF
+//     THIS ADVISORY BLOCK — see REVIEWED-BYTES ENFORCEMENT below. Every OTHER
+//     check named here stays advisory: none of them rejects an entry, refuses,
+//     or changes the no-dedupe rule, because the `files` attribution is
+//     known-unreliable and a gate keyed on it would discard real reviews. That
+//     block is FAIL-OPEN (guarded interpolation + a try/catch that degrades to
+//     one stderr note), because a warning-only check that can abort a commit
+//     inverts its own ruling.
+//   - REVIEWED-BYTES ENFORCEMENT (decision 57984926, slug review-ledger-v2-
+//     lifecycle-refuse-flip-and-external-review-design §2 — which executes the
+//     REFUSE-LATER half of user ruling b0ad640d): a stamped-candidate receipt
+//     whose recorded blob sha DIFFERS from the bytes about to be committed on a
+//     path it covers, or whose evidence for such a path is INCONSISTENT
+//     (present but not a usable sha) or ADMITTEDLY PARTIAL (truncated / v2
+//     content_evidence.status 'partial') and therefore never bound that path,
+//     now REFUSES the commit. All mismatches across all receipts aggregate into
+//     ONE refusal naming every receipt and file, printed LAST, exit 1 — nothing
+//     committed, nothing consumed, the ledger left byte-identical. Only
+//     GENUINELY ABSENT evidence is grandfathered: a v1 receipt with no
+//     reviewed_state KEY at all, and a v2 receipt whose content_evidence.status
+//     is 'unavailable' AND which carries no usable blob sha (it commits, but is
+//     DISCLOSED). Everything adjacent to those two is INCONSISTENT and refuses —
+//     a reviewed_state key present but not an object, an 'unavailable' status
+//     contradicted by recorded hashes, two blob keys normalizing to one path
+//     with different shas. `--waive-bytes "<single-line reason, <=500 chars>"`
+//     is the escape hatch: it waives the whole INVOCATION and stamps one
+//     `Review-Bytes-Waiver: <identity>` trailer per AFFECTED receipt (v2
+//     entry_id, or a receipt-derived stable fingerprint for v1), verified
+//     post-commit exactly like Reviewed-By-Agent; asked for on a run with
+//     nothing to waive, it is disclosed as unnecessary and stamps nothing.
+//     This check is NOT inside the advisory fail-open wrapper — a refusal is
+//     not an advisory — and it FAILS CLOSED (fix round 2026-08-31): an
+//     unreadable index/tree, or a throw, still REFUSES for every receipt that
+//     recorded comparable bytes for a path this commit touches, because "we
+//     could not check" is not "it matched". Only a failure with NO comparable
+//     evidence in play degrades to the REVIEWED-BYTES CHECK UNAVAILABLE warning.
+//     After the commit lands, the CREATED COMMIT'S TREE is re-read and compared
+//     against what the pre-commit check saw, so a `pre-commit` hook rewriting
+//     the index cannot slip unverified bytes under a verified trailer.
 //   - FILE-SCOPED STAMPING (board 51d93c34 requirement 2): stamping used to be
 //     all-or-nothing — every eligible receipt landed on whatever was staged,
 //     which forced concurrently-reviewed slices to commit as ONE unit
@@ -91,16 +124,30 @@
 //     nothing"); a receipt whose files intersect nothing staged is DEFERRED —
 //     disclosed by name, NOT stamped, NOT consumed, NOT deleted, and left for
 //     the commit that stages its territory, exactly like a foreign receipt.
-//     FALLBACK: if NO eligible receipt matches the staged set there is nothing
-//     to select on, so the rule does not apply and every eligible receipt is
-//     stamped exactly as before — because H22's file attribution is measured
-//     unreliable (board 09e03d76; research finding 289cd172: negated paths are
-//     recorded, positively-asserted ones can be dropped, globs register
-//     nothing), and refusing on it would brick this CLI and train
-//     --waive-reviews. NET INVARIANT: the stamped set is always a SUBSET of the
-//     old behavior's and never empty while any eligible receipt exists, so this
-//     rule can only remove a FALSE attestation — it can never add a trailer,
-//     invent evidence, or turn a commit that succeeds today into a refusal.
+//     FALLBACK, NARROWED (decision 57984926 §3): if NO eligible receipt matches
+//     the staged set, a receipt whose territory came from FREE-PROSE or LEGACY
+//     attribution is still stamped exactly as before — that attribution is
+//     measured unreliable (board 09e03d76; research finding 289cd172: negated
+//     paths are recorded, positively-asserted ones can be dropped, globs
+//     register nothing), and refusing on it would brick this CLI and train
+//     --waive-reviews. A receipt with STRUCTURED territory (territory.source /
+//     files_source 'review-territory' AND a non-empty files[]) does NOT fall
+//     back: its paths are the reviewer's own declared scope, so a non-overlap is
+//     evidence the review never saw this diff. It DEFERS instead, and if that
+//     leaves NOTHING to stamp the commit REFUSES (see the zero-stamp guard).
+//     NET INVARIANT: the stamped set is always a SUBSET of the pre-file-scoping
+//     behavior's, so this rule can only ever remove a FALSE attestation — never
+//     add a trailer and never invent evidence. It CAN now refuse a commit that
+//     an earlier version would have carried on a structured false attestation,
+//     which is the point of the narrowing.
+//   - DISCHARGED RECEIPTS ARE INVISIBLE HERE (decision 57984926 §3): a v2 entry
+//     whose `status` is 'discharged' has been explicitly ruled unspendable by
+//     `node scripts/review-ledger.mjs discharge` while being PRESERVED in the
+//     ledger. It is excluded from validity, eligibility, the file-scoped
+//     partition, every count and every advisory — and, because the consume step
+//     removes only entries it actually STAMPED, it survives the consume write
+//     untouched. A missing `status` (every v1 entry, and any v2 entry promoted
+//     before the field existed) reads as ACTIVE, never as discharged.
 //   - >=1 valid entry but NOTHING STAGED: refuse (exit 1), do NOT consume
 //     the ledger (P5 — never mint an empty commit that silently eats real
 //     review evidence for nothing).
@@ -112,6 +159,45 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSy
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { arg, fail } from './lib/project.mjs';
+// READ ADAPTER (decision 57984926, campaign slice S2b-1): h22-dispatch-
+// register.mjs now promotes every NEW reviewer-* receipt as a v2 entry
+// (nested reviewer/identity/territory/content_evidence); pre-existing v1
+// entries are never migrated in place, so a real ledger mixes both shapes.
+// Every read below maps each raw entry through this ONE adapter so the rest
+// of this file keeps reading the same flat field names it always has
+// (agent_type/files/at/session_id/branch/base_sha/reviewed_state) regardless
+// of which shape produced them — v1 entries pass through byte-identical.
+// dischargeMarkerClass rides the SAME adapter (S2b-3 fix round): the discharge
+// marker is only honored as the PAIR {status:'discharged', disposition:<object>}
+// on a structurally complete v2 entry, and that verdict is defined once, beside
+// the shape it reads, rather than restated in each of this file's two flows and
+// again in H1. See isDischargedEntry / skipForDischargeMarker below.
+// THE V1 IDENTITY HELPERS LIVE IN THE ADAPTER TOO (board 7dd3200a). They used
+// to be hoisted `function` declarations in this file, but §3's discharge verb
+// now needs the SAME v1 identity as a SELECTOR (`--legacy-handle`) that §2
+// stamps as a waiver trailer value here — and two independently-derived v1
+// identities across the two surfaces is a defect on its face: the handle read
+// off a waiver trailer must be the handle the discharge verb accepts. Moved
+// verbatim, so there is exactly one definition of each. An ESM import binding is
+// initialized before this module's body runs, so it is if anything SAFER than
+// the hoisted declarations it replaces (see the TDZ note further down: a `const`
+// there silently disabled the reviewed-bytes gate through the fail-open path).
+import {
+  normalizeLedgerEntry,
+  dischargeMarkerClass,
+  isExternalReviewEntry,
+  isEvidenceObject,
+  isUsableBlobSha,
+  receiptBlobEvidence,
+  receiptDeclaredPaths,
+  legacyReceiptHandle,
+} from './hooks/lib/review-ledger-entry.mjs';
+// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd). The shared
+// read-only inspector, used identically by BOTH flows of this CLI and by both
+// merge surfaces. It never refuses anything and cannot: see the header comment
+// above the disclosure block further down.
+import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 
 const target = process.cwd();
 
@@ -134,6 +220,80 @@ const targetShaArg = arg('--target-sha');
 // is falsy. The main flow's own `if (!message)` requirement further down is
 // unaffected; only the contradiction check needed this.
 const messageArgProvided = process.argv.slice(2).includes('-m') || process.argv.slice(2).includes('--message');
+
+// ===========================================================================
+// --waive-bytes "<reason>" (decision 57984926 §2) — the escape hatch the
+// REFUSE flip needed decided in the same breath as the refusal itself, because
+// legitimate rework-after-review produces the mismatch shape and a refusal
+// with no sanctioned route is what trains --waive-reviews.
+//
+// PARSED AND VALIDATED HERE, BEFORE EITHER FLOW BRANCHES: a malformed
+// invocation is a malformed invocation whether or not anything would have
+// mismatched, and validating early means the reason-defect refusal can never
+// be confused with (or fall through to) the byte refusal — two different
+// failures must never share one message. Both flows read `waiveBytesReason`.
+//
+// THREE DEFECTS, ALL REFUSE, NONE SANITIZED:
+//   (1) MULTI-LINE. A reason carrying \n or \r could forge a trailer line, and
+//       "strip the newlines and carry on" would launder exactly that attempt
+//       into an accepted waiver. The trailer VALUE never carries the reason
+//       (it carries the receipt identity — see waiverIdentity below), so this
+//       is defence in depth on top of that, not the only guard.
+//   (2) EMPTY AFTER TRIM. PRESENCE, not truthiness — `--waive-bytes ""` is a
+//       REASON DEFECT, never "no waiver requested". Read as absence it would
+//       silently fall through to the byte refusal, i.e. the right exit code
+//       for the wrong cause, which is indistinguishable from working.
+//   (3) OVER THE BOUND. REFUSED, never truncated: a waiver's whole value is the
+//       accountability text, and silently discarding half of it records a
+//       decision nobody made.
+// ===========================================================================
+const WAIVE_BYTES_REASON_MAX = 500; // adjudicated bound (decision 57984926 §2, conductor adjudication 2026-08-31)
+const waiveBytesProvided = process.argv.slice(2).includes('--waive-bytes');
+const waiveBytesRaw = arg('--waive-bytes');
+let waiveBytesReason = null;
+if (waiveBytesProvided) {
+  if (waiveBytesRaw === undefined) {
+    fail('commit-reviewed: --waive-bytes requires a reason argument — a waiver with no reason records no accountability at all. Nothing committed, nothing consumed.');
+  }
+  if (/[\r\n]/.test(waiveBytesRaw)) {
+    fail(
+      `commit-reviewed: --waive-bytes reason must be a SINGLE LINE — the reason given contains a newline (${JSON.stringify(waiveBytesRaw)}). ` +
+        `It is REFUSED, never silently stripped into acceptance: a multi-line reason can forge trailer lines, and laundering one into a valid waiver is ` +
+        `worse than rejecting it. Re-run with a single-line reason. Nothing committed, nothing consumed.`
+    );
+  }
+  const trimmed = waiveBytesRaw.trim();
+  // (4) FLAG-SHAPED (roster review LOW-1, fix round 2026-08-31). `arg()` takes
+  // the NEXT argv entry, so `--waive-bytes -m "msg"` silently records the reason
+  // "-m" — an accountable override justified by a flag name, and the real
+  // message argument then reads as a positional. Both spellings are refused:
+  // anything starting with `--` (which no honest reason does), and an exact
+  // match for one of THIS CLI's own flags (which catches the single-dash `-m`
+  // without rejecting prose that legitimately opens with a hyphen).
+  const OWN_FLAGS = ['-m', '--message', '--target-sha', '--waive-bytes'];
+  if (trimmed.startsWith('--') || OWN_FLAGS.includes(trimmed)) {
+    fail(
+      `commit-reviewed: --waive-bytes was given ${JSON.stringify(waiveBytesRaw)} as its REASON, which is flag-shaped — almost certainly the next option ` +
+        `rather than a reason (the reason is the argument immediately after --waive-bytes). A waiver justified by a flag name records no accountability ` +
+        `at all, and accepting it would also consume the flag it swallowed. Re-run with --waive-bytes "<single-line reason>". Nothing committed, ` +
+        `nothing consumed.`
+    );
+  }
+  if (trimmed === '') {
+    fail(
+      'commit-reviewed: --waive-bytes was given an EMPTY reason — that is a reason defect, not "no waiver requested". A waiver is an accountable override of ' +
+        'content evidence and must say why. Nothing committed, nothing consumed.'
+    );
+  }
+  if (trimmed.length > WAIVE_BYTES_REASON_MAX) {
+    fail(
+      `commit-reviewed: --waive-bytes reason is ${trimmed.length} characters, over the ${WAIVE_BYTES_REASON_MAX}-character bound. It is REFUSED, NOT ` +
+        `truncated — the reason IS the accountability record, and silently keeping half of it would record a decision nobody made. Shorten the reason (put ` +
+        `the long form in the commit message body). Nothing committed, nothing consumed.`
+    );
+  }
+  waiveBytesReason = trimmed;
+}
 
 // ===========================================================================
 // --target-sha AMEND MODE (decision post-hoc-review-receipts-target-sha-amend,
@@ -209,6 +369,10 @@ try {
   ledger = []; // malformed ledger degrades to empty — treated identically to
   // a missing/empty ledger, never a crash
 }
+// Normalize ONCE, at read time — every downstream read in this file (validity,
+// eligibility, file-scoping, spend advisories, trailer stamping) sees the flat
+// legacy shape regardless of whether the raw entry was v1 or v2.
+ledger = ledger.map(normalizeLedgerEntry);
 
 const guidance =
   'commit-reviewed: no un-consumed review-ledger entries — dispatch a reviewer before committing, or commit bare and answer at the merge gate';
@@ -221,9 +385,66 @@ if (ledger.length === 0) {
 // shape are eligible (VALID_AGENT_TYPE is declared near the top of the file,
 // shared with --target-sha amend mode). A rejected entry is warned about and
 // LEFT in the ledger un-consumed — never silently dropped.
+// DISCHARGED = EXPLICITLY UNSPENDABLE, EXPLICITLY PRESERVED (decision 57984926
+// §3, campaign slice S2b-3). scripts/review-ledger.mjs discharge sets
+// status:'discharged' + a disposition on a receipt that can never legitimately
+// be spent (foreign session, foreign branch, conclusively no-live territory)
+// WITHOUT deleting it — the evidence and the accountable reason both survive.
+// Every spending surface must therefore ignore it: it is never valid, never
+// eligible, never counted, never stamped, and (because the consume step removes
+// only entries it actually stamped) never consumed. Read STRICTLY: only the
+// exact string 'discharged' withholds, so a missing status — every v1 entry, and
+// any v2 entry promoted before the field existed — reads as ACTIVE, which is the
+// compatibility rule §3 states ("missing status = active").
+// isDischargedEntry is a HOISTED function declaration near the bottom of this
+// file, not a const here: --target-sha amend mode runs BEFORE this flow's body
+// and would hit the temporal dead zone of any const declared in it.
 const validEntries = [];
 for (const e of ledger) {
-  if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
+  // Checked FIRST. An AUTHENTICATED discharge is skipped SILENTLY: it was
+  // already adjudicated and disclosed at discharge time, with its reason
+  // recorded in the ledger, and warning about it on every subsequent commit
+  // would be noise about a decision already made — §3 says these surfaces IGNORE
+  // discharged entries, not re-report them. A v2 entry CLAIMING a discharge
+  // without a usable disposition is skipped too, but LOUDLY (see
+  // skipForDischargeMarker).
+  if (skipForDischargeMarker(e)) continue;
+  // EXTERNAL REVIEW EVIDENCE IS NEVER SPENDABLE (decision 57984926 §4, campaign
+  // slice S2b-4). A kind:'external_review' entry is the conductor's attestation
+  // that an outside-model consult completed — "evidence of a completed consult,
+  // NOT PROOF" — minted only by `scripts/review-ledger.mjs record-external`. It
+  // is never valid, never eligible, never counted by roster eligibility, never
+  // stamped, never in reviewed_by, and (because the consume step removes only
+  // entries it actually STAMPED) never consumed: the same structural posture a
+  // discharged entry has.
+  //
+  // THE KIND GATE IS THE FIRST OF TWO INDEPENDENT GUARDS §4 asks for ("kind gate
+  // + agent-type regex, belt and braces"). The agent-type regex below is the
+  // second and would already exclude this entry — an external entry carries NO
+  // agent_type at all — but it would do so through the MALFORMED-ENTRY message,
+  // which tells the conductor a well-formed attestation is broken. So the kind
+  // gate is checked FIRST, before the deficiency check (an external entry has no
+  // identity/started_at and would otherwise read as a structurally-deficient
+  // ROSTER receipt), and it is NOT AN ERROR: one quiet line, because nothing is
+  // wrong — this entry was never meant to be spent.
+  if (isExternalReviewEntry(e)) {
+    console.error(
+      `commit-reviewed: external_review ledger entry left un-consumed (not a review receipt — conductor-attested consult evidence, never spendable, decision 57984926 §4)`
+    );
+    continue;
+  }
+  // MED-2 (decision 57984926 fix round, pin S13): a v2-CLAIMING entry missing
+  // entry_id/started_at/identity is structurally deficient — normalizeLedgerEntry
+  // marks it `v2_deficient` rather than mapping it into a spendable-looking
+  // shape. Checked BEFORE the agent_type-format acceptance so a deficient
+  // entry whose agent_type otherwise looks valid is never pushed to
+  // validEntries — the strongest-unverifiable posture, same family as an
+  // invalid agent_type, disclosed by its own distinct message.
+  if (e && e.v2_deficient) {
+    console.error(
+      `commit-reviewed: skipping structurally-deficient v2 ledger entry (agent_type ${JSON.stringify(e.agent_type)} — missing entry_id/started_at/identity, per decision 57984926) — left un-consumed in the ledger, never stamped`
+    );
+  } else if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
     validEntries.push(e);
   } else {
     console.error(
@@ -430,26 +651,43 @@ const stagedFiles = new Set(
 //                  deleted; disclosed by name and left for the commit that
 //                  stages its territory. Same posture as a foreign receipt.
 //
-// THE FALLBACK IS THE WHOLE SAFETY ARGUMENT. When NO eligible receipt matches
-// the staged set, no selection is possible, so this rule does not fire at all
-// and every eligible receipt is stamped exactly as before. That is not a
-// loophole, it is the measured reality: research finding
+// THE FALLBACK IS THE SAFETY ARGUMENT FOR *UNRELIABLE* ATTRIBUTION, AND ONLY
+// THERE (NARROWED by decision 57984926 §3, campaign slice S2b-3). When no
+// eligible receipt matches the staged set, a receipt whose territory came from
+// H22's FREE-PROSE extractor still falls back and is stamped exactly as before,
+// because that attribution is measured unreliable: research finding
 // h26-registers-do-not-touch-paths-as-held-territory (289cd172, 2026-08-26)
 // establishes that files[] is written by h22-dispatch-register.mjs with NO
 // negation suppression and NO glob handling, so a receipt can both carry a
 // path its brief forbade and LOSE a path the brief positively asserted
 // ("do not edit tests/x, instead fix src/auth.mjs" drops src/auth.mjs). A
-// zero-match ledger is therefore far more likely to mean the attribution
-// failed than that every reviewer looked at other work — and board 09e03d76
-// measured exactly that, every receipt mis-attributed. Refusing there would
-// brick the CLI and train --waive-reviews, inverting this gate's purpose.
+// zero-match ledger from free-prose extraction is therefore far more likely to
+// mean the attribution failed than that every reviewer looked at other work —
+// and board 09e03d76 measured exactly that. Refusing there would brick the CLI
+// and train --waive-reviews, inverting this gate's purpose.
+//
+// STRUCTURED TERRITORY IS DIFFERENT, AND NO LONGER FALLS BACK. A receipt whose
+// territory.source is 'review-territory' (decision 8f137474 — the reviewer's
+// own declared review scope, nested in v2 as territory.source and surfaced flat
+// by the read adapter as files_source) records paths that were NOT guessed from
+// prose. For such a receipt a non-overlap is EVIDENCE that the review did not
+// look at this diff, not evidence that the extractor failed — so the no-match
+// stamping fallback is REMOVED for it: it DEFERS (disclosed, un-stamped,
+// un-consumed, never deleted) even when nothing else covers the diff. An EMPTY
+// files[] is never structured for this purpose, whatever the source says: it is
+// the UNATTRIBUTED class below, always stamped (there is nothing to have
+// matched).
+//
+// THAT MAKES THE ZERO-STAMP REFUSAL BELOW REAL AND EXPECTED, not an internal
+// scream. If every eligible receipt defers on structured territory, nothing is
+// stamped and the commit REFUSES — see that guard for the message and remedy.
 //
 // INVARIANT THIS PRESERVES (the reason this is safe on the merge-gate
-// surface): the stamped set is always a SUBSET of what today's code stamps,
-// and is never empty while eligibleEntries is non-empty (the fallback
-// guarantees it). So this rule can only ever REMOVE a trailer that would have
-// been a false attestation — it can never add one, never invent evidence, and
-// never turn a commit that succeeds today into a refusal.
+// surface): the stamped set is always a SUBSET of what the pre-file-scoping
+// code stamped. So this rule can only ever REMOVE a trailer that would have
+// been a false attestation — it can never add one and never invent evidence.
+// What it CAN now do, deliberately, is turn a commit that would have been
+// carried by a false attestation into a refusal (decision 57984926 §3).
 //
 // KNOWN, ACCEPTED LIMITATION (review, acknowledged no-action): a receipt whose
 // files[] records a path git will never stage again — a pre-rename spelling, a
@@ -460,42 +698,85 @@ const stagedFiles = new Set(
 // a receipt by hand once judged; do NOT relax the match to make it spendable.
 const usableFiles = (e) => (Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : []);
 const touchesStaged = (e) => usableFiles(e).some((f) => stagedFiles.has(normalizePath(f)));
+// STRUCTURED TERRITORY (decision 57984926 §3). BOTH spellings of the field mean
+// the same thing and are treated identically: v2's nested territory.source (via
+// the read adapter) and the FLAT pre-v2 `files_source` shipped by decision
+// 8f137474 — a receipt whose paths came from the reviewer's declared review
+// scope rather than from prose extraction. NON-EMPTY files[] is part of the
+// definition, not an extra condition: an empty files[] is the UNATTRIBUTED
+// class (always stamped), never a non-match, whatever the source records.
+// isStructuredTerritoryEntry is a HOISTED function declaration near the bottom
+// of this file, shared verbatim with --target-sha amend mode (which runs before
+// this flow's body and so cannot reach a const declared inside it).
+const isStructuredTerritory = (e) => isStructuredTerritoryEntry(e);
 // Attributed = carries territory that CAN be judged. Scoping only applies when
 // at least one attributed receipt actually matches this diff.
 const fileScopingApplies = eligibleEntries.some((e) => usableFiles(e).length > 0 && touchesStaged(e));
 const stampEntries = [];
 const deferredEntries = [];
 for (const e of eligibleEntries) {
-  if (!fileScopingApplies || usableFiles(e).length === 0 || touchesStaged(e)) stampEntries.push(e);
-  else deferredEntries.push(e);
-}
-// STRUCTURALLY UNREACHABLE, DELIBERATELY NOT SILENT (P5). The partition above
-// guarantees a non-empty stamp set: fileScopingApplies is true only when some
-// entry both has usable files AND touches the staged set (so that entry is
-// stamped), and when it is false every eligible entry is stamped — and
-// eligibleEntries was already proven non-empty. If a future edit breaks that
-// reasoning, the failure would otherwise be SILENT AND WORST-CASE: zero trailer
-// lines, a commit that lands anyway, and a trailer verification that compares
-// [] against [] and PASSES — i.e. an unreviewed-looking commit reported as a
-// success, with the ledger consumed. Refuse loudly instead, before committing.
-if (stampEntries.length === 0) {
-  fail(
-    `commit-reviewed: INTERNAL INVARIANT VIOLATED — file-scoped stamping selected ZERO receipts out of ${eligibleEntries.length} eligible one(s), which the ` +
-      `partition is constructed to make impossible. Refusing rather than creating a commit with no Reviewed-By-Agent trailer at all (which would land, ` +
-      `verify vacuously, and consume the ledger). Nothing is stamped and nothing is consumed — report this, and commit with bare 'git commit' plus the ` +
-      `merge gate if you need to proceed now.`
-  );
+  if (usableFiles(e).length === 0 || touchesStaged(e)) {
+    stampEntries.push(e); // UNATTRIBUTED or MATCHED — unchanged in both directions
+  } else if (isStructuredTerritory(e)) {
+    deferredEntries.push(e); // NARROWED (§3): structured territory never falls back
+  } else if (!fileScopingApplies) {
+    stampEntries.push(e); // the SURVIVING fallback — free-prose / legacy attribution only
+  } else {
+    deferredEntries.push(e); // DEFERRED: something else covers this diff
+  }
 }
 // Collected as well as printed, for the same reason foreign disclosures are:
 // what was NOT spent is exactly what a reader of this CLI's report needs.
+// Printed BEFORE the zero-stamp refusal below, so the receipts named in that
+// refusal are already on stderr with their full territory when it fires.
 const deferredDisclosures = deferredEntries.map(
   (e) =>
     `commit-reviewed: DEFERRED RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) reviewed ` +
-    `[${usableFiles(e).join(', ')}], none of which this commit stages, while ${stampEntries.length} other receipt(s) DO cover this diff. Stamping it here ` +
-    `would claim a review of files absent from the diff (a false attestation on the merge gate's audit surface), and consuming it would strand the slice it ` +
-    `really reviewed with no evidence at all (board 51d93c34). It stays in the ledger untouched — commit the files it names and it will be spent there.`
+    `[${usableFiles(e).join(', ')}], none of which this commit stages` +
+    (stampEntries.length > 0
+      ? `, while ${stampEntries.length} other receipt(s) DO cover this diff. `
+      : `, and NO other receipt covers this diff either — its territory is STRUCTURED (territory.source 'review-territory'), so the no-match stamping ` +
+        `fallback does NOT apply to it (decision 57984926 §3); that fallback survives only for free-prose/legacy attribution. `) +
+    `Stamping it here would claim a review of files absent from the diff (a false attestation on the merge gate's audit surface), and consuming it would ` +
+    `strand the slice it really reviewed with no evidence at all (board 51d93c34). It stays in the ledger untouched — commit the files it names and it ` +
+    `will be spent there.`
 );
 for (const line of deferredDisclosures) console.error(line);
+
+// A REAL, EXPECTED REFUSAL (decision 57984926 §3) — it used to be an internal
+// invariant scream, and it is not one any more. Since the no-match stamping
+// fallback was REMOVED for structured territory, "every eligible receipt
+// deferred" is a reachable, meaningful state: every receipt that could be spent
+// declares territory this commit does not stage, so stamping any of them would
+// be a false attestation and the commit must refuse instead.
+//
+// THE PARTITION STILL GUARANTEES WHICH SHAPE REACHES HERE. A receipt deferred
+// by the LAST branch above requires fileScopingApplies, which requires some
+// entry that both has usable files and touches the staged set — and that entry
+// is stamped. So a zero stamp set means every eligible receipt was deferred by
+// the STRUCTURED branch, which is what this message reports. (The fallback
+// wording covers a future partition change rather than a state reachable today.)
+//
+// The old reason for refusing rather than committing silently still holds and
+// is why this is a refusal and not a warning: a commit with zero trailer lines
+// would land, verify VACUOUSLY (comparing [] against []) and consume the
+// ledger — an unreviewed commit reported as a success.
+if (stampEntries.length === 0) {
+  const structuredDeferred = deferredEntries.filter(isStructuredTerritory);
+  const named = (structuredDeferred.length > 0 ? structuredDeferred : deferredEntries)
+    .map((e) => `${e.agent_type} reviewed [${usableFiles(e).join(', ')}]`)
+    .join('; ');
+  fail(
+    `commit-reviewed: NO REVIEW RECEIPT COVERS THIS DIFF — all ${eligibleEntries.length} spendable receipt(s) are DEFERRED because they declare STRUCTURED ` +
+      `territory (territory.source 'review-territory') that this commit does not stage: ${named}. Structured territory is recorded from the reviewer's own ` +
+      `declared review scope, not from the free-prose extractor, so a non-overlap is EVIDENCE that the review never looked at this diff — decision 57984926 ` +
+      `§3 removed the no-match stamping fallback for exactly this shape (it survives only for free-prose/legacy attribution, research finding 289cd172). ` +
+      `Nothing is stamped and NOTHING IS CONSUMED: every receipt named above stays in the ledger, byte-identical, for the commit that stages its territory. ` +
+      `REMEDY: stage the files a receipt names and commit those; or dispatch a reviewer for THIS diff; or commit bare with 'git commit' and answer at the ` +
+      `merge gate. If a receipt can never be spent (its territory is gone), discharge it explicitly with 'node scripts/review-ledger.mjs discharge' — never ` +
+      `by deleting the evidence.`
+  );
+}
 
 // eligibleEntries, not validEntries: a foreign receipt is not being spent on
 // this commit, so warning that its sabotage does not target this diff would be
@@ -607,7 +888,10 @@ try {
       // when some other receipt DID match, a non-overlapping one is DEFERRED
       // rather than stamped, and is disclosed there instead. Reaching this line
       // therefore means NO eligible receipt matched the diff at all, which is
-      // the state where the attribution itself is the prime suspect.
+      // the state where the attribution itself is the prime suspect — and since
+      // decision 57984926 §3 it also means this receipt's territory is
+      // FREE-PROSE or LEGACY, because a structured non-match defers instead of
+      // falling back. That is exactly the population this advisory is about.
       warnSpend(
         `commit-reviewed: RECEIPT FILES DO NOT OVERLAP THIS DIFF — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) names [${entryFiles.join(', ')}], ` +
           `none of which this commit stages, AND no other eligible receipt covers this diff either — so file-scoped stamping (board 51d93c34) has nothing ` +
@@ -620,7 +904,9 @@ try {
   }
 
   // =========================================================================
-  // REVIEWED-BYTES CHECK (board 0f448efb). Every check above this line asks
+  // REVIEWED-BYTES: THE COMPARISON ITSELF NO LONGER LIVES HERE (decision
+  // 57984926 §2, slug review-ledger-v2-lifecycle-refuse-flip-and-external-
+  // review-design; user ruling b0ad640d). Every check above this line asks
   // WHERE or WHOSE a receipt is — session, branch, filenames. NONE of them ever
   // asked WHAT BYTES it looked at, so a receipt earned in this session on this
   // branch, naming exactly the files being committed, was stamped without
@@ -629,15 +915,32 @@ try {
   // was timestamped before the substantive work even landed, and this CLI
   // stamped it regardless.
   //
-  // The evidence it reads is `reviewed_state.blobs` — a {path: git blob sha}
-  // map that h22-dispatch-register.mjs records at SubagentSTOP, i.e. at review
-  // END. That is the field this check exists to consume, and it is the reason
-  // the fix could not live in this file alone: a receipt that never recorded
-  // review-end state has nothing to compare, no matter how the comparison is
-  // written. The recorded shas are produced by `git hash-object` (filters
-  // applied) precisely so they are directly comparable to the INDEX blob shas
-  // read here — a hand-rolled content hash would mismatch on every file under
-  // autocrlf.
+  // THE RULING LANDED AND THE CHECK MOVED OUT OF THIS BLOCK. Board 0f448efb
+  // left warn-vs-refuse open, and the warn phase then measured what the open
+  // question was for: the advisories were ACCURATE AND IGNORED, and this CLI
+  // prints the advisory and commits in the same invocation, so "did a
+  // re-review follow" is not even measurable from here. Decision 57984926 §2
+  // executed b0ad640d's REFUSE-LATER half, with --waive-bytes as the escape
+  // hatch the refusal needed decided in the same breath. A REFUSAL CANNOT LIVE
+  // INSIDE THIS BLOCK: everything here is wrapped in a fail-open try/catch that
+  // degrades to one stderr note, which is right for a warning and fatal for a
+  // gate — a refusal that a stray throw converts into a successful commit is
+  // not a gate at all. The comparison therefore runs BELOW this block, outside
+  // the wrapper, before the commit and before anything is consumed. See
+  // reviewedBytesVerdict (bottom of file) and the REVIEWED-BYTES ENFORCEMENT
+  // block after this try/catch.
+  //
+  // WHAT STAYS HERE is the evidence-shape disclosure the enforcement does not
+  // duplicate: the truncation advisory and NO CONTENT EVIDENCE below, both of
+  // which describe receipts the refusal deliberately does NOT act on.
+  //
+  // The evidence read is `reviewed_state.blobs` — a {path: git blob sha} map
+  // that h22-dispatch-register.mjs records at SubagentSTOP, i.e. at review END
+  // (a v2 entry's content_evidence.blobs arrives here through the same field
+  // name via the read adapter). The recorded shas are produced by `git
+  // hash-object` (filters applied) precisely so they are directly comparable to
+  // the INDEX blob shas — a hand-rolled content hash would mismatch on every
+  // file under autocrlf.
   //
   // WHY NOT MTIMES, the cheap version the report proposed: a `touch`, a branch
   // switch, or any checkout rewrites an mtime without changing a byte, and a
@@ -646,20 +949,12 @@ try {
   // rather than a heuristic.
   //
   // SCOPED TO THE RECEIPT'S OWN TERRITORY, and only where that territory is
-  // ACTUALLY STAGED. Comparing anything wider — a whole-worktree digest, say —
-  // would fire on every commit of a normal multi-lane session, where sibling
-  // lanes legitimately edit other files while this review ran. A check that
-  // fires every time teaches its reader to ignore it, which is the exact fate
-  // the files[] attribution advisory above is written to avoid.
-  //
-  // WARNING ONLY — SEE THE OPEN RULING. Board 0f448efb states outright that the
-  // STRENGTH of this check (warn vs refuse) still needs deciding, because a
-  // refusal fires on legitimate rework-after-review and therefore needs its
-  // escape hatch decided in the same breath. Warning is the reversible half and
-  // the one this file's whole advisory block is already built for; the refusing
-  // half is a partition move (mismatching receipts into a withheld class beside
-  // DEFERRED), not a rewrite of this code. Until that ruling lands, this
-  // discloses and never rejects.
+  // ACTUALLY STAGED — now doubly load-bearing, since the verdict refuses.
+  // Comparing anything wider — a whole-worktree digest, say — would fire on
+  // every commit of a normal multi-lane session, where sibling lanes
+  // legitimately edit other files while this review ran. A check that fires
+  // every time teaches its reader to ignore it, which is the exact fate the
+  // files[] attribution advisory above is written to avoid.
   //
   // MISSING EVIDENCE IS NEVER A FINDING — BUT AN UNUSABLE ONE IS DISCLOSED
   // (review finding). A receipt with no reviewed_state (every receipt promoted
@@ -680,69 +975,6 @@ try {
       ([p, sha]) => typeof p === 'string' && p !== '' && typeof sha === 'string' && /^[0-9a-f]{40}$/i.test(sha)
     );
   };
-  const auditPaths = new Set();
-  for (const e of stampEntries) {
-    for (const [p] of recordedBlobs(e)) {
-      const n = normalizePath(p);
-      if (stagedFiles.has(n)) auditPaths.add(n);
-    }
-  }
-  let stagedBlobs = null;
-  if (auditPaths.size > 0) {
-    // --stage gives the INDEX blob sha, which is exactly what the commit about
-    // to be created will contain. -z for the same path-mangling reason the
-    // staged-file read above uses it.
-    const lsFiles = spawnSync('git', ['ls-files', '--stage', '-z', '--', ...auditPaths], {
-      cwd: target,
-      encoding: 'utf8',
-      timeout: 30_000,
-    });
-    if (lsFiles.error || lsFiles.status !== 0) {
-      warnSpend(
-        `commit-reviewed: REVIEWED-BYTES CHECK UNAVAILABLE — git ls-files --stage could not be read ` +
-          `(${(lsFiles.stderr || (lsFiles.error && lsFiles.error.message) || `exit ${lsFiles.status}`).toString().trim()}), so the ${auditPaths.size} ` +
-          `reviewed file(s) this commit stages could not be compared against the bytes their receipts recorded at review end. Advisory only — the ` +
-          `receipts are stamped and consumed as normal, but this commit carries NO content-level evidence that they reviewed what is being committed.`
-      );
-    } else {
-      stagedBlobs = new Map();
-      for (const rec of (lsFiles.stdout ?? '').split('\0')) {
-        if (!rec) continue;
-        // Record shape: "<mode> <sha> <stage>\t<path>".
-        const tab = rec.indexOf('\t');
-        if (tab === -1) continue;
-        const meta = rec.slice(0, tab).split(' ');
-        if (meta.length < 2 || !/^[0-9a-f]{40}$/i.test(meta[1])) continue;
-        stagedBlobs.set(normalizePath(rec.slice(tab + 1)), meta[1].toLowerCase());
-      }
-    }
-  }
-  if (stagedBlobs) {
-    for (const e of stampEntries) {
-      const changed = [];
-      for (const [p, recordedSha] of recordedBlobs(e)) {
-        const n = normalizePath(p);
-        if (!stagedFiles.has(n)) continue; // outside this commit — the file-scope partition already ruled on it
-        const stagedSha = stagedBlobs.get(n);
-        // A staged DELETION has no index entry at all, so an absent sha is the
-        // strongest possible form of "not the bytes that were reviewed".
-        if (stagedSha === undefined) changed.push(`${n} (reviewed ${recordedSha.slice(0, 12)}, now DELETED/unstaged in the index)`);
-        else if (stagedSha !== recordedSha.toLowerCase()) changed.push(`${n} (reviewed ${recordedSha.slice(0, 12)}, staged ${stagedSha.slice(0, 12)})`);
-      }
-      if (changed.length > 0) {
-        warnSpend(
-          `commit-reviewed: REVIEWED BYTES CHANGED — ${e.agent_type}'s receipt is being stamped onto content that DIFFERS from what it actually ` +
-            `reviewed. Changed since review end: ${changed.join('; ')}. The receipt recorded these blob shas at its reviewer's SubagentStop ` +
-            `(reviewed_state.completed_at ${safeLabel(e.reviewed_state && e.reviewed_state.completed_at)}), so this is content evidence, not a ` +
-            `timestamp heuristic — the file was edited after the review finished. The trailer this commit lands will nonetheless attest that ` +
-            `${e.agent_type} reviewed it, which is the false attestation board 0f448efb reports. ADVISORY ONLY, pending the warn-vs-refuse ruling that ` +
-            `board names: legitimate rework-after-review produces this exact shape, so re-review the changed file(s) or state in the commit message ` +
-            `what changed and why it does not need re-reviewing.`
-        );
-      }
-    }
-  }
-
   // PARTIAL BINDING IS DISCLOSED, NOT ASSUMED AWAY (review finding, MEDIUM).
   // h22-dispatch-register records at most REVIEWED_BLOBS_CAP blob shas per
   // receipt (it bounds the argv `git hash-object` is spawned with) and marks
@@ -766,12 +998,22 @@ try {
   // for real is a recording-side change (raise/remove the cap, or batch the
   // hashing), not something reachable here.
   //
-  // ADVISORY ONLY, like every check in this block: the user ruled WARN, not
-  // REFUSE, for this whole mechanism. Nothing here rejects a receipt, changes
-  // what is stamped, or alters what is consumed. It goes through warnSpend so
-  // it also lands in `spend_warnings` on the JSON report — a truncation
-  // disclosed only on stderr would still be dropped by every reader of this
-  // CLI's own output.
+  // STILL ADVISORY, BUT NO LONGER THE WHOLE ANSWER — AND THE RULING HAS MOVED
+  // ON. This comment used to read "the user ruled WARN, not REFUSE, for this
+  // whole mechanism"; that was the FIRST half of user ruling b0ad640d, whose
+  // second half ("refuse later") was executed by decision 57984926 §2 (slug
+  // review-ledger-v2-lifecycle-refuse-flip-and-external-review-design) on
+  // 2026-08-31. What refuses now is a truncated receipt whose UNBOUND declared
+  // file is one THIS COMMIT TOUCHES — the exact 65th-file shape measured above
+  // — handled by reviewedBytesVerdict below, not here. THIS LINE keeps the
+  // strictly wider disclosure the refusal does not make: the SCOPE of the
+  // audit, including the globally-partial-but-locally-complete case that
+  // deliberately still commits (evidence not covering this commit is only a
+  // refusal when it fails to cover a file this commit touches). Nothing here
+  // rejects a receipt, changes what is stamped, or alters what is consumed. It
+  // goes through warnSpend so it also lands in `spend_warnings` on the JSON
+  // report — a truncation disclosed only on stderr would still be dropped by
+  // every reader of this CLI's own output.
   const truncationOf = (e) => {
     const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
     if (!rs || rs.truncated !== true) return null; // strict true — a truthy stray value is not this marker
@@ -792,22 +1034,26 @@ try {
         `compared against this diff; the rest were never hashed at review end and whether they changed since is NOT KNOWABLE from this receipt. ` +
         `${
           unboundStaged.length > 0
-            ? `This commit stages ${unboundStaged.length} of the unbound file(s): ${unboundStaged.join(', ')} — the reviewed-bytes check above did not, and could not, judge them.`
-            : `None of the unbound files are staged by this commit, so the audit above covered every reviewed file it touches.`
+            ? `This commit stages ${unboundStaged.length} of the unbound file(s): ${unboundStaged.join(', ')} — no recorded bytes exist for them, which is why the enforcement below REFUSES rather than guessing.`
+            : `None of the unbound files are staged by this commit, so the enforcement below covered every reviewed file it touches.`
         } ` +
         `A silently partial audit reads exactly like a clean one, which is why this is named rather than inferred. Advisory only: the receipt is ` +
         `stamped and consumed exactly as before.`
     );
   }
 
-  // NO CONTENT EVIDENCE (review finding). The check above can only audit what
-  // reviewed_state.blobs actually carries, and it degrades to NOTHING — with no
-  // output at all — when that field is emptied or filled with values that fail
-  // the sha filter. Emptying it is therefore the trivial bypass of the
-  // reviewed-bytes check, and until this line it looked exactly like a clean
-  // audit. Mirrors the UNAVAILABLE-ls-files warning above: name what could NOT
-  // be verified. ADVISORY ONLY — the warn-vs-refuse ruling on board 0f448efb is
-  // still open and this changes nothing about what is stamped or consumed.
+  // NO CONTENT EVIDENCE (review finding). The reviewed-bytes comparison can
+  // only audit what reviewed_state.blobs actually carries, and it degrades to
+  // NOTHING — with no output at all — when that field is emptied or filled with
+  // values that fail the sha filter. Emptying it is therefore the trivial
+  // bypass of the reviewed-bytes check, and until this line it looked exactly
+  // like a clean audit. Mirrors the REVIEWED-BYTES CHECK UNAVAILABLE warning:
+  // name what could NOT be verified. ADVISORY ONLY, and it stays advisory after
+  // the refuse flip (decision 57984926 §2) precisely because of what the flip
+  // does NOT cover: a receipt that RECORDS a bad value for a path this commit
+  // touches is now INCONSISTENT evidence and refuses, but a receipt that
+  // records nothing at all for a path nobody declared as truncated is
+  // grandfathered, and this line is the only thing that says so out loud.
   //
   // WHAT IS DELIBERATELY NOT WARNED, and why: a commit where NO receipt has a
   // reviewed_state key at all. That is the shape of every receipt promoted
@@ -831,11 +1077,30 @@ try {
   // nothing), and a missing one alongside a sibling that has real evidence —
   // a mechanism that recorded blobs for one receipt of this commit and none
   // for another.
+  // FIX ROUND finding F2 (decision 57984926): a v2 entry's `reviewed_state` is
+  // UNCONDITIONALLY present (mapped from v2's always-on content_evidence), so
+  // `hasState` alone no longer distinguishes "an attempt was made and then
+  // emptied/tampered" (v1's actual meaning, since v1 only ever wrote the key
+  // on a successful hash) from "this receipt legitimately never had anything
+  // to hash" (a v2 receipt with no declared territory, or a reviewed deletion
+  // whose every declared path is absent — status:'unavailable'). The adapter
+  // exposes `content_evidence_status` ONLY for a v2-derived entry (undefined
+  // for v1/legacy), so branching on its presence keeps v1 behavior untouched
+  // while giving v2 entries the honest reading: `status === 'unavailable'` or
+  // no usable files were ever declared both RECORD NONE BY DESIGN and stay
+  // silent here; anything else reaching this point (status 'complete'/
+  // 'partial' with declared files, yet no usable blobs) means evidence was
+  // EXPECTED and is genuinely missing — still warned, exactly as before.
   const anyRecordedEvidence = stampEntries.some((e) => recordedBlobs(e).length > 0);
   const noEvidence = stampEntries.filter((e) => {
     if (recordedBlobs(e).length > 0) return false;
     const hasState = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null;
-    return hasState || anyRecordedEvidence;
+    const v2Status = e && typeof e.content_evidence_status === 'string' ? e.content_evidence_status : undefined;
+    if (v2Status !== undefined) {
+      const recordedNoneByDesign = v2Status === 'unavailable' || usableFiles(e).length === 0;
+      return !recordedNoneByDesign;
+    }
+    return hasState || anyRecordedEvidence; // v1/legacy — unchanged
   });
   if (noEvidence.length > 0) {
     warnSpend(
@@ -925,7 +1190,245 @@ try {
   );
 }
 
-const trailerLines = stampEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
+// ===========================================================================
+// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd).
+//
+// WHAT IT IS: for each declared attestation path glob this commit touches, ONE
+// compact rollup naming how many of those paths have a COMPARABLE HUMAN
+// INSPECTION RECORD in the store, with the verdict distribution and a few
+// capped examples. Nothing more, and deliberately nothing more: the consumer
+// asked for a REFUSING gate here and that form was DECLINED, because a gate the
+// conductor must pass converts the conductor into the de-facto attestation
+// trigger, hollowing decision a7dbac2f (an attestation is a HUMAN's inspection).
+//
+// ITS OWN EMITTER, NOT warnSpend (§6 of the decision, explicit): a spend warning
+// is about the REVIEW RECEIPTS being spent by this commit. This is about
+// somebody's inspection of the ARTIFACTS the commit changes — a different
+// question, a different remedy, and folding it into `spend_warnings` would put
+// it in a bucket every reader of that field would mis-attribute.
+//
+// PLACED HERE ON PURPOSE: after every advisory, and BEFORE the reviewed-bytes
+// enforcement block, which must stay the LAST thing printed before the commit so
+// its refusal never reads as one more advisory.
+//
+// FAIL-OPEN, TOTAL (attestationDisclosureFor's own try/catch): a throw anywhere
+// in the config read, the git diff, the store read or the rendering degrades to
+// ONE disclosed line and the commit proceeds untouched. A disclosure may lose
+// its own voice; it may never cost a commit — a warning-only mechanism that can
+// abort a commit inverts its own ruling.
+// ===========================================================================
+const attestationDisclosure = attestationDisclosureFor('commit-reviewed', 'the staged bytes', () => {
+  // --no-renames so a renamed path is reported as a DELETE plus an ADD rather
+  // than one destination: an attestation named the OLD path, and a rename is
+  // exactly the event that should surface as "the path you inspected is gone".
+  // Deletions count for the same reason. -z for the path-mangling reason every
+  // other path read in this file uses it.
+  const r = spawnSync('git', ['diff', '--cached', '--no-renames', '--name-only', '-z'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`git diff --cached --no-renames exited ${r.status}: ${(r.stderr || '').trim()}`);
+  return parseNulPathList(r.stdout);
+});
+for (const line of attestationDisclosure) console.error(line);
+
+// ===========================================================================
+// REVIEWED-BYTES ENFORCEMENT (decision 57984926 §2, slug review-ledger-v2-
+// lifecycle-refuse-flip-and-external-review-design; executes user ruling
+// b0ad640d's REFUSE-LATER half).
+//
+// PLACED HERE ON PURPOSE, and the position is the mechanism:
+//   - OUTSIDE the advisory try/catch above. That wrapper turns any throw into
+//     one stderr note and a successful commit, which is correct for a warning
+//     and is a bypass for a gate.
+//   - BEFORE `git commit` and before ANY consume, so a refusal leaves the
+//     working tree, HEAD and the ledger exactly as it found them.
+//   - LAST BEFORE THE COMMIT, so the refusal is the final thing printed. A
+//     fatal message buried above eight advisories reads as a ninth advisory,
+//     which is the habituation the warn phase measured.
+//
+// ITS OWN try/catch, AND IT FAILS CLOSED (Codex review HIGH, fix round
+// 2026-08-31 — superseding the original fail-open adjudication, which read "an
+// absence of verdict is not a mismatch" and degraded EVERY failure to a
+// REVIEWED-BYTES CHECK UNAVAILABLE note plus a normal commit). The correction:
+// an absence of verdict is not a MATCH either, and this gate's whole job is to
+// refuse an unverified attestation. So the axis is not "did it run" but "was
+// there evidence it should have compared":
+//   - findings already established -> they STAND, whatever threw afterwards.
+//   - no findings, but receipts recorded comparable bytes for paths this commit
+//     touches -> REFUSE with an explanation (--waive-bytes is the way through,
+//     so a broken git never bricks the CLI).
+//   - nothing comparable recorded at all -> the old fail-open note, because
+//     there was no verdict to lose.
+// ===========================================================================
+let byteFindings = [];
+// Written INTO by the verdict as findings are established, so a throw anywhere
+// after the fact still refuses on what was already proven (see the catch).
+const byteProgress = { findings: [], evidence_entries: [], checked: new Map() };
+let byteCheckedBlobs = new Map();
+try {
+  const verdict = reviewedBytesVerdict(
+    stampEntries,
+    stagedFiles,
+    (paths) => {
+      // --stage gives the INDEX blob sha, which is exactly what the commit about
+      // to be created will contain. -z for the same path-mangling reason the
+      // staged-file read above uses it. --literal-pathspecs (a GLOBAL git flag,
+      // hence before the subcommand) because these paths come from the RECEIPT:
+      // without it a recorded path containing `*`, `?` or a leading `:` is
+      // interpreted as a pathspec pattern, so a receipt could match files it
+      // never named — or match nothing and read as a clean audit (roster review
+      // MED-3).
+      const lsFiles = spawnSync('git', ['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', ...paths], {
+        cwd: target,
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      if (lsFiles.error || lsFiles.status !== 0) {
+        return { ok: false, detail: (lsFiles.stderr || (lsFiles.error && lsFiles.error.message) || `exit ${lsFiles.status}`).toString().trim() };
+      }
+      const map = new Map();
+      for (const rec of (lsFiles.stdout ?? '').split('\0')) {
+        if (!rec) continue;
+        // Record shape: "<mode> <sha> <stage>\t<path>".
+        const tab = rec.indexOf('\t');
+        if (tab === -1) continue;
+        const meta = rec.slice(0, tab).split(' ');
+        if (meta.length < 2 || !/^[0-9a-f]{40}$/i.test(meta[1])) continue;
+        map.set(normalizePath(rec.slice(tab + 1)), meta[1].toLowerCase());
+      }
+      return { ok: true, map };
+    },
+    byteProgress
+  );
+  byteFindings = verdict.findings;
+  byteCheckedBlobs = verdict.checked;
+  if (verdict.unreadable !== null) {
+    // FAIL-CLOSED (Codex review HIGH, fix round 2026-08-31): this used to be
+    // the fail-open REVIEWED-BYTES CHECK UNAVAILABLE note and a normal commit.
+    // The receipts here DID record comparable bytes for staged paths, so the
+    // only missing piece is our own read — and "we could not check" is not
+    // "it matched". The verdict has already turned each such path into a
+    // finding, so the aggregated refusal below carries them; this line names
+    // the CAUSE, which the refusal's per-file text would otherwise bury.
+    warnSpend(
+      `commit-reviewed: REVIEWED-BYTES EVIDENCE COULD NOT BE READ — git ls-files --stage failed (${verdict.unreadable}), so the reviewed file(s) this ` +
+        `commit stages could not be compared against the bytes their receipts recorded at review end. FAIL-CLOSED: receipts that recorded comparable ` +
+        `bytes for those paths are REFUSED below rather than stamped on an unverified basis — one broken git call must not silently disable this gate. ` +
+        `Fix the repository state and re-run, or override with --waive-bytes "<reason>" if a human has genuinely re-checked the content.`
+    );
+  }
+  for (const e of verdict.contradictory) {
+    // Disclosed as well as enforced: a receipt claiming its hashing never ran
+    // while carrying hashes is a PRODUCER bug (or a tamper) worth seeing, and
+    // the refusal below only speaks about the paths whose bytes moved.
+    warnSpend(
+      `commit-reviewed: CONTRADICTORY CONTENT EVIDENCE — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records content_evidence.status ` +
+        `'unavailable' ("the hashing never ran") while CARRYING usable blob shas. The recorded bytes are the evidence and the status is only a claim ` +
+        `about them, so this receipt is ENFORCED like any other rather than grandfathered — otherwise the status field would be a one-word disable ` +
+        `switch for the whole check (decision 57984926 §2 fix round).`
+    );
+  }
+  for (const e of verdict.unavailable) {
+    // v2 content_evidence.status 'unavailable' = the hashing never ran. §2
+    // grandfathers GENUINELY ABSENT evidence, and this is the v2 spelling of
+    // it — so it COMMITS. It does not commit SILENTLY (conductor adjudication
+    // 2026-08-31, frozen pin C3): silence is indistinguishable from a clean
+    // audit, which is exactly the state that made the previous warn phase
+    // unmeasurable.
+    warnSpend(
+      `commit-reviewed: NO CONTENT EVIDENCE (RECORDED AS UNAVAILABLE) — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records ` +
+        `content_evidence.status 'unavailable', so the bytes it reviewed were ` +
+        `never hashed and the file(s) it covers in this commit CANNOT be checked against them. Genuinely absent evidence is grandfathered by decision ` +
+        `57984926 §2 — the receipt is stamped and consumed — but the absence is disclosed rather than passing for a clean audit.`
+    );
+  }
+} catch (err) {
+  // A THROW NEVER ERASES WHAT WAS ALREADY PROVEN (Codex review HIGH, fix round
+  // 2026-08-31). This block used to reset byteFindings to [], so a throw AFTER
+  // the verdict had established real mismatches — from the git callback, from a
+  // hostile ledger value inside a later message — converted a refusal into a
+  // clean commit. The findings live in byteProgress, written as they are
+  // established, so they survive the throw and still refuse. Three cases, and
+  // only the last one degrades to a warning:
+  //   (a) findings already established -> REFUSE on them.
+  //   (b) none established, but receipts carried AUDITABLE evidence for staged
+  //       paths -> REFUSE with an explanation: evidence existed to compare and
+  //       we failed to compare it, which is the same fail-closed reasoning as
+  //       an unreadable index read. --waive-bytes is the route through.
+  //   (c) no evidence to compare at all -> the original fail-open note. Nothing
+  //       was checkable, so there is nothing this could have missed.
+  byteCheckedBlobs = byteProgress.checked;
+  byteFindings = byteProgress.findings;
+  if (byteFindings.length > 0) {
+    warnSpend(
+      `commit-reviewed: REVIEWED-BYTES CHECK THREW AFTER ESTABLISHING FINDINGS (${safeLabel(err && err.message ? err.message : err)}) — ` +
+        `${byteFindings.length} receipt finding(s) had already been proven when the computation failed, and they STAND: the refusal below is made on ` +
+        `them. The check may be INCOMPLETE (later receipts were never evaluated), so treat the list as a floor, not a total. Report this.`
+    );
+  } else if (byteProgress.evidence_entries.length > 0) {
+    byteFindings = byteProgress.evidence_entries.map((e) => ({
+      entry: e,
+      files: [
+        `(EVIDENCE UNCHECKABLE — this receipt recorded content evidence covering path(s) this commit touches, but the verdict computation threw before it could be evaluated: ${safeLabel(
+          err && err.message ? err.message : err
+        )})`,
+      ],
+    }));
+    warnSpend(
+      `commit-reviewed: REVIEWED-BYTES CHECK THREW (${safeLabel(err && err.message ? err.message : err)}) before any verdict was reached, but ` +
+        `${byteProgress.evidence_entries.length} receipt(s) carried auditable content evidence for path(s) this commit touches. FAIL-CLOSED: refusing ` +
+        `rather than stamping them on an unverified basis — a crash must not be a quieter way to pass the check than a mismatch. Report this, and use ` +
+        `--waive-bytes "<reason>" only if a human has genuinely re-checked the content.`
+    );
+  } else {
+    warnSpend(
+      `commit-reviewed: REVIEWED-BYTES CHECK UNAVAILABLE — the enforcement computation itself threw (${safeLabel(err && err.message ? err.message : err)}) ` +
+        `before any receipt with auditable evidence was found. FAIL-OPEN and disclosed (conductor adjudication, decision 57984926 §2): with nothing ` +
+        `comparable recorded for this commit's paths there was no verdict to lose, so the commit proceeds and every receipt is stamped and consumed — ` +
+        `but NO content-level check ran. Report this, and inspect the ledger by hand.`
+    );
+  }
+}
+
+// THE WAIVER IS PER INVOCATION (§2: "one commit, one accountable decision"),
+// but its TRAILERS are per AFFECTED receipt: only a receipt that actually
+// mismatched is waived, so a Review-Bytes-Waiver trailer always means "this
+// specific review was overridden" and never becomes decoration on a clean run.
+const waivedReceipts = waiveBytesReason !== null ? byteFindings.map((f) => waiverIdentity(f.entry)) : [];
+// AN UNNECESSARY WAIVER IS DISCLOSED, NOT SILENT (roster review LOW-2, fix round
+// 2026-08-31). A waiver that overrode nothing looks, from the outside, exactly
+// like a waiver that overrode something — same exit code, same commit, and
+// (correctly) zero trailers. Saying so is what stops --waive-bytes becoming
+// habitual belt-and-braces decoration: the caller learns THIS run did not need
+// it, instead of concluding the flag is always harmless to add.
+const waiverUnusedNote =
+  waiveBytesReason !== null && byteFindings.length === 0
+    ? `commit-reviewed: --waive-bytes WAS NOT NEEDED AND WAS NOT USED — no receipt's recorded bytes differ from what is being committed, so nothing was ` +
+      `overridden and NO Review-Bytes-Waiver trailer is stamped (a waiver trailer is evidence of an accountable override, never decoration). The reason ` +
+      `given was: ${waiveBytesReason}`
+    : null;
+if (waiverUnusedNote !== null) console.error(waiverUnusedNote);
+if (byteFindings.length > 0) {
+  if (waiveBytesReason === null) {
+    console.error(reviewedBytesRefusal(byteFindings, 'staged for this commit'));
+    process.exit(1);
+  }
+  console.error(
+    `commit-reviewed: REVIEWED-BYTES REFUSAL WAIVED — --waive-bytes was given, so ${byteFindings.length} receipt(s) whose recorded bytes differ from ` +
+      `what is being committed are stamped anyway. REASON: ${waiveBytesReason}. Waived receipts: ` +
+      `${byteFindings.map((f, i) => `${f.entry.agent_type} [${waivedReceipts[i]}] — ${f.files.join('; ')}`).join(' | ')}. ` +
+      `One Review-Bytes-Waiver trailer per receipt above is stamped on the commit and verified after it, so the override is auditable at the merge gate ` +
+      `instead of invisible.`
+  );
+}
+
+const trailerLines = [
+  ...stampEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`),
+  // The trailer VALUE carries only the receipt identifier — never the reason,
+  // which is arbitrary user text and belongs on stderr and in the JSON report
+  // where it cannot shape a trailer line.
+  ...waivedReceipts.map((id) => `Review-Bytes-Waiver: ${id}`),
+];
 const fullMessage = `${message}\n\n${trailerLines.join('\n')}`;
 
 const commit = spawnSync('git', ['commit', '-m', fullMessage], { cwd: target, encoding: 'utf8', timeout: 30_000 });
@@ -1045,12 +1548,121 @@ if (!trailerMatches) {
   process.exit(1);
 }
 
+// WAIVER TRAILER SURVIVAL CHECK (decision 57984926 §2: "trailers verified
+// after commit/amend like Reviewed-By-Agent"). Same read, same multiset
+// comparison, same never-consume-before-it-passes posture — a waiver whose
+// trailer did not survive is an override with no audit trail, which is worse
+// than the mismatch it waived. Run UNCONDITIONALLY, including when nothing was
+// waived: expected [] vs actual [] also proves no waiver trailer was invented.
+const waiverCheck = spawnSync(
+  'git',
+  ['log', '-1', '--format=%(trailers:key=Review-Bytes-Waiver,valueonly,unfold)', createdSha],
+  { cwd: target, encoding: 'utf8', timeout: 30_000 }
+);
+if (waiverCheck.error || waiverCheck.status !== 0) {
+  fail(
+    `commit-reviewed: COMMIT SUCCEEDED (${createdSha}) but the post-commit Review-Bytes-Waiver verification could not run ` +
+      `(${waiverCheck.error ? waiverCheck.error.message : `git log exited ${waiverCheck.status}: ${(waiverCheck.stderr || '').trim()}`}) — ` +
+      `the review-ledger entries were NOT consumed.`
+  );
+}
+const expectedWaiverValues = [...waivedReceipts].sort();
+const actualWaiverValues = (waiverCheck.stdout ?? '')
+  .split('\n')
+  .map((l) => l.trim())
+  .filter((l) => l !== '')
+  .sort();
+if (
+  actualWaiverValues.length !== expectedWaiverValues.length ||
+  !actualWaiverValues.every((v, i) => v === expectedWaiverValues[i])
+) {
+  console.error(
+    `commit-reviewed: COMMIT SUCCEEDED (${createdSha}, target resolved from ${shaSource}) but the 'Review-Bytes-Waiver' trailer set does not match what ` +
+      `this invocation waived — read with the same format string the receipt gate uses.\n` +
+      `Expected: [${expectedWaiverValues.join(', ')}]\nActual:   [${actualWaiverValues.join(', ')}]\n` +
+      `A byte waiver whose trailer did not survive is an unaudited override: the commit claims a review of bytes nobody reviewed, with nothing on the ` +
+      `commit to say so. Fix the commit message shape (see the Reviewed-By-Agent guidance above) before relying on this commit. ` +
+      `The review-ledger entries were NOT consumed — they remain available for a retry.`
+  );
+  process.exit(1);
+}
+
+// ===========================================================================
+// INDEX TOCTOU — THE COMMIT'S TREE MUST STILL CARRY THE BYTES THAT WERE CHECKED
+// (Codex review HIGH, fix round 2026-08-31).
+//
+// The reviewed-bytes verdict reads the INDEX (`git ls-files --stage`) BEFORE
+// `git commit` runs. Between those two moments the index is writable by anyone
+// — most concretely by a `pre-commit` hook, which git runs after this CLI's own
+// read and which can `git add` whatever it likes. The result was a commit that
+// passed the byte gate on one set of bytes and then stored ANOTHER, wearing a
+// Reviewed-By-Agent trailer for the first: precisely the false attestation the
+// whole flip exists to prevent, reached through a window the flip itself opened.
+//
+// So the created commit's TREE is re-read and compared against exactly what the
+// pre-commit check saw. Same posture as the trailer verification above, for the
+// same reason: the commit ALREADY EXISTS, so this is not a refusal — it is a
+// loud "this commit carries unverified bytes", with the ledger deliberately NOT
+// consumed so the receipts survive for a corrected re-run.
+//
+// SCOPE: only the paths the verdict actually compared (byteCheckedBlobs). Paths
+// nobody recorded evidence for were never attested, so re-verifying them would
+// claim a guarantee this CLI never made. When the verdict compared nothing (no
+// evidence, an unreadable index, a waived run whose read failed) this block does
+// nothing at all — there is no earlier reading to contradict.
+// ===========================================================================
+if (byteCheckedBlobs instanceof Map && byteCheckedBlobs.size > 0) {
+  const auditPaths = [...byteCheckedBlobs.keys()];
+  // --literal-pathspecs for the same reason the index read uses it: these paths
+  // are receipt-derived, and a glob character must never widen or empty the read.
+  const treeRead = spawnSync('git', ['--literal-pathspecs', 'ls-tree', '-z', '-r', createdSha, '--', ...auditPaths], {
+    cwd: target,
+    encoding: 'utf8',
+    timeout: 30_000,
+  });
+  if (treeRead.error || treeRead.status !== 0) {
+    console.error(
+      `commit-reviewed: COMMIT SUCCEEDED (${createdSha}, target resolved from ${shaSource}) but its TREE could not be re-read to confirm it carries the ` +
+        `bytes the reviewed-bytes check verified (git ls-tree failed: ${
+          treeRead.error ? treeRead.error.message : `exit ${treeRead.status}: ${(treeRead.stderr || '').trim()}`
+        }). The commit exists but carries UNVERIFIED bytes — a pre-commit hook can rewrite the index between the check and the commit, which is exactly ` +
+        `what this re-read exists to catch. The review-ledger entries were NOT consumed — inspect 'git show ${createdSha}' before relying on this commit.`
+    );
+    process.exit(1);
+  }
+  const committedBlobs = new Map();
+  for (const rec of (treeRead.stdout ?? '').split('\0')) {
+    if (!rec) continue;
+    // Record shape: "<mode> <type> <sha>\t<path>".
+    const tab = rec.indexOf('\t');
+    if (tab === -1) continue;
+    const meta = rec.slice(0, tab).split(' ');
+    if (meta.length < 3 || meta[1] !== 'blob' || !/^[0-9a-f]{40}$/i.test(meta[2])) continue;
+    committedBlobs.set(normalizePath(rec.slice(tab + 1)), meta[2].toLowerCase());
+  }
+  const drifted = auditPaths
+    .filter((p) => committedBlobs.get(p) !== byteCheckedBlobs.get(p))
+    .map((p) => `  - ${p}: checked ${byteCheckedBlobs.get(p).slice(0, 12)}, committed ${(committedBlobs.get(p) ?? 'ABSENT/DELETED').slice(0, 12)}`);
+  if (drifted.length > 0) {
+    console.error(
+      `commit-reviewed: COMMIT SUCCEEDED (${createdSha}, target resolved from ${shaSource}) but it CARRIES UNVERIFIED BYTES — ${drifted.length} path(s) ` +
+        `changed between the reviewed-bytes check and the commit itself:\n${drifted.join('\n')}\n` +
+        `The bytes this commit stores are NOT the bytes the receipts were checked against, so its Reviewed-By-Agent trailer attests a review of content ` +
+        `nobody reviewed. The most likely cause is a 'pre-commit' hook (or a concurrent process) writing to the index after this CLI read it. ` +
+        `The review-ledger entries were NOT consumed — they remain available. Inspect 'git show ${createdSha}', then re-commit the intended content ` +
+        `(amend or reset) before relying on this commit at the merge gate.`
+    );
+    process.exit(1);
+  }
+}
+
 // CONSUME the stamped entries: the commit that used the evidence removes it
 // (P4). RE-READ rather than reuse `ledger` — `git commit` runs hooks inline
 // and can take seconds, during which a reviewer's SubagentStop may have
 // promoted a fresh entry into the ledger; that entry must survive. Only
-// entries identity-matched (agent_type + at + the partition fields
-// session_id/branch/base_sha) to what was just stamped are removed.
+// entries identity-matched to what was just stamped are removed — by entry_id
+// for a v2 entry, else by agent_type + at + the partition fields
+// session_id/branch/base_sha/files.
 // Lock-guarded (FIX 2) against a concurrent H22 promotion write.
 try {
   withLedgerLock(join(target, '.sterling'), () => {
@@ -1150,14 +1762,30 @@ try {
     // EVERY field including files still consume correctly — they share one
     // partition verdict by construction, and the multiset splice below claims
     // one stamped occurrence each, so neither can survive forever.
+    //
+    // entry_id WINS WHERE IT EXISTS (Codex review MED, fix round 2026-08-31).
+    // Everything above describes a key assembled out of fields that were never
+    // meant to identify anything; a v2 entry CARRIES a minted identity, and the
+    // adapter surfaces it, so matching on the five-field key while an exact one
+    // sits unread is a defect waiting for the next collision. When either side
+    // has an entry_id the match is entry_id equality ALONE (plus agent_type,
+    // which is regex-validated and free); the multi-field key stays the answer
+    // for v1 entries, which have no id. A mixed pair (one side has an id, the
+    // other does not) is a NON-match, which fails toward SURVIVAL exactly like
+    // every other false case here. See ledgerEntryId (bottom of file).
     const identityField = (e, k) => (e[k] === undefined ? null : e[k]);
-    const sameIdentity = (fresh, stamped) =>
-      typeof fresh.agent_type === 'string' &&
-      fresh.agent_type === stamped.agent_type &&
-      boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
-      ['session_id', 'branch', 'base_sha', 'files'].every((k) =>
-        boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
+    const sameIdentity = (fresh, stamped) => {
+      if (typeof fresh.agent_type !== 'string' || fresh.agent_type !== stamped.agent_type) return false;
+      const sid = ledgerEntryId(stamped);
+      const fid = ledgerEntryId(fresh);
+      if (sid !== null || fid !== null) return sid !== null && fid !== null && sid === fid;
+      return (
+        boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
+        ['session_id', 'branch', 'base_sha', 'files'].every((k) =>
+          boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
+        )
       );
+    };
     // MULTISET consume by splicing the stamped list: each fresh entry claims at
     // most one still-unclaimed stamped occurrence, so two identical stamped
     // entries consume exactly two matching fresh ones and any excess fresh
@@ -1171,8 +1799,47 @@ try {
     const unclaimedStamped = [...stampEntries];
     const survivors = freshLedger.filter((e) => {
       if (!e || typeof e !== 'object') return true; // a malformed fresh entry was never stamped — it survives untouched
-      const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
+      // Normalized ONLY for the identity comparison below — the RAW entry `e`
+      // (v1 or v2, byte-for-byte as re-read from disk) is what actually
+      // survives into `survivors`, so a v2 entry's true on-disk shape is
+      // never rewritten by this consume step.
+      const normFresh = normalizeLedgerEntry(e);
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(normFresh, s));
       if (i === -1) return true;
+      // DISCHARGED MID-FLIGHT — PRESERVATION WINS (Codex review HIGH, fix round
+      // 2026-08-31). This whole block exists because the ledger can CHANGE while
+      // `git commit` runs its hooks; a discharge landing in that window is
+      // exactly such a change, and it is the one that must not be papered over.
+      // The entry was ACTIVE when this invocation read and stamped it, and it is
+      // DISCHARGED now — i.e. a conductor explicitly ruled it unspendable and
+      // PRESERVED it, and §3's whole promise is that a discharged entry is never
+      // deleted ("deletion is never silent"). Consuming it here would delete
+      // preserved evidence, and the accountable disposition with it, milliseconds
+      // after it was recorded.
+      // THE STAMPED OCCURRENCE IS STILL CLAIMED. Leaving it unclaimed would let
+      // the NEXT matching fresh entry — a genuinely distinct receipt sharing this
+      // identity — be spliced out in its place, turning a preservation into the
+      // silent destruction of a different receipt. So the claim is consumed and
+      // only the SPLICE-OUT is skipped.
+      // NOT the authenticated test: this is the SAFE direction (retain), and an
+      // entry claiming a discharge is exactly the shape that must not be
+      // destroyed while its claim is unjudged. The stamped side is checked too,
+      // so a v1 pass-through entry carrying a stray status:'discharged' — which
+      // skipForDischargeMarker deliberately treats as an ordinary ACTIVE v1
+      // receipt — was 'discharged' at stamp time as well, is not a mid-flight
+      // discharge, and consumes normally rather than leaking back into the ledger
+      // to be spent twice.
+      if (normFresh && normFresh.status === 'discharged' && unclaimedStamped[i].status !== 'discharged') {
+        unclaimedStamped.splice(i, 1);
+        console.error(
+          `commit-reviewed: RECEIPT DISCHARGED MID-COMMIT — ${JSON.stringify(normFresh.agent_type)}'s receipt (entry_id ${JSON.stringify(ledgerEntryId(normFresh))}) ` +
+            `was ACTIVE when this commit stamped it and is DISCHARGED now, so it was discharged while 'git commit' ran. The trailer it earned is already in ` +
+            `the commit, but the entry is PRESERVED in the ledger rather than consumed: a discharged entry is never deleted (decision 57984926 §3), and ` +
+            `deleting one milliseconds after its accountable disposition was recorded would destroy exactly the evidence the discharge verb exists to keep. ` +
+            `It will not be spent again — every spending surface ignores a discharged entry.`
+        );
+        return true;
+      }
       unclaimedStamped.splice(i, 1);
       return false; // consumes exactly one stamped occurrence
     });
@@ -1208,6 +1875,28 @@ console.log(
     // 51d93c34) — reported separately because the two withholdings mean
     // different things and have different remedies.
     deferred_receipts: deferredDisclosures,
+    // THE OVERRIDE IS IN THE REPORT, not only on stderr and the commit
+    // (decision 57984926 §2). The trailer carries the receipt identity; the
+    // REASON — the accountable half — lives here and on stderr, so a reader of
+    // this CLI's own output sees that content evidence was overridden and why.
+    // null, never omitted: absence of the key would be indistinguishable from
+    // an older CLI that could not waive at all.
+    waived_bytes:
+      waivedReceipts.length > 0
+        ? { reason: waiveBytesReason, receipts: waivedReceipts, files: byteFindings.map((f) => ({ agent_type: f.entry.agent_type, files: f.files })) }
+        : null,
+    // A waiver that overrode nothing (roster review LOW-2): null on every other
+    // run, so a reader can tell "no waiver was asked for" from "a waiver was
+    // asked for and turned out to be unnecessary" — the same
+    // null-never-omitted convention waived_bytes uses.
+    waiver_unused: waiverUnusedNote,
+    // ATTESTATION DISCLOSURE (decision 1f069af4 v2 §6) — its OWN field, never
+    // folded into spend_warnings: a reader of this report must be able to tell a
+    // review-receipt anomaly from "this commit changed artifacts a human
+    // inspected". EMPTY ARRAY on a dormant project (no declared globs), which is
+    // the shipped default; never omitted, so absence of the key means an older
+    // CLI rather than a project with nothing to disclose.
+    attestation_disclosure: attestationDisclosure,
   })
 );
 
@@ -1230,6 +1919,45 @@ console.log(
 //   file-scoped partition (commit's OWN diff) -> G6 published-history guard
 //   -> G5 amend + verify + consume + report both shas.
 // ===========================================================================
+
+/**
+ * ATTESTATION DISCLOSURE — the shared computation for BOTH flows (decision
+ * 1f069af4 v2). A HOISTED function declaration for the same reason safeLabel and
+ * withLedgerLock are: --target-sha amend mode runs before the -m flow's `const`s
+ * leave their temporal dead zone, and two independently-written disclosures
+ * across the two modes is a defect on its face — the amend path must disclose
+ * exactly what a fresh commit of the same bytes would.
+ *
+ * `touchedPathsFn` is a LAZY callback, not a value, so a DORMANT project (no
+ * declared globs — the shipped default, and Sterling's own state) never even
+ * runs the git diff: dormant means zero output and zero cost, not an empty
+ * report.
+ *
+ * ONE try/catch AROUND EVERYTHING, and it is the whole fail-open contract: the
+ * config read, the diff, the store read and the rendering all degrade to a
+ * single disclosed line. Returns the lines; the caller prints them and puts them
+ * on its own JSON report.
+ */
+function attestationDisclosureFor(tool, subject, touchedPathsFn) {
+  try {
+    // The ONE tolerant read (Codex review HIGH-1, 2026-09-01): unusable entries
+    // are dropped and DISCLOSED here rather than refused by the config schema —
+    // an advisory declaration that can kill a commit or a merge inverts this
+    // feature's own ruling. `dropped` is threaded through so a defective
+    // declaration still reaches its author.
+    const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
+    const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
+    if (declaredGlobs.length === 0 && !hasDrop) return []; // DORMANT — no diff, no store read, no output
+    const result = inspectAttestations({ projectRoot: target, touchedPaths: touchedPathsFn(), declaredGlobs });
+    return attestationDisclosureLines({ tool, result, declaredGlobs, subject, dropped });
+  } catch (err) {
+    return [
+      `${tool}: ATTESTATION DISCLOSURE SKIPPED — the disclosure computation itself threw ` +
+        `(${safeLabel(err && err.message ? err.message : err)}). Disclosed and NON-FATAL: nothing about this commit changes, because this ` +
+        `mechanism is advisory only and never a refusal. The attestation rollup for this invocation is missing — inspect the store by hand if you need it.`,
+    ];
+  }
+}
 
 /** git wrapper local to amend mode: returns {status, stdout, stderr, error}.
  *  `input` (optional) is piped to the child's stdin — used for
@@ -1342,9 +2070,32 @@ function runTargetShaMode(targetShaArg) {
   } catch {
     ledger = []; // malformed ledger degrades to empty, same posture as the -m flow
   }
+  // Same one-adapter normalization as the -m flow above.
+  ledger = ledger.map(normalizeLedgerEntry);
   const validEntries = [];
   for (const e of ledger) {
-    if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
+    // DISCHARGED — same exclusion as the -m flow, through the same helper and
+    // for the same reason (decision 57984926 §3: "spending, amend spending,
+    // fallback selection and counts all ignore discharged entries"). First, and
+    // silent only for an AUTHENTICATED marker; an unauthenticated one is
+    // withheld and disclosed identically on this flow.
+    if (skipForDischargeMarker(e)) continue;
+    // EXTERNAL REVIEW — same exclusion as the -m flow, through the same shared
+    // predicate and for the same reason (decision 57984926 §4: external entries
+    // are "never spendable, never stamped, never counted by roster
+    // eligibility"). Checked first, and quiet: nothing is wrong with the entry.
+    if (isExternalReviewEntry(e)) {
+      console.error(
+        `commit-reviewed: external_review ledger entry left un-consumed (not a review receipt — conductor-attested consult evidence, never spendable, decision 57984926 §4)`
+      );
+      continue;
+    }
+    // MED-2 — same structural-completeness check as the -m flow (see there).
+    if (e && e.v2_deficient) {
+      console.error(
+        `commit-reviewed: skipping structurally-deficient v2 ledger entry (agent_type ${JSON.stringify(e.agent_type)} — missing entry_id/started_at/identity, per decision 57984926) — left un-consumed in the ledger, never stamped`
+      );
+    } else if (e && typeof e.agent_type === 'string' && VALID_AGENT_TYPE.test(e.agent_type)) {
       validEntries.push(e);
     } else {
       console.error(
@@ -1402,26 +2153,204 @@ function runTargetShaMode(targetShaArg) {
   const fileScopingApplies = baseMatchingEntries.some((e) => usableFiles(e).length > 0 && touchesTarget(e));
   const stampEntries = [];
   const deferredEntries = [];
+  // IDENTICAL PARTITION to the -m flow, including the STRUCTURED-TERRITORY
+  // NARROWING (decision 57984926 §3) — the only difference is that "the diff"
+  // is the target commit's own diff instead of the staged set. An
+  // `if (!targetSha)` carve-out would leave post-hoc amends able to stamp a
+  // structured receipt onto a commit it never reviewed, which is precisely the
+  // false attestation the narrowing removes.
   for (const e of baseMatchingEntries) {
-    if (!fileScopingApplies || usableFiles(e).length === 0 || touchesTarget(e)) stampEntries.push(e);
+    if (usableFiles(e).length === 0 || touchesTarget(e)) stampEntries.push(e);
+    else if (isStructuredTerritoryEntry(e)) deferredEntries.push(e);
+    else if (!fileScopingApplies) stampEntries.push(e);
     else deferredEntries.push(e);
-  }
-  if (stampEntries.length === 0) {
-    // Structurally unreachable (same invariant as the -m flow's partition),
-    // deliberately not silent — see that flow's identical guard for why.
-    fail(
-      `commit-reviewed: INTERNAL INVARIANT VIOLATED — file-scoped stamping (target-sha mode) selected ZERO receipts out of ${baseMatchingEntries.length} ` +
-        `base_sha-matching one(s), which the partition is constructed to make impossible. Refusing rather than amending with no Reviewed-By-Agent trailer ` +
-        `at all. Nothing amended, nothing consumed — report this.`
-    );
   }
   const deferredDisclosures = deferredEntries.map(
     (e) =>
       `commit-reviewed: DEFERRED RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) reviewed ` +
-      `[${usableFiles(e).join(', ')}], none of which the target commit ${resolvedSha} actually changed, while ${stampEntries.length} other receipt(s) ` +
-      `DO cover it. It stays in the ledger untouched — amend the commit that stages its territory and it will be spent there.`
+      `[${usableFiles(e).join(', ')}], none of which the target commit ${resolvedSha} actually changed` +
+      (stampEntries.length > 0
+        ? `, while ${stampEntries.length} other receipt(s) DO cover it. `
+        : `, and NO other receipt covers it either — its territory is STRUCTURED (territory.source 'review-territory'), so the no-match stamping fallback ` +
+          `does NOT apply to it (decision 57984926 §3). `) +
+      `It stays in the ledger untouched — amend the commit that stages its territory and it will be spent there.`
   );
   for (const line of deferredDisclosures) console.error(line);
+  // A REAL, EXPECTED REFUSAL since the structured narrowing (decision 57984926
+  // §3) — see the -m flow's identical guard for the full reasoning. Reachable
+  // exactly when every base_sha-matching receipt declares structured territory
+  // the target commit does not change.
+  if (stampEntries.length === 0) {
+    const structuredDeferred = deferredEntries.filter(isStructuredTerritoryEntry);
+    const named = (structuredDeferred.length > 0 ? structuredDeferred : deferredEntries)
+      .map((e) => `${e.agent_type} reviewed [${usableFiles(e).join(', ')}]`)
+      .join('; ');
+    fail(
+      `commit-reviewed: NO REVIEW RECEIPT COVERS THE TARGET COMMIT — all ${baseMatchingEntries.length} base_sha-matching receipt(s) are DEFERRED because ` +
+        `they declare STRUCTURED territory (territory.source 'review-territory') that ${resolvedSha} does not change: ${named}. Structured territory is the ` +
+        `reviewer's own declared review scope, so a non-overlap is EVIDENCE the review never looked at this commit — decision 57984926 §3 removed the ` +
+        `no-match stamping fallback for exactly this shape. Nothing amended and NOTHING CONSUMED: every receipt named above stays in the ledger, ` +
+        `byte-identical. REMEDY: amend the commit that carries its territory; or dispatch a reviewer for THIS commit; or answer at the merge gate. If a ` +
+        `receipt can never be spent, discharge it explicitly with 'node scripts/review-ledger.mjs discharge' — never by deleting the evidence.`
+    );
+  }
+
+  // ---------------------------------------------------------------------
+  // ATTESTATION DISCLOSURE, MEASURED AGAINST THE TARGET COMMIT'S OWN DIFF
+  // (decision 1f069af4 v2 §4: "commit-reviewed inspects the staged diff in -m
+  // mode AND the target commit's own diff in --target-sha mode"). An
+  // `if (!targetSha)` carve-out would leave every post-hoc amend silently
+  // undisclosed, and no new-commit test could ever see the gap.
+  //
+  // Its own diff-tree read rather than the `targetFiles` set computed above,
+  // because that one is deliberately rename-FOLLOWING for receipt matching while
+  // the disclosure is rename-SAFE: an attestation names the path a human
+  // inspected, and a rename is exactly the event that must surface as "the path
+  // you inspected is gone" rather than be silently carried to a new name.
+  //
+  // Printed BEFORE any mutation, and fail-open like every other invocation of
+  // this computation — a disclosure never costs an amend.
+  // ---------------------------------------------------------------------
+  const attestationDisclosure = attestationDisclosureFor('commit-reviewed', "the target commit's bytes", () => {
+    const r = gitRun(['diff-tree', '--root', '--no-commit-id', '--no-renames', '--name-only', '-r', '-z', resolvedSha]);
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error(`git diff-tree --no-renames exited ${r.status}: ${(r.stderr || '').trim()}`);
+    return parseNulPathList(r.stdout);
+  });
+  for (const line of attestationDisclosure) console.error(line);
+
+  // ---------------------------------------------------------------------
+  // G4b: REVIEWED-BYTES ENFORCEMENT, MEASURED AGAINST THE TARGET COMMIT'S
+  // TREE (decision 57984926 §2: "--target-sha gets identical enforcement
+  // against the TARGET COMMIT'S TREE"). IDENTICAL means the same
+  // reviewedBytesVerdict, the same grandfather classes, the same aggregated
+  // refusal and the same --waive-bytes escape — the ONLY difference is where
+  // "the bytes being committed" are read from: `git ls-tree` on the target,
+  // not the index. An `if (!targetSha)` guard around the new-commit check
+  // would leave post-hoc amends silently unenforced, and no new-commit test
+  // could ever see it.
+  //
+  // Placed BEFORE the published-history guard and before any mutation, so a
+  // refusal here amends nothing and consumes nothing. FAIL-CLOSED on an
+  // unreadable tree or a throw, on the same three-case rule as the -m flow (see
+  // the header above its enforcement block). There is no warnSpend in this
+  // flow, so every note goes straight to stderr.
+  //
+  // NO POST-AMEND TREE RE-CHECK IS NEEDED HERE, unlike the -m flow's index
+  // TOCTOU guard: `git commit --amend -F -` changes only the message, and the
+  // post-amend invariant check below already proves the new commit's TREE is
+  // byte-identical to the target's — the tree this verdict measured.
+  // ---------------------------------------------------------------------
+  let byteFindings = [];
+  // Same fail-closed out-param as the -m flow (see reviewedBytesVerdict).
+  const byteProgress = { findings: [], evidence_entries: [], checked: new Map() };
+  try {
+    const verdict = reviewedBytesVerdict(
+      stampEntries,
+      targetFiles,
+      (paths) => {
+        // -r so a path in a subdirectory resolves to its blob record; -z for the
+        // same path-mangling reason every other path read here uses it.
+        // --literal-pathspecs (global flag, before the subcommand) because these
+        // paths are RECEIPT-derived: a recorded path bearing a glob character
+        // must not be read as a pathspec pattern (roster review MED-3).
+        // Record shape: "<mode> <type> <sha>\t<path>".
+        const lsTree = gitRun(['--literal-pathspecs', 'ls-tree', '-z', '-r', resolvedSha, '--', ...paths]);
+        if (lsTree.error || lsTree.status !== 0) {
+          return { ok: false, detail: (lsTree.stderr || (lsTree.error && lsTree.error.message) || `exit ${lsTree.status}`).toString().trim() };
+        }
+        const map = new Map();
+        for (const rec of (lsTree.stdout ?? '').split('\0')) {
+          if (!rec) continue;
+          const tab = rec.indexOf('\t');
+          if (tab === -1) continue;
+          const meta = rec.slice(0, tab).split(' ');
+          if (meta.length < 3 || meta[1] !== 'blob' || !/^[0-9a-f]{40}$/i.test(meta[2])) continue;
+          map.set(normalizePath(rec.slice(tab + 1)), meta[2].toLowerCase());
+        }
+        return { ok: true, map };
+      },
+      byteProgress
+    );
+    byteFindings = verdict.findings;
+    if (verdict.unreadable !== null) {
+      // FAIL-CLOSED, identically to the -m flow: the receipts recorded
+      // comparable bytes for paths this commit changes, so an unreadable tree
+      // leaves the attestation unverified rather than verified.
+      console.error(
+        `commit-reviewed: REVIEWED-BYTES EVIDENCE COULD NOT BE READ — git ls-tree failed for target ${resolvedSha} (${verdict.unreadable}), so the ` +
+          `reviewed file(s) this commit changes could not be compared against the bytes their receipts recorded. FAIL-CLOSED: receipts that recorded ` +
+          `comparable bytes for those paths are REFUSED below rather than stamped on an unverified basis. Fix the repository state and re-run, or ` +
+          `override with --waive-bytes "<reason>".`
+      );
+    }
+    for (const e of verdict.contradictory) {
+      console.error(
+        `commit-reviewed: CONTRADICTORY CONTENT EVIDENCE — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records content_evidence.status ` +
+          `'unavailable' while CARRYING usable blob shas. The recorded bytes are the evidence and the status is only a claim about them, so this receipt ` +
+          `is ENFORCED like any other rather than grandfathered (decision 57984926 §2 fix round).`
+      );
+    }
+    for (const e of verdict.unavailable) {
+      console.error(
+        `commit-reviewed: NO CONTENT EVIDENCE (RECORDED AS UNAVAILABLE) — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records ` +
+          `content_evidence.status 'unavailable', so the bytes it reviewed were never hashed. Genuinely absent evidence is grandfathered ` +
+          `(decision 57984926 §2) — the receipt is stamped and consumed — but the absence is disclosed rather than passing for a clean audit.`
+      );
+    }
+  } catch (err) {
+    // Findings already established SURVIVE the throw and still refuse; a throw
+    // before any finding still refuses when auditable evidence existed. Only a
+    // throw with nothing comparable recorded degrades to a warning. (Same three
+    // cases as the -m flow — see its catch for the full reasoning.)
+    byteFindings = byteProgress.findings;
+    if (byteFindings.length > 0) {
+      console.error(
+        `commit-reviewed: REVIEWED-BYTES CHECK THREW AFTER ESTABLISHING FINDINGS (${safeLabel(err && err.message ? err.message : err)}) — ` +
+          `${byteFindings.length} receipt finding(s) had already been proven and they STAND: the refusal below is made on them. The check may be ` +
+          `INCOMPLETE, so treat the list as a floor, not a total. Report this.`
+      );
+    } else if (byteProgress.evidence_entries.length > 0) {
+      byteFindings = byteProgress.evidence_entries.map((e) => ({
+        entry: e,
+        files: [
+          `(EVIDENCE UNCHECKABLE — this receipt recorded content evidence covering path(s) this commit changes, but the verdict computation threw before it could be evaluated: ${safeLabel(
+            err && err.message ? err.message : err
+          )})`,
+        ],
+      }));
+      console.error(
+        `commit-reviewed: REVIEWED-BYTES CHECK THREW (${safeLabel(err && err.message ? err.message : err)}) before any verdict was reached, but ` +
+          `${byteProgress.evidence_entries.length} receipt(s) carried auditable content evidence for path(s) this commit changes. FAIL-CLOSED: refusing ` +
+          `rather than amending on an unverified basis. Report this.`
+      );
+    } else {
+      console.error(
+        `commit-reviewed: REVIEWED-BYTES CHECK UNAVAILABLE — the enforcement computation itself threw ` +
+          `(${safeLabel(err && err.message ? err.message : err)}) before any receipt with auditable evidence was found. FAIL-OPEN and disclosed: with ` +
+          `nothing comparable recorded there was no verdict to lose, so the amend proceeds, but NO content-level check ran. Report this.`
+      );
+    }
+  }
+  const waivedReceipts = waiveBytesReason !== null ? byteFindings.map((f) => waiverIdentity(f.entry)) : [];
+  // Unnecessary-waiver disclosure, identical rule to the -m flow (roster LOW-2).
+  const waiverUnusedNote =
+    waiveBytesReason !== null && byteFindings.length === 0
+      ? `commit-reviewed: --waive-bytes WAS NOT NEEDED AND WAS NOT USED — no receipt's recorded bytes differ from the target commit's tree, so nothing ` +
+        `was overridden and NO Review-Bytes-Waiver trailer is stamped. The reason given was: ${waiveBytesReason}`
+      : null;
+  if (waiverUnusedNote !== null) console.error(waiverUnusedNote);
+  if (byteFindings.length > 0) {
+    if (waiveBytesReason === null) {
+      console.error(reviewedBytesRefusal(byteFindings, `in the tree of target commit ${resolvedSha}`));
+      process.exit(1);
+    }
+    console.error(
+      `commit-reviewed: REVIEWED-BYTES REFUSAL WAIVED — --waive-bytes was given, so ${byteFindings.length} receipt(s) whose recorded bytes differ from ` +
+        `the target commit's tree are stamped anyway. REASON: ${waiveBytesReason}. Waived receipts: ` +
+        `${byteFindings.map((f, i) => `${f.entry.agent_type} [${waivedReceipts[i]}] — ${f.files.join('; ')}`).join(' | ')}.`
+    );
+  }
 
   // ---------------------------------------------------------------------
   // G6: PUBLISHED-HISTORY GUARD. Query the configured upstream's ACTUAL
@@ -1580,8 +2509,39 @@ function runTargetShaMode(targetShaArg) {
     .map((l) => l.trim())
     .filter((l) => l !== '');
 
-  const trailerLines = stampEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`);
-  const interpretArgs = ['interpret-trailers'];
+  // Read the pre-existing waiver trailers too, for the SAME union reason the
+  // Reviewed-By-Agent read above exists: an earlier --target-sha round may
+  // already have stamped one, and comparing against the new set alone would
+  // report round one's waiver as "lost" on every second amend.
+  const existingWaiverCheck = gitRun(['log', '-1', '--format=%(trailers:key=Review-Bytes-Waiver,valueonly,unfold)', resolvedSha]);
+  if (existingWaiverCheck.status !== 0) {
+    fail(`commit-reviewed: could not read the original commit's existing Review-Bytes-Waiver trailers: ${(existingWaiverCheck.stderr || '').trim()}`);
+  }
+  const existingWaiverValues = (existingWaiverCheck.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '');
+
+  const trailerLines = [
+    ...stampEntries.map((e) => `Reviewed-By-Agent: ${e.agent_type}`),
+    // Same interpret-trailers path as the review trailers (never manual string
+    // concatenation), so a waiver lands INSIDE the one trailer paragraph and
+    // stays parseable by %(trailers) exactly like Reviewed-By-Agent.
+    ...waivedReceipts.map((id) => `Review-Bytes-Waiver: ${id}`),
+  ];
+  // --if-exists add IS LOAD-BEARING (roster review MED-1, fix round
+  // 2026-08-31). git's default for this is `addIfDifferentNeighbor`, which
+  // SILENTLY DROPS a trailer whose key+value already sits beside the insertion
+  // point — and duplicate identical values are legitimate here twice over: the
+  // no-dedupe rule means two receipts from the same agent_type stamp two
+  // identical Reviewed-By-Agent lines, and a second amend round can re-stamp a
+  // value round one already added. Dropped lines then fail the trailer-survival
+  // multiset comparison below, so the amend reports COMMIT SUCCEEDED BUT
+  // UNMERGEABLE for a message git itself chose to deduplicate. `add` appends
+  // unconditionally, which is exactly the multiset semantics this CLI verifies
+  // against. Passed as a flag, not read from trailer.ifexists config, so a
+  // repository-local config cannot change the outcome.
+  const interpretArgs = ['interpret-trailers', '--if-exists', 'add'];
   for (const line of trailerLines) interpretArgs.push('--trailer', line);
   const interpret = gitRun(interpretArgs, originalMessage);
   if (interpret.error) fail(`commit-reviewed: git interpret-trailers failed: ${interpret.error.message}`);
@@ -1706,6 +2666,35 @@ function runTargetShaMode(targetShaArg) {
     process.exit(1);
   }
 
+  // WAIVER TRAILER SURVIVAL CHECK — identical posture and identical union
+  // style (decision 57984926 §2). Runs unconditionally: expected [] vs actual
+  // [] also proves no waiver trailer was invented where nothing was waived.
+  const waiverCheck = gitRun(['log', '-1', '--format=%(trailers:key=Review-Bytes-Waiver,valueonly,unfold)', newSha]);
+  if (waiverCheck.error || waiverCheck.status !== 0) {
+    fail(
+      `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but the post-amend Review-Bytes-Waiver verification could not run ` +
+        `(${waiverCheck.error ? waiverCheck.error.message : `git log exited ${waiverCheck.status}: ${(waiverCheck.stderr || '').trim()}`}) — ` +
+        `the review-ledger entries were NOT consumed.`
+    );
+  }
+  const expectedWaiverValues = [...existingWaiverValues, ...waivedReceipts].sort();
+  const actualWaiverValues = (waiverCheck.stdout ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '')
+    .sort();
+  if (
+    actualWaiverValues.length !== expectedWaiverValues.length ||
+    !actualWaiverValues.every((v, i) => v === expectedWaiverValues[i])
+  ) {
+    console.error(
+      `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but the 'Review-Bytes-Waiver' trailer set does not match the UNION of ` +
+        `pre-existing plus newly stamped values.\nExpected: [${expectedWaiverValues.join(', ')}]\nActual:   [${actualWaiverValues.join(', ')}]\n` +
+        `A byte waiver whose trailer did not survive is an unaudited override. The review-ledger entries were NOT consumed.`
+    );
+    process.exit(1);
+  }
+
   // CONSUME the stamped entries (P4) — lock-guarded, identity by value (never
   // a serialized key — see the -m flow's identical reasoning above), RE-READ
   // rather than reuse `ledger` so an entry promoted mid-amend survives.
@@ -1726,8 +2715,487 @@ function runTargetShaMode(targetShaArg) {
       new_sha: newSha,
       reviewed_by: stampEntries.map((e) => e.agent_type),
       deferred_receipts: deferredDisclosures,
+      waived_bytes:
+        waivedReceipts.length > 0
+          ? { reason: waiveBytesReason, receipts: waivedReceipts, files: byteFindings.map((f) => ({ agent_type: f.entry.agent_type, files: f.files })) }
+          : null,
+      // See the -m flow's report: null on every run that did not ask for an
+      // unnecessary waiver, never omitted.
+      waiver_unused: waiverUnusedNote,
+      // Same field, same semantics, same emptiness convention as the -m flow's
+      // report (decision 1f069af4 v2 §6) — a consumer of this CLI's output must
+      // not have to know which mode produced it.
+      attestation_disclosure: attestationDisclosure,
     })
   );
+}
+
+// ===========================================================================
+// REVIEWED-BYTES ENFORCEMENT — the shared verdict (decision 57984926, slug
+// review-ledger-v2-lifecycle-refuse-flip-and-external-review-design §2;
+// executes the REFUSE-LATER half of user ruling b0ad640d, 2026-08-31).
+//
+// EVERYTHING HERE IS HOISTED `function` DECLARATIONS, for the same reason
+// safeLabel/ageLabel/withLedgerLock are: BOTH flows use them, and the
+// --target-sha flow runs before the -m flow's `const`s leave their temporal
+// dead zone. The two flows differ ONLY in what "the bytes about to be
+// committed" means — the INDEX for -m, the TARGET COMMIT'S TREE for an amend —
+// which is why the tree read is a caller-supplied callback rather than a
+// branch inside the verdict. Identical enforcement in both modes is §2's
+// explicit requirement, and an `if (!targetSha)` guard around the check would
+// be invisible to every new-commit test.
+// ===========================================================================
+
+// isUsableBlobSha / normalizeReceiptPath / receiptBlobEvidence / receiptBlobMap /
+// receiptDeclaredPaths ARE NO LONGER DECLARED HERE (board 7dd3200a). They moved
+// VERBATIM — bodies and reasoning comments alike — to
+// ./hooks/lib/review-ledger-entry.mjs and are imported at the top of this file;
+// see that import's note and the lib's V1 RECEIPT IDENTITY section for why.
+// Short version: §3's discharge verb now addresses a v1 entry by a `--legacy-
+// handle` that must be THE SAME v1 identity §2 stamps as a waiver trailer value
+// here, and two independently-derived v1 identities is a defect on its face.
+// THE TDZ HAZARD THE OLD COMMENTS HERE WARNED ABOUT IS CLOSED BY THE MOVE, NOT
+// REOPENED BY IT: an ESM import binding is initialized before this module's body
+// runs, which a `const` in this section was not — that hoisting rule still
+// governs every function that REMAINS in this section.
+
+/** The receipt ADMITS its content evidence does not cover everything it
+ *  declares — v1's reviewed_state.truncated (strict true, never a truthy
+ *  stray) or v2's content_evidence.status 'partial', surfaced by the adapter
+ *  as content_evidence_status. Both spellings are checked because reading only
+ *  the v1 one would leave every v2 partial receipt unenforced. */
+function receiptAdmitsPartial(e) {
+  const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
+  if (rs && rs.truncated === true) return true;
+  return !!(e && e.content_evidence_status === 'partial');
+}
+
+/** GRANDFATHERING IS NARROW AND POSITIVE (§2: "grandfather only genuinely
+ *  absent evidence — schema absence does not imply blob absence"):
+ *    'absent'       — a v1/legacy receipt with NO reviewed_state KEY at all,
+ *                     i.e. every receipt promoted before reviewed-bytes
+ *                     recording shipped. Never audited, never refused: refusing
+ *                     here would brick every live ledger the day this lands,
+ *                     which is the over-broad flip clause 3 forbids.
+ *    'inconsistent' — a v1/legacy receipt whose reviewed_state KEY IS PRESENT
+ *                     but is not an object (null, an array, a string, a
+ *                     number). Codex review HIGH, fix round 2026-08-31: the
+ *                     previous code folded this into 'absent', because its one
+ *                     object-guard answered "is there a usable object?" rather
+ *                     than "did the receipt record anything?". That handed the
+ *                     grandfather clause to the SHORTEST possible tamper —
+ *                     overwrite reviewed_state with `null` and the entire check
+ *                     evaporates, which is the same bypass clause 2 closes for
+ *                     a junk BLOB VALUE one level down. A key that is present
+ *                     and unreadable is INCONSISTENT evidence, and the verdict
+ *                     refuses on any staged path the receipt covers, disclosing
+ *                     the shape it actually found.
+ *                     ONE LEVEL DOWN, SAME CLASS, BOTH SCHEMA VERSIONS (board
+ *                     f55ab3e9, 2026-08-31): a receipt whose evidence CONTAINER
+ *                     is a proper object but whose `blobs` value is PRESENT and
+ *                     is not a map — the string 'junk', 42, ['array'], true,
+ *                     null — is inconsistent for exactly the same reason, and it
+ *                     is checked BEFORE the version branches below because it is
+ *                     the same defect in both. v2 reached it by a different road:
+ *                     the read adapter used to collapse an unusable
+ *                     content_evidence.blobs to `undefined`, so "recorded
+ *                     something unusable" and "recorded nothing" became one
+ *                     observation and the grandfather swallowed the first; the
+ *                     adapter now passes the value through RAW (see
+ *                     scripts/hooks/lib/review-ledger-entry.mjs) so this one
+ *                     check answers for both. v1 had the hole natively — a
+ *                     reviewed_state object carrying `blobs: 'junk'` passed the
+ *                     container guard and then produced an empty map, which read
+ *                     as absent evidence.
+ *                     PRESENT means `!== undefined`: a receipt with no `blobs`
+ *                     key at all recorded nothing, which is the genuine
+ *                     grandfather and must stay one.
+ *                     `null` IS REFUSED (board f55ab3e9 left the reading open):
+ *                     it is PRESENT-and-not-a-map, and the neighbouring v1
+ *                     container case (`reviewed_state: null`) is already
+ *                     adjudicated REFUSE — reading the same value as an explicit
+ *                     absence one level down would split the class on nothing.
+ *    'unavailable'  — a v2 receipt whose content_evidence.status says the
+ *                     hashing never ran. Grandfathered (commits) but DISCLOSED
+ *                     (conductor adjudication 2026-08-31 on the frozen suite's
+ *                     C3): silence here would be indistinguishable from a clean
+ *                     audit. THE GRANDFATHER IS CONDITIONAL ON THE BLOB MAP
+ *                     BEING EMPTY OF USABLE SHAS — see the verdict: a receipt
+ *                     that says the hashing never ran while carrying hashes
+ *                     contradicts itself, and the verdict ENFORCES its recorded
+ *                     blobs rather than believing the status field.
+ *    'present'      — anything else. ENFORCED. */
+function receiptEvidenceClass(e) {
+  const status = e && typeof e.content_evidence_status === 'string' ? e.content_evidence_status : undefined;
+  // An ARRAY is excluded deliberately: `typeof [] === 'object' && [] !== null`
+  // is true, so the obvious object-guard admits `reviewed_state: []` as a real
+  // (empty) evidence record — the exact shape a tamper reaches for after `null`
+  // is refused. A v2-derived entry always arrives as a plain object here, so
+  // this narrowing costs nothing on that path.
+  const hasKey = !!e && typeof e === 'object' && e.reviewed_state !== undefined;
+  const rs = hasKey && isEvidenceObject(e.reviewed_state) ? e.reviewed_state : null;
+  // VERSION-INDEPENDENT, AND FIRST: the blob map is PRESENT but is not a map.
+  // Checked ahead of both branches below because it is one defect wearing two
+  // schema costumes (see the class list above), and ahead of 'unavailable'
+  // because a receipt that says the hashing never ran while carrying an unusable
+  // blobs value contradicts itself — the same reasoning the verdict already
+  // applies to an 'unavailable' receipt carrying real shas.
+  if (rs && rs.blobs !== undefined && !isEvidenceObject(rs.blobs)) return 'inconsistent';
+  if (status === 'unavailable') return 'unavailable';
+  if (status !== undefined) return 'present';
+  // v1/legacy from here down: the adapter never sets content_evidence_status
+  // for a v1 entry, so `status === undefined` IS the v1 branch.
+  if (!hasKey) return 'absent'; // genuinely absent — the only v1 grandfather
+  return rs ? 'present' : 'inconsistent';
+}
+
+// isEvidenceObject — the shape the evidence CONTAINER (`reviewed_state`) and the
+// blob MAP inside it must both have before anything they claim can be read — is
+// imported from the read adapter, which applies the identical test to the v2
+// `content_evidence` container one level up. Three levels, one predicate: see its
+// definition in scripts/hooks/lib/review-ledger-entry.mjs for why a per-level
+// copy is what let each level be bypassed separately.
+
+/** The human-readable SHAPE of a present-but-unreadable reviewed_state, for the
+ *  'inconsistent' disclosure. Names the shape AND shows the value (bounded),
+ *  because "not an object" alone does not tell a reader whether they are
+ *  looking at a tamper, a producer bug, or a hand-edited fixture. */
+function evidenceShapeLabel(v) {
+  const kind = v === null ? 'null' : Array.isArray(v) ? 'an array' : `a ${typeof v}`;
+  const shown = safeLabel(v);
+  return `${kind} (${shown.length > 120 ? `${shown.slice(0, 120)}…` : shown})`;
+}
+
+/** WHICH LEVEL of a receipt's evidence is unreadable, for the 'inconsistent'
+ *  disclosure (board f55ab3e9). The class has two members and they need
+ *  different remedies: an unreadable CONTAINER (`reviewed_state` is null/an
+ *  array/a string) means the receipt has no evidence record at all, while an
+ *  unreadable BLOB MAP inside a proper container means the record exists and its
+ *  contents were replaced — EXCEPT for a v2 entry whose whole content_evidence
+ *  container was junk: the adapter's raw pass-through routes that shape into the
+ *  blob-map arm too, so there the "record" never existed at all and the remedy
+ *  is re-promotion, not un-replacing contents (review finding, 2026-08-31). The
+ *  emitted string stays accurate either way (it prints the actual value).
+ *  The blob-map case is reported first because
+ *  receiptEvidenceClass tests it first, so the two always agree about what was
+ *  found. A v2 entry reaches the blob-map arm through the read adapter's raw
+ *  pass-through of content_evidence.blobs, so one wording serves both schema
+ *  versions. */
+function inconsistentEvidenceDetail(e) {
+  const rs = e && isEvidenceObject(e.reviewed_state) ? e.reviewed_state : null;
+  if (rs && rs.blobs !== undefined && !isEvidenceObject(rs.blobs)) {
+    return `the receipt's recorded content evidence is ${evidenceShapeLabel(rs.blobs)}, not a map of recorded blob shas`;
+  }
+  return `the receipt's reviewed_state is ${evidenceShapeLabel(e && e.reviewed_state)}, not a map of recorded blob shas`;
+}
+
+/** THE VERDICT. Never throws in any path it controls — the caller's degraded
+ *  contract depends on that, and an accidental throw in here would otherwise
+ *  decide the outcome by accident. The one thing it does NOT control is the
+ *  caller-supplied `readBlobs` callback, which spawns git: that is exactly why
+ *  `progress` exists (see below).
+ *
+ *  @param entries      the STAMPED CANDIDATES only. Never the eligible set: a
+ *                      foreign or file-scope DEFERRED receipt is not being
+ *                      spent here, so its bytes are not this commit's business
+ *                      (frozen pin D2), and a receipt covering nothing this
+ *                      commit touches produces no finding at all (pin D1 — the
+ *                      no-reliable-intersection fallback stays the existing
+ *                      attribution WARNING, never relabelled a byte mismatch).
+ *  @param touchedPaths the normalized paths this commit actually changes.
+ *  @param readBlobs    (paths) => {ok:true, map} | {ok:false, detail} — the
+ *                      blob sha of each path in the content being committed.
+ *  @param progress     OUT-PARAM, and it is the fail-CLOSED half of this
+ *                      mechanism (Codex review HIGH, fix round 2026-08-31).
+ *                      Findings and the auditable-evidence set are written into
+ *                      it AS THEY ARE ESTABLISHED, so a throw anywhere after
+ *                      the fact — including inside readBlobs — leaves the
+ *                      caller holding everything already proven rather than an
+ *                      empty array it would read as "nothing to refuse". Its
+ *                      `checked` map is the pre-commit INDEX/TREE reading the
+ *                      caller re-verifies against the CREATED COMMIT'S TREE.
+ *  @returns {{findings, unavailable, contradictory, unreadable, checked}}
+ */
+function reviewedBytesVerdict(entries, touchedPaths, readBlobs, progress) {
+  const p = progress && typeof progress === 'object' ? progress : {};
+  if (!Array.isArray(p.findings)) p.findings = [];
+  if (!Array.isArray(p.evidence_entries)) p.evidence_entries = [];
+  if (!(p.checked instanceof Map)) p.checked = new Map();
+  const findings = p.findings;
+
+  const candidates = [];
+  const unavailable = [];
+  const contradictory = [];
+  const needed = new Set();
+  for (const e of entries) {
+    const cls = receiptEvidenceClass(e);
+    if (cls === 'absent') continue;
+    const { map: blobs, collisions } = receiptBlobEvidence(e);
+    // COVERAGE = declared territory UNION recorded blob keys, intersected with
+    // what this commit touches. Iterating only the blob map is the single most
+    // likely shortcut and it silently skips exactly the unbound staged path
+    // clause 2 refuses on.
+    const covered = [...new Set([...receiptDeclaredPaths(e), ...blobs.keys()])].filter((x) => touchedPaths.has(x)).sort();
+    if (covered.length === 0) continue;
+    if (cls === 'unavailable') {
+      // CONTRADICTORY GRANDFATHER (Codex review HIGH, fix round 2026-08-31).
+      // 'unavailable' means "the hashing never ran", and that is grandfathered
+      // ONLY while the receipt agrees with itself. A receipt that says the
+      // hashing never ran while CARRYING usable hashes made the status field a
+      // one-word disable switch for the whole check — write 'unavailable' and
+      // every recorded sha stops being compared. The recorded blobs are the
+      // evidence; the status is a claim about them, so the evidence wins and
+      // this entry is ENFORCED like any other (the contradiction is disclosed
+      // separately by the caller, since it is also a producer bug worth seeing).
+      if (![...blobs.values()].some(isUsableBlobSha)) {
+        unavailable.push(e);
+        continue;
+      }
+      contradictory.push(e);
+    }
+    for (const x of covered) {
+      if (!collisions.has(x) && isUsableBlobSha(blobs.get(x))) needed.add(x);
+    }
+    candidates.push({ e, blobs, collisions, covered, cls });
+    p.evidence_entries.push(e);
+  }
+
+  let treeBlobs = new Map();
+  let unreadable = null;
+  if (needed.size > 0) {
+    const r = readBlobs([...needed]);
+    if (r.ok) {
+      treeBlobs = r.map;
+      // Remember exactly what was read, so the caller can prove the bytes it
+      // verified are the bytes that landed (the index-TOCTOU re-check).
+      for (const x of needed) {
+        const sha = treeBlobs.get(x);
+        if (typeof sha === 'string') p.checked.set(x, sha.toLowerCase());
+      }
+    } else {
+      treeBlobs = null; // the comparison cannot be made — see the FAIL-CLOSED note below
+      unreadable = r.detail;
+    }
+  }
+
+  for (const { e, blobs, collisions, covered, cls } of candidates) {
+    const files = [];
+    for (const x of covered) {
+      const bound = blobs.has(x);
+      const raw = blobs.get(x);
+      if (collisions.has(x)) {
+        // Two recorded keys normalize to this one path with DIFFERENT shas —
+        // the receipt contradicts itself, so there is no "the sha it recorded"
+        // to compare (see receiptBlobEvidence).
+        files.push(
+          `${x} (INCONSISTENT EVIDENCE — two recorded blob keys normalize to this path but record DIFFERENT shas, so the receipt contradicts itself about what it reviewed)`
+        );
+      } else if (bound && isUsableBlobSha(raw)) {
+        if (treeBlobs === null) {
+          // FAIL-CLOSED ON AN UNREADABLE COMPARISON (Codex review HIGH, fix
+          // round 2026-08-31). This used to `continue`, degrading to the
+          // caller's REVIEWED-BYTES CHECK UNAVAILABLE warning and committing.
+          // The reasoning was "an absence of verdict is not a mismatch" — true,
+          // but it is not a MATCH either, and here the receipt DID record
+          // comparable bytes for a path this commit touches, so the only thing
+          // missing is our own read. Committing then stamps an attestation
+          // nobody verified, and one broken `git ls-files` call disables the
+          // gate silently. It refuses instead — and --waive-bytes is the
+          // sanctioned route through, so a genuinely broken git never bricks
+          // the CLI.
+          files.push(
+            `${x} (EVIDENCE UNCHECKABLE — the receipt recorded ${raw.slice(0, 12)}, but the bytes being committed could not be read: ${unreadable})`
+          );
+          continue;
+        }
+        const actual = treeBlobs.get(x);
+        if (actual === undefined) {
+          // A staged DELETION has no index entry at all, so an absent sha is
+          // the strongest possible form of "not the bytes that were reviewed".
+          files.push(`${x} (reviewed ${raw.slice(0, 12)}, now DELETED/absent from the content being committed)`);
+        } else if (actual.toLowerCase() !== raw.toLowerCase()) {
+          files.push(`${x} (reviewed ${raw.slice(0, 12)}, committing ${actual.slice(0, 12)})`);
+        }
+      } else if (bound) {
+        // INCONSISTENT, not absent (conductor adjudication 2026-08-31, frozen
+        // pin C2): the receipt asserts it recorded this path's bytes and the
+        // value it recorded is not bytes. Grandfathering that would make
+        // "overwrite the sha with junk" the one-keystroke bypass of the entire
+        // check, and the grandfather clause is for evidence that was never
+        // written — not for evidence that was written and then broken.
+        files.push(`${x} (INCONSISTENT EVIDENCE — the receipt records ${safeLabel(raw)} for this path, which is not a usable blob sha)`);
+      } else if (cls === 'inconsistent') {
+        // The receipt's evidence is present but unreadable — either the
+        // reviewed_state KEY itself (null/array/string) or, one level down, the
+        // `blobs` value inside a proper container (board f55ab3e9). Same family
+        // as the junk-sha case one level further down, and disclosed with the
+        // LEVEL and the SHAPE actually found: "not an object" alone does not
+        // tell a reader whether they are looking at a tamper, a producer bug or
+        // a hand-edited fixture, and naming the wrong level would send them to
+        // the wrong one of the three.
+        files.push(`${x} (INCONSISTENT EVIDENCE — ${inconsistentEvidenceDetail(e)}, so nothing it claims about this path can be read)`);
+      } else if (cls === 'unavailable' || receiptAdmitsPartial(e)) {
+        // The receipt itself says its binding is incomplete, and the file this
+        // commit stages is one of the ones it never bound. Evidence that does
+        // not cover this commit is not evidence. GLOBALLY partial stays fine —
+        // this fires only for a path THIS commit touches (frozen pin B0). A
+        // CONTRADICTORY 'unavailable' receipt (blobs present, status says none)
+        // is treated as partial for exactly the same reason.
+        files.push(`${x} (NO RECORDED BYTES — this receipt admits partial/truncated content evidence and never bound this path)`);
+      } else if (blobs.size > 0) {
+        // THE BINDING IS THE GUARD, NOT THE TRUNCATION FLAG (frozen hardening
+        // pins H2a/H2b). The two branches above key off what the receipt SAYS
+        // about its own coverage — `truncated`, `status` — and both fields are
+        // written by the same producer as the blob map, so deleting one key
+        // from a 'complete' receipt left a staged path unaudited while every
+        // self-declaration still read clean. A receipt that recorded evidence
+        // for OTHER paths demonstrably HAS content evidence, so §2's
+        // grandfather (which is per-RECEIPT — "schema absence does not imply
+        // blob absence") cannot reach it: the missing binding is a hole in the
+        // audit, not an absence of one.
+        // THE `blobs.size > 0` CONDITION IS THE FENCE, and it is what keeps this
+        // from swallowing the grandfather whole: a receipt whose map is EMPTY
+        // recorded nothing at all, which is genuinely absent evidence and stays
+        // an advisory (frozen pin completed_at (c)). Empty means absent; partial
+        // means unaudited.
+        files.push(
+          `${x} (NO RECORDED BYTES — the receipt records content evidence for ${blobs.size} other path(s) but bound NOTHING for this one, while claiming complete coverage: a missing binding is an unaudited path, not absent evidence)`
+        );
+      }
+    }
+    if (files.length > 0) findings.push({ entry: e, files });
+  }
+  return { findings, unavailable, contradictory, unreadable, checked: p.checked };
+}
+
+// v1ReceiptFingerprint moved to ./hooks/lib/review-ledger-entry.mjs (board
+// 7dd3200a) together with the four helpers it reads through; `receipt-<fp>` is
+// spelled ONCE there, as legacyReceiptHandle, because `review-ledger discharge
+// --legacy-handle` accepts exactly the string this file stamps. Frozen pin E3
+// (same fixture twice, compared) still exercises it through this call site.
+
+/** The value stamped in `Review-Bytes-Waiver: <identity>` — v2's entry_id when
+ *  it is present AND TRAILER-SAFE, else the v1 legacy handle.
+ *  THE SHAPE CHECK IS NOT COSMETIC: the ledger is agent-writable, so an
+ *  entry_id carrying \n would forge a trailer line inside the very block this
+ *  CLI verifies — the same smuggling VALID_AGENT_TYPE closes for agent_type.
+ *  An entry_id that fails it degrades to the content fingerprint rather than
+ *  being dropped, so a waived receipt is always identified by something. */
+function waiverIdentity(e) {
+  const id = e && typeof e.entry_id === 'string' ? e.entry_id : '';
+  if (/^[A-Za-z0-9._:-]{1,100}$/.test(id)) return id;
+  return legacyReceiptHandle(e);
+}
+
+/** The ONE refusal message, shared by both flows (§2: "aggregated into ONE
+ *  refusal listing every mismatched receipt+file"). Carries the 'REVIEWED
+ *  BYTES' anchor, names every offending receipt (agent_type, plus entry_id
+ *  where the entry has one) and every offending file, and names ONLY those —
+ *  a receipt whose bytes still match is never listed. The caller prints it
+ *  LAST and exits: a refusal followed by more output reads as one more
+ *  advisory, which is how the previous ruling's warnings got ignored. */
+function reviewedBytesRefusal(findings, whatIsBeingCommitted) {
+  const lines = findings.map((f) => {
+    const id = f.entry && typeof f.entry.entry_id === 'string' && f.entry.entry_id !== '' ? ` (entry ${f.entry.entry_id})` : '';
+    return `  - ${f.entry.agent_type}${id}: ${f.files.join('; ')}`;
+  });
+  return (
+    `commit-reviewed: REVIEWED BYTES CHANGED — REFUSING. ${findings.length} review receipt(s) would be stamped onto content that is NOT what they ` +
+    `reviewed (${whatIsBeingCommitted}):\n${lines.join('\n')}\n` +
+    `A trailer stamped here would attest a review of bytes nobody reviewed — the false attestation board 0f448efb measured, on the merge gate's own ` +
+    `audit surface. The blob shas above were recorded at each reviewer's SubagentStop, so this is content evidence, not a timestamp heuristic. ` +
+    `This was an ADVISORY until user ruling b0ad640d ("refuse later") was executed by decision 57984926 (slug review-ledger-v2-lifecycle-refuse-flip-and-` +
+    `external-review-design) — the warn phase measured the advisories as accurate AND ignored, which is why they became a refusal. ` +
+    `NOTHING was committed and NOTHING was consumed: every receipt is still in the ledger. ` +
+    `Re-dispatch a reviewer for the current bytes, or — if a human has genuinely re-checked the changed lines — re-run with ` +
+    `--waive-bytes "<single-line reason>", which commits and stamps one Review-Bytes-Waiver trailer per receipt named above.`
+  );
+}
+
+/** A v2 entry's own identity as surfaced by the read adapter, or null for a v1
+ *  entry (which never had one) and for any unusable value. THE CONSUME PATHS
+ *  MATCH ON THIS FIRST (Codex review MED, fix round 2026-08-31): entry_id is
+ *  minted per promotion, so it discriminates two receipts that the multi-field
+ *  identity cannot — the measured collision is two dispatches in ONE message
+ *  sharing agent_type, the Start-millisecond, session, branch and base_sha.
+ *  Falling back to the multi-field key ONLY when NEITHER side has an entry_id
+ *  keeps every v1 receipt behaving exactly as before, and makes the mixed case
+ *  (one side has an id, the other does not) a NON-match — which fails toward
+ *  SURVIVAL, the direction every identity decision on this path takes. */
+function ledgerEntryId(e) {
+  return e && typeof e.entry_id === 'string' && e.entry_id !== '' ? e.entry_id : null;
+}
+
+/** DISCHARGED (decision 57984926 §3) — an entry explicitly ruled unspendable by
+ *  `scripts/review-ledger.mjs discharge` and PRESERVED in place. Both flows
+ *  exclude these before validation, so they are never valid, eligible, counted,
+ *  stamped or consumed. A missing status (every v1 entry) is ACTIVE, per §3's
+ *  compatibility rule, and an unrecognized status is likewise not a discharge.
+ *
+ *  AUTHENTICATED, NOT MERELY CLAIMED (Codex review MED, fix round 2026-08-31).
+ *  This used to be `e.status === 'discharged'` and nothing else — a ONE-FIELD
+ *  test for the one state that makes real reviewer evidence invisible to every
+ *  spending surface, satisfiable by a hand-edited ledger, a truncated write, or
+ *  a v1 entry that never had a lifecycle at all. The genuine verb always writes
+ *  the PAIR {status:'discharged', disposition:{...}} onto a complete v2 entry,
+ *  so the pair is what is honored; the classes and their reasoning live in the
+ *  shared adapter (dischargeMarkerClass). A hoisted `function`, not a const,
+ *  because --target-sha amend mode runs before the -m flow's body and cannot
+ *  reach that flow's consts. */
+function isDischargedEntry(e) {
+  return dischargeMarkerClass(e) === 'authenticated';
+}
+
+/** The exclusion BOTH flows apply, at the top of their validity loop: true means
+ *  "this entry is not spendable on the discharge axis — skip it". Returns false
+ *  for everything else, so a 'v2-deficient' entry still reaches (and is
+ *  disclosed by) the deficiency branch and a v1 pass-through still validates as
+ *  an ordinary active receipt.
+ *
+ *  FAIL TOWARD NOT-SPENDING, BUT NEVER SILENTLY (decision 57984926 §3; fix round
+ *  2026-08-31). A v2 entry claiming 'discharged' with NO usable disposition is
+ *  MALFORMED, and the two readings of it disagree: honor it and a one-field
+ *  forgery buries evidence; ignore it and a genuine discharge whose disposition
+ *  was lost gets spent as though it had never been adjudicated. Neither reading
+ *  is safe enough to take silently, so this takes the conservative half —
+ *  the receipt is NOT spent — and DISCLOSES the anomaly by name, because the
+ *  malformed marker is the thing a human has to fix (re-discharge it properly,
+ *  or repair the entry). The one class that is skipped in SILENCE is the
+ *  authenticated one: it was already adjudicated, with its reason recorded in
+ *  the entry, and re-reporting it at every commit would be noise about a settled
+ *  decision. */
+function skipForDischargeMarker(e) {
+  const cls = dischargeMarkerClass(e);
+  if (cls === 'authenticated') return true;
+  if (cls === 'unauthenticated') {
+    console.error(
+      `commit-reviewed: UNAUTHENTICATED DISCHARGE MARKER — ${JSON.stringify(e && e.agent_type)}'s v2 ledger entry ` +
+        `(entry_id ${JSON.stringify(ledgerEntryId(e))}) carries status:'discharged' but NO usable disposition object, which no real discharge ever ` +
+        `writes (decision 57984926 §3: the verb records disposition{reason, at, head_sha, classifier_version, class, facts} in the same write). It is NOT ` +
+        `stamped and NOT consumed — a malformed lifecycle marker is not evidence that the receipt is spendable — and it is NOT silently skipped either: ` +
+        `either re-discharge it properly with 'node scripts/review-ledger.mjs discharge', or repair the entry so it can be spent. Left un-consumed in the ledger.`
+    );
+    return true;
+  }
+  return false;
+}
+
+/** Repo-path-shaped entries of a receipt's recorded territory — the one
+ *  definition both flows' local `usableFiles` helpers restate. */
+function usableTerritoryFiles(e) {
+  return e && Array.isArray(e.files) ? e.files.filter((f) => typeof f === 'string' && f) : [];
+}
+
+/** STRUCTURED TERRITORY (decision 57984926 §3) — the receipt's paths came from
+ *  the reviewer's own declared review scope (decision 8f137474), not from
+ *  free-prose extraction. BOTH spellings count and are treated identically:
+ *  v2's nested `territory.source` (surfaced flat by the read adapter) and the
+ *  pre-v2 FLAT `files_source`. A NON-EMPTY files[] is part of the definition:
+ *  an empty files[] is the UNATTRIBUTED class (always stamped), never a
+ *  non-match, whatever source it records. Such a receipt does NOT fall back
+ *  when it matches nothing — it defers. */
+function isStructuredTerritoryEntry(e) {
+  return !!e && e.files_source === 'review-territory' && usableTerritoryFiles(e).length > 0;
 }
 
 /** Lock-guarded read-modify-write consume, shared shape with the -m flow's
@@ -1749,13 +3217,19 @@ function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
     return true;
   };
   const identityField = (e, k) => (e[k] === undefined ? null : e[k]);
-  const sameIdentity = (fresh, stamped) =>
-    typeof fresh.agent_type === 'string' &&
-    fresh.agent_type === stamped.agent_type &&
-    boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
-    ['session_id', 'branch', 'base_sha', 'files'].every((k) =>
-      boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
+  // entry_id FIRST (see the -m flow's identical helper for the full reasoning).
+  const sameIdentity = (fresh, stamped) => {
+    if (typeof fresh.agent_type !== 'string' || fresh.agent_type !== stamped.agent_type) return false;
+    const sid = ledgerEntryId(stamped);
+    const fid = ledgerEntryId(fresh);
+    if (sid !== null || fid !== null) return sid !== null && fid !== null && sid === fid;
+    return (
+      boundedDeepEqual(fresh.at, stamped.at, IDENTITY_DEPTH_CAP) &&
+      ['session_id', 'branch', 'base_sha', 'files'].every((k) =>
+        boundedDeepEqual(identityField(fresh, k), identityField(stamped, k), IDENTITY_DEPTH_CAP)
+      )
     );
+  };
 
   withLedgerLock(sterlingDir, () => {
     let freshLedger = [];
@@ -1770,8 +3244,24 @@ function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
     const unclaimedStamped = [...stampEntries];
     const survivors = freshLedger.filter((e) => {
       if (!e || typeof e !== 'object') return true;
-      const i = unclaimedStamped.findIndex((s) => sameIdentity(e, s));
+      // Normalized only for identity matching; the RAW re-read entry is what
+      // survives, so a v2 entry's on-disk shape is never rewritten here.
+      const normFresh = normalizeLedgerEntry(e);
+      const i = unclaimedStamped.findIndex((s) => sameIdentity(normFresh, s));
       if (i === -1) return true;
+      // DISCHARGED MID-FLIGHT — PRESERVATION WINS, and the stamped occurrence is
+      // still CLAIMED so no other entry is spliced in its place. Identical rule
+      // and identical reasoning to the -m flow's consume block (see there for
+      // the full argument, including why the stamped side is checked too).
+      if (normFresh && normFresh.status === 'discharged' && unclaimedStamped[i].status !== 'discharged') {
+        unclaimedStamped.splice(i, 1);
+        console.error(
+          `commit-reviewed: RECEIPT DISCHARGED MID-AMEND — ${JSON.stringify(normFresh.agent_type)}'s receipt (entry_id ${JSON.stringify(ledgerEntryId(normFresh))}) ` +
+            `was ACTIVE when this amend stamped it and is DISCHARGED now. The entry is PRESERVED in the ledger rather than consumed: a discharged entry is ` +
+            `never deleted (decision 57984926 §3). It will not be spent again — every spending surface ignores a discharged entry.`
+        );
+        return true;
+      }
       unclaimedStamped.splice(i, 1);
       return false;
     });

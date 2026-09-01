@@ -561,3 +561,112 @@ test('review D4: an unreadable agent definition (directory at the path) is loud 
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// COMMAND-SHAPE ADVISORY (board 07deffab gap (3))
+// ---------------------------------------------------------------------------
+
+test('command-shape WARN: "run gdlint" to a shell-less agent fires the command-shape advisory', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'test-writer', { tools: TEST_WRITER_TOOLS });
+    const r = runHook(
+      taskInput(dir, { subagent_type: 'test-writer', prompt: 'run gdlint over the changed files and report violations' }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.match(
+      parseAdditionalContext(r),
+      /brief instructs running commands but the agent holds no shell execution tool/i
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('command-shape CONTROL: the SAME brief to an agent WITH Bash never fires the command-shape advisory', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'coder', { tools: 'Read, Write, Edit, MultiEdit, Grep, Glob, Bash' });
+    const r = runHook(
+      taskInput(dir, { subagent_type: 'coder', prompt: 'run gdlint over the changed files and report violations' }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(parseAdditionalContext(r), /COMMAND-SHAPE ADVISORY/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('command-shape CONTROL: a bare single-token backtick ("`gdlint`" alone) is not a trigger', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'test-writer', { tools: TEST_WRITER_TOOLS });
+    const r = runHook(
+      taskInput(dir, {
+        subagent_type: 'test-writer',
+        prompt: 'the linter for this project is `gdlint`, mentioned for context only',
+      }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(parseAdditionalContext(r), /COMMAND-SHAPE ADVISORY/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('command-shape SILENT (p-a): "do NOT run `npm test`" to a shell-less agent — prohibition suppresses', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'test-writer', { tools: TEST_WRITER_TOOLS });
+    const r = runHook(
+      taskInput(dir, {
+        subagent_type: 'test-writer',
+        prompt: 'do NOT run `npm test` — H5 already covers verification here.',
+      }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(parseAdditionalContext(r), /COMMAND-SHAPE ADVISORY/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('command-shape SILENT (p-b): backticked MCP call with args to a shell-less agent — MCP-first-token excluded', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'test-writer', { tools: TEST_WRITER_TOOLS });
+    const r = runHook(
+      taskInput(dir, {
+        subagent_type: 'test-writer',
+        prompt: 'First call `knowledge_get <id>` to retrieve the spec, then `board_remove <id>` when done.',
+      }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(parseAdditionalContext(r), /COMMAND-SHAPE ADVISORY/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('command-shape SILENT (p-b2): `knowledge_query types:["decision"]` (brackets/colon) to a shell-less agent — never fires', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'test-writer', { tools: TEST_WRITER_TOOLS });
+    const r = runHook(
+      taskInput(dir, {
+        subagent_type: 'test-writer',
+        prompt: 'Run `knowledge_query types:["decision"]` first to check for prior rulings.',
+      }),
+      dir
+    );
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(parseAdditionalContext(r), /COMMAND-SHAPE ADVISORY/);
+  } finally {
+    cleanup();
+  }
+});

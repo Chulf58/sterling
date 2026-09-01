@@ -49,8 +49,13 @@ import {
   writeGuard,
   enqueuePending,
   extractCommandPathCandidates,
-  renderBashPointers,
+  bashPointerBlock,
+  joinPointerBlock,
+  pointerVerifyRecipe,
   BASH_POINTER_PATH_CAP,
+  budgetKnownGaps,
+  isGapDelivered,
+  markGapDelivered,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -108,17 +113,69 @@ try {
 
   if (!entries.length) allow();
 
+  // KNOWN_GAPS RE-EMISSION AT THE BASH/PROBE-OUTPUT SEAM (board f1489964,
+  // decision known-gaps-inline-ships-with-probe-seam-boarded 53fd6f62's ship
+  // condition — closed here). The inline known_gaps slice (h19-knowledge-
+  // delivery.mjs) never reaches the exact moment a probe's OUTPUT is trusted,
+  // because this hook is pointer-only. Trigger is NARROW and reuses the
+  // owners already resolved above for the pointer line — an OWNED PATH NAMED
+  // IN THE COMMAND, never free-text output matching (that is H23's separate
+  // axis). Its OWN bounded dedup (guard.gap_articles via isGapDelivered/
+  // markGapDelivered) — deliberately separate from `pointer_files` above and
+  // from the Read/Edit path's `records`/`slugs` guard, so a probe re-showing
+  // gaps this session is bounded without being starved by, or starving, an
+  // unrelated Read of the same file.
+  const gapOwners = [];
+  const seenGapOwnerIds = new Set();
+  for (const e of entries) {
+    for (const o of e.owners) {
+      if (!Array.isArray(o.known_gaps) || !o.known_gaps.length) continue; // nothing recorded
+      if (seenGapOwnerIds.has(o.id)) continue; // named by >1 candidate path in this command
+      seenGapOwnerIds.add(o.id);
+      if (isGapDelivered(guard, o)) continue; // already re-emitted this session at this seam
+      gapOwners.push(o);
+    }
+  }
+  // GLOBAL 3-gap budget, same helper the Read/Edit path uses (no divergent
+  // copy) — an empty gapOwners list yields an empty Map, so bashPointerBlock's
+  // gapsByOwner?.get(...) is always undefined and the payload is BYTE-
+  // IDENTICAL to before this addition whenever no candidate owner carries a
+  // gap (or every candidate was already gap-delivered this session).
+  const gapsByOwner = budgetKnownGaps(gapOwners);
+
   // SIDE EFFECT FIRST, GUARD SECOND (the h19-knowledge-delivery rule): the guard
   // is what makes delivery once-per-session, so writing it before the delivery
   // happens turns any failure into permanent silent loss — nothing retries,
   // because the next touch sees the paths already marked.
+  // POINTER-VERIFY recipe (decision db3392db part 2, v2 per fixer F1): the block
+  // is enqueued DECOMPOSED — the fixed two-sentence header plus one {id, line}
+  // per record — so the drain can REBUILD it: a still-live record's line replays
+  // verbatim, while a superseded or missing one is REPLACED by its stub. The
+  // earlier shape sent bare ids and let the drain append disclosures beneath the
+  // whole cached blob, which left the dead record's own line standing above the
+  // footnote, still naming it as governing this path. Gap substance rides the
+  // SAME per-owner {id, line} entry (see bashPointerBlock), so it inherits the
+  // identical live/superseded/missing verdict as the pointer it sits beside.
+  const block = bashPointerBlock(entries, { gapsByOwner });
   enqueuePending(pendingPath(input.cwd), {
     kind: 'bash_pointers',
     rel: delivered.join(' '),
-    payload: renderBashPointers(entries),
+    payload: joinPointerBlock(block),
+    recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines }),
     agent_id: 'conductor',
   });
   guard.pointer_files.push(...delivered);
+  // MARK ONLY WHAT ACTUALLY RENDERED (fixer round LOW finding, mirrors the
+  // cappedHazards precedent: a hazard/decision capped OUT of a payload is
+  // never marked delivered, so it can surface on a later touch instead of
+  // vanishing). An owner whose ENTIRE gap allocation lost the shared budget
+  // this touch (info.shown.length === 0, e.g. a later owner in a delivery
+  // whose earlier owners already spent the global cap) must not consume its
+  // one shot at this seam's dedup — a subsequent probe of its territory
+  // should still get a real chance to show its gaps, not a permanently
+  // suppressed "0 of N" repeat.
+  const deliveredGapOwners = gapOwners.filter((o) => (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
+  if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
   writeGuard(gPath, guard);
   allow();
 } catch (e) {

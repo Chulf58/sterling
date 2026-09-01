@@ -100,7 +100,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { SterlingStore, resolveDomainMounts } from '@sterling/store';
+import { SterlingStore, resolveDomainMounts, droppedKeyPaths, renderCappedPathList } from '@sterling/store';
 import { parseConfig, validateRecord } from '@sterling/schemas';
 import { buildResolver } from './lib/citations.mjs';
 
@@ -482,44 +482,19 @@ function deepEqual(a, b, depth = 0) {
   return false;
 }
 
-/** Every key path present in `before` that is ABSENT from `after` — the LOSS
- *  half of a round-trip comparison, and deliberately only that half (board
- *  bd3f0acf; the reasoning lives at the call site in migrate()). Reports dotted
- *  paths with array indices — 'files[0].note', 'dependencies.relies_on[2]' —
- *  because a bare field name at depth tells an operator nothing about which
- *  record part is about to be dropped.
- *
- *  Presence, never value: a key whose VALUE changed is a normalization the
- *  schema boundary performs on purpose (repoPath), not damage, and flagging it
- *  would refuse good records. A key that is GONE is unrecoverable.
- *
- *  A source array LONGER than its parsed counterpart counts as loss too, so a
- *  dropped element cannot hide behind index-wise walking. DEPTH-BOUNDED by the
- *  same MAX_BODY_COMPARE_DEPTH as deepEqual, for the same reason: the `before`
- *  side is raw pre-validation JSON out of a foreign store, so nothing upstream
- *  capped its nesting, and an unbounded walk would turn a corrupt body into an
- *  exit-1 stack trace instead of the promised refusal. */
-function droppedKeyPaths(before, after, path = '', depth = 0, out = []) {
-  if (depth > MAX_BODY_COMPARE_DEPTH) {
-    throw new Error(`its nesting exceeds ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record body`);
-  }
-  if (before === null || typeof before !== 'object') return out;
-  if (Array.isArray(before)) {
-    if (!Array.isArray(after)) return out;
-    for (let i = 0; i < before.length; i++) {
-      if (i >= after.length) out.push(`${path}[${i}]`);
-      else droppedKeyPaths(before[i], after[i], `${path}[${i}]`, depth + 1, out);
-    }
-    return out;
-  }
-  if (after === null || typeof after !== 'object' || Array.isArray(after)) return out;
-  for (const key of Object.keys(before)) {
-    const here = path ? `${path}.${key}` : key;
-    if (!Object.prototype.hasOwnProperty.call(after, key)) out.push(here);
-    else droppedKeyPaths(before[key], after[key], here, depth + 1, out);
-  }
-  return out;
-}
+// droppedKeyPaths itself now lives ONE place only: packages/store/src/index.ts,
+// imported below (decision droppedkeypaths-arms-kept-budgeted-one-shared-walker,
+// campaign S2d). This script used to carry an independent copy that still had
+// the pre-fix return-empty-on-type-change bug (board bd3f0acf's original
+// reference implementation, since fixed and budgeted upstream) — two
+// implementations of one contract drift, and this one had already drifted.
+// The imported version throws ComparisonBudgetExceededError on a pathological
+// or heavily-shared body instead of hanging or partial-reporting; the call
+// site below (inside the migrate() try/catch-free comparison loop) lets that
+// propagate to the top-level `catch (e) { fail(...) }` handler at the bottom
+// of this file, which turns ANY thrown error — budget or otherwise — into a
+// clean, loud exit-2 refusal naming the underlying message. Nothing here
+// swallows it.
 
 /** migrate --from <store.db> --to <store.db> [--apply]: copy every record the
  *  destination does not hold, preserving the envelope (ids, clocks, scope: this
@@ -923,7 +898,17 @@ function migrate() {
       continue;
     }
     const lost = droppedKeyPaths(r, roundTrip);
-    if (lost.length) strays.push(`${r.id} (${r.type}): ${lost.join(', ')}`);
+    // CAPPED RENDERING (roster review, S2d micro-round, MED): droppedKeyPaths
+    // can legitimately return up to COMPARE_OUTPUT_BUDGET (50,000) paths, each
+    // up to COMPARE_PATH_LENGTH_BUDGET (~1MB), for one absent/type-changed
+    // container's full subtree — joining ALL of them unbounded into this
+    // refusal message would let the REFUSAL ITSELF build a multi-hundred-MB
+    // string (or worse), which is strictly worse than the hazard it guards.
+    // renderCappedPathList is the SAME capped rendering assertNoFieldLoss uses
+    // (packages/store/src/index.ts) — one shared cap, not two drifting ones.
+    // Refusal semantics are unchanged: `lost.length` (uncapped) still drives
+    // whether this record is reported as a stray at all.
+    if (lost.length) strays.push(`${r.id} (${r.type}): ${renderCappedPathList(lost)}`);
   }
   if (strays.length) {
     fail(

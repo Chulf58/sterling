@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { ZodError } from 'zod';
+import { ZodError, type ZodIssue } from 'zod';
 import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
@@ -112,13 +112,36 @@ export interface BoardFilter {
    * PAGING (board b786a84f) — a 186-item lane audit died at item 1 because
    * board_query/maintenance_query had no way to see past one capped window.
    * Applied AFTER the same filter+sort boardFiltered already uses and BEFORE
-   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC —
-   * query()'s own §3.4 mechanical fallback rank, made explicit and stable in
-   * boardFiltered) so paging through offset 0, cap, 2*cap, … visits every
-   * matching item exactly once, in the same order, even as the board changes
-   * between calls elsewhere. Defaults to 0.
+   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC,
+   * id DESC — query()'s own §3.4 mechanical fallback rank, made explicit and
+   * total in boardFiltered) so paging through offset 0, cap, 2*cap, … visits
+   * every matching item exactly once IF THE BOARD IS UNCHANGED between calls
+   * — under concurrent writes an item bumped toward the head between page
+   * fetches can be SKIPPED (never scanned again by a later offset, because
+   * offset is a POSITION, blind to what moved across it) — see `cursor` for
+   * the continuation that does not have this hazard. Defaults to 0.
    */
   offset?: number;
+  /**
+   * KEYSET CONTINUATION (board abafbd48, upgrading b786a84f's offset paging;
+   * versioned + identity-bound per the abafbd48 re-review): an opaque
+   * next_cursor a prior boardQueryResult call returned — the page starts
+   * strictly AFTER that (updated_at, id) tuple in the same total order
+   * (updated_at DESC, id DESC) offset uses, computed over a FRESH scan each
+   * call. Unlike offset (a POSITION, blind to items that moved across it
+   * between calls), a cursor is an IDENTITY: it can never OMIT an item that
+   * was behind it, though it still cannot surface one that jumps AHEAD of it
+   * after the cursor was minted — finish a churn-exposed walk with a head
+   * re-query. The cursor also carries the FILTERS it was minted under
+   * (source/system_reason/objective/file_keys/contains/feature_slug); a
+   * continuation under DIFFERENT filters is refused, naming the mismatch,
+   * rather than silently omitting whatever the changed filter excludes. Not
+   * an alternate history: cap/projection may still vary freely page to page.
+   * Mutually exclusive with `offset`: passing both is refused loudly, and a
+   * cursor that fails to decode is refused loudly naming `cursor`, never
+   * silently ignored.
+   */
+  cursor?: string;
 }
 
 /**
@@ -215,6 +238,56 @@ export interface LaneAdvisory {
   collisions: LaneCollision[];
 }
 
+/**
+ * ONE record named by a board/queue item's derived `artifact_evidence` — compact
+ * by design (three short fields), because this block rides EVERY item on a page
+ * and a full digest per match would dwarf the item it annotates. `name` is what
+ * lets a human recognise the record; `id8` is the citation prefix to open it
+ * with (knowledge_get resolves an unambiguous 8-char prefix) — name first, id
+ * retained, per the never-a-bare-id-in-front-of-a-human rule.
+ */
+export interface ArtifactEvidenceRecord {
+  /** the record's 8-char citation prefix — enough for knowledge_get, never a claim of uniqueness */
+  id8: string;
+  type: string;
+  /** slug → title → question → location, first present: the type-appropriate human name, clipped */
+  name: string;
+}
+
+/**
+ * The DERIVED, per-item reading of "has anything durable been written near this
+ * item since it was created" (board 00fa8adb) — board_remove's removal receipt
+ * brought forward to QUERY time, so a reader auditing the board sees the same
+ * evidence before deciding what to act on rather than only at the moment of
+ * removal. Advisory in exactly the sense `lane_advisory` is: computed after the
+ * page is already fixed, never filtering, reordering or refusing anything.
+ *
+ * NEVER A COMPLETION VERDICT: a record touching an item's files or citing its id
+ * means POSSIBLY ADDRESSED — the envelope's `artifact_evidence_note` says so in
+ * words, once per call.
+ */
+export interface ArtifactEvidence {
+  /** the FULL dedup'd match count across both arms — may exceed `records`.length */
+  count: number;
+  /**
+   * up to three of the matching records, file-key matches first. ABSENT (never
+   * an empty array) when count is 0, mirroring lane_advisory's own
+   * "presence is the signal" convention.
+   */
+  records?: ArtifactEvidenceRecord[];
+  /**
+   * whether the file_keys arm could run at all: 'skipped:no_file_keys' on an
+   * item declaring no paths (concept_article_missing / research_owed / plain
+   * tasks routinely declare none); 'unavailable:budget' when the page's
+   * distinct-key-set query budget (ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP) was
+   * already spent by earlier items. The CITATION arm still ran in every case —
+   * its scan is shared and already paid — so `count` on such an item is a
+   * citation-only floor, and a skipped or truncated check is stated rather than
+   * silently read as a negative result (P5).
+   */
+  file_key_check: 'checked' | 'skipped:no_file_keys' | 'unavailable:budget';
+}
+
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
   /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
@@ -223,8 +296,25 @@ export interface BoardQueryResult {
   cap: number;
   /** exact: more matched than were returned (i.e. offset + returned < matched_filter) */
   capped: boolean;
-  /** PAGING (board b786a84f): the offset this page was read at (0 when omitted) — the next page starts at offset + returned. */
+  /**
+   * PAGING (board b786a84f): the offset this page was READ AT when paging by
+   * offset — 0 when omitted, and the next OFFSET page starts at
+   * offset + returned. Round-3 re-review LOW: that arithmetic is ONLY valid
+   * for offset-mode paging — a page read by `cursor` always reports 0 here
+   * (no position was ever asked for), so "offset + returned" does NOT name
+   * the next page in cursor mode; use `next_cursor` there instead.
+   */
   offset: number;
+  /**
+   * KEYSET CONTINUATION (board abafbd48): an opaque cursor naming the last
+   * item returned on this page — present only when `capped` (more items
+   * remain past this page), absent otherwise. Pass it back as `cursor` on the
+   * next call to resume by IDENTITY rather than position: unlike `offset`, it
+   * can never re-skip an item that was behind it even if the board changed
+   * between calls, though a later page still cannot surface an item that
+   * jumped AHEAD of the cursor after it was minted.
+   */
+  next_cursor?: string;
   note?: string;
   /**
    * board-provenance-measured-at-head: whether the one-shot git walk backing
@@ -236,10 +326,42 @@ export interface BoardQueryResult {
    */
   provenance: string;
   /**
+   * TRUTH AT READ (decision queue-truth-at-read-annotation-design): whether the
+   * reconcile_needed DRIFT RE-CHECK ran over this page — a DIFFERENT check from
+   * `provenance` above, which describes the measured_at_head git walk, so the two
+   * statuses are reported separately rather than one standing in for the other.
+   * 'checked' means every returned reconcile_needed row got a verdict (a row with
+   * no annotation genuinely still reproduces); 'checked:budget_truncated' means
+   * the page's cost allowance ran out and the items past it say so themselves;
+   * 'unavailable:<reason>' — no_reconcile_items | no_repo_root | no_git — states
+   * why nothing was compared, because an absent annotation must never read as a
+   * positive freshness claim (P5).
+   */
+  reconcile_provenance: string;
+  /**
    * PARALLEL-LANE SEED: present ONLY when two or more user-source items in the
    * matched set share a file_keys path — see LaneAdvisory. Absent, never empty.
    */
   lane_advisory?: LaneAdvisory;
+  /**
+   * board 00fa8adb: whether the per-item `artifact_evidence` derivation ran over
+   * this page — 'checked'; 'checked:budget_truncated' when the file-key arm's
+   * per-call query budget ran out and the items past it say 'unavailable:budget'
+   * themselves (their citation-arm evidence still computed); or
+   * 'unavailable:store_query_failed' when the evidence scan threw. It FAILS
+   * OPEN: the items are returned either way (a board read
+   * is not worth losing to an advisory annotation), so this status is the only
+   * thing that distinguishes "nothing was written near these items" from "we
+   * never looked" — an absent per-item block is never a negative result (P5).
+   */
+  artifact_evidence_provenance: string;
+  /**
+   * The one-time reading instruction for `artifact_evidence`, stated once per
+   * envelope rather than per item. Unconditional: it is what makes a ZERO count
+   * readable too, and a note that appeared only when evidence exists would be
+   * missing from exactly the pages most likely to be misread.
+   */
+  artifact_evidence_note: string;
   /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
@@ -376,7 +498,7 @@ export interface SameSubjectEntry {
   matched_on: string[];
   /** N25: the served/derived status of the matched record. A same_subject
    *  candidate is drawn from axisCandidateMatches -> store.query over the
-   *  five governing types, which never serves a 'superseded' row (AC5,
+   *  six governing types, which never serves a 'superseded' row (AC5,
    *  same-subject-surfacing.test.ts: a just-superseded record must NEVER be
    *  named) — a retired record simply never reaches this entry at all, so
    *  `status` cannot disclose retirement. What it DOES disclose: among the
@@ -404,6 +526,238 @@ const DEFAULT_BOARD_CAP = 50;
 // The bounded todo scan the filter runs over. A full scan means the reported
 // count is a floor; boardQueryResult says so rather than under-reporting.
 const BOARD_SCAN_CAP = 1000;
+
+/**
+ * The durable record types that can count as a board/queue item's fulfilling
+ * ARTIFACT — ONE list, shared by board_remove's receipt (removalArtifactEvidence)
+ * and the query-time derivation (pageArtifactEvidence). Extracted from the
+ * removal path when the second reader appeared, for the DEFAULT_BOARD_CAP reason:
+ * two copies of "what counts as evidence" would let the receipt and the query
+ * disagree about the same item, which is exactly the drift the derived field
+ * exists to surface.
+ *
+ * open_question is in the set (board a9be48f2): a board item can legitimately be
+ * answered by being CONVERTED into an evidenced open question — the investigation
+ * is now durable and tracked as a record — and without this type the evidence
+ * would read empty for exactly the outcome that produced the most durable artifact.
+ */
+const ARTIFACT_EVIDENCE_TYPES = [
+  'decision',
+  'anti_pattern',
+  'feature_article',
+  'research_finding',
+  'disconfirmed_hypothesis',
+  'open_question',
+  'reference_material',
+];
+
+/**
+ * The bounded scan BOTH evidence arms run under — the same 200-record window
+ * board_remove's receipt uses, deliberately: a derived count that scanned deeper
+ * than the receipt would disagree with the receipt on the very item it is meant
+ * to prepare the reader for.
+ */
+const ARTIFACT_EVIDENCE_SCAN_CAP = 200;
+
+/** How many matching records the per-item field NAMES (the count stays full). */
+const ARTIFACT_EVIDENCE_RECORD_CAP = 3;
+
+/**
+ * PER-CALL BUDGET for the file-key arm — the number of DISTINCT normalized
+ * key-set queries one board_query/maintenance_query page may issue. `cap` is
+ * caller-controlled and the arm cannot be unioned across items (see
+ * pageArtifactEvidence), so without this a board_query({cap:1000}) over items
+ * with distinct file_keys would fan out to ~1000 store queries on a single read.
+ *
+ * SAME SHAPE AS THE NEIGHBOURING BUDGET (RECONCILE_RECHECK_FILE_ATTEMPT_CAP):
+ * shared by the WHOLE page, memo hits cost nothing, and once it is spent the
+ * remaining items get a per-item 'unavailable:budget' while the envelope
+ * discloses the truncation — never a silent partial evaluation read as
+ * "checked" (P5).
+ *
+ * MAGNITUDE: deliberately LOWER than that neighbour's 120, because the unit is
+ * not the same — an attempt there is one stat/hash of a file, whereas one unit
+ * here is a whole indexed store query. 60 still covers an ordinary full page
+ * (DEFAULT_BOARD_CAP = 50 items, every one of them declaring a DIFFERENT key
+ * set — already the worst realistic shape, since sibling slices of an objective
+ * share paths and share a query) with headroom, so the axis binds only on an
+ * explicitly raised cap, which is exactly the shape it exists for.
+ */
+const ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP = 60;
+
+/**
+ * The one-time, envelope-level reading instruction for the per-item
+ * `artifact_evidence` block. Stated ONCE per call rather than per item (it is
+ * the same sentence for every row), and worded as a LOOKUP, never a verdict:
+ * the field can say that something was written near an item, and nothing more.
+ * An index or summary is a lookup, never a source (CLAUDE.md) — a count that
+ * reads as a completion verdict would let a reader retire work on a coincidence.
+ */
+const ARTIFACT_EVIDENCE_NOTE =
+  `artifact_evidence is a LOOKUP, never a verdict: per item it counts durable knowledge records ` +
+  `(${ARTIFACT_EVIDENCE_TYPES.join(', ')}) written or updated since that item was created which either touch its ` +
+  `file_keys or cite its id — within a bounded ${ARTIFACT_EVIDENCE_SCAN_CAP}-record scan per arm. A non-zero count means POSSIBLY ADDRESSED and ` +
+  `nothing stronger: VERIFY against HEAD before acting on it. A zero count is equally weak evidence the other way — ` +
+  `it checks the knowledge store only, never git, so work that was never captured leaves no trace here.`;
+
+/**
+ * Total order for board/queue paging (board abafbd48 — Codex-adjudicated,
+ * thread 01a05bc3): `updated_at DESC` alone is not a total order — two items
+ * sharing one updated_at (minted in the same write, or the same test tick)
+ * used to resolve to whatever order the underlying scan happened to produce,
+ * and a keyset cursor built on a non-total order cannot name an unambiguous
+ * resume point. `id DESC` breaks every remaining tie, deterministically, in
+ * BOTH the JS sort (boardFiltered) and — for the same reason — the SQL
+ * ORDER BY paths this same order must agree with (packages/store/src/index.ts).
+ * Returns <0 when `a` sorts BEFORE `b` in that order, >0 when after, 0 only
+ * when the two tuples are identical (which never happens for two distinct
+ * records, since id is unique).
+ */
+function compareBoardOrder(aUpdatedAt: string, aId: string, bUpdatedAt: string, bId: string): number {
+  if (aUpdatedAt !== bUpdatedAt) return aUpdatedAt < bUpdatedAt ? 1 : -1;
+  if (aId !== bId) return aId < bId ? 1 : -1;
+  return 0;
+}
+
+/** board_query and maintenance_query are two DIFFERENT MCP tools sharing one
+ *  paging implementation (pageBoard) — this names which one a call/cursor/
+ *  refusal belongs to, so a refusal message is never a lie about which tool
+ *  the caller actually invoked (board abafbd48 re-review, HIGH). */
+type BoardSurface = 'board_query' | 'maintenance_query';
+
+/**
+ * The FILTERS a cursor is bound to — everything that decides WHICH rows can
+ * match and where they sort, but never cap/projection/offset (which may
+ * legitimately vary page to page). `objective` is an EXPLICIT DISCRIMINANT
+ * object ({mode:'any'} omitted / {mode:'ungrouped'} 'standalone' / {mode:
+ * 'exact', value} everything else) — never a bare sentinel value, because a
+ * bare-value + `?? null`-style comparison cannot tell "no objective filter"
+ * apart from "filtered to the absence sentinel" (round-3 re-review HIGH: they
+ * collapsed to the identical `null`, so a standalone cursor continued without
+ * the filter silently omitted every record the wider query would have
+ * included). `file_keys` deduped and sorted (order never changes what
+ * matches), `contains` lowercased (the match is already case-insensitive) —
+ * so two calls that MEAN the same filter always produce byte-identical
+ * identity JSON, and two calls that mean something different never
+ * accidentally collide (board abafbd48 re-review, MEDIUM-HIGH: an unbound
+ * cursor silently omitted everything ahead of the tuple whenever a caller
+ * changed filters mid-walk).
+ */
+function boardCursorIdentity(surface: BoardSurface, filter: BoardFilter): Record<string, unknown> {
+  const identity: Record<string, unknown> = { surface };
+  if (filter.source !== undefined) identity.source = filter.source;
+  // CANONICALIZATION (round-3 re-review LOW): `system_reason`/`contains` mirror
+  // the TRUTHY test boardFiltered's own `if (filter.x)` guards apply to them
+  // (an explicit '' behaves exactly like omitted — neither narrows anything),
+  // so both compare IDENTICAL in identity too; a bare `!== undefined` would
+  // fail-safe (refuse a continuation that would have behaved identically) but
+  // misstate the semantic contract these two fields actually have.
+  if (filter.system_reason) identity.system_reason = filter.system_reason;
+  // EXPLICIT DISCRIMINANTS (board abafbd48 re-review round 3, HIGH): a bare
+  // string sentinel plus describeIdentityMismatch's `value ?? null` fallback
+  // made 'standalone' (identity.objective === null, explicitly) and OMITTED
+  // (identity.objective absent -> undefined -> also collapsed to null by the
+  // ?? in the comparator) compare EQUAL — a standalone cursor continued
+  // without the filter silently omitted every record the wider query would
+  // have included. `identity.objective` is now ALWAYS present, one of three
+  // mutually distinguishable shapes, so no key-absence/`?? null` collapse
+  // can ever equate two different filter states again.
+  identity.objective =
+    filter.objective === undefined
+      ? { mode: 'any' }
+      : filter.objective === 'standalone'
+        ? { mode: 'ungrouped' }
+        : { mode: 'exact', value: filter.objective };
+  // (a sentinel comment used to stand here — round-3 re-review MEDIUM: it had
+  // accumulated literal NUL bytes, which made `file`(1) classify this whole
+  // source file as binary and broke plain-text search tools like rg/grep
+  // against it. Deleted outright rather than re-typed, since the discriminant
+  // object above no longer needs a sentinel at all.)
+  // file_keys: an EMPTY array is the same "no narrowing" as omitted (only a
+  // non-empty list ever reaches boardFiltered's overlap ranking), so both
+  // compare identical below. Each entry is run through normalizeRepoPath —
+  // the SAME normalization query execution itself applies (store/index.ts
+  // baseFilter) — so two spellings of one path (backslash vs forward slash,
+  // a leading './') that resolve to the SAME repo-relative key never read as
+  // a changed filter. Safe to call unconditionally: boardFiltered already
+  // routed these same values through store.query() -> normalizeRepoPath
+  // before this function is ever reached, so a value that would throw here
+  // already threw there, upstream of any cursor logic.
+  if (filter.file_keys && filter.file_keys.length > 0) {
+    identity.file_keys = [...new Set(filter.file_keys.map(normalizeRepoPath))].sort();
+  }
+  if (filter.contains) identity.contains = filter.contains.toLowerCase();
+  if (filter.feature_slug !== undefined) identity.feature_slug = filter.feature_slug;
+  return identity;
+}
+
+/** Key-by-key diff between a minted cursor's identity and the current call's
+ *  — null when they match, else a human-readable list of what changed, so the
+ *  refusal names the mismatch instead of just saying "no". */
+function describeIdentityMismatch(minted: Record<string, unknown>, current: Record<string, unknown>): string | null {
+  const keys = new Set([...Object.keys(minted), ...Object.keys(current)]);
+  const diffs: string[] = [];
+  for (const key of keys) {
+    const a = JSON.stringify(minted[key] ?? null);
+    const b = JSON.stringify(current[key] ?? null);
+    if (a !== b) diffs.push(`${key}: ${a} -> ${b}`);
+  }
+  return diffs.length ? diffs.join(', ') : null;
+}
+
+/**
+ * KEYSET CONTINUATION (board abafbd48; versioned + identity-bound per the
+ * abafbd48 re-review, MEDIUM-HIGH): a next_cursor is an opaque, base64-
+ * encoded {v, updated_at, id, identity} token naming the LAST item returned
+ * on a page AND the exact filters that produced it — the boundary
+ * boardQueryResult resumes strictly after, computed fresh each call (never a
+ * stored offset/snapshot), so an item that REMAINS BEHIND the cursor between
+ * calls can never be skipped by a later page (round-3 re-review LOW: an item
+ * bumped AHEAD of the cursor — toward the head — is the one case this cannot
+ * see; that limitation is real, not fixed by the fresh-scan design) WITHIN
+ * THE SAME QUERY. `identity` exists because a cursor is a
+ * position in ONE specific query's total order — resuming it under DIFFERENT
+ * filters (a different objective, a narrowed file_keys, …) is not "the next
+ * page of the same walk", it is a different walk that happens to reuse a
+ * tuple, and would silently omit everything the new filter excludes but the
+ * old one didn't (or vice versa). `v` lets the decode shape change later
+ * without a stale cursor from an old build being misread as a valid one from
+ * a new one. Not a security boundary — only round-trip-stable — so a plain
+ * base64(JSON) is sufficient; the decode failure path is what has to be loud
+ * (P5), not the encoding's obscurity.
+ */
+function encodeBoardCursor(surface: BoardSurface, filter: BoardFilter, updatedAt: string, id: string): string {
+  const payload = { v: 2, updated_at: updatedAt, id, identity: boardCursorIdentity(surface, filter) };
+  return Buffer.from(JSON.stringify(payload)).toString('base64');
+}
+
+function decodeBoardCursor(surface: BoardSurface, cursor: string): { updated_at: string; id: string; identity: Record<string, unknown> } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+  } catch {
+    throw new Error(
+      `${surface}: 'cursor' is malformed — could not decode it as a base64-encoded continuation token; page from a next_cursor this same tool returned, never a hand-built value.`
+    );
+  }
+  const rec = parsed as { v?: unknown; updated_at?: unknown; id?: unknown; identity?: unknown } | null;
+  if (
+    rec === null ||
+    typeof rec !== 'object' ||
+    rec.v !== 2 ||
+    typeof rec.updated_at !== 'string' ||
+    rec.updated_at.length === 0 ||
+    typeof rec.id !== 'string' ||
+    rec.id.length === 0 ||
+    typeof rec.identity !== 'object' ||
+    rec.identity === null
+  ) {
+    throw new Error(
+      `${surface}: 'cursor' is malformed — decoded value is not a valid {v:2, updated_at, id, identity} continuation token (wrong version, empty tuple field, or missing identity); page from a next_cursor this same tool returned, never a hand-built value.`
+    );
+  }
+  return { updated_at: rec.updated_at, id: rec.id, identity: rec.identity as Record<string, unknown> };
+}
 // How many local branches the parked-file probe will interrogate for ONE absent
 // file (board 1d6a721a). Bounded because the probe shells out per ref: a repo
 // with a long tail of stale branches must not turn one missing file into
@@ -445,6 +799,109 @@ const DRIFT_ITEMS_PER_READ = 3;
 // nag about a stub someone scaffolded five minutes ago. A whole file under this
 // is plausibly still a placeholder; several hundred lines is not.
 const PLANNED_CREDIBLE_BYTES = 2000;
+
+// TRUTH AT READ (decision queue-truth-at-read-annotation-design): the PER-CALL
+// budget the reconcile_needed re-check may spend on a board_query/
+// maintenance_query page. THREE AXES, not one N-files cap — that cap was
+// explicitly REJECTED because "fifty files can be gigabytes and missing paths
+// spawn git subprocesses", so a single number cannot bound the cost honestly:
+//  - ATTEMPTS bounds the stat() fan-out (one attempt = one owned path looked at);
+//  - BYTES bounds the sha256 work, which is what a big file actually costs;
+//  - GIT PROBES bounds parkedOnRef, the only arm that shells out per path.
+// Every axis is shared by the WHOLE page and, once any is hit, remaining items
+// get a per-item `unavailable:budget` and the envelope discloses the truncation
+// — never a silent partial evaluation read as "checked" (P5).
+//
+// MAGNITUDES: a page is capped at DEFAULT_BOARD_CAP (50) items and a minted
+// reconcile item names ONE file (DRIFT_ITEMS_PER_READ splits per file), so 120
+// attempts covers an ordinary full page more than twice over; the axis only
+// binds on the pathological shape this budget exists for — one item naming an
+// article's whole (possibly hundreds-strong) files[] set through the overflow
+// summary arm.
+const RECONCILE_RECHECK_FILE_ATTEMPT_CAP = 120;
+const RECONCILE_RECHECK_HASH_BYTE_CAP = 8 * 1024 * 1024;
+const RECONCILE_RECHECK_GIT_PROBE_CAP = 8;
+// How far liveArticleFor will follow a supersede chain before abstaining
+// (review FIX 3, 2026-08-31). Real chains are a handful of hops; the cap is the
+// shape-independent backstop beside the cycle guard, so a torn or pathological
+// chain costs a bounded number of store reads and then discloses, never a
+// verdict built on whatever node the walk happened to stop on.
+const LIVE_ARTICLE_CHAIN_HOP_CAP = 32;
+
+/**
+ * The verdict of the ONE per-owned-file drift classifier
+ * (classifyOwnedFileDrift) that the read-time MINT and the queue's
+ * TRUTH-AT-READ annotation both consume — decision
+ * queue-truth-at-read-annotation-design, predicate half: "never a second copy,
+ * and abstention is never collapsed to false".
+ *
+ * `unavailable` is a FIRST-CLASS verdict, not a hole. contentChanged() collapses
+ * "no baseline" and "cannot read the file" into `false` because its callers
+ * RAISE FLAGS and must abstain rather than fabricate one; that collapse is the
+ * anti-model here, because the annotation site has to say WHY it could not
+ * answer. The mint's abstain-as-no-drift behaviour is preserved by its CALL
+ * SITE reading `unavailable` exactly as it reads `clean` — a caller policy,
+ * never a property of the shared predicate.
+ */
+type DriftVerdict =
+  | { kind: 'reconcile'; missing: boolean }
+  | { kind: 'deletion_candidate' }
+  | { kind: 'parked'; ref: string }
+  | { kind: 'clean' }
+  | { kind: 'unavailable'; reason: string };
+
+/**
+ * classifyOwnedFileDrift's result: the verdict, plus the file's size when it
+ * EXISTS on disk (the mint's state-honesty check counts owned live bytes, and
+ * the stat is already taken — returning it keeps the mint from taking a second).
+ */
+type OwnedFileDrift = { verdict: DriftVerdict; size?: number };
+
+/**
+ * The two questions classifyOwnedFileDrift is asked, which differ in exactly
+ * TWO documented places (see the method body). Both modes run the same seven
+ * checks in the same order.
+ *
+ *  - 'mint' (knowledgeQuery's read-time drift wire): "is the article's account
+ *    of this file still true?" — the historical behaviour, unchanged.
+ *  - 'recheck' (the queue annotation): "does the drift an OPEN item already
+ *    recorded still reproduce?" — a different question about the same bytes.
+ */
+type DriftCheckMode = 'mint' | 'recheck';
+
+interface DriftCheckContext {
+  mode: DriftCheckMode;
+  /** the working tree the article's paths live in (treeRootFor, already resolved) */
+  treeRoot: string;
+  /** the live article's server-computed baselines — the bytes it was written against */
+  baselines: Record<string, string> | undefined;
+  /** the instant those baselines were taken: the article's updated_at */
+  baselinedAt: string;
+  /**
+   * Whether the cheap stat-first mtime prefilter may TERMINATE with `clean`
+   * (no hash). TRUE at the mint (its historical behaviour, decision 57d9a52d);
+   * ALWAYS FALSE at the recheck (review FIX 1, 2026-08-31) — there a
+   * timestamp-only `clean` becomes the affirmative "no longer reproduces"
+   * claim, and an mtime-preserved edit after an unrelated re-baseline would make
+   * that claim false. See the prefilter arm in classifyOwnedFileDrift.
+   */
+  honorMtimePrefilter: boolean;
+}
+
+/**
+ * The per-CALL budget + memo the recheck threads through the classifier.
+ * Absent at the mint, which is a per-record wire with its own DRIFT_ITEMS_PER_READ
+ * bound and must keep spending exactly what it spends today.
+ */
+interface DriftBudget {
+  attempts: number;
+  bytesHashed: number;
+  gitProbes: number;
+  /** any axis was hit at least once — the envelope's truncation disclosure */
+  truncated: boolean;
+  /** (resolved tree, article version, path, prefilter policy) -> verdict */
+  memo: Map<string, DriftVerdict>;
+}
 
 /**
  * Tags resolveRecordId's two genuine MISS throws — too-short-to-resolve and
@@ -527,6 +984,35 @@ export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 
  * the two surfaces in lockstep (decision 7c7f6db1).
  */
 export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
+
+/**
+ * elementOwnsScalar — the ONE ownership predicate shared by every
+ * `arr[key=value]` selector match: knowledge_edit's array-element addressing
+ * AND knowledge_array_remove's element selection (board c61c9a3a). Both used
+ * to carry their own hand-copied `String(el[key]) === value` comparison,
+ * which reads an ABSENT key as the string 'undefined' — so a selector like
+ * `[anykey=undefined]` matched every element LACKING that key. Fixed first on
+ * knowledge_array_remove (board 39673f6a, defect B) because there the false
+ * match DESTROYED the element; knowledge_edit carried the identical defect
+ * (silently misdirecting an edit to the wrong element) and is fixed here by
+ * sharing this one predicate rather than reproducing a second copy that would
+ * only re-diverge later.
+ *
+ * OWNERSHIP FIRST, then the caller does its own stringified-value comparison.
+ * This helper answers only "does this element carry `key` with a defined
+ * value" — never "does it equal `value`". A missing key, or a key explicitly
+ * set to `undefined`, both read as non-ownership; an element whose value IS
+ * the literal string "undefined" still owns the key and is unaffected.
+ *
+ * Deliberately NOT shared: the scalar-discriminator check (object/array
+ * values are unsound to address by) and every refusal policy — zero/multi
+ * match handling, floors, versioning. Those are per-operation and differ on
+ * purpose (array_remove destroys and floors; edit does not).
+ */
+function elementOwnsScalar(el: unknown, key: string): el is Record<string, unknown> {
+  if (!el || typeof el !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(el, key) && (el as Record<string, unknown>)[key] !== undefined;
+}
 
 export class SterlingTools {
   private store: ToolStore;
@@ -792,8 +1278,13 @@ export class SterlingTools {
   }
 
   /**
-   * board-provenance-measured-at-head: ONE bounded `git log --name-only` walk
-   * per board_query call (never per item — the decision's whole point).
+   * board-provenance-measured-at-head: bounded `git log` walks per board_query
+   * call — never per item, which is the decision's whole point. ONE walk for the
+   * KEYED lane (`--name-only`, path-touch counts) and, only when the page holds
+   * keyless measured items, ONE more names-free walk for their distance
+   * annotation; the two are deliberately separate so the keyless lane can never
+   * change a keyed verdict or the envelope value (see the FIX 6 note in the body
+   * and provenanceWalk).
    *
    * FIX F1 (review 2026-08-24): the walk is RANGE-BOUNDED by the OLDEST
    * eligible item's measured_at_head, not an unconditional HEAD-relative cap
@@ -828,36 +1319,186 @@ export class SterlingTools {
     treeRoot: string | undefined
   ): { status: string; warnings: Map<string, { full: string; short: string }> } {
     const warnings = new Map<string, { full: string; short: string }>();
-    const withFileKeys = (records as unknown as Record<string, unknown>[]).filter((r) => {
+    const all = records as unknown as Record<string, unknown>[];
+    const hasFileKeys = (r: Record<string, unknown>) => {
       const fk = r.file_keys as string[] | undefined;
       return Array.isArray(fk) && fk.length > 0;
-    });
-    const eligible = withFileKeys.filter((r) => {
+    };
+    const hasValidHead = (r: Record<string, unknown>) => {
       const head = r.measured_at_head as string | undefined;
       return typeof head === 'string' && /^[0-9a-f]{40}$/.test(head);
-    });
+    };
+    const withFileKeys = all.filter(hasFileKeys);
+    // KEYLESS ITEMS ARE ANNOTATED TOO (board ab5ef216, decision
+    // queue-truth-at-read-annotation-design §4): a keyless item's evidence still
+    // ages, and excluding it meant the one item that can say NOTHING about paths
+    // also said nothing about its own age — the absence a reader most easily
+    // misreads as freshness (P5).
+    //
+    // BUT STRICTLY ADDITIVELY (review FIX 6, 2026-08-31). The broadening first
+    // shipped by widening THE SHARED eligibility set, which is not additive: a
+    // keyless sha joined the oldest-base selection and the single walk, so an
+    // older keyless base could widen the range past PROVENANCE_WALK_COMMIT_CAP,
+    // flip the shared `walkTruncated` flag, and thereby change a KEYED item's
+    // verdict ('not an ancestor of HEAD' → 'walk cap reached', or a real count →
+    // no count at all) plus the envelope's own provenance value
+    // ('checked' → 'unavailable:walk_cap'). The keyed lane's verdicts and the
+    // envelope value are therefore computed from the ORIGINAL keyed-only
+    // eligibility, over their own walk, exactly as before the broadening; the
+    // keyless distances ride a SEPARATE bounded walk whose truncation is
+    // disclosed per item and never touches the keyed lane or the envelope.
+    const keyed = all.filter((r) => hasFileKeys(r) && hasValidHead(r));
+    const keyless = all.filter((r) => !hasFileKeys(r) && hasValidHead(r));
     if (!treeRoot) return { status: 'unavailable:no_repo_root', warnings };
     const headCheck = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
     if (!headCheck || headCheck.status !== 0) return { status: 'unavailable:no_git', warnings };
     const branchCheck = this.runGit(treeRoot, ['symbolic-ref', '-q', 'HEAD']);
     if (!branchCheck || branchCheck.status !== 0) return { status: 'unavailable:detached_head', warnings };
     // FIX F2: distinguish "nothing here even carries file_keys" from "file_keys
-    // exist but none of them have been stamped yet" — different remedies.
-    if (withFileKeys.length === 0) return { status: 'unavailable:no_file_keys', warnings };
-    if (eligible.length === 0) return { status: 'unavailable:no_measured_items', warnings };
+    // exist but none of them have been stamped yet" — different remedies. Both
+    // reasons report on the same NOTHING-TO-CHECK case: with no annotatable item
+    // at all there is no walk to run, and the reason names which of the two
+    // inputs was missing.
+    if (keyed.length === 0 && keyless.length === 0) {
+      return { status: withFileKeys.length === 0 ? 'unavailable:no_file_keys' : 'unavailable:no_measured_items', warnings };
+    }
+    // The CURRENT tip, for the keyless distance wording below — the reader needs
+    // the sha the distance is measured TO, and it is already in hand.
+    const headShaNow = headCheck.stdout.trim();
+    const headNow8 = /^[0-9a-f]{40}$/.test(headShaNow) ? headShaNow.slice(0, 8) : headShaNow;
 
-    // F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
-    // the oldest eligible base topologically, never by commit TIMESTAMP — a
-    // child and its parent can share a timestamp, which made the CHILD
-    // "oldest" and excluded the PARENT's range entirely, falsely reporting the
-    // parent's sha as "not in current history". `git merge-base --octopus
-    // <shas>` returns a commit reachable from EVERY given base — an ancestor
-    // of all of them by construction — so `<that>^..HEAD` is guaranteed to
-    // cover every base's range regardless of commit-time skew. Pre-filter to
-    // shas that actually resolve (rev-list --ignore-missing) first: merge-base
-    // refuses outright if handed one that doesn't, and one rebased-away sha
-    // must not poison the whole batch back to the unbounded walk.
-    const uniqueShas = [...new Set(eligible.map((r) => r.measured_at_head as string))];
+    // ---- THE KEYED LANE: byte-identical to the pre-broadening behaviour ----
+    let capHit = false;
+    if (keyed.length) {
+      const keyedWalk = this.provenanceWalk(
+        treeRoot,
+        keyed.map((r) => r.measured_at_head as string),
+        true
+      );
+      if (!keyedWalk) return { status: 'unavailable:no_git', warnings };
+      const { commits, truncated: walkTruncated } = keyedWalk;
+      for (const rec of keyed) {
+        const fileKeys = rec.file_keys as string[];
+        const head = rec.measured_at_head as string;
+        const id = rec.id as string;
+        const idx = commits.findIndex((c) => c.sha === head);
+        if (idx === -1) {
+          // F3: never silently skip — the sha is either older than a truncated
+          // window (cap genuinely hit) or not on HEAD's ancestry at all
+          // (rebased/orphaned); either way the count cannot be trusted, so say
+          // so on the item rather than reporting nothing.
+          if (walkTruncated) capHit = true;
+          const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+          warnings.set(id, {
+            full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+            // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
+            short: ` ⚠not verifiable — re-verify`,
+          });
+          continue;
+        }
+        const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
+        if (count > 0) {
+          warnings.set(id, {
+            full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
+            // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
+            // after headlineRecord's clip broke headline's compact-line contract
+            // (an 80-char line became 170+ chars, multiline). Headline gets a
+            // short marker instead; digest/full keep the full sentence.
+            short: ` ⚠${count} commits since measured`,
+          });
+        }
+      }
+    }
+
+    // ---- THE KEYLESS LANE: its own walk, its own truncation, ADDITIVE ONLY ----
+    // KEYLESS DISTANCE (board ab5ef216): with no file_keys there is no
+    // path-touch count to compute, so the item gets the one thing a walk CAN say
+    // about it — how far behind HEAD its evidence was measured. AN AGE SIGNAL,
+    // NEVER CALLED STALENESS: commits that touched nothing this item cares about
+    // still move the number, so the annotation asks for re-verification rather
+    // than asserting anything about the item's content. Zero distance says so
+    // plainly instead of dressing "no drift" up as a measurement.
+    //
+    // Names are NOT requested here (no path counting to do), and this walk's own
+    // truncation is disclosed PER ITEM only — it deliberately never feeds
+    // `capHit`, because the envelope's provenance value describes the keyed
+    // path-level check (review FIX 6).
+    if (keyless.length) {
+      const keylessWalk = this.provenanceWalk(
+        treeRoot,
+        keyless.map((r) => r.measured_at_head as string),
+        false
+      );
+      for (const rec of keyless) {
+        const head = rec.measured_at_head as string;
+        const id = rec.id as string;
+        const idx = keylessWalk ? keylessWalk.commits.findIndex((c) => c.sha === head) : -1;
+        if (idx === -1) {
+          // Same P5 posture as the keyed lane's F3 arm: never silently skip. A
+          // failed walk is its own named reason rather than an absent annotation.
+          const reason = !keylessWalk ? 'git walk unavailable' : keylessWalk.truncated ? 'walk cap reached' : 'not an ancestor of HEAD';
+          warnings.set(id, {
+            full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
+            short: ` ⚠not verifiable — re-verify`,
+          });
+          continue;
+        }
+        warnings.set(id, {
+          full:
+            idx === 0
+              ? `ℹ measured at current HEAD (${headNow8}) — no file_keys, path-level provenance unavailable; re-verify any absence claim before acting`
+              : // The decision's verbatim wording. Plural 'commits' at every N,
+                // deliberately: the phrase is quoted as-is by the pins and by the
+                // decision, and a singular special case would make the one
+                // reader who greps for it miss exactly the N=1 case.
+                `⚠ measured ${idx} commits before HEAD at ${headNow8} — no file_keys, path-level provenance unavailable; re-verify any absence claim before acting`,
+          // Headline keeps its compact line (OUTSIDE-MODEL FINDING 3) while
+          // still carrying the phrase a reader greps for.
+          short: idx === 0 ? ` ℹmeasured at current HEAD` : ` ⚠measured ${idx} commits before HEAD`,
+        });
+      }
+    }
+    // THE ENVELOPE VALUE IS THE KEYED LANE'S (review FIX 6): with no keyed item
+    // on the page the path-level check had nothing to run, and its reason is
+    // exactly the one it reported before keyless items were annotated at all.
+    if (keyed.length === 0) {
+      return { status: withFileKeys.length === 0 ? 'unavailable:no_file_keys' : 'unavailable:no_measured_items', warnings };
+    }
+    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
+  }
+
+  /**
+   * ONE bounded `git log` walk over the range that covers every sha in `shas`,
+   * newest-first. Extracted (review FIX 6, 2026-08-31) so the keyed and keyless
+   * lanes can each have their OWN walk: sharing one walk meant a keyless sha's
+   * range could flip the keyed lane's truncation flag and, through it, both a
+   * keyed item's verdict and the envelope's provenance value.
+   *
+   * Every command, flag and ordering below is unchanged from the single-walk
+   * version, so the keyed lane — handed exactly the shas it was handed before —
+   * gets byte-identical results.
+   *
+   * F1 / OUTSIDE-MODEL FINDING 1 (2026-08-24, repro d5b84e6→3ef9fbc): resolve
+   * the oldest base topologically, never by commit TIMESTAMP — a child and its
+   * parent can share a timestamp, which made the CHILD "oldest" and excluded the
+   * PARENT's range entirely, falsely reporting the parent's sha as "not in
+   * current history". `git merge-base --octopus <shas>` returns a commit
+   * reachable from EVERY given base — an ancestor of all of them by construction
+   * — so `<that>^..HEAD` is guaranteed to cover every base's range regardless of
+   * commit-time skew. Pre-filter to shas that actually resolve (rev-list
+   * --ignore-missing) first: merge-base refuses outright if handed one that
+   * doesn't, and one rebased-away sha must not poison the whole batch back to
+   * the unbounded walk.
+   *
+   * Returns undefined when git could not be walked at all (the caller's
+   * 'unavailable:no_git' / per-item disclosure decision, never a throw).
+   */
+  private provenanceWalk(
+    treeRoot: string,
+    shas: string[],
+    withNames: boolean
+  ): { commits: { sha: string; files: string[] }[]; truncated: boolean } | undefined {
+    const uniqueShas = [...new Set(shas)];
     let oldestBase: string | undefined = uniqueShas.length === 1 ? uniqueShas[0] : undefined;
     if (uniqueShas.length > 1) {
       const resolveCheck = this.runGit(treeRoot, ['rev-list', '--no-walk', '--ignore-missing', ...uniqueShas]);
@@ -889,16 +1530,15 @@ export class SterlingTools {
     // default rename detection reports only the NEW path for a renamed file,
     // so an item keyed to the path it was renamed FROM never saw its own
     // change. --no-renames reports both the old and new paths as plain
-    // add/delete entries.
+    // add/delete entries. A names-free walk (the keyless lane, which counts
+    // commits rather than path touches) asks for neither flag and parses the
+    // same way — every line is a sha.
     const requestCap = PROVENANCE_WALK_COMMIT_CAP + 1;
-    const rangedWalk = oldestBase
-      ? this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), `${oldestBase}^..HEAD`])
-      : undefined;
-    const walk =
-      rangedWalk && rangedWalk.status === 0
-        ? rangedWalk
-        : this.runGit(treeRoot, ['log', '--no-renames', '--name-only', '--format=%H', '-n', String(requestCap), 'HEAD']);
-    if (!walk || walk.status !== 0) return { status: 'unavailable:no_git', warnings };
+    const nameArgs = withNames ? ['--no-renames', '--name-only'] : [];
+    const logArgs = ['log', ...nameArgs, '--format=%H', '-n', String(requestCap)];
+    const rangedWalk = oldestBase ? this.runGit(treeRoot, [...logArgs, `${oldestBase}^..HEAD`]) : undefined;
+    const walk = rangedWalk && rangedWalk.status === 0 ? rangedWalk : this.runGit(treeRoot, [...logArgs, 'HEAD']);
+    if (!walk || walk.status !== 0) return undefined;
     const commits: { sha: string; files: string[] }[] = [];
     for (const raw of walk.stdout.split('\n')) {
       const line = raw.trim();
@@ -909,41 +1549,269 @@ export class SterlingTools {
         commits[commits.length - 1].files.push(line);
       }
     }
-    const walkTruncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
-    if (walkTruncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
-    let capHit = false;
-    for (const rec of eligible) {
-      const fileKeys = rec.file_keys as string[];
-      const head = rec.measured_at_head as string;
-      const id = rec.id as string;
-      const idx = commits.findIndex((c) => c.sha === head);
-      if (idx === -1) {
-        // F3: never silently skip — the sha is either older than a truncated
-        // window (cap genuinely hit) or not on HEAD's ancestry at all
-        // (rebased/orphaned); either way the count cannot be trusted, so say
-        // so on the item rather than reporting nothing.
-        if (walkTruncated) capHit = true;
-        const reason = walkTruncated ? 'walk cap reached' : 'not an ancestor of HEAD';
-        warnings.set(id, {
-          full: `⚠ measured_at_head ${head.slice(0, 7)} not found in the walked history (${reason}) — re-verify`,
-          // OUTSIDE-MODEL FINDING 3 (headline stays compact): no sha/reason detail.
-          short: ` ⚠not verifiable — re-verify`,
-        });
+    const truncated = commits.length > PROVENANCE_WALK_COMMIT_CAP;
+    if (truncated) commits.length = PROVENANCE_WALK_COMMIT_CAP; // drop the CAP+1'th lookahead entry
+    return { commits, truncated };
+  }
+
+  /**
+   * TRUTH AT READ for the reconcile_needed lane (decision
+   * queue-truth-at-read-annotation-design; boards be0ea20a HIGH + ab5ef216).
+   *
+   * THE MEASURED PROBLEM: the reconcile lane is minted by the READ path
+   * (research_finding f512020b), so READ VOLUME — not drift volume — drives the
+   * queue, and 12 of 14 lane items measured stale-open: the drift they name had
+   * already been reconciled away, and nothing said so. A drainer had to
+   * re-derive each item's premise by hand, which is exactly the cost that makes
+   * a queue get skipped.
+   *
+   * WHAT THIS DOES: for the reconcile_needed rows ON THIS PAGE, re-run the SAME
+   * per-file predicate the mint uses (classifyOwnedFileDrift) against the live
+   * working tree, and annotate the verdict. Composition, per the decision:
+   *   - ANY path still reconciling ⇒ the item reproduces ⇒ NO annotation (a
+   *     reproducing item is the normal case and needs no decoration);
+   *   - EVERY path clean AND fully evaluated ⇒ the stale annotation;
+   *   - ANY required check abstained (or was cut off by the budget) ⇒
+   *     `unavailable`, NEVER stale. An overflow item is never declared stale on
+   *     a partial check — the whole failure mode this closes is an absence being
+   *     read as a positive claim.
+   *
+   * WORKING-TREE WORDING, deliberately: the predicate reads TREE bytes, not the
+   * committed tree, so the annotation says "in the working tree at HEAD <sha8>"
+   * rather than implying anything about the commit. A mapped working tree is
+   * judged against THAT tree's own HEAD.
+   *
+   * NEVER CLOSURE AUTHORITY. Decision 68988832's rejection of auto-closure and
+   * auto-drain STANDS: this is a best-effort READ annotation that makes a human
+   * drain cheap, and it writes nothing (a read is a pure function here — AC2
+   * pins two identical reads producing identical records).
+   *
+   * SCOPE: source:'system' + system_reason:'reconcile_needed' rows only, so a
+   * source:'user' board_query pays ZERO drift-recompute cost. Implemented at the
+   * ONE shared seam (boardQueryResult) that maintenance_query already delegates
+   * to — the rejected alternative, annotating only the drain surface, would have
+   * left board_query's system rows disagreeing with maintenance_query's about
+   * whether the same row is a closeable no-op.
+   */
+  private reconcileTruthAtRead(records: DurableRecord[]): {
+    status: string;
+    annotations: Map<string, { full: string; short: string }>;
+  } {
+    const annotations = new Map<string, { full: string; short: string }>();
+    const lane = (records as unknown as Record<string, unknown>[]).filter(
+      (r) => r.source === 'system' && r.system_reason === 'reconcile_needed'
+    );
+    // An ABSENT annotation is never a freshness claim (P5), so every reason a
+    // check could not run is named — including "there was nothing on this page
+    // to check", which is the reason a silent field would misrepresent as fine.
+    if (lane.length === 0) return { status: 'unavailable:no_reconcile_items', annotations };
+    if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
+    const budget: DriftBudget = { attempts: 0, bytesHashed: 0, gitProbes: 0, truncated: false, memo: new Map() };
+    // PER-TREE HEAD, resolved once per distinct tree (review FIX 2, 2026-08-31).
+    // Classification reads the RESOLVED tree's bytes, so both the git-availability
+    // gate and the sha the annotation names must come from THAT tree — the
+    // decision says so in as many words ("mapped working trees use THAT tree's
+    // HEAD"). Reading them from the project root instead meant a mapped-tree item
+    // was judged against one tree and stamped with another tree's HEAD, and a
+    // mapped tree that is not a git repo at all passed a gate the project root
+    // happened to satisfy.
+    const headByTree = new Map<string, string | undefined>();
+    const headFor = (root: string): string | undefined => {
+      if (!headByTree.has(root)) headByTree.set(root, this.currentHeadSha(root));
+      return headByTree.get(root);
+    };
+    for (const item of lane) {
+      const id = item.id as string;
+      const abstain = (reason: string) => annotations.set(id, this.reconcileUnavailableAnnotation([reason]));
+      // BUDGET AXIS 1, PAGE-WIDE STOP (review FIX 4, 2026-08-31): once the
+      // attempt counter has parked at the cap, NOTHING further is spent on this
+      // page — no article resolution, no memo-key construction, no memo write, no
+      // per-path verdict allocation. file_keys carries no schema cardinality cap,
+      // so an adversarial or merely enormous item bounds I/O through the
+      // classifier's own axes but would still have paid CPU and allocation per
+      // path here. Every remaining item is disclosed as unavailable:budget, which
+      // is the same verdict it would have received one layer down (AC6: the item
+      // that blew the budget and the small item behind it are BOTH disclosed).
+      if (budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+        budget.truncated = true;
+        abstain('budget');
         continue;
       }
-      const count = commits.slice(0, idx).filter((c) => c.files.some((f) => fileKeys.includes(f))).length;
-      if (count > 0) {
-        warnings.set(id, {
-          full: `⚠ file_keys changed in ${count} commits since this item's evidence was measured (${head.slice(0, 7)})`,
-          // OUTSIDE-MODEL FINDING 3 (2026-08-24): appending the full sentence
-          // after headlineRecord's clip broke headline's compact-line contract
-          // (an 80-char line became 170+ chars, multiline). Headline gets a
-          // short marker instead; digest/full keep the full sentence.
-          short: ` ⚠${count} commits since measured`,
-        });
+      const link = item.feature_link as string | undefined;
+      if (!link) {
+        abstain('no_feature_link');
+        continue;
       }
+      const article = this.liveArticleFor(link);
+      if (!article) {
+        abstain('article_unresolved');
+        continue;
+      }
+      const tree = this.treeRootFor(article);
+      if (tree.unresolved || !tree.root) {
+        abstain('unmapped_working_tree');
+        continue;
+      }
+      // GIT AVAILABILITY IS PER TREE (review FIX 2). No resolvable HEAD in the
+      // tree actually being read means the annotation could not even NAME the
+      // state it was measured at, which is half of what makes it re-checkable.
+      const head = headFor(tree.root);
+      if (!head) {
+        abstain('no_git');
+        continue;
+      }
+      const paths = (item.file_keys as string[] | undefined) ?? [];
+      if (paths.length === 0) {
+        // A keyless reconcile item names no path to re-check. The keyless
+        // measured_at_head DISTANCE annotation (computeProvenance) still covers
+        // it — a different check, disclosed separately.
+        abstain('no_file_keys');
+        continue;
+      }
+      const baselines = (article as unknown as { file_baselines?: Record<string, string> }).file_baselines;
+      const version = (article as unknown as { version?: number }).version ?? 0;
+      const verdicts: DriftVerdict[] = [];
+      for (const path of paths) {
+        // PAGE-WIDE STOP, again (review FIX 4): the attempt counter parks at the
+        // cap, so once it is exhausted this item stops allocating per-path work
+        // and rides ONE unavailable:budget verdict into the composition below —
+        // the same verdict the classifier would return one layer down, without
+        // the per-path memo key and Map write. file_keys has no schema
+        // cardinality cap, so CPU and allocation have to be bounded here, not
+        // only I/O.
+        if (budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+          budget.truncated = true;
+          verdicts.push({ kind: 'unavailable', reason: 'budget' });
+          break;
+        }
+        // PER-CALL MEMOIZATION by (resolved tree, article version, path):
+        // sibling items under one article — the ordinary shape, since the mint
+        // splits one article's drift into one item per file — re-ask about the
+        // same paths, and a memo hit costs no budget. NO POLICY DISCRIMINATOR IS
+        // NEEDED any more (review FIX 1): the recheck runs exactly ONE policy (it
+        // always hashes), and this memo is per CALL and reachable only from this
+        // method — the mint passes no budget, so its prefilter-honouring verdicts
+        // can neither enter nor read this map.
+        //
+        // INJECTIVE key by construction (Codex re-review 01a0576f): a separator
+        // can never be impossibility-proof here because normalizeRepoPath and
+        // working_trees permit ANY byte in a path, \x1F included — so crafted
+        // (treeRoot, path) tuples could collide a separator-joined key.
+        // JSON.stringify of the tuple is injective for arbitrary strings.
+        const key = JSON.stringify([tree.root, article.id, version, path]);
+        const cached = budget.memo.get(key);
+        if (cached) {
+          verdicts.push(cached);
+          continue;
+        }
+        // THE RECHECK ALWAYS HASHES (review FIX 1, 2026-08-31 — REPLACING the
+        // 'licensed prefilter' this call site first shipped with). The licence was
+        // "the article was re-baselined after this item was minted", and it does
+        // not hold: drift lands, an unrelated article write re-baselines every
+        // owned file, then a second edit whose mtime is preserved (a copy, a
+        // restore, clock skew) sits at or below updated_at and short-circuits to
+        // `clean`. At the MINT `clean` raises nothing; HERE it is the affirmative
+        // claim "the drift no longer reproduces", which is precisely the P5
+        // inversion this feature exists to close. So the prefilter's terminating
+        // power stays where its inference is sound — the mint — and the recheck
+        // pays the hash, bounded by the attempt and byte axes.
+        const { verdict } = this.classifyOwnedFileDrift(
+          path,
+          { mode: 'recheck', treeRoot: tree.root, baselines, baselinedAt: article.updated_at, honorMtimePrefilter: false },
+          budget
+        );
+        budget.memo.set(key, verdict);
+        verdicts.push(verdict);
+      }
+      // ANY path still reconciling wins outright — never a first-path-wins or
+      // all-paths-must-differ rule (a whole-area change reconciles one file at a
+      // time, so a single live difference means the item still has work in it).
+      if (verdicts.some((v) => v.kind === 'reconcile' || v.kind === 'deletion_candidate')) continue;
+      const reasons = [
+        ...new Set(verdicts.filter((v) => v.kind === 'unavailable' || v.kind === 'parked').map((v) => (v.kind === 'unavailable' ? v.reason : 'parked_on_branch'))),
+      ].sort();
+      if (reasons.length) {
+        annotations.set(id, this.reconcileUnavailableAnnotation(reasons));
+        continue;
+      }
+      const sha8 = head.slice(0, 8);
+      annotations.set(id, {
+        full:
+          `⚠ TRUTH AT READ: the drift this item names no longer reproduces in the working tree at HEAD ${sha8} — ` +
+          `every path it names matches the live article's recorded baseline, so this is very likely a closeable no-op. ` +
+          `A BEST-EFFORT READ CHECK, NEVER CLOSURE AUTHORITY: confirm it yourself, then close it by NAMING it in a write's ` +
+          `resolves claim (or maintenance_remove) — nothing here closes anything. CONFIRM WHAT "MATCHES" MEANS HERE: a later ` +
+          `article write RE-BASELINES every file that article owns, so a re-baseline can absorb a drift whose PROSE was never ` +
+          `reconciled — the bytes agreeing with the recorded baseline does not prove the article still describes them.`,
+        short: ` ⚠no longer reproduces in the working tree at HEAD ${sha8}`,
+      });
     }
-    return { status: capHit ? 'unavailable:walk_cap' : 'checked', warnings };
+    // The budget's truncation rides the STATUS, not only a note: a page that
+    // could not finish its own check must not report the same word as one that
+    // did (P5), and the per-item `unavailable:budget` reasons above are the
+    // detail behind it.
+    return { status: budget.truncated ? 'checked:budget_truncated' : 'checked', annotations };
+  }
+
+  /** The one wording for a reconcile item whose drift could not be re-checked — named reasons, never a shrug. */
+  private reconcileUnavailableAnnotation(reasons: string[]): { full: string; short: string } {
+    const joined = reasons.join(', ');
+    return {
+      full:
+        `⚠ TRUTH AT READ: this item's drift could NOT be re-checked (unavailable:${joined}) — treat it as OPEN and re-verify by hand. ` +
+        `An absent verdict is never a freshness claim (P5); in particular 'budget' means this page's re-check ran out of its own ` +
+        `cost allowance, not that the item is clean.`,
+      short: ` ⚠not re-checkable (unavailable:${joined})`,
+    };
+  }
+
+  /**
+   * The LIVE feature_article a queue item's feature_link points at, following the
+   * supersede chain to its head (decision queue-truth-at-read-annotation-design:
+   * "legacy feature_links resolve through the supersede chain to the LIVE
+   * article's baselines").
+   *
+   * WHY THE WALK MATTERS: an item minted against an article that was later
+   * superseded still points at the DEAD id, and a dead predecessor's baselines
+   * are stale or (for a raw legacy insert) absent entirely — comparing against
+   * them would report a drift that reproduces perfectly well against the live
+   * article, or abstain where a real verdict was available.
+   *
+   * Returns undefined when the link resolves to nothing, or to something that is
+   * not a feature_article — an abstention, never a guess. store.get() (not the
+   * id-resolution ladder) deliberately: a feature_link is a full uuid written by
+   * the mint, and a READ path must not throw on a broken pointer.
+   *
+   * IT MUST TERMINATE ON A LIVE ARTICLE OR ABSTAIN (review FIX 3, 2026-08-31).
+   * The first implementation exited the walk on a BROKEN chain — a superseded
+   * record with no superseded_by, a successor missing from the store, a
+   * self-loop, a cycle — and then returned that last node merely because its
+   * type was feature_article. The whole reason for walking is that a DEAD
+   * predecessor's baselines are stale or absent, so handing one back is worse
+   * than abstaining: it produces a full verdict (including the affirmative "no
+   * longer reproduces" claim) from bytes nothing current was ever compared
+   * against. Every abnormal shape now returns undefined, and the caller's
+   * `unavailable:article_unresolved` disclosure is what the reader sees.
+   */
+  private liveArticleFor(link: string): DurableRecord | undefined {
+    let record = this.store.get(link);
+    // Bounded AND cycle-guarded: a torn store degrades to an abstention rather
+    // than spinning a read forever. The hop cap is a second, shape-independent
+    // backstop — the `seen` set already catches a cycle, but a pathological
+    // (or maliciously long) chain must not be walked at read time either.
+    const seen = new Set<string>();
+    let hops = 0;
+    while (record && record.status === 'superseded') {
+      if (hops++ >= LIVE_ARTICLE_CHAIN_HOP_CAP) return undefined;
+      if (!record.superseded_by || seen.has(record.id)) return undefined;
+      seen.add(record.id);
+      const next = this.store.get(record.superseded_by);
+      if (!next || next.id === record.id) return undefined;
+      record = next;
+    }
+    // Both conditions, not just the type: only a LIVE article's baselines
+    // describe the bytes a current read should be compared against.
+    return record && record.type === 'feature_article' && record.status === 'active' ? record : undefined;
   }
 
   /**
@@ -1002,6 +1870,154 @@ export class SterlingTools {
     const current = this.hashFile(rel, root);
     if (current === undefined) return false;
     return current !== baseline;
+  }
+
+  /**
+   * THE ONE per-owned-file drift classifier (decision
+   * queue-truth-at-read-annotation-design, predicate half). The read-time MINT
+   * (knowledgeQuery's feature-article wire) and the queue's TRUTH-AT-READ
+   * annotation (reconcileTruthAtRead) both call THIS — a second implementation
+   * at the annotation site was explicitly rejected: "the mint predicate is seven
+   * coupled checks, not a hash compare; a copy drifts from the mint and the
+   * annotation then lies about what a fresh read would do".
+   *
+   * THE SEVEN CHECKS, in this order (the mint's original order, preserved so its
+   * decisions are byte-identical before and after the extraction):
+   *   1. working-tree resolution — done by the CALLER (treeRootFor), because an
+   *      unmapped tree abstains for the whole record, not per file;
+   *   2. existence (stat) — absence is not deletion, so it routes to (3);
+   *   3. missing-file classification via parkedOnRef: parked / never_tracked
+   *      (deletion_candidate) / confirmed_absent+probe_failed (reconcile);
+   *   4. the stat-first MTIME PREFILTER — the cheap "could this have changed at
+   *      all" gate that keeps a re-baselined file from being hashed;
+   *   5. generated-projection exclusion (regen churn is by design);
+   *   6. baseline availability;
+   *   7. the authoritative content hash against that baseline.
+   *
+   * MODE DIFFERS IN EXACTLY TWO PLACES, both marked `MODE:` below, because the
+   * two callers ask different questions of the same bytes (see DriftCheckMode).
+   * Everything else — including which verdict each git probe status earns — is
+   * shared, which is the whole point of the extraction.
+   *
+   * NEVER THROWS and never writes: every failure is a named `unavailable`.
+   */
+  private classifyOwnedFileDrift(rel: string, ctx: DriftCheckContext, budget?: DriftBudget): OwnedFileDrift {
+    // BUDGET AXIS 1 — attempts. Checked BEFORE the stat so the cap bounds the
+    // syscall fan-out itself, and NOT incremented on the refusal path, so the
+    // counter parks at the cap and every later item reads the same exhausted
+    // budget (AC6: the item that blew the budget and the small item behind it
+    // are BOTH disclosed, not just the first).
+    if (budget && budget.attempts >= RECONCILE_RECHECK_FILE_ATTEMPT_CAP) {
+      budget.truncated = true;
+      return { verdict: { kind: 'unavailable', reason: 'budget' } };
+    }
+    if (budget) budget.attempts++;
+    const baseline = ctx.baselines?.[rel];
+    // THE STAT IS WRAPPED (review FIX 5, 2026-08-31): throwIfNoEntry:false only
+    // silences ENOENT. EACCES (an unreadable directory on the path), ELOOP (a
+    // symlink cycle), ENOTDIR and ENAMETOOLONG all still THROW — and an
+    // exception here does not fail one path, it escapes this method's
+    // NEVER-THROWS contract and aborts the whole board/maintenance read for
+    // every item on the page. Any stat failure is a named abstention instead;
+    // the mint reads `unavailable` exactly as it reads `clean`, so its behaviour
+    // is unchanged, and the annotation site discloses the class.
+    let stat: { size: number; mtimeMs: number } | undefined;
+    try {
+      stat = statSync(join(ctx.treeRoot, rel), { throwIfNoEntry: false }) ?? undefined;
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      return { verdict: { kind: 'unavailable', reason: `stat_failed_${String(code ?? 'unknown').toLowerCase()}` } };
+    }
+    if (!stat) {
+      // MODE (1/2) — A MISSING FILE WITH NO BASELINE.
+      // The mint asks whether the article's OWNERSHIP claim is still true, so an
+      // absent owned path is a finding regardless of baselines (that is what
+      // mints the deletion_candidate / out-of-band-deletion items, board
+      // e939fd21). The recheck asks whether an ALREADY-RECORDED drift still
+      // reproduces — and with no recorded bytes for the path there is nothing
+      // to reproduce AGAINST, so the honest answer is abstention, not a verdict.
+      // Abstaining first also spares the git probe entirely.
+      if (ctx.mode === 'recheck' && baseline === undefined) {
+        return { verdict: { kind: 'unavailable', reason: 'no_baseline' } };
+      }
+      // BUDGET AXIS 3 — git probes. parkedOnRef shells out per absent path, so
+      // it gets its own axis: a page full of missing files must not turn into
+      // hundreds of subprocesses.
+      if (budget) {
+        if (budget.gitProbes >= RECONCILE_RECHECK_GIT_PROBE_CAP) {
+          budget.truncated = true;
+          return { verdict: { kind: 'unavailable', reason: 'budget' } };
+        }
+        budget.gitProbes++;
+      }
+      // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
+      // 1d6a721a): ask git before concluding anything. 'never_tracked' (every
+      // reachable ref checked, none EVER held the blob) is the only verdict that
+      // earns deletion_candidate (board e939fd21); 'confirmed_absent' (real git
+      // history, merged into base) and 'probe_failed' (git could not be
+      // consulted at all) both keep the classic reconcile reading — a failed
+      // probe proves nothing and must not be read as the stronger verdict.
+      const probe = this.parkedOnRef(rel, ctx.treeRoot);
+      if (probe.status === 'parked') return { verdict: { kind: 'parked', ref: probe.ref } };
+      if (probe.status === 'never_tracked') return { verdict: { kind: 'deletion_candidate' } };
+      return { verdict: { kind: 'reconcile', missing: true } };
+    }
+    const size = stat.size;
+    // MODE (2/2) — THE MTIME PREFILTER'S TERMINATING POWER.
+    //
+    // At the MINT the prefilter is unconditional and is the cheap half of the
+    // two-step check (decision 57d9a52d): mtime no newer than the article's last
+    // update means the file cannot have moved since its baseline was taken, so
+    // no content read is owed.
+    //
+    // AT THE RECHECK THE PREFILTER IS OFF — ALWAYS (review FIX 1, 2026-08-31;
+    // the caller passes honorMtimePrefilter:false unconditionally, and the flag
+    // survives only because the mint still legitimately sets it). An earlier
+    // version kept the prefilter under a "licence" (the article was re-baselined
+    // after the item was minted), meaning to honour the cost design's
+    // "re-baselined items terminate without hashing". That licence does not hold:
+    // drift lands, an unrelated article write re-baselines EVERY owned file, and
+    // a second edit whose mtime is preserved or skewed to at-or-below updated_at
+    // (an mtime-preserving copy, a restore from backup, a clock skew) then
+    // short-circuits to `clean`. At the mint `clean` merely raises nothing; at
+    // the recheck it is published as the affirmative claim "the drift no longer
+    // reproduces", so a timestamp is nowhere near enough evidence. The content
+    // hash decides there, bounded by the attempt and byte axes.
+    if (ctx.honorMtimePrefilter && !(stat.mtimeMs > Date.parse(ctx.baselinedAt))) {
+      return { verdict: { kind: 'clean' }, size };
+    }
+    // A registered generated projection never CONTENT-flags: every regen changes
+    // it by design and check-projection-fresh guards its currency at the merge
+    // gate (decision e1275166). Its DELETION still flags, in the arm above.
+    if (this.isGeneratedProjection(rel)) return { verdict: { kind: 'clean' }, size };
+    if (baseline === undefined) {
+      // NOT collapsed to `false`/clean here (the contentChanged() anti-model):
+      // the mint's call site reads `unavailable` as no-drift, so its behaviour is
+      // unchanged, while the annotation site can say WHY it abstained.
+      return { verdict: { kind: 'unavailable', reason: 'no_baseline' }, size };
+    }
+    // BUDGET AXIS 2 — bytes hashed. The size is already known, so an oversize
+    // file is refused BEFORE it is read rather than after.
+    //
+    // THE PARKING ASYMMETRY IS DELIBERATE (review FIX 8): the ATTEMPT axis parks
+    // — its counter stops incrementing at the cap, so every later path and item
+    // reads the same exhausted budget and is disclosed (AC6). The BYTE axis does
+    // NOT park: one oversize file is refused and the walk CONTINUES, because
+    // bytesHashed is only advanced by files actually read, so the next (small)
+    // file can still legitimately be checked. A parking byte axis would let a
+    // single large file suppress every remaining verdict on the page as
+    // unavailable:budget — a worse read for no cost saving, since the refusal
+    // happens before the file is opened either way.
+    if (budget) {
+      if (budget.bytesHashed + size > RECONCILE_RECHECK_HASH_BYTE_CAP) {
+        budget.truncated = true;
+        return { verdict: { kind: 'unavailable', reason: 'budget' }, size };
+      }
+      budget.bytesHashed += size;
+    }
+    const current = this.hashFile(rel, ctx.treeRoot);
+    if (current === undefined) return { verdict: { kind: 'unavailable', reason: 'unreadable' }, size };
+    return { verdict: current === baseline ? { kind: 'clean' } : { kind: 'reconcile', missing: false }, size };
   }
 
   /**
@@ -1203,7 +2219,7 @@ export class SterlingTools {
   private renderValidationFailure(err: ZodError, type: string, op: string): Error {
     const described = schemaFor(type);
     const fieldsByName = new Map((described?.fields ?? []).map((f) => [f.name, f]));
-    const parts = err.issues.map((issue) => {
+    const renderIssue = (issue: ZodIssue): string => {
       const path = SterlingTools.renderIssuePath(issue.path as (string | number)[]);
       if (issue.code === 'invalid_enum_value') {
         const topField = typeof issue.path[0] === 'string' ? fieldsByName.get(issue.path[0] as string) : undefined;
@@ -1227,8 +2243,27 @@ export class SterlingTools {
         }
         return text;
       }
+      // Board a9280db7 (decision c48380bf): current_ac/live_test_refs are now a
+      // union (real content OR the structured not_applicable exemption), so a
+      // bad element inside the array branch surfaces as a single top-level
+      // 'invalid_union' issue instead of a direct 'invalid_type' — without
+      // this, the caller-facing message collapsed to a bare "Invalid input",
+      // losing the per-element path/received/expected detail every other
+      // array-of-objects field still reports. Drill into whichever union
+      // branch produced the DEEPEST (most specific) sub-issue — that is the
+      // branch that actually explains the failure, not the sibling branch
+      // that never matched the shape at all — and render THAT issue with the
+      // same rules, recursively.
+      if (issue.code === 'invalid_union') {
+        const subIssues = (issue.unionErrors ?? []).flatMap((sub) => sub.issues);
+        if (subIssues.length) {
+          const deepest = subIssues.reduce((a, b) => (b.path.length > a.path.length ? b : a));
+          return renderIssue(deepest);
+        }
+      }
       return `${path}: ${issue.message}`;
-    });
+    };
+    const parts = err.issues.map(renderIssue);
     return new Error(`${op}: '${type}' failed validation — ${parts.join('; ')}`);
   }
 
@@ -1531,6 +2566,15 @@ export class SterlingTools {
     // but an explicit slug colliding with a live record would brick slug
     // addressing of that record for every reader (the 1e639f32 incident shape).
     //
+    // `open_question` joins BOTH halves (board 4ffb95be): it declares a `slug`
+    // and mintHeadlineOf already falls through to `question`, so it auto-mints
+    // exactly the way research_finding does — the two types are the same shape,
+    // a question that IS the identity. Omitting it here would have been silent
+    // in both directions: no handle minted, AND no collision refusal, so an
+    // explicit open_question slug could take a live ruling's handle and brick
+    // slug addressing of that record for every reader — the 1e639f32 incident
+    // shape this branch exists to prevent.
+    //
     // `todo` JOINS THE SAME ONE NAMESPACE (S1, decision
     // human-readable-ids-for-board-items) — deliberately through THIS branch
     // rather than a private check on board_add, because board_add funnels here
@@ -1540,7 +2584,14 @@ export class SterlingTools {
     // `todo` a namespace of its own, which is exactly the read-time ambiguity
     // de1a7329 rejected. Its headline comes from mintHeadlineOf (a board item
     // has no title field; see todoHeadline).
-    if (type === 'decision' || type === 'anti_pattern' || type === 'research_finding' || type === 'attestation' || type === 'todo') {
+    if (
+      type === 'decision' ||
+      type === 'anti_pattern' ||
+      type === 'research_finding' ||
+      type === 'open_question' ||
+      type === 'attestation' ||
+      type === 'todo'
+    ) {
       const explicit = (parsed as { slug?: string }).slug;
       if (explicit) {
         if (this.store.recordsBySlug(explicit).length) {
@@ -1777,42 +2828,42 @@ export class SterlingTools {
         // Free here: the stat is already being taken for the drift comparison.
         let liveBytes = 0;
         for (const f of a.files ?? []) {
-          const stat = statSync(join(treeRoot, f.path), { throwIfNoEntry: false });
-          if (!stat) {
-            // ABSENT FROM THE WORKING TREE IS NOT THE SAME AS DELETED (board
-            // 1d6a721a). Every check here evaluates the CHECKED-OUT tree, so a
-            // file parked on an unmerged branch read as an out-of-band deletion
-            // — and that item could never be closed, because the trigger is
-            // absence and no write makes a file appear. It re-fired on every
-            // subsequent read (this arm is a pure function of disk state), which
-            // pushed a drain toward exactly the no-op version bumps the closing
-            // rule calls drift. Ask git before concluding anything: `ls` proves
-            // working-tree absence and nothing else.
-            const probe = this.parkedOnRef(f.path, treeRoot);
-            if (probe.status === 'parked') {
-              parkedFiles.push({ path: f.path, ref: probe.ref });
-              continue; // the article is CORRECT — the path returns on merge
-            }
-            // 'never_tracked' (every reachable ref checked, none EVER held the
-            // blob) is the only verdict that earns deletion_candidate (board
-            // e939fd21). 'confirmed_absent' (real git history, but only as a
-            // merged-into-base ancestor) and 'probe_failed' (git could not be
-            // consulted at all) both keep the classic reconcile_needed reading
-            // — a failed probe proves nothing and must not be read as strong a
-            // signal as a genuine, exhaustive "never existed here" verdict.
-            drifts.push({ path: f.path, missing: true, neverTracked: probe.status === 'never_tracked' });
+          // ONE SHARED PREDICATE (decision queue-truth-at-read-annotation-design):
+          // the seven checks this loop used to inline now live in
+          // classifyOwnedFileDrift, which the queue's truth-at-read annotation
+          // calls too. Same order, same verdicts, same git-probe readings — the
+          // extraction is behaviour-preserving here by construction, and mode
+          // 'mint' selects the two policy points that belong to THIS caller.
+          const { verdict, size } = this.classifyOwnedFileDrift(f.path, {
+            mode: 'mint',
+            treeRoot,
+            baselines: a.file_baselines,
+            baselinedAt: record.updated_at,
+            honorMtimePrefilter: true,
+          });
+          // Owned bytes that actually exist, for the state-honesty check below —
+          // free, because the classifier already took the stat.
+          if (size !== undefined) liveBytes += size;
+          if (verdict.kind === 'parked') {
+            // The article is CORRECT — the path returns on merge (board 1d6a721a).
+            parkedFiles.push({ path: f.path, ref: verdict.ref });
             continue;
           }
-          liveBytes += stat.size;
-          // mtime newer than updated_at is the cheap pre-filter; confirm a real
-          // content change against the baseline before flagging, so a git
-          // merge/checkout's mtime reset is not mistaken for an out-of-band edit.
-          // A registered generated projection never content-flags — every regen
-          // changes it by design and the merge gate's check-projection-fresh
-          // guards its currency; its DELETION still lands in the missing arm above.
-          if (stat.mtimeMs > Date.parse(record.updated_at) && !this.isGeneratedProjection(f.path) && this.contentChanged(f.path, a.file_baselines, treeRoot)) {
-            drifts.push({ path: f.path, missing: false });
+          if (verdict.kind === 'deletion_candidate') {
+            drifts.push({ path: f.path, missing: true, neverTracked: true });
+            continue;
           }
+          if (verdict.kind === 'reconcile') {
+            drifts.push({ path: f.path, missing: verdict.missing, neverTracked: false });
+            continue;
+          }
+          // 'clean' AND every 'unavailable:<reason>' raise NOTHING here, exactly
+          // as before the extraction: no baseline, an unreadable file and a
+          // generated projection all made contentChanged() return false. THE
+          // MINT ABSTAINS rather than fabricate a flag it cannot stand behind —
+          // that is this CALL SITE's policy, which is why the shared predicate
+          // reports the abstention instead of collapsing it (the annotation site
+          // has to disclose it).
         }
         if (drifts.length) {
           // NO PRE-CHECK: enqueueSystemTodo is atomic and keyed
@@ -2128,7 +3179,12 @@ export class SterlingTools {
           `knowledge_edit: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector addresses array elements; a plain field name edits a string field`
         );
       }
-      const hits = arr.filter((el) => el && typeof el === 'object' && String((el as Record<string, unknown>)[key]) === value);
+      // OWNERSHIP FIRST via the shared elementOwnsScalar (board c61c9a3a) —
+      // `String(el[key]) === value` alone read an ABSENT key as the string
+      // 'undefined', so `[anykey=undefined]` matched every element LACKING
+      // the key. Same predicate knowledge_array_remove uses (tools.ts, near
+      // its own `hits` filter), so the two selectors cannot re-diverge.
+      const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
       if (hits.length !== 1) {
         throw new Error(
           `knowledge_edit: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, nothing was written. ` +
@@ -2344,12 +3400,7 @@ export class SterlingTools {
     // a plain non-match, covered by the zero-match refusal below), so the
     // refusal fires regardless of whether the naive string comparison would
     // have produced a match.
-    const nonScalarOwners = arr.filter((el) => {
-      if (!el || typeof el !== 'object') return false;
-      const rec = el as Record<string, unknown>;
-      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
-      return typeof rec[key] === 'object';
-    });
+    const nonScalarOwners = arr.filter((el) => elementOwnsScalar(el, key) && typeof el[key] === 'object');
     if (nonScalarOwners.length > 0) {
       throw new Error(
         `knowledge_array_remove: selector key '${key}' is not a scalar discriminator on ${old.type}.${base} — ${nonScalarOwners.length} ` +
@@ -2367,12 +3418,7 @@ export class SterlingTools {
     // ban on optional keys (a present optional key stays selectable by its
     // real value). A missing key simply matches nothing, so the outcome is
     // zero matches and the refusal below already covers it.
-    const hits = arr.filter((el) => {
-      if (!el || typeof el !== 'object') return false;
-      const rec = el as Record<string, unknown>;
-      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
-      return String(rec[key]) === value;
-    });
+    const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
     if (hits.length !== 1) {
       throw new Error(
         `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
@@ -2792,11 +3838,12 @@ export class SterlingTools {
    * than discovering a governing record only after a subagent has already gone
    * wrong (H20/H19 relevance slice 4b). Reuses the SAME axis extraction +
    * stage-2 centrality floors H20 already applies at delivery time. Since
-   * board 39c3d762 (widened by e7157d0b) the candidate surface spans all five
-   * governing types — anti_pattern, decision, feature_article (territory =
-   * slug/family/title), research_finding and disconfirmed_hypothesis (subject
-   * = question) — because a missing type made an article-governed question
-   * answer 'nothing governs this', a false negative dressed as a verdict; and
+   * board 39c3d762 (widened by e7157d0b, then by a9be48f2) the candidate
+   * surface spans all six governing types — anti_pattern, decision,
+   * feature_article (territory = slug/family/title), research_finding,
+   * disconfirmed_hypothesis and open_question (subject = question) — because a
+   * missing type made an article-governed question answer 'nothing governs
+   * this', a false negative dressed as a verdict; and
    * the no-match verdict is 'ungoverned' (renamed from 'ready', whose
    * query-envelope reading is the opposite).
    */
@@ -2827,7 +3874,7 @@ export class SterlingTools {
   /**
    * The candidate-matching CORE shared by knowledgePreflight and same-subject
    * surfacing on write (decision 7e3c66c5) — the preflight axis floors
-   * (extractAxisTerms already run by the caller -> store.query the five
+   * (extractAxisTerms already run by the caller -> store.query the six
    * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
    * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
    * Callers differ only in what they do with the (record, hits) pairs and in
@@ -2857,6 +3904,15 @@ export class SterlingTools {
       // about to re-litigate a disproved hypothesis is the exact re-derivation
       // waste preflight exists to stop.
       ...this.store.query({ types: ['disconfirmed_hypothesis'], rank_terms: queryTerms, cap: 40 }),
+      // OPEN QUESTIONS join it too (board a9be48f2, wiring decision
+      // open-question-record-type-authorized's registered type into its
+      // consuming surfaces): the prior-answer surface answers "has this been
+      // settled?" — an open_question answers the adjacent "is this ALREADY
+      // BEING INVESTIGATED?", and a preflight that cannot see one lets a
+      // second lane restart a live investigation. axisNarrowText/axisTitleText
+      // already match its `question` (packages/store/src/axis.ts), so nothing
+      // in the shared matcher changes.
+      ...this.store.query({ types: ['open_question'], rank_terms: queryTerms, cap: 40 }),
     ];
     return candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
@@ -3263,6 +4319,186 @@ export class SterlingTools {
     }
 
     return this.projectFieldWindow(served, options);
+  }
+
+  /** knowledge_render's ids[] bound (board efe6f3fc): 1–20, refused loudly naming the bound. */
+  private static readonly RENDER_MAX_IDS = 20;
+
+  /**
+   * Total-output ceiling (Codex review, thread 01a05ba4, M1): the 20-id bound
+   * caps how many RECORDS a call can name, not how much TEXT they render to —
+   * 20 oversize feature_article bodies can still exhaust a consumer's
+   * context. The full render is always computed first, then measured against
+   * this; over the ceiling REFUSES the whole call naming the measured size,
+   * the ceiling, and the fix (fewer ids) — never a silent truncation, which
+   * would hand an external reviewer a partial ruling with no marker that
+   * anything was cut.
+   */
+  private static readonly RENDER_MAX_CHARS = 120_000;
+
+  /** Header components (title, handle) are collapsed to this many chars, ellipsized. */
+  private static readonly RENDER_HEADER_CLIP = 120;
+
+  /** Body lines are indented by this prefix so no record-content line can land at column 0. */
+  private static readonly RENDER_BODY_INDENT = '  ';
+
+  /**
+   * Fields never rendered in a knowledge_render body — the record's own
+   * server-owned envelope (SERVER_OWNED_FIELDS: id/created_at/updated_at/
+   * status/superseded_by/type/lifecycle/freshness/file_baselines/version),
+   * reused rather than re-listed (invariant 1 — one registry, not a second
+   * copy that can drift from it), plus `slug`, which is already carried in
+   * full in the header handle (a slug is a short caller-chosen stable
+   * handle, never a multi-KB field, so nothing is lost by never repeating it
+   * in the body). Unlike an earlier draft, the field used for the header's
+   * `<title>` slot (RENDER_TITLE_FIELDS) is NOT skipped here — Codex review
+   * M2 — because the header now renders a CLIPPED, single-line form of that
+   * value, so the field's full content must still appear in the body or it
+   * is lost entirely (worst case for a multi-KB todo `text`).
+   */
+  private static readonly RENDER_SKIP_FIELDS = new Set<string>([...SterlingTools.SERVER_OWNED_FIELDS, 'slug']);
+
+  /**
+   * The field checked, in order, for the header's `<title>` slot — the first
+   * one present as a non-empty string. Covers every registered type's own
+   * identity field: decision/feature_article/reference_material/brief carry
+   * `title`; research_finding/disconfirmed_hypothesis/open_question carry
+   * `question`; attestation carries `artifact_key`; todo carries `text`;
+   * anti_pattern falls back to `trigger` only if `title` is somehow absent
+   * (title is required on that type, so this is a defensive last resort).
+   */
+  private static readonly RENDER_TITLE_FIELDS = ['title', 'question', 'artifact_key', 'text', 'trigger'];
+
+  /**
+   * One line, safe to interpolate into a header (Codex review M2a): collapses
+   * every run of whitespace (including embedded newlines) to a single space,
+   * trims, then clips to RENDER_HEADER_CLIP with an ellipsis. Applied to BOTH
+   * header components (title and handle) — record content is caller-authored
+   * text, and an unsanitized multi-line value could otherwise inject a line
+   * that mimics the `=== ... ===` header frame.
+   */
+  private static sanitizeHeaderText(raw: string): string {
+    const collapsed = raw.replace(/\s+/g, ' ').trim();
+    if (!collapsed) return '(untitled)';
+    return collapsed.length > SterlingTools.RENDER_HEADER_CLIP ? `${collapsed.slice(0, SterlingTools.RENDER_HEADER_CLIP - 1)}…` : collapsed;
+  }
+
+  /**
+   * Indents every line of `text` (Codex review M2b) so record content can
+   * never produce a line starting at column 0 — the header line is the only
+   * text this renderer ever emits unindented, which makes it unambiguously
+   * identifiable even when a field's value is adversarial or pathological.
+   */
+  private static indentLines(text: string): string {
+    return text
+      .split('\n')
+      .map((line) => `${SterlingTools.RENDER_BODY_INDENT}${line}`)
+      .join('\n');
+  }
+
+  /**
+   * `knowledge_render(ids)` (board efe6f3fc, article knowledge-render): a
+   * READ-ONLY paste-ready dump of one or more full records for embedding
+   * store rulings into an EXTERNAL (non-MCP) reviewer prompt — Codex has no
+   * knowledge tools, and hand-transcribing rulings into consult prompts costs
+   * tokens and drifts from the source (P6 context-carriage; an index/summary
+   * is a lookup, never a source). Each id resolves through the SAME ladder
+   * knowledge_get uses (full uuid / exact slug / unambiguous 8-char prefix —
+   * resolveRecordId, not reimplemented here); an id that resolves to nothing
+   * or ambiguously REFUSES THE WHOLE CALL loudly, naming the failing id,
+   * before any output is built — never a partial render with silent skips
+   * (P5). Every id is resolved first, into an array, and the text is built
+   * only after every one has succeeded, so a failure never leaves a
+   * truncated block behind.
+   *
+   * Bounds: 1–20 ids (RENDER_MAX_IDS), refused loudly naming the bound on
+   * either side (empty or oversize) — AND a total-output ceiling
+   * (RENDER_MAX_CHARS), refused loudly naming the measured size, the
+   * ceiling, and the fix, since 20 valid ids can still render more text than
+   * a consumer can hold (Codex review M1).
+   *
+   * Rendering is DATA-DRIVEN off the record's own schema-declared fields
+   * (knownFieldsFor(record.type), the same registry knowledge_schema reads),
+   * never a hand-enumerated per-type template — a field added to a schema is
+   * rendered the moment it exists, with no second place to update. Server-
+   * owned plumbing (RENDER_SKIP_FIELDS) never appears in the body; a
+   * superseded/retired record still renders in full, with its status carried
+   * loudly in the header (never silently dropped or hidden). An unregistered
+   * record type is refused loudly naming the type and id, rather than
+   * falling open to dumping every stored key (Codex review L1).
+   *
+   * Takes a single `{ids}` object (not a bare array) — the MCP tool's only
+   * parameter is `ids`, and this mirrors every other multi-field tool method
+   * on this class (knowledgeSplitResult, knowledgeExtractResult, …).
+   */
+  knowledgeRender(args: { ids: string[] }): string {
+    const ids = args?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new Error(
+        `knowledge_render: ids must be a non-empty array of 1-${SterlingTools.RENDER_MAX_IDS} record ids — got ${Array.isArray(ids) ? 'an empty array' : typeof ids}`
+      );
+    }
+    if (ids.length > SterlingTools.RENDER_MAX_IDS) {
+      throw new Error(`knowledge_render: ids must contain at most ${SterlingTools.RENDER_MAX_IDS} entries — got ${ids.length}`);
+    }
+    // Resolve EVERY id before rendering anything (P5): a failure here throws
+    // before a single character of output is produced, so the call is never
+    // half-served.
+    const records = ids.map((id) => this.resolveRecordId(id, 'knowledge_render'));
+    const output = records.map((record) => this.renderRecordBlock(record)).join('\n\n');
+    if (output.length > SterlingTools.RENDER_MAX_CHARS) {
+      throw new Error(
+        `knowledge_render: the rendered output is ${output.length} chars, over the ${SterlingTools.RENDER_MAX_CHARS}-char ceiling — nothing was rendered (never a silent truncation). Request fewer ids, or split this call into smaller batches, and retry.`
+      );
+    }
+    return output;
+  }
+
+  /** One record's `knowledge_render` block: header line + labeled body fields. */
+  private renderRecordBlock(record: DurableRecord): string {
+    const r = record as unknown as Record<string, unknown>;
+    const fieldNames = knownFieldsFor(String(r.type));
+    if (!fieldNames) {
+      throw new Error(
+        `knowledge_render: record '${String(r.id)}' has type '${String(r.type)}', which is not a registered record type — refusing rather than rendering its raw stored fields`
+      );
+    }
+    const titleField = SterlingTools.RENDER_TITLE_FIELDS.find((f) => typeof r[f] === 'string' && (r[f] as string).trim().length > 0);
+    const rawTitle = titleField ? (r[titleField] as string) : '(untitled)';
+    const rawHandle = typeof r.slug === 'string' && r.slug.trim().length > 0 ? r.slug : String(r.id).slice(0, SterlingTools.CITATION_PREFIX_LEN);
+    // Both header components are sanitized to one clipped line (Codex review
+    // M2a) — the full title still appears in the body below (titleField is
+    // NOT in RENDER_SKIP_FIELDS), so nothing is lost, only de-duplicated
+    // between a safe locator (header) and the full value (body).
+    const title = SterlingTools.sanitizeHeaderText(rawTitle);
+    const handle = SterlingTools.sanitizeHeaderText(rawHandle);
+    const header = `=== ${String(r.type)} '${title}' [${handle}] (status: ${String(r.status)}) ===`;
+
+    const bodyLines: string[] = [];
+    for (const field of fieldNames) {
+      if (SterlingTools.RENDER_SKIP_FIELDS.has(field)) continue;
+      const rendered = SterlingTools.renderFieldValue(r[field]);
+      if (rendered === undefined) continue;
+      bodyLines.push(`${field.toUpperCase().replace(/_/g, ' ')}: ${rendered}`);
+    }
+    if (bodyLines.length === 0) return header;
+    // Every body line is indented (Codex review M2b) so record content can
+    // never produce a line starting at column 0 that mimics the header frame.
+    return `${header}\n${SterlingTools.indentLines(bodyLines.join('\n'))}`;
+  }
+
+  /**
+   * One field's readable rendering for `knowledge_render` — undefined means
+   * "omit this field entirely" (empty string / empty array / empty object /
+   * null / undefined all carry no substance worth pasting).
+   */
+  private static renderFieldValue(value: unknown): string | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === 'string') return value.trim().length > 0 ? value : undefined;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) return value.length > 0 ? `\n${JSON.stringify(value, null, 2)}` : undefined;
+    if (typeof value === 'object') return Object.keys(value as object).length > 0 ? `\n${JSON.stringify(value, null, 2)}` : undefined;
+    return String(value);
   }
 
   /**
@@ -4248,10 +5484,26 @@ export class SterlingTools {
       state: string;
       history: { date: string; event: string; target_id?: string }[];
       files: { path: string; role: string; unverified?: boolean }[];
-      current_ac: { ac_id: string; text: string; verifiable_at: string }[];
-      live_test_refs: { ac_id: string; test_paths: string[] }[];
+      current_ac: { ac_id: string; text: string; verifiable_at: string }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
+      live_test_refs: { ac_id: string; test_paths: string[] }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
       dependencies?: { relies_on: string[]; relied_by: string[] };
     };
+    // Board a9280db7 (decision c48380bf): current_ac/live_test_refs may now be
+    // the structured not_applicable exemption object on a probe|tool article,
+    // not an array — every read below assumed array shape unconditionally
+    // (.map/.filter), which would THROW rather than refuse cleanly on such a
+    // parent. Normalize FOR THE OWNERSHIP/MOVE bookkeeping only (an
+    // exemption-shaped parent simply owns no ac_id entries to move, so
+    // move_ac_ids validation below refuses it by its EXISTING "not owned by
+    // parent" message, never a crash) — the PARENT UPDATE below does NOT use
+    // these arrays: it preserves the exemption object VERBATIM when present,
+    // so a file-only split of a probe/tool parent keeps its exemption and
+    // succeeds, rather than being silently flattened to an empty array (which
+    // the new schema gate would then reject outright on kind probe/tool).
+    const currentAcIsArray = Array.isArray(parentRec.current_ac);
+    const liveRefsIsArray = Array.isArray(parentRec.live_test_refs);
+    const parentAcArray = currentAcIsArray ? (parentRec.current_ac as { ac_id: string; text: string; verifiable_at: string }[]) : [];
+    const parentRefsArray = liveRefsIsArray ? (parentRec.live_test_refs as { ac_id: string; test_paths: string[] }[]) : [];
 
     // Child slugs pairwise distinct within this call, and none colliding with
     // an existing feature_article slug — the same two-records-one-slug refusal
@@ -4274,7 +5526,7 @@ export class SterlingTools {
     // of it before any write (P5): a call mixing a valid and an invalid child
     // must refuse the WHOLE call, never create the valid one first.
     const parentPaths = new Set(parentRec.files.map((f) => f.path));
-    const parentAcIds = new Set(parentRec.current_ac.map((a) => a.ac_id));
+    const parentAcIds = new Set(parentAcArray.map((a) => a.ac_id));
     const claimedPaths = new Map<string, string>();
     const claimedAcIds = new Map<string, string>();
     for (const child of children) {
@@ -4367,8 +5619,8 @@ export class SterlingTools {
     this.store.withTransaction(() => {
       for (const child of children) {
         const movedFiles = parentRec.files.filter((f) => claimedPaths.get(f.path) === child.slug);
-        const movedAc = parentRec.current_ac.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
-        const movedRefs = parentRec.live_test_refs.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
+        const movedAc = parentAcArray.filter((a) => claimedAcIds.get(a.ac_id) === child.slug);
+        const movedRefs = parentRefsArray.filter((r) => claimedAcIds.get(r.ac_id) === child.slug);
         const created = this.knowledgeCreate('feature_article', {
           slug: child.slug,
           title: child.title,
@@ -4389,8 +5641,14 @@ export class SterlingTools {
       }
 
       const remainingFiles = parentRec.files.filter((f) => !claimedPaths.has(f.path));
-      const remainingAc = parentRec.current_ac.filter((a) => !claimedAcIds.has(a.ac_id));
-      const remainingRefs = parentRec.live_test_refs.filter((r) => !claimedAcIds.has(r.ac_id));
+      // An exemption-shaped field is preserved VERBATIM (no ac_id was ever
+      // claimable from it, so filtering would be a no-op anyway) rather than
+      // flattened to []: current_ac/live_test_refs on kind probe|tool must
+      // never be re-written to an empty array by this path, or the new
+      // article_kind schema gate (board a9280db7) would reject the parent
+      // update outright on a file-only split.
+      const remainingAc = currentAcIsArray ? parentAcArray.filter((a) => !claimedAcIds.has(a.ac_id)) : parentRec.current_ac;
+      const remainingRefs = liveRefsIsArray ? parentRefsArray.filter((r) => !claimedAcIds.has(r.ac_id)) : parentRec.live_test_refs;
       const splitEvent = { date: ts, event: `split off ${childSlugs}${reason ? ` — ${reason}` : ''}` };
       parentResult = this.knowledgeUpdate(parentRec.id, {
         what_it_does: parent_what_it_does,
@@ -5282,24 +6540,30 @@ export class SterlingTools {
       const chain = this.articleChainIds(filter.feature_slug);
       filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
     }
-    // DETERMINISTIC ORDER, MADE EXPLICIT (board b786a84f, PAGING): the store's
-    // own order for a rank_terms-less query() is `updated_at DESC` (mechanical
-    // fallback rank, §3.4). Re-sorted here on that SAME key so the order is a
-    // property of this method rather than an incidental SQL detail — but only
-    // on `updated_at`: Array.prototype.sort is SPEC-GUARANTEED STABLE (ES2019),
-    // so returning 0 for a tie (two todos sharing one updated_at, e.g. minted
-    // in the same write or the same test tick) preserves whatever relative
-    // order the underlying scan already produced for them, rather than
-    // imposing a different tie-break (an id-based one was tried and reordered
-    // same-timestamp items relative to existing, already-passing callers that
-    // assume insertion order for ties). Paging is still exactly reproducible:
-    // offset 0, cap, 2·cap, … visits every matching item once, in one order,
-    // as long as the board is unchanged between calls.
+    // DETERMINISTIC TOTAL ORDER (board abafbd48, Codex-adjudicated, upgrading
+    // b786a84f, PAGING): the store's own order for a rank_terms-less query() is
+    // `updated_at DESC` (mechanical fallback rank, §3.4). Re-sorted here on
+    // that SAME key so the order is a property of this method rather than an
+    // incidental SQL detail — and now `id DESC` as the FINAL tiebreaker, so two
+    // todos sharing one updated_at (minted in the same write, or the same test
+    // tick) no longer resolve to "whatever order the underlying scan happened
+    // to produce" (a non-total order Array.prototype.sort's stability alone
+    // cannot fix, since a fresh scan's own incoming order is not itself
+    // guaranteed stable across calls). A prior version of this comment argued
+    // for returning 0 on a tie; that left ties genuinely unordered across
+    // separate scans, which is exactly what breaks a keyset cursor's "resume
+    // strictly after this tuple" contract — see compareBoardOrder. The total
+    // order alone does not make paging immune to concurrent writes: offset
+    // paging over it can still SKIP an item bumped toward the head between
+    // page fetches (offset is a position, not an identity) — see
+    // BoardFilter.cursor for the continuation that instead cannot omit an
+    // item behind it, at the cost of being unable to surface one that jumps
+    // ahead of it after the cursor was minted.
     filtered = [...filtered].sort((a, b) => {
-      const at = (a as { updated_at: string }).updated_at;
-      const bt = (b as { updated_at: string }).updated_at;
-      if (at === bt) return 0;
-      return at < bt ? 1 : -1;
+      const rec = (r: DurableRecord) => r as unknown as { updated_at: string; id: string };
+      const ra = rec(a);
+      const rb = rec(b);
+      return compareBoardOrder(ra.updated_at, ra.id, rb.updated_at, rb.id);
     });
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
@@ -5373,7 +6637,10 @@ export class SterlingTools {
     const groups = new Map<string, { paths: string[]; items: DurableRecord[] }>();
     for (const [path, items] of byPath) {
       if (items.length < 2) continue; // AC1: two or more, or it is not a collision
-      const key = items.map((i) => (i as unknown as { id: string }).id).join(' ');
+      // Separator is a SOURCE-LEVEL escape (anti-pattern d7e03137): \x1F cannot
+      // occur in a uuid, so the impossibility property holds without a raw
+      // control byte flipping this file to binary for grep/tooling.
+      const key = items.map((i) => (i as unknown as { id: string }).id).join('\x1F');
       const group = groups.get(key);
       if (group) group.paths.push(path);
       else groups.set(key, { paths: [path], items });
@@ -5417,10 +6684,246 @@ export class SterlingTools {
     return headline ? clipName(headline) : '(unnamed board item)';
   }
 
-  boardQuery(filter: BoardFilter = {}): DurableRecord[] {
-    const offset = filter.offset ?? 0;
+  /**
+   * A matched EVIDENCE record's human name: slug → title → question → location,
+   * first present. Deliberately a fallback LADDER rather than a per-type switch:
+   * the evidence set spans seven types with three different naming fields
+   * (feature_article slugs, decision/anti_pattern titles, disconfirmed_hypothesis
+   * and open_question questions, a location-only reference doc), and a switch
+   * would silently name the eighth type `undefined` the day one is registered.
+   * Clipped like every other display name — names clip, ids never do — and the
+   * id8 beside it stays whole, since that is the address the reader cites.
+   */
+  private static artifactEvidenceName(rec: Record<string, unknown>): string {
+    const field = (name: string): string => {
+      const value = rec[name];
+      return typeof value === 'string' && value.trim().length > 0 ? value.trim() : '';
+    };
+    const slug = field('slug');
+    const headline = field('title') || field('question');
+    // ONE EXCEPTION TO SLUG-FIRST, and it is not a type special-case. Of the
+    // evidence types, FOUR auto-mint their slug from their own headline
+    // (knowledgeCreate's mint branch covers decision | anti_pattern |
+    // research_finding | open_question — plus attestation and todo, neither of
+    // which is an evidence type; attestation mints nothing anyway, having no
+    // headline): for those, slug-first would print 'references-item-3642b2c5'
+    // where the record's own name is "references item 3642b2c5" — the SAME name,
+    // kebab-flattened, in front of a human trying to recognise it. NOTE the
+    // predicate is CONTENT-based, not type-based (delta review LOW, 2026-09-01):
+    // a feature_article's slug is authored (schema-required, never minted), but
+    // the common shape — slug 'csv-export' beside title 'CSV export' — satisfies
+    // the predicate and takes the demotion branch, displaying the title. That is
+    // acceptable output for a human; what the predicate protects is a slug that
+    // DIFFERS from its headline's kebab form (a deliberately distinct authored
+    // address), which always wins. disconfirmed_hypothesis and
+    // reference_material carry no slug field at all.
+    if (slug && !SterlingTools.slugIsMintedFrom(slug, headline)) return clipName(slug);
+    if (headline) return clipName(headline);
+    const location = field('location');
+    if (location) return clipName(location);
+    // Should not be reachable for a registered evidence type; a marker beats an
+    // empty string that reads as a missing field (same reasoning as boardItemName).
+    return '(unnamed record)';
+  }
+
+  /**
+   * Whether `slug` is exactly what mintSlug would derive from `headline` — the
+   * bare slugified base, or that base plus the disambiguator mintSlug ACTUALLY
+   * generates. That loop starts at 2 and counts up in canonical decimal, so
+   * '-0', '-1' and '-01' are shapes it can never produce: matching them would
+   * demote an AUTHORED slug ('foo-1' beside a 'foo' title) to its title, which is
+   * the opposite of what this predicate is for. Recognising only the mintable
+   * shape keeps the exception as narrow as its justification.
+   */
+  private static slugIsMintedFrom(slug: string, headline: string): boolean {
+    const base = SterlingTools.slugify(headline);
+    if (!base) return false;
+    if (slug === base) return true;
+    if (!slug.startsWith(`${base}-`)) return false;
+    const suffix = slug.slice(base.length + 1);
+    // Canonical decimal, no leading zeros, >= 2 — mintSlug's own suffix alphabet.
+    return /^[1-9][0-9]*$/.test(suffix) && Number(suffix) >= 2;
+  }
+
+  /**
+   * DERIVED PER-ITEM ARTIFACT EVIDENCE (board 00fa8adb) — board_remove's removal
+   * receipt (removalArtifactEvidence) brought forward to QUERY time, so the
+   * reader auditing a board sees "something was written near this item" BEFORE
+   * choosing what to act on, instead of only at the moment of removal. Same
+   * evidence types, same two arms, same 200-record windows, same since-filter:
+   * the two surfaces share ARTIFACT_EVIDENCE_TYPES precisely so they cannot come
+   * to different conclusions about one item.
+   *
+   * PAGE-SCOPED, like the reconcile drift re-check beside it and for the same
+   * reason: the cost is paid per item actually served, never per matched item.
+   *
+   * COST SHAPE — the whole method is one shared scan plus one query per DISTINCT
+   * file-key set:
+   *  - the CITATION arm runs ONE store.query for the page and JSON.stringify's
+   *    each scanned record ONCE into `bodies`; the per-item test is then a pair
+   *    of substring checks over strings already built, so a 50-item page costs
+   *    one scan and one serialization pass rather than fifty of each.
+   *  - the FILE-KEY arm is memoized on the item's NORMALIZED (deduped, sorted)
+   *    key set. Memoized per set and never UNIONED across items: the store ranks
+   *    by file-key overlap count, so a union query's 200-record window is not the
+   *    union of the individual windows — items with few keys would be crowded out
+   *    by whichever item declared the most, and their evidence would vanish.
+   *    Because it cannot be unioned, it is BUDGETED instead
+   *    (ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP): `cap` is caller-controlled, so the
+   *    distinct-key-set query count is bounded per page and the overflow is
+   *    disclosed per item and on the envelope, exactly like the reconcile
+   *    re-check's DriftBudget beside it.
+   *
+   * STRICTLY READ-ONLY: unlike removalArtifactEvidence, the keyless case records
+   * NO check_skipped audit row — a query that writes to the store on being read
+   * would make reading the board an event, and the skip is disclosed in the
+   * returned `file_key_check` field instead (the same fact, same call, no write).
+   *
+   * FAILS OPEN: any throw from the evidence scan yields an empty map and
+   * 'unavailable:store_query_failed', because losing the page itself to a broken
+   * advisory annotation would be a far worse trade than losing the annotation.
+   */
+  private pageArtifactEvidence(items: DurableRecord[]): { evidence: Map<string, ArtifactEvidence>; provenance: string } {
+    const evidence = new Map<string, ArtifactEvidence>();
+    if (items.length === 0) return { evidence, provenance: 'checked' };
+    try {
+      // CITATION ARM, hoisted: one scan + one serialization pass for the page.
+      const scanned = this.store.query({ types: ARTIFACT_EVIDENCE_TYPES, cap: ARTIFACT_EVIDENCE_SCAN_CAP });
+      const bodies = scanned.map((r) => JSON.stringify(r));
+      const fileKeyScans = new Map<string, DurableRecord[]>();
+      let truncated = false;
+      for (const item of items) {
+        const rec = item as unknown as { id: string; created_at: string; file_keys?: unknown };
+        const since = rec.created_at;
+        const fileKeys = Array.isArray(rec.file_keys)
+          ? [...new Set((rec.file_keys as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0))].sort()
+          : [];
+        let fileKeyMatches: DurableRecord[] = [];
+        let file_key_check: ArtifactEvidence['file_key_check'] = fileKeys.length > 0 ? 'checked' : 'skipped:no_file_keys';
+        if (fileKeys.length > 0) {
+          // Keyed on the normalized set, so two items declaring the same paths in
+          // different order share one query rather than issuing two identical ones.
+          //
+          // INJECTIVE BY CONSTRUCTION (Codex review, this slice — the same finding
+          // and the same remedy as the reconcile re-check's memo key): a separator
+          // join can never be impossibility-proof here, because normalizeRepoPath
+          // permits ANY byte in a path, \x1F included, so crafted key sets
+          // (["a","b\x1Fc"] vs ["a\x1Fb","c"]) would alias and one item would read
+          // another item's store result. JSON.stringify of the array is injective
+          // for arbitrary strings.
+          const memoKey = JSON.stringify(fileKeys);
+          let scan = fileKeyScans.get(memoKey);
+          if (!scan) {
+            // BUDGET, checked only on a MISS: a memo hit issues no query and
+            // therefore costs nothing. Once the page's distinct-key-set allowance
+            // is spent, this item's file-key arm abstains LOUDLY rather than
+            // returning a zero that reads as "checked and found nothing" — and its
+            // citation arm below still runs, since that scan is shared and paid.
+            if (fileKeyScans.size >= ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP) {
+              truncated = true;
+              file_key_check = 'unavailable:budget';
+            } else {
+              scan = this.store.query({ types: ARTIFACT_EVIDENCE_TYPES, file_keys: fileKeys, cap: ARTIFACT_EVIDENCE_SCAN_CAP });
+              fileKeyScans.set(memoKey, scan);
+            }
+          }
+          // The since-filter is PER ITEM even when the scan is shared: two items
+          // over the same files were created at different times.
+          fileKeyMatches = (scan ?? []).filter((r) => r.created_at >= since || r.updated_at >= since);
+        }
+        const prefix = rec.id.slice(0, 8);
+        const idMatches = scanned.filter(
+          (r, i) => (r.created_at >= since || r.updated_at >= since) && (bodies[i].includes(rec.id) || bodies[i].includes(prefix))
+        );
+        // Dedupe across the arms by record id — file_keys order first, then any
+        // citation match not already covered (removalArtifactEvidence's order).
+        const seen = new Set<string>();
+        const combined: DurableRecord[] = [];
+        for (const r of [...fileKeyMatches, ...idMatches]) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          combined.push(r);
+        }
+        evidence.set(rec.id, {
+          count: combined.length,
+          // The count stays FULL while the named records clip: a reader must be
+          // able to see that six things were written even when only three fit.
+          ...(combined.length > 0
+            ? {
+                records: combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => {
+                  const body = r as unknown as Record<string, unknown>;
+                  return { id8: String(body.id).slice(0, 8), type: String(body.type), name: SterlingTools.artifactEvidenceName(body) };
+                }),
+              }
+            : {}),
+          file_key_check,
+        });
+      }
+      return { evidence, provenance: truncated ? 'checked:budget_truncated' : 'checked' };
+    } catch {
+      // FAIL OPEN — the page survives, and the envelope says the check did not run.
+      return { evidence: new Map(), provenance: 'unavailable:store_query_failed' };
+    }
+  }
+
+  boardQuery(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): DurableRecord[] {
+    return this.pageBoard(surface, this.boardFiltered(filter).matching, filter).records;
+  }
+
+  /**
+   * ONE page of an already-sorted `matching` set, shared by boardQuery and
+   * boardQueryResult — and by BOTH board_query and maintenance_query, which
+   * is why `surface` is explicit rather than assumed (board abafbd48
+   * re-review, HIGH: a maintenance_query refusal must never say "board_query").
+   * `offset` and `cursor` are two different continuation strategies over the
+   * SAME total order (compareBoardOrder) — passing both is ambiguous and
+   * refused; a `cursor` that fails to decode, or was minted under DIFFERENT
+   * filters than this call, is refused naming the parameter/mismatch, never
+   * silently ignored (board abafbd48 re-review, MEDIUM-HIGH). `capped` is
+   * exact (more matched than returned); when true, `next_cursor` names the
+   * boundary for a keyset-continued next call — present whenever more
+   * remains, regardless of which strategy read this page.
+   */
+  private pageBoard(
+    surface: BoardSurface,
+    matching: DurableRecord[],
+    filter: BoardFilter
+  ): { records: DurableRecord[]; offset: number; capped: boolean; next_cursor?: string } {
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
-    return this.boardFiltered(filter).matching.slice(offset, offset + cap);
+    if (filter.cursor !== undefined && filter.offset !== undefined) {
+      throw new Error(
+        `${surface}: 'cursor' and 'offset' are two different continuation strategies — passing both is ambiguous and refused; page with one or the other, never both.`
+      );
+    }
+    const currentIdentity = boardCursorIdentity(surface, filter);
+    const rest =
+      filter.cursor !== undefined
+        ? (() => {
+            const decoded = decodeBoardCursor(surface, filter.cursor as string);
+            const mismatch = describeIdentityMismatch(decoded.identity, currentIdentity);
+            if (mismatch) {
+              throw new Error(
+                `${surface}: this cursor was minted for a DIFFERENT query (${mismatch}) — a cursor is a position in ONE specific query's ` +
+                  `total order, so continuing it under different filters (source/system_reason/objective/file_keys/contains/feature_slug) is ` +
+                  `refused rather than silently omitting whatever the new filter excludes but the old one didn't. cap/projection may change ` +
+                  `freely; start a fresh, uncursored call to change anything else.`
+              );
+            }
+            return matching.filter((r) => {
+              const rec = r as unknown as { updated_at: string; id: string };
+              return compareBoardOrder(rec.updated_at, rec.id, decoded.updated_at, decoded.id) > 0;
+            });
+          })()
+        : matching.slice(filter.offset ?? 0);
+    const records = rest.slice(0, cap);
+    const capped = records.length < rest.length;
+    const last = records[records.length - 1] as unknown as { updated_at: string; id: string } | undefined;
+    return {
+      records,
+      offset: filter.offset ?? 0,
+      capped,
+      next_cursor: capped && last ? encodeBoardCursor(surface, filter, last.updated_at, last.id) : undefined,
+    };
   }
 
   /**
@@ -5440,27 +6943,40 @@ export class SterlingTools {
    * matching the filter you gave) — one name per concept, with each tool
    * documenting its own guarantee.
    */
-  boardQueryResult(filter: BoardFilter = {}): BoardQueryResult {
+  boardQueryResult(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): BoardQueryResult {
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
-    const offset = filter.offset ?? 0;
-    const records = matching.slice(offset, offset + cap);
-    // capped is EXACT here (same guarantee as before offset existed): more of
-    // the matching set sits past this page's end.
-    const capped = offset + records.length < matching.length;
+    const { records, offset, capped, next_cursor } = this.pageBoard(surface, matching, filter);
     const projection = filter.projection ?? 'full';
     const notes: string[] = [];
+    // MODE-SPECIFIC ADVICE (board abafbd48 re-review, MEDIUM): this page was
+    // read by cursor iff the caller passed one — `offset` on the pageBoard
+    // result is always 0 in that mode (nothing was ever asked to position-page),
+    // so surfacing "offset:0" as a continuation there would just re-fetch this
+    // SAME page, not the next one. A cursor page therefore offers ONLY
+    // next_cursor; an offset page offers both, since either genuinely continues
+    // it. The keyset claim itself is qualified, not absolute (server.ts states
+    // the same boundary): a cursor page can never OMIT an item that was behind
+    // the cursor, but it also cannot surface one that jumped AHEAD of the
+    // cursor after it was minted — a churn-exposed walk still needs a
+    // terminal head re-query either way.
+    const cursorMode = filter.cursor !== undefined;
     if (capped) {
+      const cursorAdvice =
+        `page with cursor:"${next_cursor}" to continue by KEYSET — it will never omit an item that was behind the cursor, ` +
+        `though it still cannot surface one that jumped AHEAD of the cursor after this page was read`;
+      const offsetAdvice = `or offset:${offset + records.length} to continue by position (can SKIP an item bumped toward the head between page fetches)`;
       notes.push(
-        `cap reached — showing ${records.length} of ${matching.length} matching items (offset ${offset}); ` +
-          `page with offset:${offset + records.length} to continue, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
+        `cap reached — showing ${records.length} of ${matching.length} matching items${cursorMode ? '' : ` (offset ${offset})`}; ` +
+          (cursorMode ? cursorAdvice : `${cursorAdvice}, ${offsetAdvice}`) +
+          `, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
           (projection === 'full' ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)` : '')
       );
     }
     if (scanTruncated) {
       notes.push(
         `the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total — ` +
-          `and PAGING IS BOUNDED BY THAT SAME CEILING: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue)`
+          `and PAGING IS BOUNDED BY THAT SAME CEILING EITHER WAY: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue), and cursor paging is equally bounded — a cursor whose position lies past the scanned window cannot resume into rows the scan never saw either`
       );
     }
     // board-provenance-measured-at-head: ONE bounded git walk for this whole
@@ -5469,10 +6985,36 @@ export class SterlingTools {
     // this keeps the annotation visible through whichever projection the
     // caller asked for without adding a wire field no projection declares).
     const { status: provenance, warnings } = this.computeProvenance(records, this.repoRoot);
+    // TRUTH AT READ (decision queue-truth-at-read-annotation-design): the ONE
+    // integration point for the reconcile_needed drift re-check. Gated INSIDE to
+    // this page's source:'system'/reconcile_needed rows, so a source:'user'
+    // query pays nothing; maintenance_query delegates to this same method, so
+    // both public views of one row agree about whether it is a closeable no-op.
+    // AFTER pagination, deliberately: the check is page-scoped, never
+    // matched-set-scoped, because its cost is per item actually served.
+    const { status: reconcile_provenance, annotations: reconcileNotes } = this.reconcileTruthAtRead(records);
+    if (reconcile_provenance === 'checked:budget_truncated') {
+      notes.push(
+        `the reconcile_needed drift re-check hit its per-call BUDGET on this page and was TRUNCATED — the items it could not finish ` +
+          `say 'unavailable:budget' themselves and must be treated as OPEN; narrow the page (cap/offset, or system_reason) to re-check them`
+      );
+    }
     // PARALLEL-LANE SEED: derived from `matching` (the FULL matched set), NOT
     // from `records` — see laneAdvisory. Advisory only: it is computed after
     // `records` is already fixed and never touches it.
     const lane_advisory = this.laneAdvisory(matching);
+    // DERIVED ARTIFACT EVIDENCE (board 00fa8adb): PAGE-scoped — computed from
+    // `records`, after cap/offset/cursor resolution, never from `matching` (the
+    // opposite of lane_advisory above, deliberately: an advisory about lane
+    // collisions is useless if the cap splits the collision, whereas this one's
+    // cost is per item actually served and its verdict is per item anyway).
+    const { evidence: artifactEvidence, provenance: artifact_evidence_provenance } = this.pageArtifactEvidence(records);
+    if (artifact_evidence_provenance === 'checked:budget_truncated') {
+      notes.push(
+        `the artifact_evidence FILE-KEY arm hit its per-call query budget on this page — the items it could not reach say ` +
+          `file_key_check:'unavailable:budget' themselves and their count is a CITATION-ONLY floor; narrow the page (a smaller cap, or offset/cursor) to check them`
+      );
+    }
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const base =
         projection === 'headline'
@@ -5480,14 +7022,29 @@ export class SterlingTools {
           : projection === 'digest'
             ? digestRecord(r as unknown as Record<string, unknown>)
             : { ...(r as unknown as Record<string, unknown>) };
-      const warning = warnings.get((r as unknown as { id: string }).id);
-      if (!warning) return base;
+      const id = (r as unknown as { id: string }).id;
+      const warning = warnings.get(id);
+      // COMPOSED AFTER THE PROJECTION CLIP, like the provenance warning beside
+      // it and for the same reason: a verdict clipped away by digest/headline
+      // would make those surfaces the ones that lie about the item.
+      const note = reconcileNotes.get(id);
+      // ALSO after the clip, and a WIRE FIELD rather than an appendix to `text`
+      // (the two annotations above ride `text` because they are prose): the
+      // block is structured data every projection can carry, and it is ABSENT
+      // when the derivation failed, never a zero-count that would read as a
+      // checked-and-found-nothing result.
+      const derived = artifactEvidence.get(id);
+      const withEvidence = derived ? { ...base, artifact_evidence: derived } : base;
+      if (!warning && !note) return withEvidence;
       const text = typeof base.text === 'string' ? base.text : '';
-      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (a short marker,
-      // appended directly, no separator) — the full sentence only lands on
-      // digest/full, which already tolerate multi-line text.
-      if (projection === 'headline') return { ...base, text: `${text}${warning.short}` };
-      return { ...base, text: text ? `${text}\n\n${warning.full}` : warning.full };
+      // OUTSIDE-MODEL FINDING 3: headline's line stays compact (short markers,
+      // appended directly, no separator) — the full sentences only land on
+      // digest/full, which already tolerate multi-line text. Both annotations
+      // can apply to one row (an aged keyed item whose drift is also gone), so
+      // they compose rather than one displacing the other.
+      if (projection === 'headline') return { ...withEvidence, text: `${text}${warning ? warning.short : ''}${note ? note.short : ''}` };
+      const parts = [text, warning?.full, note?.full].filter((p): p is string => typeof p === 'string' && p.length > 0);
+      return { ...withEvidence, text: parts.join('\n\n') };
     };
     return {
       matched_filter: matching.length,
@@ -5496,8 +7053,18 @@ export class SterlingTools {
       capped,
       offset,
       provenance,
+      reconcile_provenance,
+      // KEYSET CONTINUATION (board abafbd48): present only when more items
+      // remain past this page — absent, never null, mirroring lane_advisory's
+      // own "presence is the signal" convention.
+      ...(next_cursor !== undefined ? { next_cursor } : {}),
       // AC3: the key is ABSENT when nothing collides, never an empty block.
       ...(lane_advisory ? { lane_advisory } : {}),
+      // board 00fa8adb: the status ALWAYS present (an absent per-item block must
+      // be readable as "not checked" rather than "nothing found"), and the
+      // reading instruction with it — once per envelope, not once per item.
+      artifact_evidence_provenance,
+      artifact_evidence_note: ARTIFACT_EVIDENCE_NOTE,
       ...(notes.length ? { note: notes.join('; ') } : {}),
       // AC6: unchanged, unfiltered, unreordered — the advisory above is derived
       // FROM this page's matched set and never acts on it.
@@ -5748,7 +7315,11 @@ export class SterlingTools {
   private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
     const since = item.created_at;
-    const evidenceTypes = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'reference_material'];
+    // The evidence set is ONE module-level list (ARTIFACT_EVIDENCE_TYPES, which
+    // documents why open_question is in it) shared with board_query's derived
+    // per-item evidence — the two surfaces must never disagree about what counts
+    // as an artifact for the same item.
+    const evidenceTypes = ARTIFACT_EVIDENCE_TYPES;
     // FIX M1 (upgrade-polish review, 2026-08-21): the id-citation arm below needs
     // no file identity at all — concept_article_missing / research_owed / plain
     // tasks routinely carry no file_keys, and those are exactly the items most
@@ -6361,6 +7932,19 @@ export class SterlingTools {
    * a no-op success — a silent success here would let a PIPELINE agent's exit
    * vanish if a run ended mid-phase — but it now terminates the attempt instead
    * of starting a diagnosis.
+   *
+   * SOFTENED 2026-08-31 (board 1259802b, adopted Codex+conductor joint): the
+   * REFUSAL SEMANTICS ARE UNCHANGED — still an error, still nothing recorded,
+   * still the loud refusal decision 391fae4f deliberately kept over a silent
+   * no-op. What changed is the TEXT. The measured residual was agents burning a
+   * tool call AND THEN A PARAGRAPH on this in conductor-direct mode (~12
+   * refusals in one consuming session), which is the shape of a message that
+   * reads like a fault report: four sentences, a parenthetical tool inventory,
+   * and a "do not retry" that invites an explanation of why you did. So the
+   * message now opens by naming the outcome as EXPECTED, states the one action
+   * (put the handoff in your final text and proceed), and says explicitly that
+   * one line is enough — the cheapest fix tried first, before the bigger
+   * mode-aware tool-availability surface the board still holds as option (b).
    */
   private requireWireRun(tool: string, runId?: string): RunRecord {
     // Keyed on "is any run active", NOT on "did the caller omit run_id"
@@ -6373,10 +7957,9 @@ export class SterlingTools {
     // untouched.
     if (!this.store.getRun()) {
       throw new Error(
-        `${tool}: no run is active, so there is no handoff wire to write to — nothing was recorded. ` +
-          `This is CONDUCTOR-DIRECT mode, not a fault to diagnose: ${tool} and its siblings (agent_exit, handoff_write, handoff_read) ` +
-          `work only inside a pipeline run. Your final message IS your deliverable — report your findings in prose and stop. ` +
-          `Do not retry with another signal, and never invent a run_id.`
+        `${tool}: no run is active — EXPECTED in CONDUCTOR-DIRECT mode, not a fault to diagnose. Nothing was recorded. ` +
+          `Put the handoff in your final text and proceed: your final message IS your deliverable. ` +
+          `One line about this is enough — do not narrate it, do not retry with another signal, and never invent a run_id.`
       );
     }
     return this.runState(runId);
@@ -6562,21 +8145,39 @@ export class SterlingTools {
   }
 
   maintenanceQuery(
-    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; offset?: number } = {}
+    filter: {
+      system_reason?: string;
+      file_keys?: string[];
+      contains?: string;
+      feature_slug?: string;
+      cap?: number;
+      offset?: number;
+      cursor?: string;
+    } = {}
   ): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap. contains
     // (work order d9960c98) and feature_slug (board e725979c) ride the same
     // boardFiltered pass for the same reason, and combine as a genuine AND.
-    return this.boardQuery({
-      source: 'system',
-      system_reason: filter.system_reason,
-      file_keys: filter.file_keys,
-      contains: filter.contains,
-      feature_slug: filter.feature_slug,
-      cap: filter.cap,
-      offset: filter.offset,
-    });
+    // `cursor` FORWARDS to the shared pageBoard (board abafbd48 re-review, HIGH:
+    // the queue is paged in exactly the concurrent-write conditions cursor
+    // continuation exists for — DROPPING it here, rather than forwarding it,
+    // was the defect: a capped maintenance page's own advice then named a
+    // parameter this surface refused as unknown) — the 'maintenance_query'
+    // surface tag keeps its refusal messages honest about which tool they are.
+    return this.boardQuery(
+      {
+        source: 'system',
+        system_reason: filter.system_reason,
+        file_keys: filter.file_keys,
+        contains: filter.contains,
+        feature_slug: filter.feature_slug,
+        cap: filter.cap,
+        offset: filter.offset,
+        cursor: filter.cursor,
+      },
+      'maintenance_query'
+    );
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
@@ -6588,19 +8189,24 @@ export class SterlingTools {
       feature_slug?: string;
       cap?: number;
       offset?: number;
+      cursor?: string;
       projection?: BoardProjection;
     } = {}
   ): BoardQueryResult {
-    return this.boardQueryResult({
-      source: 'system',
-      system_reason: filter.system_reason,
-      file_keys: filter.file_keys,
-      contains: filter.contains,
-      feature_slug: filter.feature_slug,
-      cap: filter.cap,
-      offset: filter.offset,
-      projection: filter.projection,
-    });
+    return this.boardQueryResult(
+      {
+        source: 'system',
+        system_reason: filter.system_reason,
+        file_keys: filter.file_keys,
+        contains: filter.contains,
+        feature_slug: filter.feature_slug,
+        cap: filter.cap,
+        offset: filter.offset,
+        cursor: filter.cursor,
+        projection: filter.projection,
+      },
+      'maintenance_query'
+    );
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------

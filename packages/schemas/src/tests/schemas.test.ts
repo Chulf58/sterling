@@ -399,6 +399,57 @@ test('attestation: human-inspection ruling round-trips; verdict enum closed; imm
   assert.deepEqual(RECORD_TYPES.attestation.fileKeys({}), [], 'fileless attestation never throws');
 });
 
+test('open_question: an OPEN question needs no closed_into; a CLOSED one without closed_into is refused; the resolution_status enum is closed (decision open-question-record-type-authorized)', () => {
+  // WHY THIS EXISTS. The type's whole reason to exist is holding a question
+  // with evidence and NO answer, and its one refinement is that closure must
+  // name where the answer went — `closed_into`, a SEPARATE field, never an id
+  // smuggled into a status string. The caller-set lifecycle field is
+  // `resolution_status` (open|closed) precisely so it cannot collide with the
+  // server-owned envelope `status` (user ruling, 2026-08-31).
+  const base = {
+    ...envelope('open_question'),
+    question: 'does the dome geometry derive from the three measured spans?',
+    hypotheses: ['the spans are chord lengths', 'the spans are arc lengths'],
+    evidence: 'three measurements + a derived geometry, 2026-08-29 dome-farmer lane',
+  };
+
+  // CONTROL ARM, FIRST: an OPEN question with no answer, no closed_into, is
+  // ACCEPTED. Without this, the refusal below is satisfied just as well by a
+  // schema that refuses every open_question — the verdict would have two
+  // possible causes and could not tell them apart.
+  const open = validateRecord({ ...base, resolution_status: 'open' }) as unknown as {
+    resolution_status: string;
+    closed_into?: string | null;
+  };
+  assert.equal(open.resolution_status, 'open');
+  assert.ok(!open.closed_into, 'an open question carries no closure target — that is the state this type exists to hold');
+
+  // THE REFINEMENT: closed without closed_into is refused.
+  assert.throws(
+    () => validateRecord({ ...base, id: randomUUID(), resolution_status: 'closed' }),
+    /closed_into/,
+    'closing an open_question must name the research_finding it closed into — the refusal names the missing field'
+  );
+
+  // SECOND CONTROL: closed WITH closed_into is accepted, so the refusal above
+  // is caused by the missing field and not by 'closed' being unwritable.
+  const closed = validateRecord({
+    ...base,
+    id: randomUUID(),
+    resolution_status: 'closed',
+    closed_into: randomUUID(),
+  }) as unknown as { resolution_status: string; closed_into: string };
+  assert.equal(closed.resolution_status, 'closed');
+  assert.equal(typeof closed.closed_into, 'string');
+
+  // The lifecycle enum is CLOSED — free text is not a third state.
+  assert.throws(
+    () => validateRecord({ ...base, id: randomUUID(), resolution_status: 'parked' }),
+    /invalid/i,
+    'resolution_status is open|closed only'
+  );
+});
+
 test('registry: full record set registered 1:1, unregistered type rejected loudly (invariant 3)', () => {
   assert.deepEqual(Object.keys(RECORD_TYPES).sort(), [
     'anti_pattern',
@@ -407,6 +458,7 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
     'decision',
     'disconfirmed_hypothesis',
     'feature_article',
+    'open_question', // evidenced question, live hypotheses, no answer (decision open-question-record-type-authorized, user-ruled 2026-08-31)
     'reference_material',
     'research_finding',
     'todo',
@@ -574,6 +626,48 @@ test('sessionEventSchema: test_repair joins the register as the SIXTH kind — d
   assert.throws(() => s.parse({ kind: 'test_repair', at: NOW }), 'detail is required for test_repair too');
   assert.throws(() => s.parse({ kind: 'test_repair', detail: 42, at: NOW }), 'detail must be a string');
   assert.throws(() => s.parse({ kind: 'test_repair', detail }), 'at is required for test_repair too');
+});
+
+// ---- test_append kind (board 17204d1e review MEDIUM: the shipped --append
+// CLI mode and its enum member had zero schema coverage — a mutation
+// survivor by construction). Mirrors the test_repair pin immediately above:
+// same schema, same round-trip shape, one more kind. The pre-existing "six
+// kinds" pin further above is left AS-IS per the coordinator's instruction —
+// its own enum-rejection assertion already uses 'file_touch' as the
+// always-invalid probe, which stays invalid at seven kinds too, so nothing
+// there needed to change.
+test('sessionEventSchema: test_append joins the register as the EIGHTH kind — detail carries the path + additive-evidence summary', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  // detail carries BOTH the appended-to test path and the additive-evidence
+  // statement (what NEW behavior the case pins, and why it is additive) —
+  // same free-text-with-required-substance shape as test_repair's detail.
+  const detail = 'tests/feature.spec.ts — pins a new additive case for empty-input handling, not a repair of an existing assertion';
+  const appended = s.parse({ kind: 'test_append', detail, at: NOW });
+  assert.equal(appended.kind, 'test_append');
+  assert.equal(appended.detail, detail);
+  assert.equal(appended.at, NOW);
+
+  // totality holds after the addition — the seven pre-existing kinds still
+  // parse...
+  assert.equal(s.parse({ kind: 'research_tool', detail: 'x', at: NOW }).kind, 'research_tool');
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'x', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'x', at: NOW }).kind, 'debug_scope');
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'x', at: NOW }).kind, 'concept_designed');
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'x', at: NOW }).kind, 'no_capture');
+  assert.equal(s.parse({ kind: 'capture_pending', detail: 'x', at: NOW }).kind, 'capture_pending');
+  assert.equal(s.parse({ kind: 'test_repair', detail: 'x', at: NOW }).kind, 'test_repair');
+  // ...and a kind outside the eight is still rejected — the totality
+  // boundary moved from seven to eight, it did not open. This is the SAME
+  // rejection pin (unchanged) as the closed-enum test above, re-asserted here
+  // against the new eight-kind enum so a landed implementation that widened
+  // the enum to accept an arbitrary string is caught at this test too.
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the eight writers is rejected');
+  assert.throws(() => s.parse({ kind: 'test_append', at: NOW }), 'detail is required for test_append too');
+  assert.throws(() => s.parse({ kind: 'test_append', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'test_append', detail }), 'at is required for test_append too');
 });
 
 test('research_owed is a registered SYSTEM_REASONS member draining under "captured"; 1:1 totality holds (AC7, interface slice 4)', () => {

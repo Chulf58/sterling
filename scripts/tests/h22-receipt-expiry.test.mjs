@@ -207,9 +207,12 @@ test(
       assert.equal(r.code, 0, r.stderr);
       const ledger = readLedgerA(dir);
       assert.equal(ledger.length, 1);
-      assert.equal(ledger[0].agent_type, 'reviewer-correctness', 'agent_type unchanged by the receipt-expiry addition');
-      assert.deepEqual(ledger[0].files, ['src/a.mjs'], 'files unchanged');
-      assert.equal(ledger[0].at, '2026-08-25T00:00:00.000Z', 'at unchanged');
+      // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+      // standing): the CONTROL's intent (promotion works independent of whether the expiry fields land) is
+      // unchanged — only the field homes moved, to the v2 envelope's reviewer.agent_type/territory.files/started_at.
+      assert.equal(ledger[0].reviewer.agent_type, 'reviewer-correctness', 'agent_type unchanged by the receipt-expiry addition');
+      assert.deepEqual(ledger[0].territory.files, ['src/a.mjs'], 'files unchanged');
+      assert.equal(ledger[0].started_at, '2026-08-25T00:00:00.000Z', 'at (now started_at) unchanged');
     } finally {
       cleanup();
     }
@@ -217,7 +220,7 @@ test(
 );
 
 test(
-  "A1: the promoted entry ALSO carries session_id (the register entry's session_id), branch (the git branch active in the hook's cwd), and a sha-shaped base_sha — exactly six keys total",
+  "A1: the promoted v2 entry's identity{} carries session_id (the register entry's session_id), branch (the git branch active in the hook's cwd), and a sha-shaped base_sha (per decision 57984926's v2 envelope)",
   { skip: GIT_SKIP },
   () => {
     const { dir, cleanup } = makeGitProject('sterling/board-fanout-3');
@@ -228,18 +231,22 @@ test(
       const ledger = readLedgerA(dir);
       assert.equal(ledger.length, 1);
       const entry = ledger[0];
+      // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+      // standing): promotions now write the v2 entry envelope, not the flat six-key shape this pin originally
+      // asserted. The expiry semantics this test actually cares about (session_id/branch/base_sha presence and
+      // value) now live under identity{...} — same assertions, ruled v2 home.
       assert.deepEqual(
         Object.keys(entry).sort(),
-        ['agent_type', 'at', 'base_sha', 'branch', 'files', 'session_id'],
-        'ASSUMED snake_case field names (session_id/branch/base_sha), matching the sibling-field convention — the decision names them only in prose'
+        ['content_evidence', 'disposition', 'entry_id', 'finished_at', 'identity', 'kind', 'reviewer', 'schema_version', 'started_at', 'status', 'territory'],
+        'decision 57984926: every new promotion is a v2 entry — exactly these eleven top-level keys, nothing extra'
       );
       assert.equal(
-        entry.session_id,
+        entry.identity.session_id,
         's1',
         "the register entry's session_id is carried through — TODAY's shipped promotion deliberately EXCLUDES session_id (see h22-review-ledger.test.mjs's pin: 'NOT the register's agent_id/session_id'); this decision reverses exactly that exclusion"
       );
-      assert.equal(entry.branch, 'sterling/board-fanout-3', "branch matches the git branch active in the hook's cwd at promotion time");
-      assert.match(entry.base_sha, /^[0-9a-f]{7,40}$/i, 'base_sha is a plausible git sha string — its exact derivation (HEAD vs. merge-base) is unspecified and not pinned here');
+      assert.equal(entry.identity.branch, 'sterling/board-fanout-3', "branch matches the git branch active in the hook's cwd at promotion time");
+      assert.match(entry.identity.base_sha, /^[0-9a-f]{7,40}$/i, 'base_sha is a plausible git sha string — its exact derivation (HEAD vs. merge-base) is unspecified and not pinned here');
     } finally {
       cleanup();
     }
@@ -258,7 +265,9 @@ test('A2: a cwd with no git repository at all still promotes the reviewer entry 
     assert.equal(r.code, 0, r.stderr);
     const ledger = readLedgerA(dir);
     assert.equal(ledger.length, 1, 'the reviewer entry is still promoted even though branch/base_sha cannot be resolved');
-    assert.equal(ledger[0].agent_type, 'reviewer-performance');
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): agent_type now lives at reviewer.agent_type on a v2-promoted entry.
+    assert.equal(ledger[0].reviewer.agent_type, 'reviewer-performance');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

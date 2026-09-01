@@ -158,15 +158,26 @@ try {
   // Grep/Glob served again.
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
 
-  // Read-only git verb allowance (board 4c7b84d3, AC3): VERB-SHAPED, never
-  // "git anything" — each pattern is an EXACT shape (a ref token is the only
-  // free variable), so a lookalike ('git logger') or an unlisted verb ('git
-  // stash') never matches, and mutating verbs (commit/push/checkout/rebase/
-  // reset/status) stay denied exactly as before. Chaining/redirection off an
-  // allowed verb is already caught by the control-operator gate above this
-  // point, so it never reaches this check at all.
-  const READONLY_GIT_PATTERNS = [/^git log$/, /^git show \S+ --stat$/, /^git diff --name-only$/, /^git branch --list$/];
-  const isReadOnlyGit = READONLY_GIT_PATTERNS.some((re) => re.test(command));
+  // Read-only git rides the WRAPPER, never a direct git verb (decision
+  // `git-ro-wrapper-fixed-recipes-no-caller-flags`, knowledge_get 1a7f3926).
+  // The four direct read-only git verb prefixes this hook once carried (git log
+  // / git show <ref> --stat / git diff --name-only / git branch --list, board
+  // 4c7b84d3 AC3 lineage) are REMOVED and replaced by one exact prefix:
+  // `node scripts/git-ro.mjs`. Keeping them beside the wrapper was explicitly
+  // rejected — it "preserves a bypass around every guarantee the wrapper adds"
+  // (fixed recipes, zero caller-controlled git flags, resolved cardinality, a
+  // hardcoded executable roster, a positive-set child env, bounded output).
+  // The grant is ONE EXACT TOKEN-BOUNDED PREFIX, never a substring: a lookalike
+  // ('node scripts/git-ro-evil.mjs', 'node scripts/git-ro.mjs.bak') must not
+  // match, and the name appearing anywhere but the command head never exempts a
+  // command (the H15 unanchored-substring class, anti_pattern
+  // `unanchored-substring-allowlist-in-command-guard`). Chaining/redirection off
+  // the wrapper is already caught by the control-operator gate above this point,
+  // so it never reaches this check at all. H14 is NOT the wrapper's arity gate:
+  // a malformed wrapper invocation passes here and is refused by the wrapper
+  // itself, which is where the recipe rules live.
+  const GIT_RO_PREFIX = 'node scripts/git-ro.mjs';
+  const isGitRoWrapper = command === GIT_RO_PREFIX || command.startsWith(GIT_RO_PREFIX + ' ');
 
   // Quote-strip the FIRST whitespace-separated token, for MATCH PURPOSES ONLY
   // (board f49466f5, decision 398adceb): the executed command, the operator
@@ -270,7 +281,7 @@ try {
   // project's absolute clone path still matches.
   const isRunGateInvocation = RUN_GATE_RE.test(command) || (strictUnquoted !== null && RUN_GATE_RE.test(strictUnquoted));
 
-  const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isReadOnlyGit || isRunGateInvocation;
+  const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isGitRoWrapper || isRunGateInvocation;
 
   if (!allowed) {
     // QUOTING DIAGNOSTIC (reported from a consuming project 2026-07-30, decision
@@ -308,7 +319,7 @@ try {
                 : ''
             }`
           : ''
-      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, 'node …/scripts/run-gate.mjs …' (any path prefix), the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied), and read-only git: git log, git show <ref> --stat, git diff --name-only, git branch --list. All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
+      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, 'node …/scripts/run-gate.mjs …' (any path prefix), the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied), and read-only git through the WRAPPER only: 'node scripts/git-ro.mjs <verb> …' (verbs: log, show, show-stat, diff-names) — the direct git verbs (git log, git show <ref> --stat, git diff --name-only, git branch --list) were REMOVED in favour of it, so re-run history reads as 'node scripts/git-ro.mjs log …'. All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

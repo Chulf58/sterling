@@ -433,9 +433,16 @@ test('(T5) SubagentStop promotion copies files_source into the review-ledger rec
     assert.equal(r.code, 0, r.stderr);
     assert.ok(ledgerExists(dir), 'a review ledger receipt was promoted');
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('packages/mcp-server/src/auth.ts'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/files_source at territory.files/territory.source. Dual-shape
+    // lookup preserves this test's substance (decision 8f137474's structured-territory extraction, unchanged) for
+    // either shape.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('packages/mcp-server/src/auth.ts');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.files_source, 'review-territory', 'files_source travels unchanged from the register entry to the promoted ledger receipt');
+    assert.equal(entry.territory?.source ?? entry.files_source, 'review-territory', 'files_source travels unchanged from the register entry to the promoted ledger receipt');
   } finally {
     cleanup();
   }
@@ -466,9 +473,15 @@ test('(T5b) SubagentStop promotion of a free-prose-fallback reviewer entry copie
     assert.equal(r.code, 0, r.stderr);
     assert.ok(ledgerExists(dir), 'a review ledger receipt was promoted');
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('scripts/decoy-analysis.mjs'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/files_source at territory.files/territory.source. Dual-shape
+    // lookup preserves this test's substance for either shape.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('scripts/decoy-analysis.mjs');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.files_source, 'free-prose-fallback', 'a fallback-sourced register entry must never be promoted as though it were review-territory-sourced');
+    assert.equal(entry.territory?.source ?? entry.files_source, 'free-prose-fallback', 'a fallback-sourced register entry must never be promoted as though it were review-territory-sourced');
   } finally {
     cleanup();
   }
@@ -497,9 +510,16 @@ test('(T6b) CONTROL: a legacy register entry with no `attribution` key promotes 
     const r = runHook(h22Input(dir, { agent_id: 'rev-legacy', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('src/legacy.mjs'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/attribution at territory.files/territory.attribution. Dual-shape
+    // lookup preserves this CONTROL's substance (no fabricated attribution) for either shape.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('src/legacy.mjs');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.ok(!('attribution' in entry), 'a legacy source entry lacking attribution must never gain a fabricated attribution key on promotion');
+    const attributionHome = entry.territory ?? entry;
+    assert.ok(!('attribution' in attributionHome), 'a legacy source entry lacking attribution must never gain a fabricated attribution key on promotion');
   } finally {
     cleanup();
   }
@@ -528,9 +548,14 @@ test('(T6a) SubagentStop promotion copies the register entry\'s attribution valu
     const r = runHook(h22Input(dir, { agent_id: 'rev-attr', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ledger = readLedger(dir);
-    const entry = ledger.find((e) => Array.isArray(e.files) && e.files.includes('src/attr.mjs'));
+    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
+    // standing): a v2-promoted entry carries files/attribution at territory.files/territory.attribution.
+    const entry = ledger.find((e) => {
+      const files = e.territory?.files ?? e.files;
+      return Array.isArray(files) && files.includes('src/attr.mjs');
+    });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.attribution, 'union', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
+    assert.equal(entry.territory?.attribution ?? entry.attribution, 'union', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
   } finally {
     cleanup();
   }
@@ -617,7 +642,10 @@ test('(T7b) multi-block: a valid REVIEW-TERRITORY sibling wins over a malformed 
 
 // ===========================================================================
 // (P-path-shape) a declared path that is NOT repo-relative POSIX shape
-// (parent traversal, absolute, or backslash-separated) is MALFORMED, not a
+// (parent traversal, absolute, backslash-separated — or, since round 4 of
+// board 7632586d, a glob element: variant d below carries its own comment
+// and its own sabotage, distinct from the shared one described here) is
+// MALFORMED, not a
 // valid declaration: falls back to free-prose extraction, files_source:
 // "free-prose-fallback", plus a loud stderr warning — NEVER an authoritative
 // files[] rewrite with files_source: "review-territory". This targets a
@@ -675,6 +703,23 @@ test('(P-path-shape-c) REVIEW-TERRITORY with a backslash-separated path ("script
   const { dir, cleanup } = makeProject();
   try {
     assertPathShapeRejected(dir, 'agent-path-c', 'scripts\\\\hooks\\\\outside.mjs');
+  } finally {
+    cleanup();
+  }
+});
+
+// (P-path-shape-d) A glob token is a PATTERN, not a path — the convention
+// (decision review-territory-structured-receipt-files) says "paths naming
+// exactly the files". A glob element accepted as declared territory would let
+// H26 clear a live entry's claimed_glob_prefixes while its files[] silently
+// carries the un-expandable pattern (Codex re-review Medium, board 7632586d,
+// thread 01a05b8c). SABOTAGE: remove the GLOB_METACHAR_RE rejection from
+// isRepoRelativePosixShape — the glob is accepted as review-territory and
+// this pin's files_source assertion goes red.
+test('(P-path-shape-d) REVIEW-TERRITORY with a glob element ("src/**") is malformed — free-prose fallback, loud warning', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    assertPathShapeRejected(dir, 'agent-path-d', 'src/**');
   } finally {
     cleanup();
   }

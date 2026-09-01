@@ -32,10 +32,13 @@ import {
   cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
-  renderLineSuspects,
+  lineSuspectBlock,
+  joinSuspectBlock,
   renderPayload,
+  rerenderRecipe,
   isDelivered,
   markDelivered,
+  budgetKnownGaps,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -132,7 +135,21 @@ try {
   // Hazards guard the severity-sorted RENDERED slice only, mirroring the
   // decision cap below (board a470046d slice 1): a hazard capped out of this
   // payload must surface on a later touch, not vanish as 'delivered'.
-  const fresh = [...freshOwners, ...cappedHazards(freshHazards), ...freshDecisions.slice(0, DECISION_POINTER_CAP)];
+  // The SHOWN slices are named once and reused for the guard, the line-suspect
+  // scan AND the render recipe (fixer F3): the recipe must carry exactly what the
+  // payload rendered, so re-deriving the slice in three places is how a record
+  // the reader never saw gets promoted into the drained payload.
+  const shownHazards = cappedHazards(freshHazards);
+  const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+  const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
+
+  // KNOWN_GAPS INLINE (decision db3392db Part 3 / 53fd6f62, board 3dbbdb35):
+  // one GLOBAL 3-gap budget across every fresh owner in THIS delivery — never
+  // per-article — computed over freshOwners in their own delivery order so an
+  // article that does not re-render this session (already guarded) never
+  // re-offers its gaps either (dedup rides the existing lineage guard above,
+  // not a separate ledger).
+  const gapsByOwner = budgetKnownGaps(freshOwners);
 
   // LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce, warn-only
   // P1 advisory). `fresh` above already holds exactly the records this touch is
@@ -145,7 +162,10 @@ try {
   // surprise) degrades to NO advisory rather than a broken delivery: this can
   // never be the reason a delivery fails (P5 / AC7 floor is the hook's own,
   // untouched by this addition).
-  let lineSuspectBlocks = [];
+  // Kept as the DECOMPOSED {header, lines:[{id,line}], footer} block, not a
+  // pre-joined string, so the recipe can carry each line keyed by the record it
+  // names and the drain can re-resolve them (fixer M1).
+  let suspectBlock = null;
   try {
     const mtimeMs = statSync(join(input.cwd, rel)).mtimeMs;
     const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -169,7 +189,7 @@ try {
       if (!Number.isFinite(updatedAtMs) || updatedAtMs >= mtimeMs) continue; // fresh — not suspect
       suspects.push({ record, tokens });
     }
-    lineSuspectBlocks = renderLineSuspects(suspects, charCap);
+    if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
   } catch {
     // stat failure or any scan error: skip the advisory silently (warn-only).
   }
@@ -180,10 +200,14 @@ try {
   // knowledge already delivered above, not knowledge in its own right.
   const blocks = [
     ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-    ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+    ...freshOwners.map((r) =>
+      r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+    ),
     ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
-    ...lineSuspectBlocks,
-  ];
+    // joinSuspectBlock returns '' when no line survives; the filter keeps an
+    // empty advisory shell out of the payload exactly as the drain does.
+    joinSuspectBlock(suspectBlock ?? {}),
+  ].filter((b) => typeof b === 'string' && b);
   const payload = renderPayload(rel, blocks, { unowned });
 
   // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
@@ -208,10 +232,43 @@ try {
   // back to 'prompt' when the running session is not the probed cell — not
   // residue-on-inject, which would double-deliver every healthy payload to hedge it.
   if (mode === 'enqueue') {
+    // RENDER RECIPE beside the payload (decision db3392db part 2): the queue
+    // injects one turn later, so the drain re-reads these ids and rebuilds the
+    // payload from CURRENT records — the pre-rendered `payload` above survives
+    // only as the fallback for a drain that cannot reach the store.
+    //
+    // THE ID LISTS ARE THE SHOWN (POST-CAP) SLICES, with what the caps SUPPRESSED
+    // carried alongside as counts (fixer F3). The earlier shape stored the
+    // UNCAPPED fresh sets and let the drain re-apply the caps, which silently
+    // PROMOTES: a hazard capped out of this payload, whose more-severe sibling is
+    // superseded by drain time, would surface in the drained text as though it
+    // had been delivered here — and the guard never marked it delivered, so the
+    // reader gets it twice, once as a record they were never shown. The counts
+    // are what let the drain replay the original '… N more NOT shown' tail
+    // without holding the ids it must not render.
     enqueuePending(pendingPath(input.cwd), {
       kind: unowned ? 'frontier' : 'delivery',
       rel,
       payload,
+      recipe: rerenderRecipe({
+        rel,
+        unowned,
+        charCap,
+        hazardIds: shownHazards.map((r) => r.id),
+        ownerIds: freshOwners.map((r) => r.id),
+        decisionIds: shownDecisions.map((r) => r.id),
+        hazardTail: freshHazards.length - shownHazards.length,
+        decisionTail: freshDecisions.length - shownDecisions.length,
+        // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
+        // It reads as a note about the FILE's line positions, but every one of its
+        // lines is labelled with the CITING RECORD's own title/slug/id, so
+        // replaying it verbatim at drain would serve cached per-record text for a
+        // record that may have been superseded or deleted meanwhile — the same leak
+        // the pointer channel was rebuilt to close. It therefore rides `suspects`
+        // as {id, line} entries and is re-resolved there; `trailing_blocks` is
+        // reserved for text with no record id in it at all.
+        suspects: suspectBlock,
+      }),
       agent_id: input.agent_id ?? 'conductor',
     });
   } else {

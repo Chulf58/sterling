@@ -484,3 +484,147 @@ test('H26 internal failure: unparseable (non-JSON) stdin itself exits 1, not 0 a
     cleanup();
   }
 });
+
+// ==========================================================================
+// Board 7632586d — 9-for-9 false positives: read-only agent classes and
+// prose-scraping of FORBIDDEN blocks. reviewer-class incoming-dispatch
+// exemption is already pinned in h25-h26-advisory-precision.test.mjs; the
+// pins below close the two gaps that item's triage named: librarian, the
+// SYMMETRIC "never contributes" half for a read-only-class LIVE entry, and
+// the REVIEW-TERRITORY structured-territory precedence over prose-scraping.
+// ==========================================================================
+
+test('H26 SILENT: incoming librarian dispatch (read-only, board 7632586d item 1) never warns despite live overlapping territory', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('a1', 'coder', ['src/shared/util.mjs'])]);
+    const r = runHook(taskInput(dir, { subagent_type: 'librarian', prompt: 'please modify src/shared/util.mjs today' }), dir);
+    assertSilent(r);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 SILENT: a live librarian entry never CONTRIBUTES an overlap warning to an outgoing coder dispatch, even though its declared files overlap', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('lib-1', 'librarian', ['src/shared/util.mjs'])]);
+    const r = runHook(taskInput(dir, { subagent_type: 'coder', prompt: 'please modify src/shared/util.mjs today' }), dir);
+    assertSilent(r);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 SILENT: a live explorer entry never CONTRIBUTES an overlap warning either — same read-only write-set-empty class', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('exp-1', 'explorer', ['src/shared/util.mjs'])]);
+    const r = runHook(taskInput(dir, { subagent_type: 'coder', prompt: 'please modify src/shared/util.mjs today' }), dir);
+    assertSilent(r);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 WARN: a well-formed REVIEW-TERRITORY declaration is used INSTEAD of prose-scraping — a path only present in prose (even inside a FORBIDDEN block) is never compared, only the declared array is', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [
+      liveEntry('sub-1', 'coder', ['src/declared/only.mjs']),
+      liveEntry('sub-2', 'coder', ['src/other/prose.mjs']),
+    ]);
+    const prompt = [
+      'REVIEW-TERRITORY: ["src/declared/only.mjs"]',
+      '',
+      'FORBIDDEN — another lane owns this, do not touch: src/other/prose.mjs',
+    ].join('\n');
+    const r = runHook(taskInput(dir, { prompt }), dir);
+    assertOverlapWarning(r, { paths: ['src/declared/only.mjs'], entries: [['coder', 'sub-1']] });
+    const ctx = parseAdditionalContext(r);
+    assert.ok(!ctx.includes('src/other/prose.mjs'), `declared territory must win outright — prose-only path must never appear; got: ${ctx}`);
+    assert.ok(!ctx.includes('sub-2'), `the prose-only overlapping entry must never be named; got: ${ctx}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 WARN: a malformed REVIEW-TERRITORY declaration falls back to prose-scraping, mirroring H22\'s own fallback', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('sub-1', 'coder', ['src/shared/util.mjs'])]);
+    const prompt = ['REVIEW-TERRITORY: [not valid json', '', 'please modify src/shared/util.mjs today'].join('\n');
+    const r = runHook(taskInput(dir, { prompt }), dir);
+    assertOverlapWarning(r, { paths: ['src/shared/util.mjs'], entries: [['coder', 'sub-1']] });
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 SILENT: a live review-territory entry compares against files ONLY — prose-derived claimed_files/claimed_glob_prefixes must never contribute (Codex review HIGH, board 7632586d, thread 01a05b8c)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [
+      {
+        agent_id: 'sub-1',
+        agent_type: 'coder',
+        session_id: 's1',
+        files: ['src/a.mjs'],
+        files_source: 'review-territory',
+        claimed_files: ['src/a.mjs', 'src/b.mjs'],
+        at: agoISO(0),
+        attribution: 'block',
+      },
+    ]);
+    const r = runHook(taskInput(dir, { prompt: 'please modify src/b.mjs today' }), dir);
+    assertSilent(r);
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 WARN control: the SAME claimed_files shape with files_source absent (legacy) still warns — proves the exemption is files_source-gated, not a blanket claimed_files bypass', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [
+      {
+        agent_id: 'sub-1',
+        agent_type: 'coder',
+        session_id: 's1',
+        files: ['src/a.mjs'],
+        claimed_files: ['src/a.mjs', 'src/b.mjs'],
+        at: agoISO(0),
+        attribution: 'block',
+      },
+    ]);
+    const r = runHook(taskInput(dir, { prompt: 'please modify src/b.mjs today' }), dir);
+    assertOverlapWarning(r, { paths: ['src/b.mjs'], entries: [['coder', 'sub-1']] });
+  } finally {
+    cleanup();
+  }
+});
+
+test('H26 SILENT: a live review-territory entry poisoned with claimed_glob_prefixes:["src"] never contributes a prefix overlap — only files is compared (Codex re-review Medium, thread 01a05b8c)', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [{
+      agent_id: 'sub-1', agent_type: 'coder', session_id: 's1',
+      files: ['src/a.mjs'], files_source: 'review-territory',
+      claimed_glob_prefixes: ['src'], at: agoISO(0), attribution: 'block',
+    }]);
+    const r = runHook(taskInput(dir, { prompt: 'please modify src/b.mjs today' }), dir);
+    assertSilent(r);
+  } finally { cleanup(); }
+});
+
+test('H26 WARN control: the SAME claimed_glob_prefixes:["src"] with files_source absent (legacy) still warns via the prefix', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [{
+      agent_id: 'sub-1', agent_type: 'coder', session_id: 's1',
+      files: ['src/a.mjs'], claimed_glob_prefixes: ['src'], at: agoISO(0), attribution: 'block',
+    }]);
+    const r = runHook(taskInput(dir, { prompt: 'please modify src/b.mjs today' }), dir);
+    assertOverlapWarning(r, { paths: ['src/b.mjs'], entries: [['coder', 'sub-1']] });
+  } finally { cleanup(); }
+});

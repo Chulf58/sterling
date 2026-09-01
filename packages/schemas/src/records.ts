@@ -47,6 +47,74 @@ export const decisionSchema = base
   })
   .superRefine(refineSupersession);
 
+// Board a9280db7; decision article-kind-marker-gates-structured-na-exemption
+// (c48380bf): the structured not_applicable exemption parallel to
+// current_ac[].untestable_because — same {reason, optional ruling pointer}
+// shape, but at the WHOLE-FIELD level (replaces the array outright, never a
+// per-item marker). Deliberately a different key/field name
+// (`not_applicable`/`ruling_record_id`, not `untestable_because`/
+// `blocking_record_id`) so the two mechanisms are never confused.
+const notApplicableExemptionSchema = z
+  .object({
+    not_applicable: z
+      .object({
+        reason: z.string().min(1),
+        ruling_record_id: z.string().optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+const currentAcItemSchema = z.object({
+  ac_id: z.string().min(1),
+  text: z.string().min(1),
+  verifiable_at: verifiableAt,
+  // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no test
+  // CAN cover this, because <ruling>" — strict (extra members refused) so a
+  // stray field cannot smuggle unreviewed prose past the one place a reader
+  // checks for a real blocking ruling. Optional: absent means the AC is
+  // ordinarily testable; when present both members are required, since a
+  // reason with no ruling to point at is just an excuse.
+  untestable_because: z
+    .object({
+      reason: z.string().min(1),
+      blocking_record_id: z.string().uuid(),
+    })
+    .strict()
+    .optional(),
+});
+
+const liveTestRefItemSchema = z.object({ ac_id: z.string().min(1), test_paths: z.array(repoPath) });
+
+// current_ac/live_test_refs are validated at RUNTIME as a union (array of real
+// content OR the structured not_applicable exemption, gated by article_kind
+// below) but kept STATICALLY typed as their pre-existing array shape: every
+// pre-existing consumer (frozen tests included, e.g. schemas.test.ts's
+// `ok.live_test_refs[0].test_paths[0]`) indexes these fields as plain arrays,
+// and TypeScript cannot narrow a union by the sibling `article_kind` field
+// anyway. This is why every consumer needs EXPLICIT Array.isArray guards
+// (board a9280db7) — the compiler will not catch a missing one, and each
+// unguarded site fails as a raw TypeError, not a legible refusal.
+//
+// FULL VERIFIED CONSUMER LIST (re-check every one of these before widening
+// this union further — review round 2026-09-01 found three the first pass
+// missed):
+//   - packages/mcp-server/src/tools.ts: knowledgeSplit (reads current_ac for
+//     ownership/move bookkeeping, normalized; PRESERVES the exemption object
+//     verbatim on the parent update rather than flattening it to []) and
+//     suspiciousLocalLabelWarnings (knowledge_promote's prose scan — already
+//     Array.isArray-guarded)
+//   - packages/tui/src/viewmodel.ts: toCard's feature_article branch
+//     (marked-AC section — `.filter` over current_ac)
+//   - scripts/lib/promotion.mjs: the AC-traced-tests dispose-run/H9 gate
+//     (`for...of` over live_test_refs)
+//   - scripts/cleanup-plan.mjs: the deletion-plan evidence builder
+//     (`.flatMap` over live_test_refs)
+//   - scripts/hooks/lib/delivery.mjs: the article-header AC count
+//     (`current_ac?.length` — degrades to omitting the AC section, by design)
+type CurrentAcArray = Array<z.infer<typeof currentAcItemSchema>>;
+type LiveTestRefsArray = Array<z.infer<typeof liveTestRefItemSchema>>;
+
 // §3.2.3 — versioned body + append-only history.
 export const featureArticleSchema = base
   .extend({
@@ -70,27 +138,16 @@ export const featureArticleSchema = base
     // git merge/checkout that only resets mtimes no longer raises false
     // reconcile_needed items (decision 65222971 → its baseline successor).
     file_baselines: z.record(z.string(), z.string()).optional(),
-    current_ac: z.array(
-      z.object({
-        ac_id: z.string().min(1),
-        text: z.string().min(1),
-        verifiable_at: verifiableAt,
-        // Board 6a8507f8: distinguishes "no test covers this (yet)" from "no
-        // test CAN cover this, because <ruling>" — strict (extra members
-        // refused) so a stray field cannot smuggle unreviewed prose past the
-        // one place a reader checks for a real blocking ruling. Optional:
-        // absent means the AC is ordinarily testable; when present both
-        // members are required, since a reason with no ruling to point at is
-        // just an excuse.
-        untestable_because: z
-          .object({
-            reason: z.string().min(1),
-            blocking_record_id: z.string().uuid(),
-          })
-          .strict()
-          .optional(),
-      })
-    ),
+    // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+    // axis, subsuming concept_family's role there — concept_family itself is
+    // untouched, kept for compatibility (see below).
+    article_kind: z.enum(['feature', 'probe', 'tool', 'concept']).default('feature'),
+    // Union with the structured not_applicable exemption (see
+    // notApplicableExemptionSchema above) — acceptance of the exemption
+    // branch, and rejection of an empty array, are both gated BY KIND in the
+    // superRefine below, since "which kind" is a whole-record fact a single
+    // field's shape cannot express alone.
+    current_ac: z.union([z.array(currentAcItemSchema), notApplicableExemptionSchema]) as unknown as z.ZodType<CurrentAcArray>,
     // Concept-article marker (domain decision 7208729b, concept-article-layer
     // standard): set ONLY on concept articles — one per recurring domain concept
     // FAMILY (items, weapons, …). Enables class/family enumeration without
@@ -123,7 +180,7 @@ export const featureArticleSchema = base
       .optional(),
     version: z.number().int().positive(),
     history: z.array(z.object({ date: z.string().datetime(), event: z.string().min(1), target_id: z.string().uuid().optional() })),
-    live_test_refs: z.array(z.object({ ac_id: z.string().min(1), test_paths: z.array(repoPath) })),
+    live_test_refs: z.union([z.array(liveTestRefItemSchema), notApplicableExemptionSchema]) as unknown as z.ZodType<LiveTestRefsArray>,
     // Board 6a8507f8: when an instrument-describing article's probe script was
     // last actually RUN — distinct from updated_at (when the record was
     // edited). Optional: most articles describe no probe at all.
@@ -133,6 +190,33 @@ export const featureArticleSchema = base
     refineSupersession(rec, ctx);
     if (rec.state === 'dormant' && (!rec.state_reason || !rec.wiring_todo_id)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (§3.2.3)" });
+    }
+    // Board a9280db7 (decision c48380bf): the not_applicable exemption on
+    // live_test_refs/current_ac is gated by article_kind — accepted ONLY on
+    // probe|tool, and on probe|tool an empty array is rejected outright (both
+    // are honest-ceremony rules a single field's shape cannot express alone).
+    const exemptKind = rec.article_kind === 'probe' || rec.article_kind === 'tool';
+    const isExempt = (v: unknown): boolean => typeof v === 'object' && v !== null && !Array.isArray(v) && 'not_applicable' in (v as Record<string, unknown>);
+    const gated: Array<[('live_test_refs' | 'current_ac'), unknown, string]> = [
+      ['live_test_refs', rec.live_test_refs, 'real content (ac_id/test_paths)'],
+      ['current_ac', rec.current_ac, 'real content (ac_id/text)'],
+    ];
+    for (const [field, value, contentHint] of gated) {
+      const exempt = isExempt(value);
+      if (exempt && !exemptKind) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} — only kind probe/tool may; other kinds must supply real content`,
+        });
+      }
+      if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [field],
+          message: `${field} must not be empty on article_kind '${rec.article_kind}' — write ${contentHint}, or the structured not_applicable exemption`,
+        });
+      }
     }
   });
 
@@ -253,6 +337,76 @@ export const disconfirmedHypothesisSchema = base
     file_keys: z.array(repoPath).optional(),
   })
   .superRefine(refineSupersession);
+
+// open_question — an EVIDENCED question with live hypotheses and NO answer
+// (decision open-question-record-type-authorized, 0857d3bb; board 4ffb95be, from
+// the 2026-08-29 dome-farmer docs). research_finding's contract is question +
+// ANSWER, so a lane holding "three measurements, a derived geometry, two live
+// hypotheses, and no answer" had nowhere durable to put the most perishable
+// output of an engineering session; two independent consumer lanes parked it on
+// board todos instead — correct capture, wrong surface, since the board is
+// near-term WORK and this is durable KNOWLEDGE. Relaxing research_finding was
+// rejected: its two-clocks/staleness contract assumes an answer exists to go
+// stale, so an optional answer would weaken every existing consumer.
+//
+// WHY THE LIFECYCLE FIELD IS NAMED resolution_status AND NOT `status`
+// (user-ruled 2026-08-31, correcting the decision's literal field name): `status`
+// is already the ENVELOPE's server-owned lifecycle axis. It is refused by name on
+// every write (WRITE_REFUSED_FIELDS) and deleted from the persisted body by the
+// store (storableBody), which derives the served value from lifecycle/freshness.
+// A type-local `status` would therefore be both unsettable by a caller and
+// silently destroyed on write — the misleading-success shape the refusal guard
+// exists to eliminate. research_finding is not a counter-example: its extra
+// 'flagged_stale' value is still the ENVELOPE axis, derived at read. The two
+// axes are genuinely different questions — whether the RECORD still serves
+// (envelope) versus whether the QUESTION is still open (this field) — so they
+// get different names rather than one overloaded one.
+export const openQuestionSchema = base
+  .extend({
+    type: z.literal('open_question'),
+    // Stable handle, minted from the question — see decisionSchema.slug.
+    slug: z.string().min(1).optional(),
+    // The question IS the identity, exactly as on research_finding and
+    // disconfirmed_hypothesis (which is why axisNarrowText treats all three the
+    // same way and why the digest leads with it).
+    question: z.string().min(1),
+    // The LIVE candidates. Plural and ordered by the author; a question with no
+    // hypothesis yet is legitimate, so this defaults to [] rather than being
+    // required — what makes the record worth keeping is the EVIDENCE.
+    hypotheses: z.array(z.string().min(1)).default([]),
+    // What is already known: the measurements, the derived geometry, the probe
+    // output. Required — an unevidenced question is a board todo, not durable
+    // knowledge, and that boundary is the whole point of the type.
+    evidence: z.string().min(1),
+    resolution_status: z.enum(['open', 'closed']).default('open'),
+    // The TERMINAL home: closure means the question was answered, and an
+    // answered question is a research_finding. Its own field, never an id
+    // embedded in a status string (Codex refinement, thread 01a05710), so it is
+    // queryable and cannot rot inside prose.
+    closed_into: z.string().min(1).optional(),
+    file_keys: z.array(repoPath).optional(),
+  })
+  .superRefine((rec, ctx) => {
+    refineSupersession(rec, ctx);
+    // The one invariant the type carries beyond its shape: a closed question
+    // must NAME where its answer went. Without this, closing is indistinguishable
+    // from abandoning, and the answered-question type stops being the terminus.
+    if (rec.resolution_status === 'closed' && !rec.closed_into) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "resolution_status 'closed' requires closed_into (the research_finding the answer landed in)",
+      });
+    }
+    // The mirror, so 'open' cannot carry a phantom terminus: an open question
+    // pointing at a finding is a record that contradicts itself, and a reader
+    // would have no way to tell which half is true.
+    if (rec.resolution_status !== 'closed' && rec.closed_into) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "closed_into is set but resolution_status is 'open' — close the question or drop the terminus",
+      });
+    }
+  });
 
 // Attestation — a HUMAN inspected an artifact and ruled on it (board 259a455f,
 // user-approved 2026-08-21). The durable per-item progress surface consuming
@@ -648,6 +802,20 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // re-asked and re-answered the same wrong way.
     digest: { question: 'clip', rejected_answer: 'clip' },
   },
+  open_question: {
+    schema: openQuestionSchema,
+    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
+    // record — hypotheses get added and struck, evidence accumulates, and it
+    // eventually flips to closed. Supersession would mint a new record per
+    // measurement, which is exactly the churn the type exists to absorb.
+    immutable: false,
+    fts: (r) => [s(r.slug), s(r.question), (r.hypotheses as string[] | undefined)?.join('\n') ?? '', s(r.evidence)].join('\n'),
+    fileKeys: (r) => (r.file_keys as string[] | undefined) ?? [],
+    // The question is the identity (research_finding's rule); resolution_status
+    // rides along because whether a question is still OPEN decides whether it is
+    // worth reading at all — the same role research_finding's clocks play.
+    digest: { slug: 'plain', question: 'clip', resolution_status: 'plain' },
+  },
   attestation: {
     schema: attestationSchema,
     // Point-in-time human ruling: supersession is the only change path, exactly
@@ -969,14 +1137,25 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
     case 'ZodRecord':
       return { type: 'record<string, string>' };
     case 'ZodUnion': {
-      const opts = ((def?.options as unknown[]) ?? []).map((o) => describeZodDetailed(o, depth + 1));
+      const rawOptions = (def?.options as unknown[]) ?? [];
+      const opts = rawOptions.map((o) => describeZodDetailed(o, depth + 1));
       // A union of literals IS a closed set, so report it as one — that is what
       // verifiable_at ('final' | 'phase:<n>') and similar fields actually are.
       const literals = opts.filter((o) => o.type.startsWith('literal '));
       if (literals.length === opts.length && opts.length) {
         return { type: opts.map((o) => o.type.replace('literal ', '')).join(' | ') };
       }
-      return { type: opts.map((o) => o.type).join(' | ') };
+      // Board a9280db7 (decision c48380bf): current_ac/live_test_refs are now
+      // a union of their real array shape with the structured not_applicable
+      // exemption — surface the ARRAY branch's element_fields here too (one
+      // level down, matching every other array-of-objects field), rather than
+      // silently losing the nested shape because the top-level node is now a
+      // union and not a bare ZodArray.
+      const arrayElementFields = opts.find((o) => o.element_fields && o.type.endsWith('[]'))?.element_fields;
+      return {
+        type: opts.map((o) => o.type).join(' | '),
+        ...(arrayElementFields ? { element_fields: arrayElementFields } : {}),
+      };
     }
     // Wrappers: describe what they wrap. optionality is reported separately, so
     // it is deliberately NOT folded into the type string.

@@ -67,8 +67,27 @@ export const REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
 // change to reach canonical form (backslash conversion, a stray './',
 // trailing '/', etc.) fails the shape test, so this stays ONE predicate
 // rather than a normalizer plus a second divergent backslash regex.
+// GLOB METACHARACTERS ARE REJECTED, NOT NORMALIZED AWAY (Codex review MEDIUM,
+// thread 01a05b8c, board 7632586d). The governing decision
+// (review-territory-structured-receipt-files) is explicit: "a JSON array of
+// repo-relative POSIX PATH strings" naming EXACTLY the files — paths, never
+// patterns. normalizeRepoPath has no reason to reject '*'/'?'/'[' (they are
+// ordinary path-invariant-legal characters elsewhere), so "src/**" and
+// "src/*.mjs" previously passed this shape check unchanged and parsed as
+// VALID declared elements. That let a live H22 register entry declare
+// files:["src/**"] under files_source:'review-territory' while also writing
+// claimed_glob_prefixes:["src"] from its own separate prose glob-prefix scan
+// (globPrefixesFromBlocks, h22-dispatch-register.mjs) — h26's declared-
+// territory branch reads `files` LITERALLY, never as a pattern, and clears
+// claimed_glob_prefixes for a declared entry, so a genuine prefix claim
+// written that way would silently stop being compared. A path-shaped
+// declaration cannot carry a glob, so this check now runs before/alongside
+// the canonical-form check.
+const GLOB_METACHAR_RE = /[*?[\]]/;
+
 function isRepoRelativePosixShape(p) {
   if (typeof p !== 'string' || p === '') return false;
+  if (GLOB_METACHAR_RE.test(p)) return false;
   try {
     return normalizeRepoPath(p) === p;
   } catch {

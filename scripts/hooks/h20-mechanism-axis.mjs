@@ -159,6 +159,14 @@ try {
     // other candidate; axisNarrowText matches their question fields.
     ...store.query({ types: ['research_finding'], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ['disconfirmed_hypothesis'], rank_terms: terms, cap: 40 }),
+    // OPEN QUESTIONS (board a9be48f2) ride the SAME surface for the adjacent
+    // question: not "was this answered?" but "is this ALREADY BEING
+    // INVESTIGATED?". A fan-out onto a live open_question duplicates an
+    // investigation instead of re-deriving a finished one — the same waste,
+    // one step earlier. NOTE the deny rung is deliberately untouched: an
+    // open_question is not a RULING, so it stays out of DENY_RULING_TYPES and
+    // can never deny a user's question.
+    ...store.query({ types: ['open_question'], rank_terms: terms, cap: 40 }),
   ];
 
   // MULTI-QUESTION CANDIDATE AUGMENTATION (post-commit follow-up, deny-once
@@ -340,7 +348,14 @@ try {
   // renderDecisionPointers; slicing early would lose the true matched count
   // the disclosure line needs.
   const articles = fresh.filter((x) => x.record.type === 'feature_article');
-  const priorAnswers = fresh.filter((x) => x.record.type === 'research_finding' || x.record.type === 'disconfirmed_hypothesis');
+  // open_question shares this bucket (board a9be48f2) rather than minting a
+  // fourth block: it answers the same reader question — "has someone been here
+  // already?" — and a candidate type queried above but rendered by no bucket
+  // would be dead weight (line 344 would allow() on an open_question-only
+  // match, i.e. silence). Its own line label distinguishes it from an ANSWER.
+  const priorAnswers = fresh.filter(
+    (x) => x.record.type === 'research_finding' || x.record.type === 'disconfirmed_hypothesis' || x.record.type === 'open_question'
+  );
   if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) allow();
 
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(', ');
@@ -404,15 +419,30 @@ try {
   const priorBlocks = priorAnswers.length
     ? [
         [
-          `▸ PRIOR ANSWERS in the store (${priorAnswers.length}) — this dispatch may be about to RE-DERIVE one of these. knowledge_get before fanning out:`,
+          `▸ PRIOR ANSWERS in the store (${priorAnswers.length}) — this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
           ...shownPrior.map((x) => {
             const r = x.record;
-            return r.type === 'research_finding'
-              ? `  → ANSWERED: ${clip(r.question)} (source ${r.source_date ?? '?'}, captured ${r.capture_date ?? '?'}${r.status === 'flagged_stale' ? ', FLAGGED STALE — re-verify before trusting' : ''}) · knowledge_get ${r.id}`
-              : `  → REFUTED TRAIL: ${clip(r.question)} — rejected: ${clip(r.rejected_answer, 100)} · knowledge_get ${r.id}`;
+            if (r.type === 'research_finding') {
+              return `  → ANSWERED: ${clip(r.question)} (source ${r.source_date ?? '?'}, captured ${r.capture_date ?? '?'}${r.status === 'flagged_stale' ? ', FLAGGED STALE — re-verify before trusting' : ''}) · knowledge_get ${r.id}`;
+            }
+            // An OPEN question is not an answer: it names live hypotheses and
+            // says the investigation exists, so the reader joins it (or cites
+            // it) instead of starting a second one.
+            if (r.type === 'open_question') {
+              // A CLOSED question is not a live investigation: it already
+              // closed into a research_finding, and THAT record is the prior
+              // answer this block exists to surface — point the reader there
+              // (review finding, 2026-08-31: the unbranched render said
+              // 'closed, no answer yet', a self-contradicting false clause).
+              if (r.resolution_status === 'closed') {
+                return `  → ANSWERED (question closed into ${r.closed_into ?? 'an unnamed record'}): ${clip(r.question)} · knowledge_get ${r.id}`;
+              }
+              return `  → ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip(r.question)} · knowledge_get ${r.id}`;
+            }
+            return `  → REFUTED TRAIL: ${clip(r.question)} — rejected: ${clip(r.rejected_answer, 100)} · knowledge_get ${r.id}`;
           }),
           ...(priorAnswers.length > PRIOR_ANSWER_CAP
-            ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more — knowledge_query types:["research_finding","disconfirmed_hypothesis"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',')}] cap:${priorAnswers.length})`]
+            ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more — knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',')}] cap:${priorAnswers.length})`]
             : []),
         ].join('\n'),
       ]

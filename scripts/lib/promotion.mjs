@@ -115,7 +115,15 @@ export function verifyPromotionConditions({ store, config, run }) {
   if (article) {
     const tracedOn = new Map(); // ac_id -> slug of the first article found tracing it
     for (const a of articles) {
-      for (const ref of a.live_test_refs) {
+      // Board a9280db7 (decision c48380bf): on a probe|tool article
+      // live_test_refs can now be the structured not_applicable exemption
+      // object instead of an array — normalize to [] so this degrades to
+      // "no trace found" (the existing ac_untraced refusal, legible) instead
+      // of a raw TypeError from iterating a non-iterable object. This gate
+      // feeds dispose-run AND H9's Stop backstop, which must fail LOUDLY,
+      // never crash.
+      const refs = Array.isArray(a.live_test_refs) ? a.live_test_refs : [];
+      for (const ref of refs) {
         if (Array.isArray(ref.test_paths) && ref.test_paths.length > 0 && !tracedOn.has(ref.ac_id)) {
           tracedOn.set(ref.ac_id, a.slug);
         }

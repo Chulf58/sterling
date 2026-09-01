@@ -498,9 +498,16 @@ export function isReviewerClass(type) {
 }
 
 /**
- * Read-only dispatch classes (board a6b76e8c item 3): an agent of one of
- * these types cannot write, so H26 never warns overlap on an INCOMING
- * dispatch of this type.
+ * Read-only dispatch classes (board a6b76e8c item 3; librarian added board
+ * 7632586d item 1): an agent of one of these types has a structurally EMPTY
+ * write-set — explorer, reviewer-* (any role), Explore, and Plan never touch
+ * repo files at all, and librarian's own grant is knowledge-store-update-only (never
+ * knowledge_create, never a repo write — decision
+ * conductor-creates-records-directly-librarian-stays-update-only) — so H26
+ * never warns overlap on an INCOMING dispatch of this type, and (per H26's
+ * own file-overlap loop) such a dispatch's live register entry can never
+ * CONTRIBUTE an overlap warning against a sibling either, since it never
+ * declares write territory in the first place.
  */
 export function isReadOnlyDispatchType(type) {
   if (!type) return false;
@@ -508,5 +515,5 @@ export function isReadOnlyDispatchType(type) {
   // Case-insensitive for the hardcoded names only — reviewer-* prefix
   // matching above is unchanged (review finding, board a6b76e8c fixer pass).
   const lower = type.toLowerCase();
-  return lower === 'explorer' || lower === 'explore' || lower === 'plan';
+  return lower === 'explorer' || lower === 'explore' || lower === 'plan' || lower === 'librarian';
 }

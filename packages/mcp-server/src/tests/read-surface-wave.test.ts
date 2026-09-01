@@ -546,7 +546,11 @@ test("SPEC3(d) CONTROL: existing projection:'digest' output is UNCHANGED by addi
 
     assert.equal(digest.returned, full.returned, 'digest still returns the SAME COUNT of items as full — unaffected by the headline addition');
     const [item] = digest.records;
-    assert.match(item.text as string, /^digest-item-0/, 'digest still clips FROM THE START, not dropping the item');
+    // /^digest-item-\d/ not -0: all five fixtures share one updated_at under
+    // the fixed clock, so which tied item leads belongs to the (updated_at
+    // DESC, id DESC) total order (board abafbd48); this pin's subject is the
+    // clip shape only.
+    assert.match(item.text as string, /^digest-item-\d/, 'digest still clips FROM THE START, not dropping the item');
     assert.match(item.text as string, /…$/, 'digest still ends in the clip ellipsis — unchanged shape');
     assert.equal(item.priority, 'high', 'the triage field still survives on digest, unchanged');
   } finally {

@@ -226,7 +226,16 @@ test('AC1: an object-shaped tool_response (e.g. a structured Bash result) is str
   }
 });
 
-test('AC1: hazards render before decisions, one pointer line per record, and the record body never renders inline', () => {
+// Decision `h23-kept-raised-threshold-one-pointer-payload` (284fc4b0, user-ruled
+// 2026-08-31): "payload drops to ONE pointer plus the suppressed-count tail (was
+// 3 + tail)" — the volume cut that keeps H23's unique output-axis coverage while
+// removing the noise its ~6% follow rate paid for. Class ordering (hazards ahead
+// of decisions) survives, but is now observable ONLY through WHICH record occupies
+// the single line: the hazard takes it and the decision falls into the tail.
+// The tail assertion below is the CONTROL ARM — "DEC-GAMMA absent" alone has two
+// possible causes (outranked-and-suppressed vs. never matched at all), and the
+// suppressed count of 1 is what distinguishes them.
+test('AC1: hazards outrank decisions for the single pointer line, the outranked decision lands in the suppressed count, and no record body renders inline', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const ap = store.create(markedAntiPattern('AP-ALPHA'));
@@ -235,17 +244,17 @@ test('AC1: hazards render before decisions, one pointer line per record, and the
     assert.equal(r.code, 0);
     const payload = pendingOf(dir)[0].payload;
 
-    const hazardIdx = payload.indexOf('AP-ALPHA');
-    const decisionIdx = payload.indexOf('DEC-GAMMA');
-    assert.ok(hazardIdx >= 0, 'the hazard pointer is present');
-    assert.ok(decisionIdx >= 0, 'the decision pointer is present');
-    assert.ok(hazardIdx < decisionIdx, 'hazards lead, decisions follow');
-
-    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`));
-    assert.match(payload, new RegExp(`knowledge_get ${dec.id}`));
-
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
-    assert.equal(lines.length, 2, 'exactly one pointer line per matched record');
+    assert.equal(lines.length, 1, 'exactly one pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0');
+
+    assert.ok(payload.includes('AP-ALPHA'), 'the hazard — the highest class — occupies the one available pointer line');
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the rendered pointer is the anti_pattern, not the decision');
+    assert.ok(!payload.includes('DEC-GAMMA'), 'the decision is outranked by the hazard and renders no pointer of its own');
+    assert.doesNotMatch(payload, new RegExp(`knowledge_get ${dec.id}`), 'the outranked decision contributes no knowledge_get line');
+
+    const remainder = payload.match(/\(\+(\d+) more matched\)/);
+    assert.ok(remainder, 'the suppressed-count tail discloses what the cap withheld');
+    assert.equal(remainder[1], '1', 'CONTROL: 2 matched minus the 1 shown leaves exactly 1 suppressed — proving the decision MATCHED and was outranked, not that it failed to match');
 
     assert.doesNotMatch(payload, /guidance prose that must NEVER appear/, 'anti_pattern guidance never renders inline');
     assert.doesNotMatch(payload, /rationale prose that must NEVER appear/, 'decision rationale never renders inline');
@@ -398,7 +407,13 @@ test('AC6: an event carrying a subagent session marker enqueues nothing — the 
 // AC7 — cap
 // ---------------------------------------------------------------------------
 
-test('AC7: more than 3 matching records caps the pointer block at 3 lines and discloses the remainder count', () => {
+// Decision `h23-kept-raised-threshold-one-pointer-payload` (284fc4b0, user-ruled
+// 2026-08-31) supersedes the 3-line cap: the payload is ONE pointer plus the
+// suppressed-count tail. The remainder is therefore matched-minus-one, and the
+// tail is the only thing standing between a volume cut and silent knowledge loss
+// — a cap that drops records without disclosing the count is the failure mode
+// this assertion exists to catch.
+test('AC7: more than 1 matching record caps the pointer block at 1 line and discloses the full suppressed remainder', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
@@ -409,10 +424,10 @@ test('AC7: more than 3 matching records caps the pointer block at 3 lines and di
     assert.equal(r.code, 0);
     const payload = pendingOf(dir)[0].payload;
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
-    assert.equal(lines.length, 3, 'at most 3 pointer lines render');
+    assert.equal(lines.length, 1, 'at most 1 pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0');
     const remainderMatch = payload.match(/\(\+(\d+) more matched\)/);
     assert.ok(remainderMatch, 'a remainder disclosure names how many more matched');
-    assert.equal(remainderMatch[1], '1', '4 matched minus 3 shown leaves exactly 1 undisclosed record disclosed as a remainder');
+    assert.equal(remainderMatch[1], '3', '4 matched minus the 1 shown leaves exactly 3 suppressed records disclosed as the remainder');
   } finally {
     cleanup();
   }

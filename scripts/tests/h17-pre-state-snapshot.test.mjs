@@ -1112,6 +1112,15 @@ test('PIN-FALLBACK-SKEW (boundary guard): a tool_use_id present at Pre and absen
 
     assert.notEqual(r.code, 1, 'AC9: never a non-blocking exit 1');
     assert.equal(r.code, 2, `a Pre/Post tool_use_id skew must deny — actual ${r.code}, stderr: ${oneLine(r.stderr)}`);
+
+    // Reword pin (board e15035ce, review MEDIUM): the missing-Pre-evidence
+    // branches classify as MISSING PRE-EVIDENCE (abnormal), never the broader
+    // ENVIRONMENT DEFECT — and the wrapper's second .replace must have fired
+    // too, so the BROKEN STATE sentence is gone. Both assertions together
+    // discriminate a silently no-oping .replace from a working reword.
+    assert.match(r.stderr, /MISSING PRE-EVIDENCE \(abnormal\) \(H17\)/, 'the reclassified token is emitted verbatim (the string agent templates train on)');
+    assert.doesNotMatch(r.stderr, /ENVIRONMENT DEFECT/, 'the old classification never fires on a missing-Pre-evidence branch');
+    assert.doesNotMatch(r.stderr, /BROKEN STATE/, 'the second replace fired — no self-contradictory hybrid message');
   } finally {
     cleanup();
   }

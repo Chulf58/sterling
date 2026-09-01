@@ -18,12 +18,25 @@
 // toolchains at all (no .sterling/config.json) fails closed (P5): there is
 // nothing to verify the claim against, so the script must not silently
 // accept it.
+//
+// --append (board 17204d1e): a second, honest shape for the OTHER frozen-test
+// edit the conductor makes — appending a new case rather than repairing a
+// wrong one. Reusing --evidence's "why the TEST was wrong" wording for an
+// append would assert something false, which is exactly the gap 17204d1e
+// found: the sanctioned route had no shape for it, so the honest change went
+// unrecorded. --append keeps the SAME --path/--evidence plumbing and the SAME
+// test-glob check, but asks --evidence to state what NEW behavior the case
+// pins and why it is additive, and records it under a distinct 'test_append'
+// kind rather than 'test_repair' so the two are never conflated. The repair
+// path (no --append) is untouched.
 //   node scripts/test-repair.mjs --path <repo-relative test path> --evidence "<why the test was wrong>"
+//   node scripts/test-repair.mjs --append --path <repo-relative test path> --evidence "<what new behavior this case pins, and why it is additive>"
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { matchesGlob, normalizeRepoPath } from '@sterling/schemas';
 import { arg, fail } from './lib/project.mjs';
 
+const isAppend = process.argv.includes('--append');
 const rawPath = arg('--path');
 const evidence = arg('--evidence');
 const target = process.cwd();
@@ -42,7 +55,27 @@ try {
   fail(`test-repair: --path '${rawPath}' is not a repo-relative path: ${(e && e.message) || e}`);
 }
 if (!evidence || !evidence.trim()) {
-  fail('test-repair: --evidence "<why the TEST was wrong>" is required');
+  fail(
+    isAppend
+      ? 'test-repair: --evidence "<what new behavior this case pins, and why it is additive>" is required'
+      : 'test-repair: --evidence "<why the TEST was wrong>" is required'
+  );
+}
+// FLAG-SHAPED EVIDENCE (mirrors commit-reviewed.mjs's --waive-bytes reason
+// guard). `arg()` takes the NEXT argv entry, so `--evidence --append` silently
+// records the evidence "--append" and ALSO leaves --append matched by
+// process.argv.includes — toggling append mode while bypassing the evidence
+// requirement entirely (Codex MEDIUM finding). Refuse anything starting with
+// `--`, or an exact match for one of this CLI's own flags, in BOTH modes.
+const trimmedEvidence = evidence.trim();
+const OWN_FLAGS = ['--path', '--evidence', '--append'];
+if (trimmedEvidence.startsWith('--') || OWN_FLAGS.includes(trimmedEvidence)) {
+  fail(
+    `test-repair: --evidence was given ${JSON.stringify(evidence)}, which is flag-shaped — almost certainly the next option ` +
+      `rather than evidence (the evidence is the argument immediately after --evidence). Accepting it would also silently ` +
+      `consume the flag it swallowed. Re-run with --evidence "<${isAppend ? 'what new behavior this case pins, and why it is additive' : 'why the TEST was wrong'}>". ` +
+      `Nothing recorded.`
+  );
 }
 
 const configPath = join(target, '.sterling', 'config.json');
@@ -71,6 +104,6 @@ mkdirSync(dirname(eventsPath), { recursive: true });
 const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
 const at = new Date().toISOString();
 const detail = `${path} — ${evidence}`;
-events.push({ kind: 'test_repair', detail, at });
+events.push({ kind: isAppend ? 'test_append' : 'test_repair', detail, at });
 writeFileSync(eventsPath, JSON.stringify(events));
-console.log(JSON.stringify({ repaired: path, evidence, at }));
+console.log(JSON.stringify(isAppend ? { appended: path, evidence, at } : { repaired: path, evidence, at }));
