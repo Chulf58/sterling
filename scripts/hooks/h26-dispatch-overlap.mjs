@@ -44,7 +44,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
-import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { liveDispatches } from '../lib/dispatch-register.mjs';
 import { hasUnsuppressedMatch, escapeRe, isReadOnlyDispatchType } from './lib/dispatch-advisory.mjs';
 import { claimedResources } from './lib/dispatch-residue.mjs';
@@ -265,53 +265,66 @@ try {
   // resource advisory computed above is unaffected by this exemption.
   if (isReadOnlyDispatchType(input.tool_input?.subagent_type)) finish();
 
-  const candidates = extractPathCandidates(prompt);
   // Repo-relative POSIX only, with H22's exact exclusion filter mirrored
   // verbatim: .git/.sterling are never governed territory, and the dot-
   // stripped 'sterling/…'/'git/…' forms the extractor can produce are
   // dropped too, so an excluded path never enters the candidate set at all.
-  // KEEP THE PRE-NORMALIZATION STRING for the suppression check (review
-  // finding, board a6b76e8c fixer pass): a Windows-style mention
-  // ('src\util.mjs') normalizes to 'src/util.mjs', which never literally
-  // appears in the RAW prompt — searching the normalized form there silently
-  // dropped every such candidate as "not found" rather than warning on it.
-  // The normalized form is still what feeds the register comparison below.
-  const normalized = candidates
-    .map((raw) => ({ raw, norm: repoRel(raw, input.cwd) }))
-    .filter((p) => p.norm)
-    .filter(
-      (p) =>
-        p.norm !== '.git' &&
-        !p.norm.startsWith('.git/') &&
-        !p.norm.startsWith('.sterling/') &&
-        !p.norm.startsWith('sterling/') &&
-        !p.norm.startsWith('git/')
-    );
-  // Then the SHARED PROHIBITION/NEGATION CHECK (board a6b76e8c item 1): a
-  // path named only inside a prohibition ("DO NOT TOUCH: <paths> (another
-  // lane owns those)") is a NEGATIVE territory declaration, not a positive
-  // claim on this dispatch's own lane — it must never count as a candidate.
-  // checkSubjectVerb:false — "implement the feature in <path>" is a
-  // legitimate territory declaration for a FILE candidate, not a
-  // subject-of-change mention to discount (that guard is for H25's tool
-  // mentions only); only an actual negation suppresses a path here.
-  // Then RUN-NOT-WRITE (board 8f43e6b5, see the two rules at the top of this
-  // file): the executable family drops unconditionally, and a non-executable
-  // whose every mention is an argument of a command line drops too. DISCLOSED
-  // RESIDUAL: this filter and the negation check above are independent
-  // any-occurrence tests, so a path whose only unsuppressed mention is
-  // command-shaped and whose only non-command mention is negated survives both
-  // — over-warning, the direction this family already accepts (P1), never a
-  // silently dropped lane.
-  const files = [
-    ...new Set(
-      normalized
-        .filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false }))
-        .filter((p) => !EXECUTABLE_EXT_RE.test(p.norm))
-        .filter((p) => hasNonRunMention(prompt, p.raw))
-        .map((p) => p.norm)
-    ),
-  ];
+  // Named so both branches below (structured declaration and prose
+  // extraction) apply the exact same exclusion rather than two copies.
+  const dropGoverned = (norm) =>
+    norm !== '.git' && !norm.startsWith('.git/') && !norm.startsWith('.sterling/') && !norm.startsWith('sterling/') && !norm.startsWith('git/');
+
+  // STRUCTURED TERRITORY WINS OVER PROSE-SCRAPING (board 7632586d item 2,
+  // decision 8f137474 review-territory-structured-receipt-files). Reuses the
+  // SAME REVIEW-TERRITORY line h22-dispatch-register.mjs already parses
+  // (lib/dispatch-prompt.mjs's parseReviewTerritory — one parser, not a
+  // second one drifting from it). A well-formed declaration is an EXPLICIT
+  // positive territory claim the dispatcher wrote on purpose, so none of the
+  // prose-extraction ambiguity below (negation, run-vs-write, subject-of-
+  // change) applies to it — the measured false positives this board item
+  // fixes were exactly prose heuristics misreading a FORBIDDEN block as
+  // claimed territory, which a structured declaration cannot do. A missing or
+  // malformed declaration falls through to the prose extractor, mirroring
+  // h22's own fallback for the same shape.
+  const territoryDecl = parseReviewTerritory(prompt);
+  let files;
+  if (territoryDecl.present && territoryDecl.valid) {
+    files = [...new Set(territoryDecl.files.map((raw) => repoRel(raw, input.cwd)).filter((norm) => norm && dropGoverned(norm)))];
+  } else {
+    const candidates = extractPathCandidates(prompt);
+    // KEEP THE PRE-NORMALIZATION STRING for the suppression check (review
+    // finding, board a6b76e8c fixer pass): a Windows-style mention
+    // ('src\util.mjs') normalizes to 'src/util.mjs', which never literally
+    // appears in the RAW prompt — searching the normalized form there silently
+    // dropped every such candidate as "not found" rather than warning on it.
+    // The normalized form is still what feeds the register comparison below.
+    const normalized = candidates.map((raw) => ({ raw, norm: repoRel(raw, input.cwd) })).filter((p) => p.norm && dropGoverned(p.norm));
+    // Then the SHARED PROHIBITION/NEGATION CHECK (board a6b76e8c item 1): a
+    // path named only inside a prohibition ("DO NOT TOUCH: <paths> (another
+    // lane owns those)") is a NEGATIVE territory declaration, not a positive
+    // claim on this dispatch's own lane — it must never count as a candidate.
+    // checkSubjectVerb:false — "implement the feature in <path>" is a
+    // legitimate territory declaration for a FILE candidate, not a
+    // subject-of-change mention to discount (that guard is for H25's tool
+    // mentions only); only an actual negation suppresses a path here.
+    // Then RUN-NOT-WRITE (board 8f43e6b5, see the two rules at the top of this
+    // file): the executable family drops unconditionally, and a non-executable
+    // whose every mention is an argument of a command line drops too. DISCLOSED
+    // RESIDUAL: this filter and the negation check above are independent
+    // any-occurrence tests, so a path whose only unsuppressed mention is
+    // command-shaped and whose only non-command mention is negated survives both
+    // — over-warning, the direction this family already accepts (P1), never a
+    // silently dropped lane.
+    files = [
+      ...new Set(
+        normalized
+          .filter((p) => hasUnsuppressedMatch(prompt, new RegExp(escapeRe(p.raw)), { checkSubjectVerb: false }))
+          .filter((p) => !EXECUTABLE_EXT_RE.test(p.norm))
+          .filter((p) => hasNonRunMention(prompt, p.raw))
+          .map((p) => p.norm)
+      ),
+    ];
+  }
   if (!files.length) finish();
 
   const candidateSet = new Set(files);
@@ -328,6 +341,12 @@ try {
     // type gets the same 'agent' fallback label the script-side reader uses
     // (scripts/lib/dispatch-register.mjs inFlightAdvisory).
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
+    // A READ-ONLY-CLASS live entry (board 7632586d item 1) can never
+    // CONTRIBUTE an overlap warning either — its write-set is structurally
+    // empty, so a path it merely mentioned (reviewed, explored, or updated
+    // in the knowledge store) was never really held territory to begin with.
+    // Symmetric with the incoming-dispatch exemption above.
+    if (isReadOnlyDispatchType(e.agent_type)) continue;
     // IMPRECISE ATTRIBUTION IS SUPPRESSED, NOT CAVEATED (decision 5d3747c1):
     // an entry H22 could only union across several/zero type-matching blocks
     // (attribution:'union') may not actually name this dispatch's territory,
@@ -349,7 +368,31 @@ try {
     // the briefs that named their do-not-touch lists most carefully.
     // A pre-field entry has no `claimed_files` and falls back to `files` —
     // today's behavior, never a silently empty lane.
-    const entryFiles = Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
+    //
+    // DECLARED-TERRITORY ENTRIES ARE EXEMPT FROM THE claimed_files FALLBACK
+    // TOO (board 7632586d, Codex review HIGH, thread 01a05b8c). H22 writes
+    // `claimed_files`/`claimed_glob_prefixes` from a PROSE re-scan of the
+    // SAME attributed blocks (claimedFromBlocks/globPrefixesFromBlocks in
+    // h22-dispatch-register.mjs) regardless of files_source — so a live
+    // entry whose OWN `files` already came from a REVIEW-TERRITORY
+    // declaration (files_source === 'review-territory') still carries a
+    // claimed_files/claimed_glob_prefixes computed from its brief's free
+    // prose, including any FORBIDDEN-block mention. Comparing against that
+    // reintroduces exactly the false positive step 2 exists to remove, just
+    // on the LIVE side instead of the outgoing side: a live coder that
+    // declared REVIEW-TERRITORY: ["src/a.mjs"] but mentioned forbidden
+    // src/b.mjs in prose would still conflict with a later dispatch on
+    // src/b.mjs. A declared entry's `files` IS its structured declaration
+    // (resolveTerritory's declared branch, h22-dispatch-register.mjs) — the
+    // authoritative, exclusive territory — so a declared entry compares
+    // against `files` alone, never claimed_files, and never
+    // claimed_glob_prefixes (glob claims are prose-only; a REVIEW-TERRITORY
+    // array cannot contain a glob token, since parseReviewTerritory requires
+    // each element to already be a canonical repo-relative POSIX path).
+    // Every other files_source ('free-prose-fallback', or absent on a
+    // pre-migration entry) keeps today's behavior byte-identical.
+    const isDeclaredTerritory = e.files_source === 'review-territory';
+    const entryFiles = isDeclaredTerritory ? e.files : Array.isArray(e.claimed_files) ? e.claimed_files : e.files;
     const matchedExact = entryFiles.filter((f) => candidateSet.has(f));
     // GLOB LITERAL-PREFIX OVERLAP (board a63b226d) — PREFIX-AWARE (startsWith)
     // matching, and ONLY for this field: `claimed_glob_prefixes` (absent on a
@@ -381,7 +424,7 @@ try {
     // unbuilt (not merely unnoticed): nobody's reproduction needed it, and
     // this family prefers bounded under-warning over the added surface a
     // second extraction+comparison pass would add (P1).
-    const entryPrefixes = Array.isArray(e.claimed_glob_prefixes) ? e.claimed_glob_prefixes : [];
+    const entryPrefixes = isDeclaredTerritory ? [] : Array.isArray(e.claimed_glob_prefixes) ? e.claimed_glob_prefixes : [];
     const matchedPrefix = entryPrefixes.length
       ? files.filter((f) => entryPrefixes.some((p) => f === p || f.startsWith(`${p}/`)))
       : [];

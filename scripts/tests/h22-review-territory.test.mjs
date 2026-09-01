@@ -642,7 +642,10 @@ test('(T7b) multi-block: a valid REVIEW-TERRITORY sibling wins over a malformed 
 
 // ===========================================================================
 // (P-path-shape) a declared path that is NOT repo-relative POSIX shape
-// (parent traversal, absolute, or backslash-separated) is MALFORMED, not a
+// (parent traversal, absolute, backslash-separated — or, since round 4 of
+// board 7632586d, a glob element: variant d below carries its own comment
+// and its own sabotage, distinct from the shared one described here) is
+// MALFORMED, not a
 // valid declaration: falls back to free-prose extraction, files_source:
 // "free-prose-fallback", plus a loud stderr warning — NEVER an authoritative
 // files[] rewrite with files_source: "review-territory". This targets a
@@ -700,6 +703,23 @@ test('(P-path-shape-c) REVIEW-TERRITORY with a backslash-separated path ("script
   const { dir, cleanup } = makeProject();
   try {
     assertPathShapeRejected(dir, 'agent-path-c', 'scripts\\\\hooks\\\\outside.mjs');
+  } finally {
+    cleanup();
+  }
+});
+
+// (P-path-shape-d) A glob token is a PATTERN, not a path — the convention
+// (decision review-territory-structured-receipt-files) says "paths naming
+// exactly the files". A glob element accepted as declared territory would let
+// H26 clear a live entry's claimed_glob_prefixes while its files[] silently
+// carries the un-expandable pattern (Codex re-review Medium, board 7632586d,
+// thread 01a05b8c). SABOTAGE: remove the GLOB_METACHAR_RE rejection from
+// isRepoRelativePosixShape — the glob is accepted as review-territory and
+// this pin's files_source assertion goes red.
+test('(P-path-shape-d) REVIEW-TERRITORY with a glob element ("src/**") is malformed — free-prose fallback, loud warning', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    assertPathShapeRejected(dir, 'agent-path-d', 'src/**');
   } finally {
     cleanup();
   }
