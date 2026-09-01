@@ -373,6 +373,11 @@ const BASELINE = {
     // whether the change FEELS structural, only whether it is inside. Verify by
     // running the check, never by reasoning about the edit's shape.
     //
+    // ROTATED AN EIGHTH TIME 2026-09-01 (#97fb9c75 -> #bcb43f69): the
+    // consumer-feedback branch's shared-lib recompiles shifted this statement's
+    // bundled text. RE-EXAMINED: the catch still calls warnNonBlocking, no new
+    // unguarded top-level statement — one entry, total unmoved. Verified by
+    // RUNNING the check. Prior:
     // ROTATED A SEVENTH TIME 2026-08-29 (#dc220b59 -> #97fb9c75): the review-fix
     // containment pass (guarded disclose/skipRow primitives) edited this same
     // statement again. SEVENTH rotation, total UNMOVED at 107. Prior:
@@ -395,7 +400,7 @@ const BASELINE = {
     // top-level statement, so this stays exactly ONE entry and
     // FOUNDING_BASELINE_TOTAL stays 107. What moved is the SIZE of the region
     // that can reach the catch, and it shrank. Verified by RUNNING the check.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #97fb9c75" },
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #bcb43f69" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },
@@ -495,11 +500,15 @@ const BASELINE = {
     { statement: "const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');" },
     { statement: 'const store = openStore(input.cwd);' },
     { statement: 'if (!store) allow();' },
+    // ROTATED AGAIN 2026-09-01 (#f084420c -> #ec8f5e26): the consumer-feedback
+    // branch's shared-lib recompiles shifted this statement's bundled text.
+    // RE-EXAMINED: same single try, catch semantics unchanged, no new unguarded
+    // statement. Verified by RUNNING the check. Prior:
     // ROTATED 2026-08-30 (#f96e3634 → #f084420c): commit 7404cbf wired the
     // advisory firing counter into h20's top-level try WITHOUT rotating this
     // entry, so the check was red at HEAD; the S3 commit absorbs the repair and
     // says so. Same statement, same debt — the counter swallows its own errors.
-    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #f084420c' },
+    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #ec8f5e26' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart
