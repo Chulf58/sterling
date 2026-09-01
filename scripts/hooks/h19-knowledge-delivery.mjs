@@ -38,6 +38,7 @@ import {
   rerenderRecipe,
   isDelivered,
   markDelivered,
+  budgetKnownGaps,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -142,6 +143,14 @@ try {
   const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
   const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
 
+  // KNOWN_GAPS INLINE (decision db3392db Part 3 / 53fd6f62, board 3dbbdb35):
+  // one GLOBAL 3-gap budget across every fresh owner in THIS delivery — never
+  // per-article — computed over freshOwners in their own delivery order so an
+  // article that does not re-render this session (already guarded) never
+  // re-offers its gaps either (dedup rides the existing lineage guard above,
+  // not a separate ledger).
+  const gapsByOwner = budgetKnownGaps(freshOwners);
+
   // LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce, warn-only
   // P1 advisory). `fresh` above already holds exactly the records this touch is
   // about to render (owners uncapped, hazards/decisions the rendered slice), so
@@ -191,7 +200,9 @@ try {
   // knowledge already delivered above, not knowledge in its own right.
   const blocks = [
     ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-    ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+    ...freshOwners.map((r) =>
+      r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+    ),
     ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
     // joinSuspectBlock returns '' when no line survives; the filter keeps an
     // empty advisory shell out of the payload exactly as the drain does.

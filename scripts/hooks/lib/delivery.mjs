@@ -838,11 +838,180 @@ export const ARTICLE_DIGEST_EXCERPT = 1200;
  *  unchanged while a pathological slug can no longer breach the delivery ceiling. */
 export const ARTICLE_SLUG_CLIP = 256;
 
+// ---------------------------------------------------------------------------
+// KNOWN_GAPS INLINE DELIVERY (decision db3392db Part 3, ship-ruled by decision
+// 53fd6f62 known-gaps-inline-ships-with-probe-seam-boarded; board 3dbbdb35).
+// A delivered article's known_gaps ({site, kind, evidence, recorded_run} —
+// packages/schemas records.ts) render inline beside the article: site + a
+// whitespace-normalized FIRST SENTENCE of evidence only (normalized BEFORE
+// sentence-splitting so an embedded newline in stored evidence can never
+// fabricate a fake delivery line), ~400 chars/gap, a GLOBAL 3-gap budget PER
+// DELIVERY — summed across every owning article touched in ONE hook
+// invocation, never per-article (a per-article budget multiplies unboundedly
+// when several articles own one path) — with the elision disclosed. A
+// mutation_survivor gap is prefixed 'WRONG-ON-PURPOSE test survivor'; an
+// 'other'-kind gap never is. The article's own knowledge_get pointer is
+// retained beside the inlined gaps even for a small article whose normal
+// (non-digest) render carries no pointer of its own. NO site-based filtering
+// (the schema has no path/scope field on a gap yet) — every known_gaps entry
+// on a delivered article is eligible for the budget.
+//
+// DEDUP rides the EXISTING per-article lineage/session guard (isDelivered/
+// markDelivered above): an article that does not re-render this session
+// (already guarded) never reaches renderArticle again, so its gaps never
+// re-render either — there is no separate per-gap ledger to maintain.
+//
+// DELIBERATELY EXCLUDED (accepted, boarded seam f1489964): the Bash pointer
+// path (h19-bash-delivery.mjs / bashPointerBlock below) never calls
+// renderArticle or this section at all — it renders a POINTER, not the
+// article — so known_gaps can never leak into a pointer-only payload.
+// ---------------------------------------------------------------------------
+
+/** Global per-DELIVERY cap on inlined gaps — NOT per article, see header. */
+export const GAP_GLOBAL_BUDGET = 3;
+
+/** ~400 chars/gap per the ruling; clip() discloses truncation with its own
+ *  ellipsis rather than a silent cut. */
+export const GAP_EVIDENCE_CHAR_CAP = 400;
+
+/** Deterministic per-gap render order (spec: "deterministic article/gap
+ *  ordering"): a mutation_survivor gap — proven-live evidence a mutation test
+ *  actually caught nothing — outranks an ordinary 'other' blind spot,
+ *  mirroring HAZARD_RANK's own severity-first precedent above. Ties (same
+ *  kind) keep delivery order (owner order, then the owner's own known_gaps
+ *  array order). GLOBAL, not per-owner (Codex review finding 3): a survivor
+ *  gap on the delivery's SECOND owner must still outrank an 'other' gap on
+ *  the FIRST owner for the one shared budget — see budgetKnownGaps below,
+ *  which is the only caller. */
+const GAP_KIND_RANK = { mutation_survivor: 0, other: 1 };
+
+/** Bound the INPUT to firstSentence before it does any work (Codex review
+ *  finding 5): normalizeWs walks its whole argument, so an unbounded stored
+ *  evidence field (nothing in the schema caps it) must never reach it whole.
+ *  Generous relative to GAP_EVIDENCE_CHAR_CAP — comfortably enough slack to
+ *  find a real sentence terminator inside what will render — but still a
+ *  hard multiple, not "however long the record is". */
+const FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
+
+/** First sentence terminator, optionally followed by a closing quote/bracket
+ *  before the whitespace/end-of-string boundary (Codex review finding 5): a
+ *  sentence ending 'He said "stop."' must still cut after the closing quote,
+ *  not run on into whatever follows because the char right after the period
+ *  was punctuation rather than whitespace. */
+const SENTENCE_END_RE = /^.*?[.!?]["'”’)\]]*(?=\s|$)/;
+
+/** Whitespace-normalized FIRST SENTENCE of `text` only — the input is CAPPED
+ *  before normalizing (bounded work regardless of stored evidence size), then
+ *  normalized (so an embedded newline cannot fabricate a fake boundary), then
+ *  matched up to the first sentence terminator (see SENTENCE_END_RE). A run
+ *  with no terminator at all within the scan cap (an oversize single
+ *  "sentence") falls back to the whole (bounded, normalized) text — clip()
+ *  in renderGapLine is what bounds the actually-rendered result to
+ *  GAP_EVIDENCE_CHAR_CAP regardless. */
+function firstSentence(text) {
+  const raw = String(text ?? '');
+  const bounded = raw.length > FIRST_SENTENCE_SCAN_CAP ? raw.slice(0, FIRST_SENTENCE_SCAN_CAP) : raw;
+  const s = normalizeWs(bounded);
+  const m = SENTENCE_END_RE.exec(s);
+  return m ? m[0] : s;
+}
+
+/** Site-label clip (Codex review finding 4): `site` is free text with no
+ *  length bound in the schema, and — unlike evidence — was rendered RAW. A
+ *  long or multiline site could otherwise enlarge or fabricate lines in the
+ *  digest path. Normalized (so an embedded newline can't fake a new line)
+ *  then clipped; clip() already appends its own ellipsis disclosure. */
+export const GAP_SITE_CLIP = 120;
+
+/** One rendered gap line. Deliberately carries no repeated section-header
+ *  word (never the literal "gap") beside the site: a recorded site is
+ *  free-text and can itself contain a digit (e.g. a numbered fixture id), and
+ *  a per-line header word would then sit on the very same line as that digit
+ *  — indistinguishable from a genuine disclosure to any digit-proximity
+ *  reader. The one "KNOWN GAPS" header word lives ONCE, on its own line with
+ *  no digit on it, in renderKnownGapsLines below. */
+function renderGapLine(gap) {
+  const site = clip(normalizeWs(gap.site), GAP_SITE_CLIP);
+  const sentence = clip(firstSentence(gap.evidence), GAP_EVIDENCE_CHAR_CAP);
+  const prefix = gap.kind === 'mutation_survivor' ? 'WRONG-ON-PURPOSE test survivor: ' : '';
+  return `  - ${site}: ${prefix}${sentence}`;
+}
+
+/** Slice EVERY owner's known_gaps against ONE shared budget, ranked GLOBALLY
+ *  (Codex review finding 3) — every candidate gap across every owner in this
+ *  delivery is pooled, sorted by GAP_KIND_RANK (survivor-first) with a
+ *  delivery-order tiebreak (owner order, then the owner's own array order),
+ *  and only THEN sliced to `budget`. Grouped back per owner afterward, in the
+ *  same ranked order, for rendering. Returns a Map keyed by owner id:
+ *  {shown, dropped, total, totalDropped}. An owner with no known_gaps at all
+ *  (absent or an explicit empty array — the control case) gets NO entry, so a
+ *  caller can tell "nothing recorded" from "everything here was dropped by
+ *  the budget" (an owner whose gaps all lost the budget still gets an entry,
+ *  with shown: [] — see renderKnownGapsLines, Codex review finding 2). */
+export function budgetKnownGaps(owners, budget = GAP_GLOBAL_BUDGET) {
+  const totals = new Map();
+  const candidates = [];
+  owners.forEach((owner, ownerIndex) => {
+    const raw = Array.isArray(owner.known_gaps) ? owner.known_gaps : [];
+    if (!raw.length) return;
+    totals.set(owner.id, raw.length);
+    raw.forEach((gap, gapIndex) => candidates.push({ owner, gap, ownerIndex, gapIndex }));
+  });
+  if (!candidates.length) return new Map();
+  const ranked = [...candidates].sort((a, b) => {
+    const rankDiff = (GAP_KIND_RANK[a.gap.kind] ?? 1) - (GAP_KIND_RANK[b.gap.kind] ?? 1);
+    if (rankDiff !== 0) return rankDiff;
+    if (a.ownerIndex !== b.ownerIndex) return a.ownerIndex - b.ownerIndex;
+    return a.gapIndex - b.gapIndex;
+  });
+  const byOwner = new Map();
+  for (const owner of owners) {
+    if (totals.has(owner.id)) byOwner.set(owner.id, { shown: [], dropped: 0, total: totals.get(owner.id) });
+  }
+  ranked.forEach((c, i) => {
+    const info = byOwner.get(c.owner.id);
+    if (i < budget) info.shown.push(c.gap);
+    else info.dropped += 1;
+  });
+  const totalDropped = [...byOwner.values()].reduce((sum, info) => sum + info.dropped, 0);
+  for (const info of byOwner.values()) info.totalDropped = totalDropped;
+  return byOwner;
+}
+
+/** The known-gaps block lines for ONE article, or [] only when NOTHING was
+ *  recorded for it at all (no map entry). An owner that HAS an entry but
+ *  whose whole allocation lost the shared budget (shown: [], dropped: total
+ *  > 0 — Codex review finding 2) still renders the header and an explicit
+ *  "0 of N shown" elision — silently omitting the block entirely would drop
+ *  both the omission AND the total count with no trace. The knowledge_get
+ *  pointer is ALWAYS appended when the block renders at all (decision
+ *  db3392db Part 3: "the knowledge_get pointer retained even when
+ *  rendered") — a small article's normal render carries no pointer of its
+ *  own today, so without this the reader would have nothing to follow back
+ *  to the full record. */
+function renderKnownGapsLines(article, info) {
+  if (!info) return [];
+  const lines = ['KNOWN GAPS recorded for this territory:'];
+  for (const gap of info.shown) lines.push(renderGapLine(gap));
+  if (info.dropped > 0) {
+    const totalNote =
+      info.totalDropped > info.dropped ? `; ${info.totalDropped} total omitted across this delivery` : '';
+    lines.push(
+      `  … ${info.shown.length} of ${info.total} known gap(s) shown for this article (global budget ${GAP_GLOBAL_BUDGET} per delivery); ${info.dropped} not shown${totalNote} — knowledge_get ${article.id} for the full set`
+    );
+  } else {
+    lines.push(`  (full record: knowledge_get ${article.id})`);
+  }
+  return lines;
+}
+
 /** Render the delivery payload for one owning feature_article: its substance
  *  (what_it_does, intended_behavior, current ACs) plus one-hop POINTERS —
  *  slugs with one-liners, never full neighbor bodies (grill answer: article +
- *  one-hop pointers; P6 filter-first-capped). */
-export function renderArticle(store, article, charCap) {
+ *  one-hop pointers; P6 filter-first-capped). `gaps` (optional) is one entry
+ *  of budgetKnownGaps's returned Map, keyed by this article's id — inlined
+ *  per the known_gaps section above when present. */
+export function renderArticle(store, article, charCap, { gaps } = {}) {
   // slug/concept_family are clipped (outside-family review, board 725299c8): they
   // are the only unbounded inputs to the digest block below, so without this a
   // pathological slug/family could push the digested block past the ~8192-byte
@@ -858,12 +1027,14 @@ export function renderArticle(store, article, charCap) {
   // AC list and one-hop pointers behind the knowledge_get pointer is what keeps
   // the block bounded no matter how large those fields grow — the measured
   // offender carried a ~5k intended_behavior and 12 ACs on top of a ~15k body.
+  const gapLines = renderKnownGapsLines(article, gaps);
   if (body.length > ARTICLE_BODY_FLOOR) {
     return [
       header,
       `WHAT IT DOES (digested — full body is ${body.length} chars, withheld to fit the reader's view): ${clip(body, ARTICLE_DIGEST_EXCERPT)}`,
       `▸ FULL RECORD (intended_behavior, acceptance criteria, one-hop dependencies withheld): knowledge_get ${article.id}` +
         ` — windowed: knowledge_get ${article.id} field:"what_it_does" offset:0 length:4000, then page by offset.`,
+      ...gapLines,
     ].join('\n');
   }
   const lines = [
@@ -871,6 +1042,11 @@ export function renderArticle(store, article, charCap) {
     `WHAT IT DOES: ${clip(body, charCap)}`,
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
   ];
+  // Board a9280db7: on a probe|tool article, current_ac can be the structured
+  // not_applicable exemption object instead of an array — `?.length` is
+  // undefined on that shape, so this ACCEPTANCE CRITERIA section is silently
+  // omitted for such an article, same as any article with zero real ACs;
+  // acceptable (never a crash), not a distinct case worth its own line.
   if (article.current_ac?.length) {
     lines.push(
       `ACCEPTANCE CRITERIA: ${article.current_ac
@@ -891,6 +1067,7 @@ export function renderArticle(store, article, charCap) {
     for (const slug of relies) lines.push(pointerLine(store, 'relies_on', slug));
     for (const slug of relied) lines.push(pointerLine(store, 'relied_by', slug));
   }
+  lines.push(...gapLines);
   return lines.join('\n');
 }
 
@@ -1587,6 +1764,17 @@ function rerenderFromRecipe(store, recipe) {
     ? joinSuspectBlock({ header: recipe.suspects.header, lines: survivingSuspects, footer: recipe.suspects.footer })
     : '';
 
+  // KNOWN_GAPS, RECOMPUTED AT DRAIN TIME (Codex review finding 1; decision
+  // db3392db's own re-resolve-at-delivery-time design). The recipe carries no
+  // known_gaps of its own — like every other field here, gaps are derived
+  // from the LIVE record `owners` just resolved above, never a value cached
+  // at enqueue time (an edit to the article between enqueue and drain must
+  // show current gaps, not stale ones). Budgeted over the SAME live owner set
+  // the payload is about to render, so the drain path's gap disclosure always
+  // matches what actually rendered — never silently dropped, and never a
+  // count computed against owners that died before the drain ran.
+  const gapsByOwner = budgetKnownGaps(owners);
+
   // SUBSTANTIVE blocks only (fixer F5/L1) — the disclosure block is appended after
   // and is deliberately NOT counted, so an unowned entry whose every record died
   // renders the plain frontier notice instead of promising hazards below it. The
@@ -1594,7 +1782,9 @@ function rerenderFromRecipe(store, recipe) {
   // otherwise, and the filter below drops it from the count as well as the output).
   const substantive = [
     ...renderHazards(hazards, charCap, { fileKeys: [recipe.rel], total: hazardTotal, suppressed: hazardTail }),
-    ...owners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
+    ...owners.map((r) =>
+      r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+    ),
     ...(decisions.length || decisionTail
       ? [renderDecisionPointers(recipe.rel, decisions, DECISION_POINTER_CAP, { total: decisionTotal, suppressed: decisionTail })]
       : []),
