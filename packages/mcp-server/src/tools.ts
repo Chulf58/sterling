@@ -112,13 +112,36 @@ export interface BoardFilter {
    * PAGING (board b786a84f) — a 186-item lane audit died at item 1 because
    * board_query/maintenance_query had no way to see past one capped window.
    * Applied AFTER the same filter+sort boardFiltered already uses and BEFORE
-   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC —
-   * query()'s own §3.4 mechanical fallback rank, made explicit and stable in
-   * boardFiltered) so paging through offset 0, cap, 2*cap, … visits every
-   * matching item exactly once, in the same order, even as the board changes
-   * between calls elsewhere. Defaults to 0.
+   * the cap slice, over the same DETERMINISTIC ordering (updated_at DESC,
+   * id DESC — query()'s own §3.4 mechanical fallback rank, made explicit and
+   * total in boardFiltered) so paging through offset 0, cap, 2*cap, … visits
+   * every matching item exactly once IF THE BOARD IS UNCHANGED between calls
+   * — under concurrent writes an item bumped toward the head between page
+   * fetches can be SKIPPED (never scanned again by a later offset, because
+   * offset is a POSITION, blind to what moved across it) — see `cursor` for
+   * the continuation that does not have this hazard. Defaults to 0.
    */
   offset?: number;
+  /**
+   * KEYSET CONTINUATION (board abafbd48, upgrading b786a84f's offset paging;
+   * versioned + identity-bound per the abafbd48 re-review): an opaque
+   * next_cursor a prior boardQueryResult call returned — the page starts
+   * strictly AFTER that (updated_at, id) tuple in the same total order
+   * (updated_at DESC, id DESC) offset uses, computed over a FRESH scan each
+   * call. Unlike offset (a POSITION, blind to items that moved across it
+   * between calls), a cursor is an IDENTITY: it can never OMIT an item that
+   * was behind it, though it still cannot surface one that jumps AHEAD of it
+   * after the cursor was minted — finish a churn-exposed walk with a head
+   * re-query. The cursor also carries the FILTERS it was minted under
+   * (source/system_reason/objective/file_keys/contains/feature_slug); a
+   * continuation under DIFFERENT filters is refused, naming the mismatch,
+   * rather than silently omitting whatever the changed filter excludes. Not
+   * an alternate history: cap/projection may still vary freely page to page.
+   * Mutually exclusive with `offset`: passing both is refused loudly, and a
+   * cursor that fails to decode is refused loudly naming `cursor`, never
+   * silently ignored.
+   */
+  cursor?: string;
 }
 
 /**
@@ -223,8 +246,25 @@ export interface BoardQueryResult {
   cap: number;
   /** exact: more matched than were returned (i.e. offset + returned < matched_filter) */
   capped: boolean;
-  /** PAGING (board b786a84f): the offset this page was read at (0 when omitted) — the next page starts at offset + returned. */
+  /**
+   * PAGING (board b786a84f): the offset this page was READ AT when paging by
+   * offset — 0 when omitted, and the next OFFSET page starts at
+   * offset + returned. Round-3 re-review LOW: that arithmetic is ONLY valid
+   * for offset-mode paging — a page read by `cursor` always reports 0 here
+   * (no position was ever asked for), so "offset + returned" does NOT name
+   * the next page in cursor mode; use `next_cursor` there instead.
+   */
   offset: number;
+  /**
+   * KEYSET CONTINUATION (board abafbd48): an opaque cursor naming the last
+   * item returned on this page — present only when `capped` (more items
+   * remain past this page), absent otherwise. Pass it back as `cursor` on the
+   * next call to resume by IDENTITY rather than position: unlike `offset`, it
+   * can never re-skip an item that was behind it even if the board changed
+   * between calls, though a later page still cannot surface an item that
+   * jumped AHEAD of the cursor after it was minted.
+   */
+  next_cursor?: string;
   note?: string;
   /**
    * board-provenance-measured-at-head: whether the one-shot git walk backing
@@ -417,6 +457,165 @@ const DEFAULT_BOARD_CAP = 50;
 // The bounded todo scan the filter runs over. A full scan means the reported
 // count is a floor; boardQueryResult says so rather than under-reporting.
 const BOARD_SCAN_CAP = 1000;
+
+/**
+ * Total order for board/queue paging (board abafbd48 — Codex-adjudicated,
+ * thread 01a05bc3): `updated_at DESC` alone is not a total order — two items
+ * sharing one updated_at (minted in the same write, or the same test tick)
+ * used to resolve to whatever order the underlying scan happened to produce,
+ * and a keyset cursor built on a non-total order cannot name an unambiguous
+ * resume point. `id DESC` breaks every remaining tie, deterministically, in
+ * BOTH the JS sort (boardFiltered) and — for the same reason — the SQL
+ * ORDER BY paths this same order must agree with (packages/store/src/index.ts).
+ * Returns <0 when `a` sorts BEFORE `b` in that order, >0 when after, 0 only
+ * when the two tuples are identical (which never happens for two distinct
+ * records, since id is unique).
+ */
+function compareBoardOrder(aUpdatedAt: string, aId: string, bUpdatedAt: string, bId: string): number {
+  if (aUpdatedAt !== bUpdatedAt) return aUpdatedAt < bUpdatedAt ? 1 : -1;
+  if (aId !== bId) return aId < bId ? 1 : -1;
+  return 0;
+}
+
+/** board_query and maintenance_query are two DIFFERENT MCP tools sharing one
+ *  paging implementation (pageBoard) — this names which one a call/cursor/
+ *  refusal belongs to, so a refusal message is never a lie about which tool
+ *  the caller actually invoked (board abafbd48 re-review, HIGH). */
+type BoardSurface = 'board_query' | 'maintenance_query';
+
+/**
+ * The FILTERS a cursor is bound to — everything that decides WHICH rows can
+ * match and where they sort, but never cap/projection/offset (which may
+ * legitimately vary page to page). `objective` is an EXPLICIT DISCRIMINANT
+ * object ({mode:'any'} omitted / {mode:'ungrouped'} 'standalone' / {mode:
+ * 'exact', value} everything else) — never a bare sentinel value, because a
+ * bare-value + `?? null`-style comparison cannot tell "no objective filter"
+ * apart from "filtered to the absence sentinel" (round-3 re-review HIGH: they
+ * collapsed to the identical `null`, so a standalone cursor continued without
+ * the filter silently omitted every record the wider query would have
+ * included). `file_keys` deduped and sorted (order never changes what
+ * matches), `contains` lowercased (the match is already case-insensitive) —
+ * so two calls that MEAN the same filter always produce byte-identical
+ * identity JSON, and two calls that mean something different never
+ * accidentally collide (board abafbd48 re-review, MEDIUM-HIGH: an unbound
+ * cursor silently omitted everything ahead of the tuple whenever a caller
+ * changed filters mid-walk).
+ */
+function boardCursorIdentity(surface: BoardSurface, filter: BoardFilter): Record<string, unknown> {
+  const identity: Record<string, unknown> = { surface };
+  if (filter.source !== undefined) identity.source = filter.source;
+  // CANONICALIZATION (round-3 re-review LOW): `system_reason`/`contains` mirror
+  // the TRUTHY test boardFiltered's own `if (filter.x)` guards apply to them
+  // (an explicit '' behaves exactly like omitted — neither narrows anything),
+  // so both compare IDENTICAL in identity too; a bare `!== undefined` would
+  // fail-safe (refuse a continuation that would have behaved identically) but
+  // misstate the semantic contract these two fields actually have.
+  if (filter.system_reason) identity.system_reason = filter.system_reason;
+  // EXPLICIT DISCRIMINANTS (board abafbd48 re-review round 3, HIGH): a bare
+  // string sentinel plus describeIdentityMismatch's `value ?? null` fallback
+  // made 'standalone' (identity.objective === null, explicitly) and OMITTED
+  // (identity.objective absent -> undefined -> also collapsed to null by the
+  // ?? in the comparator) compare EQUAL — a standalone cursor continued
+  // without the filter silently omitted every record the wider query would
+  // have included. `identity.objective` is now ALWAYS present, one of three
+  // mutually distinguishable shapes, so no key-absence/`?? null` collapse
+  // can ever equate two different filter states again.
+  identity.objective =
+    filter.objective === undefined
+      ? { mode: 'any' }
+      : filter.objective === 'standalone'
+        ? { mode: 'ungrouped' }
+        : { mode: 'exact', value: filter.objective };
+  // (a sentinel comment used to stand here — round-3 re-review MEDIUM: it had
+  // accumulated literal NUL bytes, which made `file`(1) classify this whole
+  // source file as binary and broke plain-text search tools like rg/grep
+  // against it. Deleted outright rather than re-typed, since the discriminant
+  // object above no longer needs a sentinel at all.)
+  // file_keys: an EMPTY array is the same "no narrowing" as omitted (only a
+  // non-empty list ever reaches boardFiltered's overlap ranking), so both
+  // compare identical below. Each entry is run through normalizeRepoPath —
+  // the SAME normalization query execution itself applies (store/index.ts
+  // baseFilter) — so two spellings of one path (backslash vs forward slash,
+  // a leading './') that resolve to the SAME repo-relative key never read as
+  // a changed filter. Safe to call unconditionally: boardFiltered already
+  // routed these same values through store.query() -> normalizeRepoPath
+  // before this function is ever reached, so a value that would throw here
+  // already threw there, upstream of any cursor logic.
+  if (filter.file_keys && filter.file_keys.length > 0) {
+    identity.file_keys = [...new Set(filter.file_keys.map(normalizeRepoPath))].sort();
+  }
+  if (filter.contains) identity.contains = filter.contains.toLowerCase();
+  if (filter.feature_slug !== undefined) identity.feature_slug = filter.feature_slug;
+  return identity;
+}
+
+/** Key-by-key diff between a minted cursor's identity and the current call's
+ *  — null when they match, else a human-readable list of what changed, so the
+ *  refusal names the mismatch instead of just saying "no". */
+function describeIdentityMismatch(minted: Record<string, unknown>, current: Record<string, unknown>): string | null {
+  const keys = new Set([...Object.keys(minted), ...Object.keys(current)]);
+  const diffs: string[] = [];
+  for (const key of keys) {
+    const a = JSON.stringify(minted[key] ?? null);
+    const b = JSON.stringify(current[key] ?? null);
+    if (a !== b) diffs.push(`${key}: ${a} -> ${b}`);
+  }
+  return diffs.length ? diffs.join(', ') : null;
+}
+
+/**
+ * KEYSET CONTINUATION (board abafbd48; versioned + identity-bound per the
+ * abafbd48 re-review, MEDIUM-HIGH): a next_cursor is an opaque, base64-
+ * encoded {v, updated_at, id, identity} token naming the LAST item returned
+ * on a page AND the exact filters that produced it — the boundary
+ * boardQueryResult resumes strictly after, computed fresh each call (never a
+ * stored offset/snapshot), so an item that REMAINS BEHIND the cursor between
+ * calls can never be skipped by a later page (round-3 re-review LOW: an item
+ * bumped AHEAD of the cursor — toward the head — is the one case this cannot
+ * see; that limitation is real, not fixed by the fresh-scan design) WITHIN
+ * THE SAME QUERY. `identity` exists because a cursor is a
+ * position in ONE specific query's total order — resuming it under DIFFERENT
+ * filters (a different objective, a narrowed file_keys, …) is not "the next
+ * page of the same walk", it is a different walk that happens to reuse a
+ * tuple, and would silently omit everything the new filter excludes but the
+ * old one didn't (or vice versa). `v` lets the decode shape change later
+ * without a stale cursor from an old build being misread as a valid one from
+ * a new one. Not a security boundary — only round-trip-stable — so a plain
+ * base64(JSON) is sufficient; the decode failure path is what has to be loud
+ * (P5), not the encoding's obscurity.
+ */
+function encodeBoardCursor(surface: BoardSurface, filter: BoardFilter, updatedAt: string, id: string): string {
+  const payload = { v: 2, updated_at: updatedAt, id, identity: boardCursorIdentity(surface, filter) };
+  return Buffer.from(JSON.stringify(payload)).toString('base64');
+}
+
+function decodeBoardCursor(surface: BoardSurface, cursor: string): { updated_at: string; id: string; identity: Record<string, unknown> } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64').toString('utf8'));
+  } catch {
+    throw new Error(
+      `${surface}: 'cursor' is malformed — could not decode it as a base64-encoded continuation token; page from a next_cursor this same tool returned, never a hand-built value.`
+    );
+  }
+  const rec = parsed as { v?: unknown; updated_at?: unknown; id?: unknown; identity?: unknown } | null;
+  if (
+    rec === null ||
+    typeof rec !== 'object' ||
+    rec.v !== 2 ||
+    typeof rec.updated_at !== 'string' ||
+    rec.updated_at.length === 0 ||
+    typeof rec.id !== 'string' ||
+    rec.id.length === 0 ||
+    typeof rec.identity !== 'object' ||
+    rec.identity === null
+  ) {
+    throw new Error(
+      `${surface}: 'cursor' is malformed — decoded value is not a valid {v:2, updated_at, id, identity} continuation token (wrong version, empty tuple field, or missing identity); page from a next_cursor this same tool returned, never a hand-built value.`
+    );
+  }
+  return { updated_at: rec.updated_at, id: rec.id, identity: rec.identity as Record<string, unknown> };
+}
 // How many local branches the parked-file probe will interrogate for ONE absent
 // file (board 1d6a721a). Bounded because the probe shells out per ref: a repo
 // with a long tail of stale branches must not turn one missing file into
@@ -6199,24 +6398,30 @@ export class SterlingTools {
       const chain = this.articleChainIds(filter.feature_slug);
       filtered = chain ? filtered.filter((t) => chain.has((t as { feature_link?: string }).feature_link ?? '')) : [];
     }
-    // DETERMINISTIC ORDER, MADE EXPLICIT (board b786a84f, PAGING): the store's
-    // own order for a rank_terms-less query() is `updated_at DESC` (mechanical
-    // fallback rank, §3.4). Re-sorted here on that SAME key so the order is a
-    // property of this method rather than an incidental SQL detail — but only
-    // on `updated_at`: Array.prototype.sort is SPEC-GUARANTEED STABLE (ES2019),
-    // so returning 0 for a tie (two todos sharing one updated_at, e.g. minted
-    // in the same write or the same test tick) preserves whatever relative
-    // order the underlying scan already produced for them, rather than
-    // imposing a different tie-break (an id-based one was tried and reordered
-    // same-timestamp items relative to existing, already-passing callers that
-    // assume insertion order for ties). Paging is still exactly reproducible:
-    // offset 0, cap, 2·cap, … visits every matching item once, in one order,
-    // as long as the board is unchanged between calls.
+    // DETERMINISTIC TOTAL ORDER (board abafbd48, Codex-adjudicated, upgrading
+    // b786a84f, PAGING): the store's own order for a rank_terms-less query() is
+    // `updated_at DESC` (mechanical fallback rank, §3.4). Re-sorted here on
+    // that SAME key so the order is a property of this method rather than an
+    // incidental SQL detail — and now `id DESC` as the FINAL tiebreaker, so two
+    // todos sharing one updated_at (minted in the same write, or the same test
+    // tick) no longer resolve to "whatever order the underlying scan happened
+    // to produce" (a non-total order Array.prototype.sort's stability alone
+    // cannot fix, since a fresh scan's own incoming order is not itself
+    // guaranteed stable across calls). A prior version of this comment argued
+    // for returning 0 on a tie; that left ties genuinely unordered across
+    // separate scans, which is exactly what breaks a keyset cursor's "resume
+    // strictly after this tuple" contract — see compareBoardOrder. The total
+    // order alone does not make paging immune to concurrent writes: offset
+    // paging over it can still SKIP an item bumped toward the head between
+    // page fetches (offset is a position, not an identity) — see
+    // BoardFilter.cursor for the continuation that instead cannot omit an
+    // item behind it, at the cost of being unable to surface one that jumps
+    // ahead of it after the cursor was minted.
     filtered = [...filtered].sort((a, b) => {
-      const at = (a as { updated_at: string }).updated_at;
-      const bt = (b as { updated_at: string }).updated_at;
-      if (at === bt) return 0;
-      return at < bt ? 1 : -1;
+      const rec = (r: DurableRecord) => r as unknown as { updated_at: string; id: string };
+      const ra = rec(a);
+      const rb = rec(b);
+      return compareBoardOrder(ra.updated_at, ra.id, rb.updated_at, rb.id);
     });
     // The underlying scan is itself bounded; if it came back full, the count we
     // can report is a FLOOR, and saying so beats quietly under-reporting (P5).
@@ -6337,10 +6542,64 @@ export class SterlingTools {
     return headline ? clipName(headline) : '(unnamed board item)';
   }
 
-  boardQuery(filter: BoardFilter = {}): DurableRecord[] {
-    const offset = filter.offset ?? 0;
+  boardQuery(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): DurableRecord[] {
+    return this.pageBoard(surface, this.boardFiltered(filter).matching, filter).records;
+  }
+
+  /**
+   * ONE page of an already-sorted `matching` set, shared by boardQuery and
+   * boardQueryResult — and by BOTH board_query and maintenance_query, which
+   * is why `surface` is explicit rather than assumed (board abafbd48
+   * re-review, HIGH: a maintenance_query refusal must never say "board_query").
+   * `offset` and `cursor` are two different continuation strategies over the
+   * SAME total order (compareBoardOrder) — passing both is ambiguous and
+   * refused; a `cursor` that fails to decode, or was minted under DIFFERENT
+   * filters than this call, is refused naming the parameter/mismatch, never
+   * silently ignored (board abafbd48 re-review, MEDIUM-HIGH). `capped` is
+   * exact (more matched than returned); when true, `next_cursor` names the
+   * boundary for a keyset-continued next call — present whenever more
+   * remains, regardless of which strategy read this page.
+   */
+  private pageBoard(
+    surface: BoardSurface,
+    matching: DurableRecord[],
+    filter: BoardFilter
+  ): { records: DurableRecord[]; offset: number; capped: boolean; next_cursor?: string } {
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
-    return this.boardFiltered(filter).matching.slice(offset, offset + cap);
+    if (filter.cursor !== undefined && filter.offset !== undefined) {
+      throw new Error(
+        `${surface}: 'cursor' and 'offset' are two different continuation strategies — passing both is ambiguous and refused; page with one or the other, never both.`
+      );
+    }
+    const currentIdentity = boardCursorIdentity(surface, filter);
+    const rest =
+      filter.cursor !== undefined
+        ? (() => {
+            const decoded = decodeBoardCursor(surface, filter.cursor as string);
+            const mismatch = describeIdentityMismatch(decoded.identity, currentIdentity);
+            if (mismatch) {
+              throw new Error(
+                `${surface}: this cursor was minted for a DIFFERENT query (${mismatch}) — a cursor is a position in ONE specific query's ` +
+                  `total order, so continuing it under different filters (source/system_reason/objective/file_keys/contains/feature_slug) is ` +
+                  `refused rather than silently omitting whatever the new filter excludes but the old one didn't. cap/projection may change ` +
+                  `freely; start a fresh, uncursored call to change anything else.`
+              );
+            }
+            return matching.filter((r) => {
+              const rec = r as unknown as { updated_at: string; id: string };
+              return compareBoardOrder(rec.updated_at, rec.id, decoded.updated_at, decoded.id) > 0;
+            });
+          })()
+        : matching.slice(filter.offset ?? 0);
+    const records = rest.slice(0, cap);
+    const capped = records.length < rest.length;
+    const last = records[records.length - 1] as unknown as { updated_at: string; id: string } | undefined;
+    return {
+      records,
+      offset: filter.offset ?? 0,
+      capped,
+      next_cursor: capped && last ? encodeBoardCursor(surface, filter, last.updated_at, last.id) : undefined,
+    };
   }
 
   /**
@@ -6360,27 +6619,40 @@ export class SterlingTools {
    * matching the filter you gave) — one name per concept, with each tool
    * documenting its own guarantee.
    */
-  boardQueryResult(filter: BoardFilter = {}): BoardQueryResult {
+  boardQueryResult(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): BoardQueryResult {
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
-    const offset = filter.offset ?? 0;
-    const records = matching.slice(offset, offset + cap);
-    // capped is EXACT here (same guarantee as before offset existed): more of
-    // the matching set sits past this page's end.
-    const capped = offset + records.length < matching.length;
+    const { records, offset, capped, next_cursor } = this.pageBoard(surface, matching, filter);
     const projection = filter.projection ?? 'full';
     const notes: string[] = [];
+    // MODE-SPECIFIC ADVICE (board abafbd48 re-review, MEDIUM): this page was
+    // read by cursor iff the caller passed one — `offset` on the pageBoard
+    // result is always 0 in that mode (nothing was ever asked to position-page),
+    // so surfacing "offset:0" as a continuation there would just re-fetch this
+    // SAME page, not the next one. A cursor page therefore offers ONLY
+    // next_cursor; an offset page offers both, since either genuinely continues
+    // it. The keyset claim itself is qualified, not absolute (server.ts states
+    // the same boundary): a cursor page can never OMIT an item that was behind
+    // the cursor, but it also cannot surface one that jumped AHEAD of the
+    // cursor after it was minted — a churn-exposed walk still needs a
+    // terminal head re-query either way.
+    const cursorMode = filter.cursor !== undefined;
     if (capped) {
+      const cursorAdvice =
+        `page with cursor:"${next_cursor}" to continue by KEYSET — it will never omit an item that was behind the cursor, ` +
+        `though it still cannot surface one that jumped AHEAD of the cursor after this page was read`;
+      const offsetAdvice = `or offset:${offset + records.length} to continue by position (can SKIP an item bumped toward the head between page fetches)`;
       notes.push(
-        `cap reached — showing ${records.length} of ${matching.length} matching items (offset ${offset}); ` +
-          `page with offset:${offset + records.length} to continue, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
+        `cap reached — showing ${records.length} of ${matching.length} matching items${cursorMode ? '' : ` (offset ${offset})`}; ` +
+          (cursorMode ? cursorAdvice : `${cursorAdvice}, ${offsetAdvice}`) +
+          `, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
           (projection === 'full' ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)` : '')
       );
     }
     if (scanTruncated) {
       notes.push(
         `the underlying todo scan hit its ${BOARD_SCAN_CAP}-record ceiling, so matched_filter is a FLOOR, not a total — ` +
-          `and PAGING IS BOUNDED BY THAT SAME CEILING: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue)`
+          `and PAGING IS BOUNDED BY THAT SAME CEILING EITHER WAY: an offset at or past ${BOARD_SCAN_CAP} addresses items the scan never reached, so it cannot be served (an empty page here is not necessarily the end of the queue), and cursor paging is equally bounded — a cursor whose position lies past the scanned window cannot resume into rows the scan never saw either`
       );
     }
     // board-provenance-measured-at-head: ONE bounded git walk for this whole
@@ -6439,6 +6711,10 @@ export class SterlingTools {
       offset,
       provenance,
       reconcile_provenance,
+      // KEYSET CONTINUATION (board abafbd48): present only when more items
+      // remain past this page — absent, never null, mirroring lane_advisory's
+      // own "presence is the signal" convention.
+      ...(next_cursor !== undefined ? { next_cursor } : {}),
       // AC3: the key is ABSENT when nothing collides, never an empty block.
       ...(lane_advisory ? { lane_advisory } : {}),
       ...(notes.length ? { note: notes.join('; ') } : {}),
@@ -7522,21 +7798,39 @@ export class SterlingTools {
   }
 
   maintenanceQuery(
-    filter: { system_reason?: string; file_keys?: string[]; contains?: string; feature_slug?: string; cap?: number; offset?: number } = {}
+    filter: {
+      system_reason?: string;
+      file_keys?: string[];
+      contains?: string;
+      feature_slug?: string;
+      cap?: number;
+      offset?: number;
+      cursor?: string;
+    } = {}
   ): DurableRecord[] {
     // system_reason is applied inside boardQuery BEFORE the cap (finding 33/43),
     // so a reason-filtered query no longer misses matches past the cap. contains
     // (work order d9960c98) and feature_slug (board e725979c) ride the same
     // boardFiltered pass for the same reason, and combine as a genuine AND.
-    return this.boardQuery({
-      source: 'system',
-      system_reason: filter.system_reason,
-      file_keys: filter.file_keys,
-      contains: filter.contains,
-      feature_slug: filter.feature_slug,
-      cap: filter.cap,
-      offset: filter.offset,
-    });
+    // `cursor` FORWARDS to the shared pageBoard (board abafbd48 re-review, HIGH:
+    // the queue is paged in exactly the concurrent-write conditions cursor
+    // continuation exists for — DROPPING it here, rather than forwarding it,
+    // was the defect: a capped maintenance page's own advice then named a
+    // parameter this surface refused as unknown) — the 'maintenance_query'
+    // surface tag keeps its refusal messages honest about which tool they are.
+    return this.boardQuery(
+      {
+        source: 'system',
+        system_reason: filter.system_reason,
+        file_keys: filter.file_keys,
+        contains: filter.contains,
+        feature_slug: filter.feature_slug,
+        cap: filter.cap,
+        offset: filter.offset,
+        cursor: filter.cursor,
+      },
+      'maintenance_query'
+    );
   }
 
   /** The disclosed envelope for maintenance_query — the queue's own depth, stated (see boardQueryResult). */
@@ -7548,19 +7842,24 @@ export class SterlingTools {
       feature_slug?: string;
       cap?: number;
       offset?: number;
+      cursor?: string;
       projection?: BoardProjection;
     } = {}
   ): BoardQueryResult {
-    return this.boardQueryResult({
-      source: 'system',
-      system_reason: filter.system_reason,
-      file_keys: filter.file_keys,
-      contains: filter.contains,
-      feature_slug: filter.feature_slug,
-      cap: filter.cap,
-      offset: filter.offset,
-      projection: filter.projection,
-    });
+    return this.boardQueryResult(
+      {
+        source: 'system',
+        system_reason: filter.system_reason,
+        file_keys: filter.file_keys,
+        contains: filter.contains,
+        feature_slug: filter.feature_slug,
+        cap: filter.cap,
+        offset: filter.offset,
+        cursor: filter.cursor,
+        projection: filter.projection,
+      },
+      'maintenance_query'
+    );
   }
 
   // -- handoff pair (§10): transient, never enters the durable store -------------

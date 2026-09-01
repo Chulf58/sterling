@@ -2337,7 +2337,14 @@ export class SterlingStore {
         return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body) as DurableRecord));
       }
     }
-    // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at desc.
+    // Mechanical fallback rank (§3.4): file-key overlap count, then updated_at
+    // desc, then id desc as the FINAL tiebreaker (board abafbd48, Codex-
+    // adjudicated) — `updated_at DESC` alone is not a total order (two rows
+    // can share one updated_at), and board_query's keyset cursor paging
+    // (packages/mcp-server/src/tools.ts) needs a total, deterministic order to
+    // name an unambiguous resume point. Applies to BOTH the plain variant and
+    // the file_keys-overlap variant below, since both funnel through this same
+    // `orderBy` array and its shared trailing clauses.
     const orderBy: string[] = [];
     const overlapParams: string[] = [];
     if (fileKeys.length) {
@@ -2346,7 +2353,7 @@ export class SterlingStore {
       );
       overlapParams.push(...fileKeys);
     }
-    orderBy.push('r.updated_at DESC');
+    orderBy.push('r.updated_at DESC', 'r.id DESC');
     const sql = `SELECT r.body FROM records r WHERE ${where.join(' AND ')}
       ORDER BY ${orderBy.join(', ')} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap) as { body: string }[];
