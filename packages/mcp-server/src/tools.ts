@@ -644,6 +644,35 @@ export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 
  */
 export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
 
+/**
+ * elementOwnsScalar — the ONE ownership predicate shared by every
+ * `arr[key=value]` selector match: knowledge_edit's array-element addressing
+ * AND knowledge_array_remove's element selection (board c61c9a3a). Both used
+ * to carry their own hand-copied `String(el[key]) === value` comparison,
+ * which reads an ABSENT key as the string 'undefined' — so a selector like
+ * `[anykey=undefined]` matched every element LACKING that key. Fixed first on
+ * knowledge_array_remove (board 39673f6a, defect B) because there the false
+ * match DESTROYED the element; knowledge_edit carried the identical defect
+ * (silently misdirecting an edit to the wrong element) and is fixed here by
+ * sharing this one predicate rather than reproducing a second copy that would
+ * only re-diverge later.
+ *
+ * OWNERSHIP FIRST, then the caller does its own stringified-value comparison.
+ * This helper answers only "does this element carry `key` with a defined
+ * value" — never "does it equal `value`". A missing key, or a key explicitly
+ * set to `undefined`, both read as non-ownership; an element whose value IS
+ * the literal string "undefined" still owns the key and is unaffected.
+ *
+ * Deliberately NOT shared: the scalar-discriminator check (object/array
+ * values are unsound to address by) and every refusal policy — zero/multi
+ * match handling, floors, versioning. Those are per-operation and differ on
+ * purpose (array_remove destroys and floors; edit does not).
+ */
+function elementOwnsScalar(el: unknown, key: string): el is Record<string, unknown> {
+  if (!el || typeof el !== 'object') return false;
+  return Object.prototype.hasOwnProperty.call(el, key) && (el as Record<string, unknown>)[key] !== undefined;
+}
+
 export class SterlingTools {
   private store: ToolStore;
   private config: SterlingConfig;
@@ -2809,7 +2838,12 @@ export class SterlingTools {
           `knowledge_edit: '${base}' on ${old.type} is ${arr === undefined ? 'absent' : typeof arr}, not an array — the [${key}=…] selector addresses array elements; a plain field name edits a string field`
         );
       }
-      const hits = arr.filter((el) => el && typeof el === 'object' && String((el as Record<string, unknown>)[key]) === value);
+      // OWNERSHIP FIRST via the shared elementOwnsScalar (board c61c9a3a) —
+      // `String(el[key]) === value` alone read an ABSENT key as the string
+      // 'undefined', so `[anykey=undefined]` matched every element LACKING
+      // the key. Same predicate knowledge_array_remove uses (tools.ts, near
+      // its own `hits` filter), so the two selectors cannot re-diverge.
+      const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
       if (hits.length !== 1) {
         throw new Error(
           `knowledge_edit: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, nothing was written. ` +
@@ -3025,12 +3059,7 @@ export class SterlingTools {
     // a plain non-match, covered by the zero-match refusal below), so the
     // refusal fires regardless of whether the naive string comparison would
     // have produced a match.
-    const nonScalarOwners = arr.filter((el) => {
-      if (!el || typeof el !== 'object') return false;
-      const rec = el as Record<string, unknown>;
-      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
-      return typeof rec[key] === 'object';
-    });
+    const nonScalarOwners = arr.filter((el) => elementOwnsScalar(el, key) && typeof el[key] === 'object');
     if (nonScalarOwners.length > 0) {
       throw new Error(
         `knowledge_array_remove: selector key '${key}' is not a scalar discriminator on ${old.type}.${base} — ${nonScalarOwners.length} ` +
@@ -3048,12 +3077,7 @@ export class SterlingTools {
     // ban on optional keys (a present optional key stays selectable by its
     // real value). A missing key simply matches nothing, so the outcome is
     // zero matches and the refusal below already covers it.
-    const hits = arr.filter((el) => {
-      if (!el || typeof el !== 'object') return false;
-      const rec = el as Record<string, unknown>;
-      if (!Object.prototype.hasOwnProperty.call(rec, key) || rec[key] === undefined) return false;
-      return String(rec[key]) === value;
-    });
+    const hits = arr.filter((el) => elementOwnsScalar(el, key) && String(el[key]) === value);
     if (hits.length !== 1) {
       throw new Error(
         `knowledge_array_remove: selector [${key}=${value}] matches ${hits.length} element(s) of ${old.type}.${base} — exactly one is required, ` +
@@ -3954,6 +3978,186 @@ export class SterlingTools {
     }
 
     return this.projectFieldWindow(served, options);
+  }
+
+  /** knowledge_render's ids[] bound (board efe6f3fc): 1–20, refused loudly naming the bound. */
+  private static readonly RENDER_MAX_IDS = 20;
+
+  /**
+   * Total-output ceiling (Codex review, thread 01a05ba4, M1): the 20-id bound
+   * caps how many RECORDS a call can name, not how much TEXT they render to —
+   * 20 oversize feature_article bodies can still exhaust a consumer's
+   * context. The full render is always computed first, then measured against
+   * this; over the ceiling REFUSES the whole call naming the measured size,
+   * the ceiling, and the fix (fewer ids) — never a silent truncation, which
+   * would hand an external reviewer a partial ruling with no marker that
+   * anything was cut.
+   */
+  private static readonly RENDER_MAX_CHARS = 120_000;
+
+  /** Header components (title, handle) are collapsed to this many chars, ellipsized. */
+  private static readonly RENDER_HEADER_CLIP = 120;
+
+  /** Body lines are indented by this prefix so no record-content line can land at column 0. */
+  private static readonly RENDER_BODY_INDENT = '  ';
+
+  /**
+   * Fields never rendered in a knowledge_render body — the record's own
+   * server-owned envelope (SERVER_OWNED_FIELDS: id/created_at/updated_at/
+   * status/superseded_by/type/lifecycle/freshness/file_baselines/version),
+   * reused rather than re-listed (invariant 1 — one registry, not a second
+   * copy that can drift from it), plus `slug`, which is already carried in
+   * full in the header handle (a slug is a short caller-chosen stable
+   * handle, never a multi-KB field, so nothing is lost by never repeating it
+   * in the body). Unlike an earlier draft, the field used for the header's
+   * `<title>` slot (RENDER_TITLE_FIELDS) is NOT skipped here — Codex review
+   * M2 — because the header now renders a CLIPPED, single-line form of that
+   * value, so the field's full content must still appear in the body or it
+   * is lost entirely (worst case for a multi-KB todo `text`).
+   */
+  private static readonly RENDER_SKIP_FIELDS = new Set<string>([...SterlingTools.SERVER_OWNED_FIELDS, 'slug']);
+
+  /**
+   * The field checked, in order, for the header's `<title>` slot — the first
+   * one present as a non-empty string. Covers every registered type's own
+   * identity field: decision/feature_article/reference_material/brief carry
+   * `title`; research_finding/disconfirmed_hypothesis/open_question carry
+   * `question`; attestation carries `artifact_key`; todo carries `text`;
+   * anti_pattern falls back to `trigger` only if `title` is somehow absent
+   * (title is required on that type, so this is a defensive last resort).
+   */
+  private static readonly RENDER_TITLE_FIELDS = ['title', 'question', 'artifact_key', 'text', 'trigger'];
+
+  /**
+   * One line, safe to interpolate into a header (Codex review M2a): collapses
+   * every run of whitespace (including embedded newlines) to a single space,
+   * trims, then clips to RENDER_HEADER_CLIP with an ellipsis. Applied to BOTH
+   * header components (title and handle) — record content is caller-authored
+   * text, and an unsanitized multi-line value could otherwise inject a line
+   * that mimics the `=== ... ===` header frame.
+   */
+  private static sanitizeHeaderText(raw: string): string {
+    const collapsed = raw.replace(/\s+/g, ' ').trim();
+    if (!collapsed) return '(untitled)';
+    return collapsed.length > SterlingTools.RENDER_HEADER_CLIP ? `${collapsed.slice(0, SterlingTools.RENDER_HEADER_CLIP - 1)}…` : collapsed;
+  }
+
+  /**
+   * Indents every line of `text` (Codex review M2b) so record content can
+   * never produce a line starting at column 0 — the header line is the only
+   * text this renderer ever emits unindented, which makes it unambiguously
+   * identifiable even when a field's value is adversarial or pathological.
+   */
+  private static indentLines(text: string): string {
+    return text
+      .split('\n')
+      .map((line) => `${SterlingTools.RENDER_BODY_INDENT}${line}`)
+      .join('\n');
+  }
+
+  /**
+   * `knowledge_render(ids)` (board efe6f3fc, article knowledge-render): a
+   * READ-ONLY paste-ready dump of one or more full records for embedding
+   * store rulings into an EXTERNAL (non-MCP) reviewer prompt — Codex has no
+   * knowledge tools, and hand-transcribing rulings into consult prompts costs
+   * tokens and drifts from the source (P6 context-carriage; an index/summary
+   * is a lookup, never a source). Each id resolves through the SAME ladder
+   * knowledge_get uses (full uuid / exact slug / unambiguous 8-char prefix —
+   * resolveRecordId, not reimplemented here); an id that resolves to nothing
+   * or ambiguously REFUSES THE WHOLE CALL loudly, naming the failing id,
+   * before any output is built — never a partial render with silent skips
+   * (P5). Every id is resolved first, into an array, and the text is built
+   * only after every one has succeeded, so a failure never leaves a
+   * truncated block behind.
+   *
+   * Bounds: 1–20 ids (RENDER_MAX_IDS), refused loudly naming the bound on
+   * either side (empty or oversize) — AND a total-output ceiling
+   * (RENDER_MAX_CHARS), refused loudly naming the measured size, the
+   * ceiling, and the fix, since 20 valid ids can still render more text than
+   * a consumer can hold (Codex review M1).
+   *
+   * Rendering is DATA-DRIVEN off the record's own schema-declared fields
+   * (knownFieldsFor(record.type), the same registry knowledge_schema reads),
+   * never a hand-enumerated per-type template — a field added to a schema is
+   * rendered the moment it exists, with no second place to update. Server-
+   * owned plumbing (RENDER_SKIP_FIELDS) never appears in the body; a
+   * superseded/retired record still renders in full, with its status carried
+   * loudly in the header (never silently dropped or hidden). An unregistered
+   * record type is refused loudly naming the type and id, rather than
+   * falling open to dumping every stored key (Codex review L1).
+   *
+   * Takes a single `{ids}` object (not a bare array) — the MCP tool's only
+   * parameter is `ids`, and this mirrors every other multi-field tool method
+   * on this class (knowledgeSplitResult, knowledgeExtractResult, …).
+   */
+  knowledgeRender(args: { ids: string[] }): string {
+    const ids = args?.ids;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new Error(
+        `knowledge_render: ids must be a non-empty array of 1-${SterlingTools.RENDER_MAX_IDS} record ids — got ${Array.isArray(ids) ? 'an empty array' : typeof ids}`
+      );
+    }
+    if (ids.length > SterlingTools.RENDER_MAX_IDS) {
+      throw new Error(`knowledge_render: ids must contain at most ${SterlingTools.RENDER_MAX_IDS} entries — got ${ids.length}`);
+    }
+    // Resolve EVERY id before rendering anything (P5): a failure here throws
+    // before a single character of output is produced, so the call is never
+    // half-served.
+    const records = ids.map((id) => this.resolveRecordId(id, 'knowledge_render'));
+    const output = records.map((record) => this.renderRecordBlock(record)).join('\n\n');
+    if (output.length > SterlingTools.RENDER_MAX_CHARS) {
+      throw new Error(
+        `knowledge_render: the rendered output is ${output.length} chars, over the ${SterlingTools.RENDER_MAX_CHARS}-char ceiling — nothing was rendered (never a silent truncation). Request fewer ids, or split this call into smaller batches, and retry.`
+      );
+    }
+    return output;
+  }
+
+  /** One record's `knowledge_render` block: header line + labeled body fields. */
+  private renderRecordBlock(record: DurableRecord): string {
+    const r = record as unknown as Record<string, unknown>;
+    const fieldNames = knownFieldsFor(String(r.type));
+    if (!fieldNames) {
+      throw new Error(
+        `knowledge_render: record '${String(r.id)}' has type '${String(r.type)}', which is not a registered record type — refusing rather than rendering its raw stored fields`
+      );
+    }
+    const titleField = SterlingTools.RENDER_TITLE_FIELDS.find((f) => typeof r[f] === 'string' && (r[f] as string).trim().length > 0);
+    const rawTitle = titleField ? (r[titleField] as string) : '(untitled)';
+    const rawHandle = typeof r.slug === 'string' && r.slug.trim().length > 0 ? r.slug : String(r.id).slice(0, SterlingTools.CITATION_PREFIX_LEN);
+    // Both header components are sanitized to one clipped line (Codex review
+    // M2a) — the full title still appears in the body below (titleField is
+    // NOT in RENDER_SKIP_FIELDS), so nothing is lost, only de-duplicated
+    // between a safe locator (header) and the full value (body).
+    const title = SterlingTools.sanitizeHeaderText(rawTitle);
+    const handle = SterlingTools.sanitizeHeaderText(rawHandle);
+    const header = `=== ${String(r.type)} '${title}' [${handle}] (status: ${String(r.status)}) ===`;
+
+    const bodyLines: string[] = [];
+    for (const field of fieldNames) {
+      if (SterlingTools.RENDER_SKIP_FIELDS.has(field)) continue;
+      const rendered = SterlingTools.renderFieldValue(r[field]);
+      if (rendered === undefined) continue;
+      bodyLines.push(`${field.toUpperCase().replace(/_/g, ' ')}: ${rendered}`);
+    }
+    if (bodyLines.length === 0) return header;
+    // Every body line is indented (Codex review M2b) so record content can
+    // never produce a line starting at column 0 that mimics the header frame.
+    return `${header}\n${SterlingTools.indentLines(bodyLines.join('\n'))}`;
+  }
+
+  /**
+   * One field's readable rendering for `knowledge_render` — undefined means
+   * "omit this field entirely" (empty string / empty array / empty object /
+   * null / undefined all carry no substance worth pasting).
+   */
+  private static renderFieldValue(value: unknown): string | undefined {
+    if (value === undefined || value === null) return undefined;
+    if (typeof value === 'string') return value.trim().length > 0 ? value : undefined;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    if (Array.isArray(value)) return value.length > 0 ? `\n${JSON.stringify(value, null, 2)}` : undefined;
+    if (typeof value === 'object') return Object.keys(value as object).length > 0 ? `\n${JSON.stringify(value, null, 2)}` : undefined;
+    return String(value);
   }
 
   /**

@@ -259,6 +259,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'knowledge_render',
+    {
+      description:
+        'READ-ONLY: render 1-20 knowledge records as ONE paste-ready plain-text block, for embedding store rulings faithfully into an EXTERNAL (non-MCP) reviewer prompt (e.g. a Codex consult) instead of hand-transcribing them — an index/summary is a lookup, never a source (P6 context-carriage). Each id resolves through the same ladder knowledge_get uses (full uuid / exact slug / unambiguous 8-char prefix); an id that resolves to nothing, or ambiguously, refuses the WHOLE call loudly, naming the failing id — never a partial render with silent skips. Records render in the order requested. Per record: a header line naming type, title, handle and status, followed by every content-bearing field for that record\'s type, labeled and readable; server-owned plumbing (file_baselines, version, …) never appears. A superseded/retired record still renders in full, with its status carried loudly in the header. No writes — rendering never mints a version.',
+      inputSchema: strict({ ids: z.array(z.string()).min(1).max(20).describe('1-20 record ids (uuid / slug / unambiguous 8-char prefix)') }),
+    },
+    ({ ids }) => ({ content: [{ type: 'text' as const, text: tools.knowledgeRender({ ids }) }] })
+  );
+
+  server.registerTool(
     'knowledge_split',
     {
       description:

@@ -17,6 +17,9 @@ const SERVED_TOOLS = [
   'knowledge_create',
   'knowledge_query',
   'knowledge_get',
+  // Paste-ready plain-text rendering of 1-20 records for external (non-MCP)
+  // consults — read-only context-carriage, P6 (board efe6f3fc).
+  'knowledge_render',
   // Ask what a type requires instead of learning by rejection (board 7acfbe48).
   'knowledge_schema',
   // Size and composition without the body — per-id drill-down or store-wide
