@@ -6,8 +6,9 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h14-bash-allowlist.mjs
-import { relative, resolve as resolve2, sep, join as join2 } from "node:path";
-import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync } from "node:fs";
+import { relative, resolve as resolve2, sep, join as join2, dirname as dirname2 } from "node:path";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync2, writeFileSync, renameSync, realpathSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5298,8 +5299,93 @@ try {
   const helperArg = firstArg ? firstArg[1] ?? firstArg[2] : void 0;
   const isFsHelper = !!helperArg && /(^|\/)fs-(remove|move)\.mjs$/.test(helperArg.replace(/\\/g, "/"));
   const isReadOnlySearch = /^(grep|ls)(\s|$)/.test(command);
-  const GIT_RO_PREFIX = "node scripts/git-ro.mjs";
-  const isGitRoWrapper = command === GIT_RO_PREFIX || command.startsWith(GIT_RO_PREFIX + " ");
+  const GIT_RO_WALK_LIMIT = 4;
+  const fwdSlash = (p) => String(p).replace(/\\/g, "/");
+  const normSep = (p) => process.platform === "win32" ? String(p).replace(/\\/g, "/") : String(p);
+  const canonical = (p) => normSep(realpathSync(p));
+  const samePath2 = (a, b) => process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+  let gitRoExpected = null;
+  let gitRoDefect = null;
+  try {
+    let dir = dirname2(fileURLToPath(import.meta.url));
+    let pluginRoot = null;
+    for (let i = 0; i <= GIT_RO_WALK_LIMIT; i++) {
+      if (existsSync2(join2(dir, ".claude-plugin", "plugin.json"))) {
+        pluginRoot = dir;
+        break;
+      }
+      const parent = dirname2(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    if (!pluginRoot) {
+      gitRoDefect = `no plugin root (a directory holding .claude-plugin/plugin.json) within ${GIT_RO_WALK_LIMIT} levels above this hook at '${fwdSlash(dirname2(fileURLToPath(import.meta.url)))}'`;
+    } else {
+      const expectedPath = join2(pluginRoot, "scripts", "git-ro.mjs");
+      const resolved = canonical(expectedPath);
+      if (!statSync(resolved).isFile()) gitRoDefect = `the plugin's wrapper path '${fwdSlash(expectedPath)}' is not a regular file`;
+      else gitRoExpected = resolved;
+    }
+  } catch (e) {
+    gitRoDefect = `the plugin's read-only git wrapper could not be canonicalized (${e && e.message || e})`;
+  }
+  const lexTwoTokens = (str) => {
+    const tokens = [];
+    let i = 0;
+    while (tokens.length < 2) {
+      while (i < str.length && (str[i] === " " || str[i] === "	")) i++;
+      if (i >= str.length) return null;
+      let tok = "";
+      const quote = str[i] === '"' || str[i] === "'" ? str[i] : null;
+      if (quote) {
+        i++;
+        let closed = false;
+        while (i < str.length) {
+          if (str[i] === quote) {
+            closed = true;
+            i++;
+            break;
+          }
+          tok += str[i++];
+        }
+        if (!closed) return null;
+        if (i < str.length && str[i] !== " " && str[i] !== "	") return null;
+      } else {
+        while (i < str.length && str[i] !== " " && str[i] !== "	") tok += str[i++];
+      }
+      if (tok === "") return null;
+      if (/[`$"']/.test(tok)) return null;
+      if (process.platform !== "win32" && tok.includes("\\")) return null;
+      if (!quote && /[*?[\]{}~]/.test(tok)) return null;
+      tokens.push(tok);
+    }
+    return tokens;
+  };
+  const isAbsoluteToken = (tok) => {
+    const norm = normSep(tok);
+    return norm.startsWith("/") || /^[A-Za-z]:\//.test(norm);
+  };
+  const nodeCanonical = (() => {
+    try {
+      return canonical(process.execPath);
+    } catch {
+      return null;
+    }
+  })();
+  const isGitRoWrapper = (() => {
+    if (!gitRoExpected || !nodeCanonical) return false;
+    const tokens = lexTwoTokens(command);
+    if (!tokens) return false;
+    const [exeTok, scriptTok] = tokens;
+    if (scriptTok.startsWith("-")) return false;
+    if (!isAbsoluteToken(scriptTok)) return false;
+    try {
+      if (!samePath2(canonical(exeTok), nodeCanonical)) return false;
+      return samePath2(canonical(scriptTok), gitRoExpected);
+    } catch {
+      return false;
+    }
+  })();
   const strictQuote = command.match(/^(["'])([^\s"']*)\1(?=\s|$)/);
   const strictUnquoted = strictQuote ? strictQuote[2] + command.slice(strictQuote[0].length) : null;
   const matchesPrefix = (candidate) => runCommandPrefixes.some((p) => candidate === p || candidate.startsWith(p + " "));
@@ -5357,13 +5443,58 @@ try {
   const isRunGateInvocation = RUN_GATE_RE.test(command) || strictUnquoted !== null && RUN_GATE_RE.test(strictUnquoted);
   const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isGitRoWrapper || isRunGateInvocation;
   if (!allowed) {
+    const gitRoAttempt = (() => {
+      const tokens = lexTwoTokens(command);
+      if (!tokens) return null;
+      const [exeTok, scriptTok] = tokens;
+      if (scriptTok.startsWith("-")) return null;
+      const norm = normSep(scriptTok);
+      if (norm.slice(norm.lastIndexOf("/") + 1) !== "git-ro.mjs") return null;
+      return { exeTok, scriptTok };
+    })();
+    if (gitRoAttempt) {
+      if (!gitRoExpected) {
+        deny(
+          environmentDefectDenial(
+            "H14",
+            `the read-only git wrapper's expected identity cannot be established \u2014 ${gitRoDefect}. A blocking gate that cannot verify the grant refuses it (P5).`
+          )
+        );
+      }
+      const reason = (() => {
+        const { exeTok, scriptTok } = gitRoAttempt;
+        if (!isAbsoluteToken(scriptTok)) {
+          return `the wrapper path '${scriptTok}' is RELATIVE; only an absolute path is accepted, because this hook resolves against the normalized project root while the shell resolves against its own cwd \u2014 a relative spelling can validate one file and execute another`;
+        }
+        let exeResolved;
+        try {
+          exeResolved = canonical(exeTok);
+        } catch {
+          return `the node executable token '${exeTok}' cannot be canonicalized \u2014 name the RUNNING node binary by absolute path (bare 'node' is a PATH lookup and never matches)`;
+        }
+        if (!nodeCanonical) return `this hook cannot canonicalize its own node binary, so no invocation can be verified`;
+        if (!samePath2(exeResolved, nodeCanonical)) return `the node executable '${exeTok}' resolves to '${exeResolved}', which is not the running node binary '${nodeCanonical}'`;
+        try {
+          const scriptResolved = canonical(scriptTok);
+          if (!samePath2(scriptResolved, gitRoExpected)) {
+            return `'${scriptTok}' resolves to '${scriptResolved}', which is not the PLUGIN's wrapper \u2014 a project-local copy, a renamed lookalike, or another clone never matches`;
+          }
+        } catch {
+          return `the wrapper path '${scriptTok}' cannot be canonicalized \u2014 it does not exist on this machine`;
+        }
+        return `the invocation did not match the exact accepted form`;
+      })();
+      deny(
+        `H14: this is not the sanctioned read-only git wrapper invocation: '${command}'. Reason: ${reason}. The EXACT accepted form is: ${nodeCanonical ?? fwdSlash(process.execPath)} "${gitRoExpected}" <verb> \u2026 (verbs: log, show, show-stat, diff-names \u2014 run from the repository root; the wrapper takes NO git flags).`
+      );
+    }
     const looseQuote = command.match(/^(["'])([^"']*)\1/);
     const looseUnquoted = looseQuote ? looseQuote[2] + command.slice(looseQuote[0].length) : null;
     const matchedPrefix = looseUnquoted !== null ? runCommandPrefixes.find((p) => looseUnquoted === p || looseUnquoted.startsWith(p + " ")) : void 0;
     const quotingIsTheCause = !!matchedPrefix && /\s/.test(looseQuote[2]);
     const prefixHasSpace = quotingIsTheCause && matchedPrefix.includes(" ");
     deny(
-      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token \u2014 e.g. a quoted exe path \u2014 is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, 'node \u2026/scripts/run-gate.mjs \u2026' (any path prefix), the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied), and read-only git through the WRAPPER only: 'node scripts/git-ro.mjs <verb> \u2026' (verbs: log, show, show-stat, diff-names) \u2014 the direct git verbs (git log, git show <ref> --stat, git diff --name-only, git branch --list) were REMOVED in favour of it, so re-run history reads as 'node scripts/git-ro.mjs log \u2026'. All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
+      `H14: command not on the allowlist: '${command}'.${quotingIsTheCause ? ` THE QUOTED FORM IS GENUINELY UNMATCHABLE: quoting the whole command as ONE token cannot match the allowlist (a single-word quoted first token \u2014 e.g. a quoted exe path \u2014 is already accepted; a multi-word quoted span is not, so it cannot smuggle a prefix past this gate). Re-run it unquoted: '${looseUnquoted}'.${prefixHasSpace ? ` CAVEAT before you retry: '${matchedPrefix}' contains a space. If that space is inside the EXECUTABLE PATH rather than separating arguments, the unquoted form passes this allowlist and is then word-split by the shell \u2014 meaning this command has NO working spelling here, so report it as unrunnable instead of retrying further (Sterling board f49466f5 tracks whether quoted forms should be accepted).` : ""}` : ""} Allowed: ${runCommandPrefixes.map((p) => `'${p} \u2026'`).join(", ")}, 'node \u2026/scripts/run-gate.mjs \u2026' (any path prefix), the fs helpers (node \u2026/fs-remove.mjs, node \u2026/fs-move.mjs), standalone read-only search: grep \u2026, ls \u2026 (no pipes, no redirection; find stays denied), and read-only git through the PLUGIN'S WRAPPER only, named by ABSOLUTE path: ${gitRoExpected ? `'${nodeCanonical ?? fwdSlash(process.execPath)} "${gitRoExpected}" <verb> \u2026'` : `(UNAVAILABLE on this machine \u2014 ${gitRoDefect})`} (verbs: log, show, show-stat, diff-names) \u2014 the direct git verbs (git log, git show <ref> --stat, git diff --name-only, git branch --list) were REMOVED in favour of it, so re-run history reads through that exact form. All other file access flows through Edit/Write/Read \u2014 and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

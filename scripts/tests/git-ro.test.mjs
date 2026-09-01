@@ -46,12 +46,20 @@
 //     exist but not their values — pinning a number would invent an interface);
 //   * GIT_LITERAL_PATHSPECS=1 (its only cheap observable needs a glob-shaped
 //     path argument, and the decision does not say whether the argv path
-//     charset admits '*').
+//     charset admits '*');
+//   * `--no-pager` (S2.2): git only invokes a pager when stdout is a TTY
+//     (or pagination is force-enabled), and spawnSync's captured pipes are
+//     never a TTY — so a `pager.log` fixture cannot distinguish "the flag is
+//     present" from "the flag is absent but the pager was never going to run
+//     anyway" from this harness. GIT_CONFIG_GLOBAL and
+//     `-c log.showSignature=false` / `--no-show-signature` ARE independently
+//     pinned below by observable side effects (a hostile alias / a
+//     gpg.program marker script), because those trigger regardless of TTY.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { realpathSync, existsSync, mkdtempSync, rmSync, writeFileSync, chmodSync, readdirSync } from 'node:fs';
+import { realpathSync, existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -593,36 +601,255 @@ test('git-ro EXECUTABLE: git is resolved from a hardcoded absolute-path roster �
 // wrapper that refuses unconditionally.
 // ===========================================================================
 
-test('git-ro CWD RULE: invoked from outside the canonical project root, the wrapper refuses naming the root rule and writes nothing', () => {
+test('git-ro CWD RULE: invoked from outside any repository, the wrapper refuses naming the repository-root rule (S2.1: root is the invoking repo\'s toplevel, not the wrapper\'s own location) and writes nothing', () => {
   requireWrapper();
-  // CONTROL — same argv, cwd = the canonical project root.
+  // CONTROL — same argv, cwd = the canonical project root (this repo's
+  // toplevel — S2.1 removed the wrapper-location special case, so this
+  // control is now evidence of "cwd IS a repo toplevel", not "cwd is the
+  // Sterling clone" specifically).
   const fromRoot = gitro(['log']);
-  assert.equal(fromRoot.code, 0, `control: the SAME call succeeds from the canonical project root; stderr=${fromRoot.stderr}`);
+  assert.equal(fromRoot.code, 0, `control: the SAME call succeeds from a repository toplevel; stderr=${fromRoot.stderr}`);
 
   const outside = mkdtempSync(join(tmpdir(), 'gitro-wrong-cwd-'));
   try {
-    // NAMED SABOTAGE: delete the canonical-path cwd comparison (or downgrade
-    // it to a warning) — the call below succeeds and this refusal goes red.
+    // NAMED SABOTAGE: delete the `git rev-parse --show-toplevel` cwd
+    // comparison (or downgrade it to a warning) — the call below succeeds
+    // and this refusal goes red.
+    // EXPECTED FAILURE SHAPE (today's wrapper-location rule would ALSO
+    // refuse this non-repo cwd, so a bare nonzero-exit check would be
+    // already-green for the wrong reason): the NEW pins are the exact exit
+    // code (S2.1's EXIT_ENV = 3) and the NEW message wording
+    // (/repository root|toplevel/i) — a wrapper still keyed to its own
+    // import.meta.url location may use a different code/message here.
     const r = gitro(['log'], { cwd: realpathSync(outside) });
-    assertRefusal(r, /project root|root|cwd|directory/i, 'invocation from a foreign cwd');
+    assertRefusal(r, /repository root|toplevel/i, 'invocation from a foreign, non-repository cwd');
+    assert.equal(r.code, 3, `a non-repository cwd refuses with the wrapper's EXIT_ENV (3); actual=${r.code}, stderr=${r.stderr}`);
     assert.deepEqual(readdirSync(outside), [], 'a refused invocation creates nothing in the foreign directory');
   } finally {
     rmSync(outside, { recursive: true, force: true });
   }
 });
 
-test('git-ro CWD RULE: the refusal is about the CWD, not about the verb — every verb refuses from a foreign cwd, and all of them succeed from the root', () => {
+test('git-ro CWD RULE: the refusal is about the CWD, not about the verb — every verb refuses from a foreign, non-repository cwd with EXIT_ENV (3), and all of them succeed from the root', () => {
   requireWrapper();
   const outside = mkdtempSync(join(tmpdir(), 'gitro-wrong-cwd-verbs-'));
   try {
     for (const args of [['log'], ['show', 'HEAD'], ['show-stat', 'HEAD'], ['diff-names', 'HEAD~1', 'HEAD']]) {
       // CONTROL arm, per verb, evaluated first.
       assert.equal(gitro(args).code, 0, `control: \`${args.join(' ')}\` succeeds from the project root`);
+      // NAMED SABOTAGE: same as the sibling CWD RULE test — delete/downgrade
+      // the toplevel comparison for one verb only (a per-verb regression) —
+      // that verb's arm goes red while its siblings stay green.
       const r = gitro(args, { cwd: realpathSync(outside) });
-      assertRefusal(r, /project root|root|cwd|directory/i, `\`${args.join(' ')}\` from a foreign cwd`);
+      assertRefusal(r, /repository root|toplevel/i, `\`${args.join(' ')}\` from a foreign cwd`);
+      assert.equal(r.code, 3, `\`${args.join(' ')}\` from a foreign cwd must refuse with EXIT_ENV (3); actual=${r.code}`);
     }
   } finally {
     rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// NEW (S2.1): root is derived from the INVOKING repository, not the
+// wrapper's own file location — a temp repo that is NOT the Sterling clone
+// succeeds from its own toplevel and refuses from a subdirectory of it.
+// ---------------------------------------------------------------------------
+
+function makeTempRepo() {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'gitro-temp-repo-')));
+  const gitEnv = {
+    PATH: process.env.PATH,
+    HOME: dir,
+    GIT_AUTHOR_NAME: 'git-ro test',
+    GIT_AUTHOR_EMAIL: 'git-ro-test@example.invalid',
+    GIT_COMMITTER_NAME: 'git-ro test',
+    GIT_COMMITTER_EMAIL: 'git-ro-test@example.invalid',
+  };
+  const run = (args) => spawnSync('git', args, { cwd: dir, env: gitEnv, encoding: 'utf8' });
+  assert.equal(run(['init', '-q']).status, 0, 'fixture: git init must succeed');
+  writeFileSync(join(dir, 'file.txt'), 'hello\n');
+  assert.equal(run(['add', 'file.txt']).status, 0, 'fixture: git add must succeed');
+  assert.equal(
+    run(['-c', 'commit.gpgsign=false', 'commit', '-q', '-m', 'initial']).status,
+    0,
+    'fixture: git commit must succeed'
+  );
+  return dir;
+}
+
+test('git-ro CWD RULE (S2.1): `log` from the TOPLEVEL of a temp repo that is NOT the Sterling clone succeeds, with JSON carrying exactly the one fixture commit', () => {
+  requireWrapper();
+  const repo = makeTempRepo();
+  try {
+    // EXPECTED FAILURE SHAPE (today): a wrapper still deriving root from its
+    // own import.meta.url refuses ANY cwd other than the Sterling clone, so
+    // this assert.equal(r.code, 0) fires with a nonzero code — the wrapper
+    // treats a foreign repo's own toplevel exactly like a foreign non-repo
+    // cwd, because it never consults the invoking repo at all.
+    // NAMED SABOTAGE: keep the import.meta.url-derived ROOT (S2.1's "remove
+    // the ROOT derivation" reverted) — this goes red (nonzero code) even
+    // though `repo` genuinely is a valid repository toplevel.
+    const r = gitro(['log'], { cwd: repo });
+    assert.equal(r.code, 0, `log from a foreign repo's own toplevel must succeed; stderr=${r.stderr}`);
+    const entries = jsonArray(r.stdout, 'log from foreign repo toplevel');
+    assert.equal(entries.length, 1, `the fixture repo carries exactly one commit; got ${entries.length}`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('git-ro CWD RULE (S2.1): `log` from a SUBDIRECTORY of a temp repo (not the Sterling clone) refuses with EXIT_ENV (3) naming the repository-root rule', () => {
+  requireWrapper();
+  const repo = makeTempRepo();
+  try {
+    const sub = join(repo, 'sub');
+    mkdirSync(sub);
+    // CONTROL, opposite reason, first: the SAME repo succeeds from its own
+    // toplevel — so the refusal below is evidence of the SUBDIRECTORY rule,
+    // not of "this repo can never be read".
+    const control = gitro(['log'], { cwd: repo });
+    assert.equal(control.code, 0, `control: the same repo succeeds from its toplevel; stderr=${control.stderr}`);
+
+    // NAMED SABOTAGE: compare cwd against the repository (via .git presence
+    // anywhere in the ancestry) rather than against `git rev-parse
+    // --show-toplevel` EXACTLY — a subdirectory would then also validate,
+    // and this refusal goes red.
+    const r = gitro(['log'], { cwd: sub });
+    assertRefusal(r, /repository root|toplevel/i, 'invocation from a subdirectory of a real repository');
+    assert.equal(r.code, 3, `a subdirectory cwd refuses with EXIT_ENV (3); actual=${r.code}, stderr=${r.stderr}`);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// NEW (S2.2): hardening additions to the child env and base args.
+// ---------------------------------------------------------------------------
+
+test('git-ro HARDENING (S2.2): GIT_CONFIG_GLOBAL is FIXED by the wrapper\'s positive-set child env — a hostile inherited GIT_CONFIG_GLOBAL pointing at a malicious shell alias is never honored', () => {
+  requireWrapper();
+  const dir = mkdtempSync(join(tmpdir(), 'gitro-hostile-global-config-'));
+  try {
+    const marker = join(dir, 'ALIAS-RAN');
+    const hostileConfig = join(dir, 'hostile.gitconfig');
+    writeFileSync(hostileConfig, `[alias]\n\tlog = !touch "${marker}" ; exit 1\n`);
+
+    // CONTROL, opposite reason, first: the clean call succeeds normally and
+    // no marker exists yet.
+    const control = gitro(['log']);
+    assert.equal(control.code, 0, `control: log succeeds under a clean env; stderr=${control.stderr}`);
+    assert.ok(!existsSync(marker), 'control: no alias marker exists before the hostile-env call');
+
+    // NAMED SABOTAGE: build the child env by copying the inherited
+    // GIT_CONFIG_GLOBAL through, or simply omit the wrapper's own
+    // GIT_CONFIG_GLOBAL=/dev/null (win32: NUL) assignment from the positive
+    // set — `git log` resolves the caller-supplied GLOBAL config, the
+    // malicious `!` shell alias replaces the log recipe entirely, and BOTH
+    // assertions below go red (a marker appears on disk, and/or the exit
+    // code stops being 0 / stdout stops being the wrapper's JSON envelope).
+    const r = gitro(['log'], { extraEnv: { GIT_CONFIG_GLOBAL: hostileConfig } });
+    assert.ok(
+      !existsSync(marker),
+      "a hostile inherited GIT_CONFIG_GLOBAL pointing at a malicious alias must never be honored — the wrapper fixes its OWN GIT_CONFIG_GLOBAL in the positive-set child env"
+    );
+    assert.equal(r.code, 0, `log must still succeed under a hostile GIT_CONFIG_GLOBAL — the wrapper's own value wins; stderr=${r.stderr}`);
+    const entries = jsonArray(r.stdout, 'log under hostile GIT_CONFIG_GLOBAL');
+    assert.ok(entries.length > 0, 'log still returns the real recipe JSON, not the alias output');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('git-ro HARDENING (S2.2): a repo-local `log.showSignature=true` + malicious `gpg.program` is NEUTRALIZED on `log` and `show` — `-c log.showSignature=false` / `--no-show-signature`', () => {
+  requireWrapper();
+  const repo = makeTempRepo();
+  try {
+    // TEST FIX (post-implementation, test-side only): git only ever invokes
+    // gpg.program to VERIFY a commit that actually carries a signature — the
+    // original fixture's HEAD (from makeTempRepo()) is unsigned, so
+    // gpg.program is never invoked regardless of the wrapper's flags, and the
+    // CONTROL below failed for that unrelated reason. Fixed by making the
+    // fixture's HEAD a SIGNED commit, using the SAME fake script as BOTH the
+    // signer (at commit time) and the verifier (at log/show time) — the
+    // script tells the two calls apart by argv shape: a verify invocation
+    // carries `--verify`, a sign invocation does not. Per git's signing
+    // protocol the sign call must emit a `[GNUPG:] SIG_CREATED ` status line
+    // (git checks for that exact prefix) and non-empty "signature" bytes on
+    // stdout, or `git commit -S` itself fails and the fixture never gets a
+    // signed HEAD to test against.
+    const marker = join(repo, 'GPG-RAN');
+    const fakeGpg = join(repo, 'fake-gpg.sh');
+    writeFileSync(
+      fakeGpg,
+      [
+        '#!/bin/sh',
+        'case "$*" in',
+        '  *--verify*)',
+        `    : > "${marker}"`,
+        '    exit 0',
+        '    ;;',
+        '  *)',
+        "    echo '[GNUPG:] SIG_CREATED ' >&2",
+        // git refuses an unrecognized signature blob outright ("bad/
+        // incompatible signature"), so the fake "signature" must carry a
+        // real PGP armor header for git to accept it as a signature object
+        // at all — the base64-looking payload line is never decoded/verified
+        // by our fixture path (verification is a SEPARATE invocation,
+        // handled by the --verify arm above), it only has to LOOK like a
+        // detached PGP signature block.
+        "    echo '-----BEGIN PGP SIGNATURE-----'",
+        "    echo 'iQEzBAABCAAdFiEEfake'",
+        "    echo '-----END PGP SIGNATURE-----'",
+        '    exit 0',
+        '    ;;',
+        'esac',
+        '',
+      ].join('\n')
+    );
+    chmodSync(fakeGpg, 0o755);
+    // Same fixture env makeTempRepo() uses for its own git spawns (author/
+    // committer identity + PATH/HOME so the real git and the fake gpg script
+    // both resolve) — every direct git spawn below needs it too, including
+    // `commit -S` (author identity) and the CONTROL `log --show-signature`.
+    const gitEnv = {
+      PATH: process.env.PATH,
+      HOME: repo,
+      GIT_AUTHOR_NAME: 'git-ro test',
+      GIT_AUTHOR_EMAIL: 'git-ro-test@example.invalid',
+      GIT_COMMITTER_NAME: 'git-ro test',
+      GIT_COMMITTER_EMAIL: 'git-ro-test@example.invalid',
+    };
+    const cfg = (args) => spawnSync('git', ['config', ...args], { cwd: repo, env: gitEnv, encoding: 'utf8' });
+    assert.equal(cfg(['log.showSignature', 'true']).status, 0, 'fixture: setting log.showSignature must succeed');
+    assert.equal(cfg(['gpg.program', fakeGpg]).status, 0, 'fixture: setting gpg.program must succeed');
+    assert.equal(cfg(['user.signingkey', 'TESTKEY']).status, 0, 'fixture: setting user.signingkey must succeed');
+
+    const signed = spawnSync('git', ['commit', '--allow-empty', '-S', '-q', '-m', 'signed commit'], { cwd: repo, env: gitEnv, encoding: 'utf8' });
+    assert.equal(signed.status, 0, `fixture: a signed commit must be creatable via the fake signing program; stderr=${signed.stderr}`);
+
+    // CONTROL, opposite reason, first: calling REAL git DIRECTLY (bypassing
+    // the wrapper entirely) against this SAME repo and config DOES invoke
+    // gpg.program to verify the now-SIGNED HEAD — proving the fixture is
+    // sound, so a green "marker absent" below cannot be explained by "this
+    // fixture never triggers gpg.program regardless of flags".
+    const direct = spawnSync('git', ['log', '--show-signature', '-n', '1'], { cwd: repo, env: gitEnv, encoding: 'utf8' });
+    assert.ok(existsSync(marker), `control: real git with a signed HEAD, log.showSignature=true and gpg.program set must invoke the configured program directly; direct.status=${direct.status}`);
+    rmSync(marker, { force: true });
+
+    // NAMED SABOTAGE: drop `-c log.showSignature=false` and/or
+    // `--no-show-signature` from the log/show recipes — the marker
+    // reappears and the relevant assertion below goes red. This is the exact
+    // attack the governing decision/article record: "repo config
+    // log.showSignature + gpg.program can exec from log/show".
+    const viaLog = gitro(['log'], { cwd: repo });
+    assert.equal(viaLog.code, 0, `log must still succeed; stderr=${viaLog.stderr}`);
+    assert.ok(!existsSync(marker), "the wrapper's `log` must NOT invoke the repo-configured gpg.program");
+
+    const viaShow = gitro(['show', 'HEAD'], { cwd: repo });
+    assert.equal(viaShow.code, 0, `show must still succeed; stderr=${viaShow.stderr}`);
+    assert.ok(!existsSync(marker), "the wrapper's `show` must NOT invoke the repo-configured gpg.program");
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
   }
 });
 

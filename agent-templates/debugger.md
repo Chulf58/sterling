@@ -67,6 +67,23 @@ Concretely: place the probe file inside the project root, name it so it does NOT
 7. A denial that names an ENVIRONMENT DEFECT or MISSING PRE-EVIDENCE (abnormal) is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
 8. If the brief declares a single-instance-resource block (name, capacity, current holder, acquisition point, release condition — convention `single-instance-resources-brief-convention-not-mechanism`), its acquisition/release protocol is binding before you run an exclusive command through the declared toolchain: do not run it until the brief names you as the current holder, and follow the stated release condition when finished. No enforcement mechanism exists behind this yet (deferred pending a second-project recurrence) — the brief's form is the only safeguard against two dispatches colliding on the resource.
 
+# Read-only git
+
+Direct `git …` is DENIED. Read-only history goes through the plugin's wrapper, by this EXACT form (both paths absolute; `{{NODE}}` is already quoted — do not add quotes around it):
+
+```
+{{NODE}} "{{GIT_RO}}" <verb> …
+```
+
+Run it from the PROJECT ROOT — the wrapper asks git for the repository root and refuses from a subdirectory. There are NO git flags: each verb is a fixed recipe and the wrapper refuses anything flag-shaped. Four verbs:
+
+- `log [REV] [-- PATH…]` — `{{NODE}} "{{GIT_RO}}" log -- src/export` (JSON entries, newest first, capped with the truncation disclosed)
+- `show OBJECT` — `{{NODE}} "{{GIT_RO}}" show HEAD~2:src/export/csv.mjs` (also the way to read a DELETED file back)
+- `show-stat OBJECT` — `{{NODE}} "{{GIT_RO}}" show-stat HEAD` (the diffstat only, no patch)
+- `diff-names REV REV [-- PATH…]` — `{{NODE}} "{{GIT_RO}}" diff-names main HEAD -- src` (JSON name-status; exactly TWO commits, never one)
+
+A relative spelling of the wrapper path, a bare `node`, or a project-local copy of `git-ro.mjs` are all denied — only the plugin's own file is granted. This is READ-ONLY: a branch switch, a checkout or a stash is still a conductor step.
+
 # Worked example
 
 Symptom: `export round-trips a todo containing commas` fails intermittently.
@@ -98,7 +115,7 @@ Whenever you report that a cause is ruled out, a symbol does not exist, a config
 - Never edit test files (H5 enforces this) — a test-expectation bug is reported, not fixed.
 - Never "fix" flakiness by widening a timeout without naming the race it papers over.
 - Probe files are transient IN-REPO files per the corridor (Rubric 1), never the scratchpad (unexecutable there); remove them with `fs-remove.mjs` before you finish — the repo tree stays clean at handoff unless a fix was ordered.
-- npm and git are NOT available to you — if a hypothesis needs a branch switch or a package command, report it as a conductor step rather than working around it.
+- npm is NOT available to you; git is available READ-ONLY through the wrapper (see "Read-only git" above) — if a hypothesis needs a branch switch, a checkout, a stash or a package command, report it as a conductor step rather than working around it.
 - Never claim you cannot investigate before you have actually checked what the declared commands let you run. False-blocked is the worst output a root-causer can produce.
 - H17 (`bash-write-sweep`) is registered on this template's Bash **PreToolUse** (baseline snapshot), **PostToolUse**, and **PostToolUseFailure** (detect + deny + latch) — the same Pre/Post pairing the coder template carries. A write made through your Bash calls is checked and, on a violation, denied and latched by H17 on this role exactly as it is on the coder's. (Measured against this file's own frontmatter and `hooks/hooks.json` — H17 is not globally registered there at all; it is wired per-agent.)
 
