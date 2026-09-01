@@ -238,6 +238,56 @@ export interface LaneAdvisory {
   collisions: LaneCollision[];
 }
 
+/**
+ * ONE record named by a board/queue item's derived `artifact_evidence` — compact
+ * by design (three short fields), because this block rides EVERY item on a page
+ * and a full digest per match would dwarf the item it annotates. `name` is what
+ * lets a human recognise the record; `id8` is the citation prefix to open it
+ * with (knowledge_get resolves an unambiguous 8-char prefix) — name first, id
+ * retained, per the never-a-bare-id-in-front-of-a-human rule.
+ */
+export interface ArtifactEvidenceRecord {
+  /** the record's 8-char citation prefix — enough for knowledge_get, never a claim of uniqueness */
+  id8: string;
+  type: string;
+  /** slug → title → question → location, first present: the type-appropriate human name, clipped */
+  name: string;
+}
+
+/**
+ * The DERIVED, per-item reading of "has anything durable been written near this
+ * item since it was created" (board 00fa8adb) — board_remove's removal receipt
+ * brought forward to QUERY time, so a reader auditing the board sees the same
+ * evidence before deciding what to act on rather than only at the moment of
+ * removal. Advisory in exactly the sense `lane_advisory` is: computed after the
+ * page is already fixed, never filtering, reordering or refusing anything.
+ *
+ * NEVER A COMPLETION VERDICT: a record touching an item's files or citing its id
+ * means POSSIBLY ADDRESSED — the envelope's `artifact_evidence_note` says so in
+ * words, once per call.
+ */
+export interface ArtifactEvidence {
+  /** the FULL dedup'd match count across both arms — may exceed `records`.length */
+  count: number;
+  /**
+   * up to three of the matching records, file-key matches first. ABSENT (never
+   * an empty array) when count is 0, mirroring lane_advisory's own
+   * "presence is the signal" convention.
+   */
+  records?: ArtifactEvidenceRecord[];
+  /**
+   * whether the file_keys arm could run at all: 'skipped:no_file_keys' on an
+   * item declaring no paths (concept_article_missing / research_owed / plain
+   * tasks routinely declare none); 'unavailable:budget' when the page's
+   * distinct-key-set query budget (ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP) was
+   * already spent by earlier items. The CITATION arm still ran in every case —
+   * its scan is shared and already paid — so `count` on such an item is a
+   * citation-only floor, and a skipped or truncated check is stated rather than
+   * silently read as a negative result (P5).
+   */
+  file_key_check: 'checked' | 'skipped:no_file_keys' | 'unavailable:budget';
+}
+
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
   /** items matching the filter — EXACT here, unlike knowledge_query's rank-blind count */
@@ -293,6 +343,25 @@ export interface BoardQueryResult {
    * matched set share a file_keys path — see LaneAdvisory. Absent, never empty.
    */
   lane_advisory?: LaneAdvisory;
+  /**
+   * board 00fa8adb: whether the per-item `artifact_evidence` derivation ran over
+   * this page — 'checked'; 'checked:budget_truncated' when the file-key arm's
+   * per-call query budget ran out and the items past it say 'unavailable:budget'
+   * themselves (their citation-arm evidence still computed); or
+   * 'unavailable:store_query_failed' when the evidence scan threw. It FAILS
+   * OPEN: the items are returned either way (a board read
+   * is not worth losing to an advisory annotation), so this status is the only
+   * thing that distinguishes "nothing was written near these items" from "we
+   * never looked" — an absent per-item block is never a negative result (P5).
+   */
+  artifact_evidence_provenance: string;
+  /**
+   * The one-time reading instruction for `artifact_evidence`, stated once per
+   * envelope rather than per item. Unconditional: it is what makes a ZERO count
+   * readable too, and a note that appeared only when evidence exists would be
+   * missing from exactly the pages most likely to be misread.
+   */
+  artifact_evidence_note: string;
   /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
@@ -457,6 +526,79 @@ const DEFAULT_BOARD_CAP = 50;
 // The bounded todo scan the filter runs over. A full scan means the reported
 // count is a floor; boardQueryResult says so rather than under-reporting.
 const BOARD_SCAN_CAP = 1000;
+
+/**
+ * The durable record types that can count as a board/queue item's fulfilling
+ * ARTIFACT — ONE list, shared by board_remove's receipt (removalArtifactEvidence)
+ * and the query-time derivation (pageArtifactEvidence). Extracted from the
+ * removal path when the second reader appeared, for the DEFAULT_BOARD_CAP reason:
+ * two copies of "what counts as evidence" would let the receipt and the query
+ * disagree about the same item, which is exactly the drift the derived field
+ * exists to surface.
+ *
+ * open_question is in the set (board a9be48f2): a board item can legitimately be
+ * answered by being CONVERTED into an evidenced open question — the investigation
+ * is now durable and tracked as a record — and without this type the evidence
+ * would read empty for exactly the outcome that produced the most durable artifact.
+ */
+const ARTIFACT_EVIDENCE_TYPES = [
+  'decision',
+  'anti_pattern',
+  'feature_article',
+  'research_finding',
+  'disconfirmed_hypothesis',
+  'open_question',
+  'reference_material',
+];
+
+/**
+ * The bounded scan BOTH evidence arms run under — the same 200-record window
+ * board_remove's receipt uses, deliberately: a derived count that scanned deeper
+ * than the receipt would disagree with the receipt on the very item it is meant
+ * to prepare the reader for.
+ */
+const ARTIFACT_EVIDENCE_SCAN_CAP = 200;
+
+/** How many matching records the per-item field NAMES (the count stays full). */
+const ARTIFACT_EVIDENCE_RECORD_CAP = 3;
+
+/**
+ * PER-CALL BUDGET for the file-key arm — the number of DISTINCT normalized
+ * key-set queries one board_query/maintenance_query page may issue. `cap` is
+ * caller-controlled and the arm cannot be unioned across items (see
+ * pageArtifactEvidence), so without this a board_query({cap:1000}) over items
+ * with distinct file_keys would fan out to ~1000 store queries on a single read.
+ *
+ * SAME SHAPE AS THE NEIGHBOURING BUDGET (RECONCILE_RECHECK_FILE_ATTEMPT_CAP):
+ * shared by the WHOLE page, memo hits cost nothing, and once it is spent the
+ * remaining items get a per-item 'unavailable:budget' while the envelope
+ * discloses the truncation — never a silent partial evaluation read as
+ * "checked" (P5).
+ *
+ * MAGNITUDE: deliberately LOWER than that neighbour's 120, because the unit is
+ * not the same — an attempt there is one stat/hash of a file, whereas one unit
+ * here is a whole indexed store query. 60 still covers an ordinary full page
+ * (DEFAULT_BOARD_CAP = 50 items, every one of them declaring a DIFFERENT key
+ * set — already the worst realistic shape, since sibling slices of an objective
+ * share paths and share a query) with headroom, so the axis binds only on an
+ * explicitly raised cap, which is exactly the shape it exists for.
+ */
+const ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP = 60;
+
+/**
+ * The one-time, envelope-level reading instruction for the per-item
+ * `artifact_evidence` block. Stated ONCE per call rather than per item (it is
+ * the same sentence for every row), and worded as a LOOKUP, never a verdict:
+ * the field can say that something was written near an item, and nothing more.
+ * An index or summary is a lookup, never a source (CLAUDE.md) — a count that
+ * reads as a completion verdict would let a reader retire work on a coincidence.
+ */
+const ARTIFACT_EVIDENCE_NOTE =
+  `artifact_evidence is a LOOKUP, never a verdict: per item it counts durable knowledge records ` +
+  `(${ARTIFACT_EVIDENCE_TYPES.join(', ')}) written or updated since that item was created which either touch its ` +
+  `file_keys or cite its id — within a bounded ${ARTIFACT_EVIDENCE_SCAN_CAP}-record scan per arm. A non-zero count means POSSIBLY ADDRESSED and ` +
+  `nothing stronger: VERIFY against HEAD before acting on it. A zero count is equally weak evidence the other way — ` +
+  `it checks the knowledge store only, never git, so work that was never captured leaves no trace here.`;
 
 /**
  * Total order for board/queue paging (board abafbd48 — Codex-adjudicated,
@@ -6542,6 +6684,188 @@ export class SterlingTools {
     return headline ? clipName(headline) : '(unnamed board item)';
   }
 
+  /**
+   * A matched EVIDENCE record's human name: slug → title → question → location,
+   * first present. Deliberately a fallback LADDER rather than a per-type switch:
+   * the evidence set spans seven types with three different naming fields
+   * (feature_article slugs, decision/anti_pattern titles, disconfirmed_hypothesis
+   * and open_question questions, a location-only reference doc), and a switch
+   * would silently name the eighth type `undefined` the day one is registered.
+   * Clipped like every other display name — names clip, ids never do — and the
+   * id8 beside it stays whole, since that is the address the reader cites.
+   */
+  private static artifactEvidenceName(rec: Record<string, unknown>): string {
+    const field = (name: string): string => {
+      const value = rec[name];
+      return typeof value === 'string' && value.trim().length > 0 ? value.trim() : '';
+    };
+    const slug = field('slug');
+    const headline = field('title') || field('question');
+    // ONE EXCEPTION TO SLUG-FIRST, and it is not a type special-case. Of the
+    // evidence types, FOUR auto-mint their slug from their own headline
+    // (knowledgeCreate's mint branch covers decision | anti_pattern |
+    // research_finding | open_question — plus attestation and todo, neither of
+    // which is an evidence type; attestation mints nothing anyway, having no
+    // headline): for those, slug-first would print 'references-item-3642b2c5'
+    // where the record's own name is "references item 3642b2c5" — the SAME name,
+    // kebab-flattened, in front of a human trying to recognise it. NOTE the
+    // predicate is CONTENT-based, not type-based (delta review LOW, 2026-09-01):
+    // a feature_article's slug is authored (schema-required, never minted), but
+    // the common shape — slug 'csv-export' beside title 'CSV export' — satisfies
+    // the predicate and takes the demotion branch, displaying the title. That is
+    // acceptable output for a human; what the predicate protects is a slug that
+    // DIFFERS from its headline's kebab form (a deliberately distinct authored
+    // address), which always wins. disconfirmed_hypothesis and
+    // reference_material carry no slug field at all.
+    if (slug && !SterlingTools.slugIsMintedFrom(slug, headline)) return clipName(slug);
+    if (headline) return clipName(headline);
+    const location = field('location');
+    if (location) return clipName(location);
+    // Should not be reachable for a registered evidence type; a marker beats an
+    // empty string that reads as a missing field (same reasoning as boardItemName).
+    return '(unnamed record)';
+  }
+
+  /**
+   * Whether `slug` is exactly what mintSlug would derive from `headline` — the
+   * bare slugified base, or that base plus the disambiguator mintSlug ACTUALLY
+   * generates. That loop starts at 2 and counts up in canonical decimal, so
+   * '-0', '-1' and '-01' are shapes it can never produce: matching them would
+   * demote an AUTHORED slug ('foo-1' beside a 'foo' title) to its title, which is
+   * the opposite of what this predicate is for. Recognising only the mintable
+   * shape keeps the exception as narrow as its justification.
+   */
+  private static slugIsMintedFrom(slug: string, headline: string): boolean {
+    const base = SterlingTools.slugify(headline);
+    if (!base) return false;
+    if (slug === base) return true;
+    if (!slug.startsWith(`${base}-`)) return false;
+    const suffix = slug.slice(base.length + 1);
+    // Canonical decimal, no leading zeros, >= 2 — mintSlug's own suffix alphabet.
+    return /^[1-9][0-9]*$/.test(suffix) && Number(suffix) >= 2;
+  }
+
+  /**
+   * DERIVED PER-ITEM ARTIFACT EVIDENCE (board 00fa8adb) — board_remove's removal
+   * receipt (removalArtifactEvidence) brought forward to QUERY time, so the
+   * reader auditing a board sees "something was written near this item" BEFORE
+   * choosing what to act on, instead of only at the moment of removal. Same
+   * evidence types, same two arms, same 200-record windows, same since-filter:
+   * the two surfaces share ARTIFACT_EVIDENCE_TYPES precisely so they cannot come
+   * to different conclusions about one item.
+   *
+   * PAGE-SCOPED, like the reconcile drift re-check beside it and for the same
+   * reason: the cost is paid per item actually served, never per matched item.
+   *
+   * COST SHAPE — the whole method is one shared scan plus one query per DISTINCT
+   * file-key set:
+   *  - the CITATION arm runs ONE store.query for the page and JSON.stringify's
+   *    each scanned record ONCE into `bodies`; the per-item test is then a pair
+   *    of substring checks over strings already built, so a 50-item page costs
+   *    one scan and one serialization pass rather than fifty of each.
+   *  - the FILE-KEY arm is memoized on the item's NORMALIZED (deduped, sorted)
+   *    key set. Memoized per set and never UNIONED across items: the store ranks
+   *    by file-key overlap count, so a union query's 200-record window is not the
+   *    union of the individual windows — items with few keys would be crowded out
+   *    by whichever item declared the most, and their evidence would vanish.
+   *    Because it cannot be unioned, it is BUDGETED instead
+   *    (ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP): `cap` is caller-controlled, so the
+   *    distinct-key-set query count is bounded per page and the overflow is
+   *    disclosed per item and on the envelope, exactly like the reconcile
+   *    re-check's DriftBudget beside it.
+   *
+   * STRICTLY READ-ONLY: unlike removalArtifactEvidence, the keyless case records
+   * NO check_skipped audit row — a query that writes to the store on being read
+   * would make reading the board an event, and the skip is disclosed in the
+   * returned `file_key_check` field instead (the same fact, same call, no write).
+   *
+   * FAILS OPEN: any throw from the evidence scan yields an empty map and
+   * 'unavailable:store_query_failed', because losing the page itself to a broken
+   * advisory annotation would be a far worse trade than losing the annotation.
+   */
+  private pageArtifactEvidence(items: DurableRecord[]): { evidence: Map<string, ArtifactEvidence>; provenance: string } {
+    const evidence = new Map<string, ArtifactEvidence>();
+    if (items.length === 0) return { evidence, provenance: 'checked' };
+    try {
+      // CITATION ARM, hoisted: one scan + one serialization pass for the page.
+      const scanned = this.store.query({ types: ARTIFACT_EVIDENCE_TYPES, cap: ARTIFACT_EVIDENCE_SCAN_CAP });
+      const bodies = scanned.map((r) => JSON.stringify(r));
+      const fileKeyScans = new Map<string, DurableRecord[]>();
+      let truncated = false;
+      for (const item of items) {
+        const rec = item as unknown as { id: string; created_at: string; file_keys?: unknown };
+        const since = rec.created_at;
+        const fileKeys = Array.isArray(rec.file_keys)
+          ? [...new Set((rec.file_keys as unknown[]).filter((k): k is string => typeof k === 'string' && k.length > 0))].sort()
+          : [];
+        let fileKeyMatches: DurableRecord[] = [];
+        let file_key_check: ArtifactEvidence['file_key_check'] = fileKeys.length > 0 ? 'checked' : 'skipped:no_file_keys';
+        if (fileKeys.length > 0) {
+          // Keyed on the normalized set, so two items declaring the same paths in
+          // different order share one query rather than issuing two identical ones.
+          //
+          // INJECTIVE BY CONSTRUCTION (Codex review, this slice — the same finding
+          // and the same remedy as the reconcile re-check's memo key): a separator
+          // join can never be impossibility-proof here, because normalizeRepoPath
+          // permits ANY byte in a path, \x1F included, so crafted key sets
+          // (["a","b\x1Fc"] vs ["a\x1Fb","c"]) would alias and one item would read
+          // another item's store result. JSON.stringify of the array is injective
+          // for arbitrary strings.
+          const memoKey = JSON.stringify(fileKeys);
+          let scan = fileKeyScans.get(memoKey);
+          if (!scan) {
+            // BUDGET, checked only on a MISS: a memo hit issues no query and
+            // therefore costs nothing. Once the page's distinct-key-set allowance
+            // is spent, this item's file-key arm abstains LOUDLY rather than
+            // returning a zero that reads as "checked and found nothing" — and its
+            // citation arm below still runs, since that scan is shared and paid.
+            if (fileKeyScans.size >= ARTIFACT_EVIDENCE_KEY_SET_QUERY_CAP) {
+              truncated = true;
+              file_key_check = 'unavailable:budget';
+            } else {
+              scan = this.store.query({ types: ARTIFACT_EVIDENCE_TYPES, file_keys: fileKeys, cap: ARTIFACT_EVIDENCE_SCAN_CAP });
+              fileKeyScans.set(memoKey, scan);
+            }
+          }
+          // The since-filter is PER ITEM even when the scan is shared: two items
+          // over the same files were created at different times.
+          fileKeyMatches = (scan ?? []).filter((r) => r.created_at >= since || r.updated_at >= since);
+        }
+        const prefix = rec.id.slice(0, 8);
+        const idMatches = scanned.filter(
+          (r, i) => (r.created_at >= since || r.updated_at >= since) && (bodies[i].includes(rec.id) || bodies[i].includes(prefix))
+        );
+        // Dedupe across the arms by record id — file_keys order first, then any
+        // citation match not already covered (removalArtifactEvidence's order).
+        const seen = new Set<string>();
+        const combined: DurableRecord[] = [];
+        for (const r of [...fileKeyMatches, ...idMatches]) {
+          if (seen.has(r.id)) continue;
+          seen.add(r.id);
+          combined.push(r);
+        }
+        evidence.set(rec.id, {
+          count: combined.length,
+          // The count stays FULL while the named records clip: a reader must be
+          // able to see that six things were written even when only three fit.
+          ...(combined.length > 0
+            ? {
+                records: combined.slice(0, ARTIFACT_EVIDENCE_RECORD_CAP).map((r) => {
+                  const body = r as unknown as Record<string, unknown>;
+                  return { id8: String(body.id).slice(0, 8), type: String(body.type), name: SterlingTools.artifactEvidenceName(body) };
+                }),
+              }
+            : {}),
+          file_key_check,
+        });
+      }
+      return { evidence, provenance: truncated ? 'checked:budget_truncated' : 'checked' };
+    } catch {
+      // FAIL OPEN — the page survives, and the envelope says the check did not run.
+      return { evidence: new Map(), provenance: 'unavailable:store_query_failed' };
+    }
+  }
+
   boardQuery(filter: BoardFilter = {}, surface: BoardSurface = 'board_query'): DurableRecord[] {
     return this.pageBoard(surface, this.boardFiltered(filter).matching, filter).records;
   }
@@ -6679,6 +7003,18 @@ export class SterlingTools {
     // from `records` — see laneAdvisory. Advisory only: it is computed after
     // `records` is already fixed and never touches it.
     const lane_advisory = this.laneAdvisory(matching);
+    // DERIVED ARTIFACT EVIDENCE (board 00fa8adb): PAGE-scoped — computed from
+    // `records`, after cap/offset/cursor resolution, never from `matching` (the
+    // opposite of lane_advisory above, deliberately: an advisory about lane
+    // collisions is useless if the cap splits the collision, whereas this one's
+    // cost is per item actually served and its verdict is per item anyway).
+    const { evidence: artifactEvidence, provenance: artifact_evidence_provenance } = this.pageArtifactEvidence(records);
+    if (artifact_evidence_provenance === 'checked:budget_truncated') {
+      notes.push(
+        `the artifact_evidence FILE-KEY arm hit its per-call query budget on this page — the items it could not reach say ` +
+          `file_key_check:'unavailable:budget' themselves and their count is a CITATION-ONLY floor; narrow the page (a smaller cap, or offset/cursor) to check them`
+      );
+    }
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const base =
         projection === 'headline'
@@ -6692,16 +7028,23 @@ export class SterlingTools {
       // it and for the same reason: a verdict clipped away by digest/headline
       // would make those surfaces the ones that lie about the item.
       const note = reconcileNotes.get(id);
-      if (!warning && !note) return base;
+      // ALSO after the clip, and a WIRE FIELD rather than an appendix to `text`
+      // (the two annotations above ride `text` because they are prose): the
+      // block is structured data every projection can carry, and it is ABSENT
+      // when the derivation failed, never a zero-count that would read as a
+      // checked-and-found-nothing result.
+      const derived = artifactEvidence.get(id);
+      const withEvidence = derived ? { ...base, artifact_evidence: derived } : base;
+      if (!warning && !note) return withEvidence;
       const text = typeof base.text === 'string' ? base.text : '';
       // OUTSIDE-MODEL FINDING 3: headline's line stays compact (short markers,
       // appended directly, no separator) — the full sentences only land on
       // digest/full, which already tolerate multi-line text. Both annotations
       // can apply to one row (an aged keyed item whose drift is also gone), so
       // they compose rather than one displacing the other.
-      if (projection === 'headline') return { ...base, text: `${text}${warning ? warning.short : ''}${note ? note.short : ''}` };
+      if (projection === 'headline') return { ...withEvidence, text: `${text}${warning ? warning.short : ''}${note ? note.short : ''}` };
       const parts = [text, warning?.full, note?.full].filter((p): p is string => typeof p === 'string' && p.length > 0);
-      return { ...base, text: parts.join('\n\n') };
+      return { ...withEvidence, text: parts.join('\n\n') };
     };
     return {
       matched_filter: matching.length,
@@ -6717,6 +7060,11 @@ export class SterlingTools {
       ...(next_cursor !== undefined ? { next_cursor } : {}),
       // AC3: the key is ABSENT when nothing collides, never an empty block.
       ...(lane_advisory ? { lane_advisory } : {}),
+      // board 00fa8adb: the status ALWAYS present (an absent per-item block must
+      // be readable as "not checked" rather than "nothing found"), and the
+      // reading instruction with it — once per envelope, not once per item.
+      artifact_evidence_provenance,
+      artifact_evidence_note: ARTIFACT_EVIDENCE_NOTE,
       ...(notes.length ? { note: notes.join('; ') } : {}),
       // AC6: unchanged, unfiltered, unreordered — the advisory above is derived
       // FROM this page's matched set and never acts on it.
@@ -6967,12 +7315,11 @@ export class SterlingTools {
   private removalArtifactEvidence(item: DurableRecord): { artifact_evidence: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
     const fileKeys = ((item as unknown as { file_keys?: string[] }).file_keys ?? []).filter(Boolean);
     const since = item.created_at;
-    // open_question joins the evidence set (board a9be48f2): a board item can
-    // legitimately close by being CONVERTED into an evidenced open question —
-    // the investigation is now durable and tracked as a record — and without
-    // this type the receipt would show empty artifact evidence for exactly the
-    // close that produced the most durable artifact.
-    const evidenceTypes = ['decision', 'anti_pattern', 'feature_article', 'research_finding', 'disconfirmed_hypothesis', 'open_question', 'reference_material'];
+    // The evidence set is ONE module-level list (ARTIFACT_EVIDENCE_TYPES, which
+    // documents why open_question is in it) shared with board_query's derived
+    // per-item evidence — the two surfaces must never disagree about what counts
+    // as an artifact for the same item.
+    const evidenceTypes = ARTIFACT_EVIDENCE_TYPES;
     // FIX M1 (upgrade-polish review, 2026-08-21): the id-citation arm below needs
     // no file identity at all — concept_article_missing / research_owed / plain
     // tasks routinely carry no file_keys, and those are exactly the items most
