@@ -124,9 +124,16 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
     substituted = substituted.split(`{{${key}}}`).join(value);
   }
   const { name, frontmatter, body } = parseTemplate(substituted, label);
-  const unsubstituted = frontmatter.match(/\{\{[A-Z_]+\}\}/);
+  // WHOLE rendered template, not just the frontmatter: templates now carry
+  // substitution tokens in the BODY too ({{GIT_RO}} — the absolute path H14
+  // grants for read-only git), and a forgotten body variable would otherwise
+  // ship silently as literal '{{GIT_RO}}' in an installed agent's prose, i.e. an
+  // instruction the agent cannot run. Same P5 refusal either way. Verified
+  // 2026-09-01 that no shipped template body carries a literal '{{…}}' as prose
+  // rather than as a variable, so nothing legitimate is caught by widening.
+  const unsubstituted = substituted.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {
-    throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value — refusing to install a half-baked hook command (P5)`);
+    throw new Error(`install substitution incomplete for ${label}: '${unsubstituted[0]}' has no value — refusing to install a half-baked agent (P5)`);
   }
   const badCommands = findBackslashHookCommands(frontmatter);
   if (badCommands.length) {

@@ -19,7 +19,7 @@ import { AGENT_MODEL_KEY, REVIEWER_ROLES } from '@sterling/schemas';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TPL = join(root, 'agent-templates');
-const VARS = { NODE: '"C:/tools with space/node.exe"', HOOKS_DIR: 'C:/plugin/hooks' };
+const VARS = { NODE: '"C:/tools with space/node.exe"', HOOKS_DIR: 'C:/plugin/hooks', GIT_RO: '/clone/scripts/git-ro.mjs' };
 const OPTS = { pluginVersion: '0.1.0', now: '2026-06-10T12:00:00.000Z', vars: VARS };
 
 // Phase 2 (r-ea9e): model:/effort: in the 9 templates are {{MODEL}}/{{EFFORT}}

@@ -640,7 +640,15 @@ items.push({ item: CONSUMER_CHECK_LAUNCHER_NAME, ...ensureConsumerCheckLauncher(
 
 // agent installation (§2.2) via the §13 sync semantics: installed | refreshed |
 // up_to_date | locally-modified left | refuse-on-local-modification
-const vars = { NODE: `"${fwd(process.execPath)}"`, HOOKS_DIR: fwd(join(pluginRoot, 'hooks')) };
+// GIT_RO is the plugin-owned read-only git wrapper, baked as an absolute
+// forward-slash path exactly like HOOKS_DIR: H14 grants ONLY that exact file
+// identity, so a template must name it absolutely (decision
+// `git-ro-wrapper-fixed-recipes-no-caller-flags`).
+const vars = {
+  NODE: `"${fwd(process.execPath)}"`,
+  HOOKS_DIR: fwd(join(pluginRoot, 'hooks')),
+  GIT_RO: fwd(join(pluginRoot, 'scripts', 'git-ro.mjs')),
+};
 const { report: agentReport } = syncAgents({
   templatesDir: join(pluginRoot, 'agent-templates'),
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),

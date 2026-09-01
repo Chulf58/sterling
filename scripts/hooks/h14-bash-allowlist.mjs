@@ -40,8 +40,9 @@
 // assume it (decision 19678617). If a future probe finds H14 is skipped
 // entirely when this flag is set, the disclosure below never runs and this
 // comment is the loud flag that it was never verified either way.
-import { relative, resolve, sep, join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { relative, resolve, sep, join, dirname } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, realpathSync, statSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 
 const input = readStdin();
@@ -162,22 +163,176 @@ try {
   // `git-ro-wrapper-fixed-recipes-no-caller-flags`, knowledge_get 1a7f3926).
   // The four direct read-only git verb prefixes this hook once carried (git log
   // / git show <ref> --stat / git diff --name-only / git branch --list, board
-  // 4c7b84d3 AC3 lineage) are REMOVED and replaced by one exact prefix:
-  // `node scripts/git-ro.mjs`. Keeping them beside the wrapper was explicitly
-  // rejected — it "preserves a bypass around every guarantee the wrapper adds"
-  // (fixed recipes, zero caller-controlled git flags, resolved cardinality, a
-  // hardcoded executable roster, a positive-set child env, bounded output).
-  // The grant is ONE EXACT TOKEN-BOUNDED PREFIX, never a substring: a lookalike
-  // ('node scripts/git-ro-evil.mjs', 'node scripts/git-ro.mjs.bak') must not
-  // match, and the name appearing anywhere but the command head never exempts a
-  // command (the H15 unanchored-substring class, anti_pattern
-  // `unanchored-substring-allowlist-in-command-guard`). Chaining/redirection off
-  // the wrapper is already caught by the control-operator gate above this point,
-  // so it never reaches this check at all. H14 is NOT the wrapper's arity gate:
-  // a malformed wrapper invocation passes here and is refused by the wrapper
-  // itself, which is where the recipe rules live.
-  const GIT_RO_PREFIX = 'node scripts/git-ro.mjs';
-  const isGitRoWrapper = command === GIT_RO_PREFIX || command.startsWith(GIT_RO_PREFIX + ' ');
+  // 4c7b84d3 AC3 lineage) are REMOVED. Keeping them beside the wrapper was
+  // explicitly rejected — it "preserves a bypass around every guarantee the
+  // wrapper adds" (fixed recipes, zero caller-controlled git flags, resolved
+  // cardinality, a hardcoded executable roster, a positive-set child env,
+  // bounded output).
+  //
+  // THE GRANT IS AN EXACT PLUGIN-OWNED FILE IDENTITY, NOT A TEXT PREFIX. The
+  // old rule was the cwd-relative literal `node scripts/git-ro.mjs`, which no
+  // CONSUMING project can satisfy — it has no such file, so the grant only ever
+  // worked inside the Sterling clone (measured 2026-09-01: MODULE_NOT_FOUND).
+  // The rule now is: token 1 must canonicalize to the RUNNING node binary and
+  // token 2 must be an ABSOLUTE path canonicalizing to <pluginRoot>/scripts/
+  // git-ro.mjs, where pluginRoot is walked up from THIS FILE. Consequences that
+  // are deliberate, not incidental:
+  //   * a consumer's own <project>/scripts/git-ro.mjs never matches — only the
+  //     plugin's reviewed copy is trusted, and a lookalike
+  //     ('…/git-ro-evil.mjs', '…/git-ro.mjs.bak') canonicalizes elsewhere;
+  //   * a RELATIVE spelling is denied even when it would resolve to the right
+  //     file: readStdin normalizes the payload cwd to the project root while
+  //     the shell resolves against its own real cwd, so a relative path can be
+  //     validated as one file and executed as another;
+  //   * literal `node` is denied — a PATH-selected node shim is not the
+  //     trusted interpreter the wrapper's guarantees assume;
+  //   * NO env override on the plugin root (h1's pluginRoot() has one; H14 is a
+  //     BLOCKING gate, where an env-settable root IS a bypass).
+  // Chaining/redirection off the wrapper is already caught by the
+  // control-operator gate above this point. H14 is NOT the wrapper's arity
+  // gate: a malformed but correctly-identified invocation passes here and is
+  // refused by the wrapper itself, which is where the recipe rules live.
+  //
+  // CHECK/USE RACE, ACCEPTED (S1.4): between this realpath and the shell's
+  // exec, the expected file could in principle be swapped. That is accepted
+  // under H14's documented SCOPE-DISCIPLINE model (research_finding bc00be84) —
+  // the expected path is PLUGIN-owned, outside the consumer write scope the
+  // agent operates in, and H14 has never been code-execution containment.
+  const GIT_RO_WALK_LIMIT = 4;
+  // fwdSlash is for DISPLAY only (message readability). Path COMPARISON uses
+  // normSep, which rewrites separators ONLY on win32 — on POSIX a backslash is
+  // a legal character IN a filename, so normalizing there would make two
+  // genuinely different files compare equal.
+  const fwdSlash = (p) => String(p).replace(/\\/g, '/');
+  const normSep = (p) => (process.platform === 'win32' ? String(p).replace(/\\/g, '/') : String(p));
+  const canonical = (p) => normSep(realpathSync(p));
+  const samePath = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+
+  // The expected identity. Any failure to establish it (walk-up, realpath, or
+  // a non-regular file) leaves gitRoExpected null and records a defect string;
+  // the whole derivation is wrapped so a throw can never escape into an allow
+  // path — a git-ro-shaped command then denies as an ENVIRONMENT DEFECT below,
+  // and nothing else is affected.
+  let gitRoExpected = null;
+  let gitRoDefect = null;
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    let pluginRoot = null;
+    for (let i = 0; i <= GIT_RO_WALK_LIMIT; i++) {
+      if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) {
+        pluginRoot = dir;
+        break;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+    if (!pluginRoot) {
+      gitRoDefect = `no plugin root (a directory holding .claude-plugin/plugin.json) within ${GIT_RO_WALK_LIMIT} levels above this hook at '${fwdSlash(dirname(fileURLToPath(import.meta.url)))}'`;
+    } else {
+      const expectedPath = join(pluginRoot, 'scripts', 'git-ro.mjs');
+      const resolved = canonical(expectedPath);
+      if (!statSync(resolved).isFile()) gitRoDefect = `the plugin's wrapper path '${fwdSlash(expectedPath)}' is not a regular file`;
+      else gitRoExpected = resolved;
+    }
+  } catch (e) {
+    gitRoDefect = `the plugin's read-only git wrapper could not be canonicalized (${(e && e.message) || e})`;
+  }
+
+  // TWO-TOKEN LEXER over the command HEAD (S1.2). Returns exactly the first two
+  // tokens, or null when the head is not two clean tokens. Each token may be
+  // bare, "double-quoted" or 'single-quoted' (a quoted token may contain
+  // spaces). NO-MATCH (never a silent acceptance) for: an unbalanced quote, a
+  // quote glued to adjacent text, an empty token, or a `$`/backtick expansion —
+  // the hook sees the PRE-expansion text, so an expansion means what is
+  // validated is not what runs, and this lexer is explicitly NOT a shell.
+  //
+  // CHECK/USE: THE VERDICT RESTS ON realpath EQUALITY OF THE SPELLING THE SHELL
+  // WILL EXECUTE — which is exactly why any spelling the SHELL reads
+  // differently from this hook must be REFUSED, never normalized into a match.
+  // Backslash is the case that bites (review round, both reviewers): on POSIX
+  // bash treats '\' as an escape when unquoted and as a LITERAL character when
+  // quoted — never as a separator. Normalizing it here would validate one file
+  // and execute another: `"/…/Dataverse/\..\Sterling/scripts/git-ro.mjs"`
+  // normalizes to the plugin's wrapper while bash execs a literal, attacker-
+  // CREATABLE path, and unquoted `/home/cuj/Sterling\scripts/git-ro.mjs`
+  // collapses to `/home/cuj/Sterlingscripts/…`. So on non-win32 ANY backslash in
+  // either token is a NO-MATCH, checked BEFORE any normalization. Only on win32,
+  // where '\' genuinely IS the separator and the shell reads it that way too, is
+  // it normalized to '/' for the compare. Everything after token 2 is passed
+  // through untouched: the wrapper's arity gate owns it.
+  const lexTwoTokens = (str) => {
+    const tokens = [];
+    let i = 0;
+    while (tokens.length < 2) {
+      while (i < str.length && (str[i] === ' ' || str[i] === '\t')) i++;
+      if (i >= str.length) return null;
+      let tok = '';
+      const quote = str[i] === '"' || str[i] === "'" ? str[i] : null;
+      if (quote) {
+        i++;
+        let closed = false;
+        while (i < str.length) {
+          if (str[i] === quote) {
+            closed = true;
+            i++;
+            break;
+          }
+          tok += str[i++];
+        }
+        if (!closed) return null; // unbalanced quote
+        if (i < str.length && str[i] !== ' ' && str[i] !== '\t') return null; // quote glued to more text
+      } else {
+        while (i < str.length && str[i] !== ' ' && str[i] !== '\t') tok += str[i++];
+      }
+      if (tok === '') return null;
+      if (/[`$"']/.test(tok)) return null; // expansions / embedded quotes
+      // POSIX: a backslash is NEVER a separator — see the CHECK/USE rule above.
+      // Refused BEFORE any normalization, so no normalized form is ever built
+      // from a spelling the shell reads differently.
+      if (process.platform !== 'win32' && tok.includes('\\')) return null;
+      // An UNQUOTED token is still subject to brace, glob and tilde expansion,
+      // which this hook never performs — the same check/use divergence one step
+      // further out: `"/usr/bin/node" /project/{evil,good} log`, where the
+      // literal `/project/{evil,good}` is a symlink to the plugin wrapper,
+      // realpaths HERE to the trusted file while bash expands it into two words
+      // and node executes `/project/evil`. Refused on every platform, before
+      // normalization. Quoted tokens (either style) are exempt from THIS check
+      // because quotes suppress brace/glob/tilde expansion; what double quotes
+      // leave active is `$`/backtick, already refused above.
+      if (!quote && /[*?[\]{}~]/.test(tok)) return null;
+      tokens.push(tok);
+    }
+    return tokens;
+  };
+
+  const isAbsoluteToken = (tok) => {
+    const norm = normSep(tok);
+    return norm.startsWith('/') || /^[A-Za-z]:\//.test(norm);
+  };
+
+  const nodeCanonical = (() => {
+    try {
+      return canonical(process.execPath);
+    } catch {
+      return null;
+    }
+  })();
+
+  const isGitRoWrapper = (() => {
+    if (!gitRoExpected || !nodeCanonical) return false;
+    const tokens = lexTwoTokens(command);
+    if (!tokens) return false;
+    const [exeTok, scriptTok] = tokens;
+    if (scriptTok.startsWith('-')) return false; // a node FLAG between the two tokens
+    if (!isAbsoluteToken(scriptTok)) return false; // a relative spelling never matches
+    try {
+      if (!samePath(canonical(exeTok), nodeCanonical)) return false;
+      return samePath(canonical(scriptTok), gitRoExpected);
+    } catch {
+      return false; // an unresolvable token is not the expected file
+    }
+  })();
 
   // Quote-strip the FIRST whitespace-separated token, for MATCH PURPOSES ONLY
   // (board f49466f5, decision 398adceb): the executed command, the operator
@@ -284,6 +439,65 @@ try {
   const allowed = runCommandAllowed || isFsHelper || isReadOnlySearch || isGitRoWrapper || isRunGateInvocation;
 
   if (!allowed) {
+    // GIT-RO DIAGNOSTIC (S1.3). A command that IS the two-token wrapper shape
+    // but failed the IDENTITY check gets the exact accepted form plus the
+    // specific reason, instead of the generic allowlist text — those shapes (a
+    // relative path, bare `node`, a lookalike, a consumer's own copy) all look
+    // correct to the caller, so naming the difference is the whole point.
+    // SCOPE: only when the head lexes to two clean tokens AND token 2 names a
+    // file called git-ro.mjs. A command that does not even lexically match the
+    // two-token shape — a node flag between the tokens, an env-assignment
+    // prefix, an unbalanced quote, a $-expansion — is not git-ro-shaped in
+    // H14's eyes at all: S1.2 says it fails to MATCH, so ordinary allowlist
+    // reasoning (and the generic denial below) applies. This runs only on the
+    // DENY path; the allow decision above is untouched.
+    const gitRoAttempt = (() => {
+      const tokens = lexTwoTokens(command);
+      if (!tokens) return null;
+      const [exeTok, scriptTok] = tokens;
+      if (scriptTok.startsWith('-')) return null;
+      const norm = normSep(scriptTok);
+      if (norm.slice(norm.lastIndexOf('/') + 1) !== 'git-ro.mjs') return null;
+      return { exeTok, scriptTok };
+    })();
+    if (gitRoAttempt) {
+      if (!gitRoExpected) {
+        deny(
+          environmentDefectDenial(
+            'H14',
+            `the read-only git wrapper's expected identity cannot be established — ${gitRoDefect}. A blocking gate that cannot verify the grant refuses it (P5).`
+          )
+        );
+      }
+      const reason = (() => {
+        const { exeTok, scriptTok } = gitRoAttempt;
+        if (!isAbsoluteToken(scriptTok)) {
+          return `the wrapper path '${scriptTok}' is RELATIVE; only an absolute path is accepted, because this hook resolves against the normalized project root while the shell resolves against its own cwd — a relative spelling can validate one file and execute another`;
+        }
+        let exeResolved;
+        try {
+          exeResolved = canonical(exeTok);
+        } catch {
+          return `the node executable token '${exeTok}' cannot be canonicalized — name the RUNNING node binary by absolute path (bare 'node' is a PATH lookup and never matches)`;
+        }
+        if (!nodeCanonical) return `this hook cannot canonicalize its own node binary, so no invocation can be verified`;
+        if (!samePath(exeResolved, nodeCanonical)) return `the node executable '${exeTok}' resolves to '${exeResolved}', which is not the running node binary '${nodeCanonical}'`;
+        try {
+          const scriptResolved = canonical(scriptTok);
+          if (!samePath(scriptResolved, gitRoExpected)) {
+            return `'${scriptTok}' resolves to '${scriptResolved}', which is not the PLUGIN's wrapper — a project-local copy, a renamed lookalike, or another clone never matches`;
+          }
+        } catch {
+          return `the wrapper path '${scriptTok}' cannot be canonicalized — it does not exist on this machine`;
+        }
+        return `the invocation did not match the exact accepted form`;
+      })();
+      deny(
+        `H14: this is not the sanctioned read-only git wrapper invocation: '${command}'. Reason: ${reason}. ` +
+          `The EXACT accepted form is: ${nodeCanonical ?? fwdSlash(process.execPath)} "${gitRoExpected}" <verb> … ` +
+          `(verbs: log, show, show-stat, diff-names — run from the repository root; the wrapper takes NO git flags).`
+      );
+    }
     // QUOTING DIAGNOSTIC (reported from a consuming project 2026-07-30, decision
     // 398adceb; matching now strips a single-word quoted first token above, so a
     // command reaching this deny branch was NOT fixed by that — quoting can only
@@ -319,7 +533,11 @@ try {
                 : ''
             }`
           : ''
-      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, 'node …/scripts/run-gate.mjs …' (any path prefix), the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied), and read-only git through the WRAPPER only: 'node scripts/git-ro.mjs <verb> …' (verbs: log, show, show-stat, diff-names) — the direct git verbs (git log, git show <ref> --stat, git diff --name-only, git branch --list) were REMOVED in favour of it, so re-run history reads as 'node scripts/git-ro.mjs log …'. All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
+      } Allowed: ${runCommandPrefixes.map((p) => `'${p} …'`).join(', ')}, 'node …/scripts/run-gate.mjs …' (any path prefix), the fs helpers (node …/fs-remove.mjs, node …/fs-move.mjs), standalone read-only search: grep …, ls … (no pipes, no redirection; find stays denied), and read-only git through the PLUGIN'S WRAPPER only, named by ABSOLUTE path: ${
+        gitRoExpected
+          ? `'${nodeCanonical ?? fwdSlash(process.execPath)} "${gitRoExpected}" <verb> …'`
+          : `(UNAVAILABLE on this machine — ${gitRoDefect})`
+      } (verbs: log, show, show-stat, diff-names) — the direct git verbs (git log, git show <ref> --stat, git diff --name-only, git branch --list) were REMOVED in favour of it, so re-run history reads through that exact form. All other file access flows through Edit/Write/Read — and the Grep/Glob tools when the platform serves them.`
     );
   }
   allow();

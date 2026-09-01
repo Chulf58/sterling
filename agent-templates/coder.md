@@ -81,6 +81,23 @@ H14's escape check only denies arguments that resolve outside the project root �
 A probe you intend to delete is transient state, and P4 requires transient state to be removed by the mechanical event that ends its life, not by a remembered step — clean it up with the sanctioned fs helper, `node scripts/fs-remove.mjs scripts/zz-probe.mjs`, before you stop; a probe left in the repo tree is untracked source the moment you stop, and it will be treated as unowned territory, not as scratch work.
 A probe that DRIVES A HOOK never runs against the live checkout: hooks resolve `.sterling/` by walking UP from the stdin `cwd` to the nearest store, so a synthetic payload with the real repo (or any unisolated subdirectory) as `cwd` WRITES REAL SESSION STATE — measured 2026-08-31, a manual `h1-session-start` probe overwrote the live session cell and broke that session's commit gate (research_finding `h1-session-pollution-was-manual-probe-not-fixture-escape`). Build a throwaway fixture root the way every committed hook test does — `mkdtempSync(join(tmpdir(),...))` + `.sterling/config.json` + a store — and point the payload's `cwd` there.
 
+# Read-only git
+
+Direct `git …` is DENIED. Read-only history goes through the plugin's wrapper, by this EXACT form (the node path and the wrapper path are both absolute; `{{NODE}}` is already quoted — do not add quotes around it):
+
+```
+{{NODE}} "{{GIT_RO}}" <verb> …
+```
+
+Run it from the PROJECT ROOT — the wrapper asks git for the repository root and refuses from a subdirectory. There are NO git flags: each verb is a fixed recipe and the wrapper refuses anything flag-shaped. Four verbs:
+
+- `log [REV] [-- PATH…]` — `{{NODE}} "{{GIT_RO}}" log -- src/export` (JSON entries, newest first, capped with the truncation disclosed)
+- `show OBJECT` — `{{NODE}} "{{GIT_RO}}" show HEAD~2:src/export/csv.mjs` (also the way to read a DELETED file back)
+- `show-stat OBJECT` — `{{NODE}} "{{GIT_RO}}" show-stat HEAD` (the diffstat only, no patch)
+- `diff-names REV REV [-- PATH…]` — `{{NODE}} "{{GIT_RO}}" diff-names main HEAD -- src` (JSON name-status; exactly TWO commits, never one)
+
+A relative spelling of the wrapper path, a bare `node`, or a project-local copy of `git-ro.mjs` are all denied — only the plugin's own file is granted.
+
 # Worked example
 
 Failing test: `export round-trips a todo containing commas and quotes`. Wrong move: edit the test's expectation (H5 denies; tests are frozen). Right move:

@@ -27,7 +27,7 @@
 // workspace imports.
 //
 // STRUCTURE
-//   1. canonical-root cwd rule      — refuse unless invoked from the root
+//   1. repository-root cwd rule     — refuse unless standing at the repo root
 //   2. hardcoded executable roster  — never PATH, never a config-stored path
 //   3. argv structure + lexical     — mandatory `--`, per-verb arity, no flags
 //   4. cardinality by RESOLUTION    — rev-parse --verify --end-of-options
@@ -36,8 +36,7 @@
 
 import { spawn } from 'node:child_process';
 import { realpathSync, statSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 
 // ---------------------------------------------------------------------------
 // Exit codes. A refusal is ALWAYS nonzero with EMPTY stdout and a rule-naming
@@ -87,29 +86,46 @@ function fail(code, message) {
 const refuse = (message) => fail(EXIT_RULE, message);
 
 // ---------------------------------------------------------------------------
-// 1. CANONICAL-ROOT CWD RULE. The project root is derived from THIS FILE's
-//    location — never from an argument, never from the environment — and the
-//    wrapper refuses when its own cwd is not that root (canonical-path
-//    compare). The child's cwd is then pinned to the same root, so a recipe
-//    can never be aimed at another repository.
+// 1. REPOSITORY-ROOT CWD RULE. The root is the root of the repository the
+//    wrapper was INVOKED IN — never derived from this file's own location. The
+//    old import.meta.url derivation meant a plugin-owned wrapper could only
+//    ever read the clone it lives in, so a consuming project could not use it
+//    at all (measured 2026-09-01). The rule now: canonicalize process.cwd(),
+//    ask git for `rev-parse --show-toplevel` through the SAME hardened spawn
+//    path as every other call (roster executable, positive-set env, cumulative
+//    deadline), canonicalize the answer, and REFUSE unless it equals the cwd.
+//    A subdirectory, a non-repo, a bare repo and a gitdir therefore all refuse
+//    with a message telling the agent to stand at the repository root. Every
+//    later child cwd is then pinned to that discovered root. There is NO
+//    special case for the Sterling clone: the wrapper is the same code
+//    everywhere, and what it may read is decided by where the caller stands.
+//
+//    ACCEPTED RESIDUAL — "one repository" is bounded by REPO METADATA, not by
+//    this check (Codex review round 2). With toplevel == cwd satisfied, the
+//    repository's own on-disk metadata can still aim the recipes at another
+//    repository's objects: a `.git` GITDIR POINTER file, `objects/info/
+//    alternates`, or a local config `include`. Rejecting those was ruled out —
+//    it would break linked worktrees and submodules, which are legitimate and
+//    common. The residual is accepted under H14's scope-discipline model
+//    because reaching it requires WRITING INSIDE .git/, which is already full
+//    repository control. What IS closed is the env-side half: the positive-set
+//    child env below means no inherited GIT_DIR / GIT_WORK_TREE /
+//    GIT_OBJECT_DIRECTORY / GIT_CONFIG_* can redirect the child from outside.
 // ---------------------------------------------------------------------------
-const ROOT = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '..'));
-
 const samePath = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
 
-let invokedFrom;
+let INVOKED_FROM;
 try {
-  invokedFrom = realpathSync(process.cwd());
+  INVOKED_FROM = realpathSync(process.cwd());
 } catch (e) {
   fail(EXIT_ENV, `the current working directory cannot be canonicalized (${(e && e.message) || e}) — refusing.`);
 }
-if (!samePath(invokedFrom, ROOT)) {
-  fail(
-    EXIT_ENV,
-    `refusing: this wrapper runs ONLY from the canonical project root '${ROOT}', and its cwd is '${invokedFrom}'. ` +
-      `The root is derived from the wrapper's own location and compared canonically, so re-run the command with the project root as the working directory.`
-  );
-}
+
+// The discovery call runs at the cwd (there is no root yet); every call after
+// establishRoot() runs at the discovered root. One mutable binding rather than
+// a per-call option keeps the pin in ONE place, so no recipe can forget it.
+let ROOT = null;
+let CHILD_CWD = INVOKED_FROM;
 
 // ---------------------------------------------------------------------------
 // 2. EXECUTABLE ROSTER. A runtime probe of a HARDCODED per-platform
@@ -167,6 +183,15 @@ const CHILD_ENV = {
   GIT_OPTIONAL_LOCKS: '0',
   GIT_CONFIG_NOSYSTEM: '1',
   GIT_TERMINAL_PROMPT: '0',
+  // GIT_CONFIG_NOSYSTEM disarms /etc/gitconfig but NOT the per-user global
+  // config, which carries the same exec-capable knobs (gpg.program, pager.*,
+  // alias.*). Point it at the null device so the child reads no global config
+  // at all. WIN32: 'NUL' is the documented null device and git-for-Windows
+  // accepts it here, but that is NOT VERIFIABLE FROM WSL — VERIFY AT BUILD ON
+  // WINDOWS (decision 19678617's verify-at-build register). If the win32 form
+  // is wrong the failure is loud (git refuses to read the config path), never a
+  // silent re-enabling of the global config.
+  GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
 };
 if (process.platform === 'win32') {
   for (const key of WIN32_INHERIT) {
@@ -175,12 +200,19 @@ if (process.platform === 'win32') {
   }
 }
 
-// Fixed, caller-invisible config baked into every invocation. Each -c is a
+// Fixed, caller-invisible config baked into every invocation. Each entry is a
 // repo-config→exec knob neutralized as defense-in-depth: core.fsmonitor spawns
 // a configured process, and core.pager can hand git's output to a configured
 // command — so it is pinned to `cat` (a no-op passthrough) beside --no-ext-diff
-// / --no-textconv in the recipes, closing the last standing config→exec knob.
-const GIT_BASE_ARGS = ['-c', 'core.fsmonitor=false', '-c', 'core.pager=cat'];
+// / --no-textconv in the recipes. --no-pager is belt to that brace: core.pager
+// does NOT dominate the per-command pager.log / pager.show settings, so pinning
+// core.pager alone leaves a configured pager reachable for exactly the two
+// verbs that page. log.showSignature=false closes the sibling hole: a repo
+// config turning signature display on makes `log`/`show` exec gpg.program, so
+// the config knob is disarmed here and the recipes ALSO pass
+// --no-show-signature (defense in depth — the flag alone would be a single
+// point of failure, the config alone can be re-enabled per command).
+const GIT_BASE_ARGS = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.pager=cat', '-c', 'log.showSignature=false'];
 
 // ---------------------------------------------------------------------------
 // 6. BOUNDED, FAIL-CLOSED EXECUTION. stdout is buffered to a 5MiB cap and
@@ -202,7 +234,7 @@ function runGit(args) {
     let child;
     try {
       child = spawn(GIT, [...GIT_BASE_ARGS, ...args], {
-        cwd: ROOT,
+        cwd: CHILD_CWD,
         env: CHILD_ENV,
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
@@ -355,6 +387,47 @@ function writeStdout(payload) {
 }
 
 // ---------------------------------------------------------------------------
+// 1b. ROOT DISCOVERY (the second half of the cwd rule above). Deliberately
+//     routed through git()/runGit() rather than a bare spawn, so the discovery
+//     call gets the SAME guarantees as every recipe call: the hardcoded
+//     executable roster, the positive-set child env, the bounded output and the
+//     one cumulative 30s deadline. It is the only call that runs at the
+//     caller's cwd; afterwards CHILD_CWD is the discovered root.
+// ---------------------------------------------------------------------------
+const STAND_AT_ROOT = `Stand at the REPOSITORY ROOT and re-run: this wrapper reads exactly one repository — the one whose root is your working directory.`;
+
+async function establishRoot() {
+  const r = await git(['rev-parse', '--show-toplevel']);
+  if (r.failed) {
+    // NOT a git pass-through: "not a git repository" is an environment refusal
+    // of this wrapper, and it must not be reported as a failed recipe.
+    const detail = r.stderr && r.stderr.trim().length > 0 ? r.stderr.trim() : `git exited ${r.code} without a message`;
+    fail(EXIT_ENV, `'${INVOKED_FROM}' is not the working tree of a git repository (git said: ${detail}). ${STAND_AT_ROOT}`);
+  }
+  const answer = r.stdout.toString('utf8').trim();
+  if (answer === '') {
+    // A BARE repository (and a cwd inside a gitdir) has no working tree, so
+    // --show-toplevel answers empty rather than failing.
+    fail(EXIT_ENV, `'${INVOKED_FROM}' has no working tree (a bare repository or a git directory). ${STAND_AT_ROOT}`);
+  }
+  let canonicalRoot;
+  try {
+    canonicalRoot = realpathSync(answer);
+  } catch (e) {
+    fail(EXIT_ENV, `the repository root reported by git ('${answer}') cannot be canonicalized (${(e && e.message) || e}) — refusing.`);
+  }
+  if (!samePath(canonicalRoot, INVOKED_FROM)) {
+    fail(
+      EXIT_ENV,
+      `refusing: this wrapper runs ONLY from the repository ROOT, and '${INVOKED_FROM}' is a SUBDIRECTORY of the repository rooted at '${canonicalRoot}'. ` +
+        `${STAND_AT_ROOT}`
+    );
+  }
+  ROOT = canonicalRoot;
+  CHILD_CWD = ROOT;
+}
+
+// ---------------------------------------------------------------------------
 // 3. ARGV STRUCTURE + LEXICAL PRE-CHECKS.
 //    The lexical layer is the EARLY filter; cardinality is settled by
 //    resolution further down. Flag-shaped positionals are refused on every
@@ -363,8 +436,11 @@ function writeStdout(payload) {
 //    exactly how a flagless surface becomes an arbitrary-file writer.
 // ---------------------------------------------------------------------------
 const VERBS = ['log', 'show', 'show-stat', 'diff-names'];
+// The usage line echoes the ABSOLUTE two-token spelling the caller actually
+// used, never the old cwd-relative literal: that literal is exactly what H14
+// now denies (S1.2), so printing it would teach a refused invocation.
 const USAGE =
-  `usage: node scripts/git-ro.mjs <verb> [rev ...] [-- path ...]  |  verbs: ${VERBS.join(', ')} ` +
+  `usage: ${process.execPath} "${process.argv[1]}" <verb> [rev ...] [-- path ...]  |  verbs: ${VERBS.join(', ')} ` +
   `(log [rev] [-- paths], show <object>, show-stat <object>, diff-names <commit> <commit> [-- paths]).`;
 
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
@@ -515,6 +591,12 @@ async function runLog() {
     'log',
     '--no-decorate',
     '--no-color',
+    '--no-show-signature',
+    // parity with show / diff-names (reviewer L2): even a --pretty-only log
+    // must never reach an external diff driver or a textconv filter, both of
+    // which are repo-config→exec knobs.
+    '--no-ext-diff',
+    '--no-textconv',
     '-n',
     String(LOG_CAP + 1),
     '-z',
@@ -564,9 +646,11 @@ async function runShow({ stat }) {
   // (--stat --no-patch): the set is kept intact but ORDERED '--no-patch --stat'
   // so --stat carries the verdict and --no-patch remains the defense-in-depth
   // guard the decision asked for.
+  // --no-show-signature rides both forms: a repo config can turn signature
+  // display on, and a signature check execs gpg.program.
   const args = stat
-    ? ['show', '--no-color', '--no-patch', '--stat', '--no-ext-diff', '--no-textconv', object]
-    : ['show', '--no-color', '--no-ext-diff', '--no-textconv', object];
+    ? ['show', '--no-color', '--no-show-signature', '--no-patch', '--stat', '--no-ext-diff', '--no-textconv', object]
+    : ['show', '--no-color', '--no-show-signature', '--no-ext-diff', '--no-textconv', object];
   const r = await git(args);
   if (r.failed) passThrough(r);
   writeStdout(r.stdout);
@@ -601,6 +685,9 @@ async function runDiffNames() {
 }
 
 try {
+  // The cwd rule is settled BEFORE any recipe runs, so no recipe can execute
+  // against a repository the caller is not standing in.
+  await establishRoot();
   if (verb === 'log') await runLog();
   else if (verb === 'show') await runShow({ stat: false });
   else if (verb === 'show-stat') await runShow({ stat: true });
