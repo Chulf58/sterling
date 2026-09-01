@@ -129,6 +129,17 @@ export type MachineState = z.infer<typeof machineState>;
 // path plus the evidence for why the TEST, not the code, was wrong; written
 // by scripts/test-repair.mjs (a CLI, not a hook — mirrors no-capture.mjs's
 // append shape). Never a durable store record.
+// test_append (board 17204d1e): the ADDITIVE sibling of test_repair — the
+// conductor appended a NEW case to a frozen test rather than repairing a
+// wrong one; detail carries the test path plus what the new case pins and
+// why it is additive. Written by scripts/test-repair.mjs --append. Kept a
+// distinct kind so appends and repairs are never conflated in the register.
+// READER ASYMMETRY (deliberate, not an oversight): a test_repair event
+// discharges H10's per-path capture duty (h10-direct-capture.mjs kind-filters
+// 'test_repair' only) — a test_append event does NOT, so the capture duty
+// stays armed for an appended case. This is the safe direction (consistent
+// with decision no-capture-discharge-is-lane-scoped) and the two kinds are
+// NOT siblings for that purpose — do not assume parity when wiring a reader.
 //
 // LANE (decision no-capture-discharge-is-lane-scoped,
 // 51ebe0dd-099e-40a9-abc5-d3c8cc767883; USER-RULED 2026-08-22): a no_capture
@@ -155,6 +166,7 @@ export const sessionEventSchema = z.object({
     'no_capture',
     'capture_pending',
     'test_repair',
+    'test_append',
   ]),
   detail: z.string().min(1),
   at: z.string().min(1),

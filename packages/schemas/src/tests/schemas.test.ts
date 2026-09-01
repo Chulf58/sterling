@@ -628,6 +628,48 @@ test('sessionEventSchema: test_repair joins the register as the SIXTH kind — d
   assert.throws(() => s.parse({ kind: 'test_repair', detail }), 'at is required for test_repair too');
 });
 
+// ---- test_append kind (board 17204d1e review MEDIUM: the shipped --append
+// CLI mode and its enum member had zero schema coverage — a mutation
+// survivor by construction). Mirrors the test_repair pin immediately above:
+// same schema, same round-trip shape, one more kind. The pre-existing "six
+// kinds" pin further above is left AS-IS per the coordinator's instruction —
+// its own enum-rejection assertion already uses 'file_touch' as the
+// always-invalid probe, which stays invalid at seven kinds too, so nothing
+// there needed to change.
+test('sessionEventSchema: test_append joins the register as the EIGHTH kind — detail carries the path + additive-evidence summary', async () => {
+  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
+  const s = mod.sessionEventSchema as { parse: (v: unknown) => { kind: string; detail: string; at: string } } | undefined;
+  assert.ok(s, 'sessionEventSchema must be exported from the schemas index (defined once in transient.ts)');
+
+  // detail carries BOTH the appended-to test path and the additive-evidence
+  // statement (what NEW behavior the case pins, and why it is additive) —
+  // same free-text-with-required-substance shape as test_repair's detail.
+  const detail = 'tests/feature.spec.ts — pins a new additive case for empty-input handling, not a repair of an existing assertion';
+  const appended = s.parse({ kind: 'test_append', detail, at: NOW });
+  assert.equal(appended.kind, 'test_append');
+  assert.equal(appended.detail, detail);
+  assert.equal(appended.at, NOW);
+
+  // totality holds after the addition — the seven pre-existing kinds still
+  // parse...
+  assert.equal(s.parse({ kind: 'research_tool', detail: 'x', at: NOW }).kind, 'research_tool');
+  assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'x', at: NOW }).kind, 'agent_dispatch');
+  assert.equal(s.parse({ kind: 'debug_scope', detail: 'x', at: NOW }).kind, 'debug_scope');
+  assert.equal(s.parse({ kind: 'concept_designed', detail: 'x', at: NOW }).kind, 'concept_designed');
+  assert.equal(s.parse({ kind: 'no_capture', detail: 'x', at: NOW }).kind, 'no_capture');
+  assert.equal(s.parse({ kind: 'capture_pending', detail: 'x', at: NOW }).kind, 'capture_pending');
+  assert.equal(s.parse({ kind: 'test_repair', detail: 'x', at: NOW }).kind, 'test_repair');
+  // ...and a kind outside the eight is still rejected — the totality
+  // boundary moved from seven to eight, it did not open. This is the SAME
+  // rejection pin (unchanged) as the closed-enum test above, re-asserted here
+  // against the new eight-kind enum so a landed implementation that widened
+  // the enum to accept an arbitrary string is caught at this test too.
+  assert.throws(() => s.parse({ kind: 'file_touch', detail: 'x', at: NOW }), 'kind outside the eight writers is rejected');
+  assert.throws(() => s.parse({ kind: 'test_append', at: NOW }), 'detail is required for test_append too');
+  assert.throws(() => s.parse({ kind: 'test_append', detail: 42, at: NOW }), 'detail must be a string');
+  assert.throws(() => s.parse({ kind: 'test_append', detail }), 'at is required for test_append too');
+});
+
 test('research_owed is a registered SYSTEM_REASONS member draining under "captured"; 1:1 totality holds (AC7, interface slice 4)', () => {
   const reasons = SYSTEM_REASONS as readonly string[];
   const verbs = DRAIN_VERBS as Record<string, string>;
