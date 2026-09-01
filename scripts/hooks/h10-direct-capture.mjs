@@ -702,8 +702,20 @@ try {
   const disclosureParts = [];
   if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
+    // Board cdaf2824 (residual build, 2026-08-31): a count-only disclosure
+    // beside a path-specific article demand asserts no identity between the
+    // two, which manufactured false defect reports in two unrelated projects
+    // — the reader could see a file was deferred and a file was demanded, but
+    // not whether they were the same file. Name the deferred PATHS themselves
+    // (repo-relative, comma-separated), capped so a wide fan-out cannot flood
+    // the Stop message: past PATH_DISPLAY_CAP, show the first N and "+K more".
+    const PATH_DISPLAY_CAP = 8;
+    const pathsDisplay =
+      deferredPaths.length > PATH_DISPLAY_CAP
+        ? `${deferredPaths.slice(0, PATH_DISPLAY_CAP).join(', ')} +${deferredPaths.length - PATH_DISPLAY_CAP} more`
+        : deferredPaths.join(', ');
     disclosureParts.push(
-      `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}] — duty re-arms when they land ` +
+      `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}]: ${pathsDisplay} — duty re-arms when they land ` +
         `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
     );
   }
