@@ -15,6 +15,7 @@ import { arg, fail, openProject } from './lib/project.mjs';
 import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
+import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { matchesGlob } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 
@@ -847,19 +848,31 @@ if (existsSync(bundleChecker)) {
 // drift lanes do. Without this sweep it would linger as permanent noise — which
 // is the same complaint the lane was created to answer, one lane over.
 //
+// CLOSURE HAS TWO SHAPES (decision parked-close-endpoint-diff-not-history-walk):
+// the parked file RETURNED at the merge target (present on disk again), OR its
+// deletion landed IN THIS MERGE'S ENDPOINT DIFF — `git diff --diff-filter=D
+// --no-renames <pre-merge intoTip> <post-merge HEAD>` — meaning the branch that
+// just merged deleted it outright, so it can never "return". An endpoint diff,
+// never a history walk: a path added and deleted entirely between the two
+// endpoints (absent at both) does not count. When the deletion set cannot be
+// measured (any git failure — deletedBetween returns null), closure degrades to
+// presence-only: deletion-shaped items stay open rather than closing on
+// unmeasured evidence, and /sterling:drain closes them later.
+//
 // Deliberately AFTER the merge and outside any fail() path: this is bookkeeping,
 // so a failure here must never be reported as a merge problem. It reopens the
 // store because the gate closed it during the preflight.
 let parkedClosed = 0;
 try {
+  const postMergeHead = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  const deletedSet =
+    postMergeHead.status === 0 ? deletedBetween(target, intoTip, postMergeHead.stdout.trim()) : null;
   const { store: post } = openProject(target);
   try {
     for (const t of post.query({ types: ['todo'], cap: 1000 })) {
       if (t.source !== 'system' || t.system_reason !== 'file_parked') continue;
-      // Close only when EVERY path the item names is now present — a multi-path
-      // item whose second file is still parked is still true.
       const paths = t.file_keys ?? [];
-      if (paths.length > 0 && paths.every((k) => existsSync(join(target, k)))) {
+      if (parkedItemResolved(paths, deletedSet, (k) => existsSync(join(target, k)))) {
         post.remove(t.id, new Date().toISOString());
         parkedClosed += 1;
       }
