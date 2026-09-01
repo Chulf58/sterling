@@ -158,10 +158,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-// sha256, for the v1 waiver fingerprint only (decision 57984926 §2) — a v1
-// receipt has no entry_id, so its waiver trailer carries a STABLE identifier
-// derived from the receipt's own content. See v1ReceiptFingerprint below.
-import { createHash } from 'node:crypto';
 import { arg, fail } from './lib/project.mjs';
 // READ ADAPTER (decision 57984926, campaign slice S2b-1): h22-dispatch-
 // register.mjs now promotes every NEW reviewer-* receipt as a v2 entry
@@ -176,7 +172,32 @@ import { arg, fail } from './lib/project.mjs';
 // on a structurally complete v2 entry, and that verdict is defined once, beside
 // the shape it reads, rather than restated in each of this file's two flows and
 // again in H1. See isDischargedEntry / skipForDischargeMarker below.
-import { normalizeLedgerEntry, dischargeMarkerClass, isExternalReviewEntry, isEvidenceObject } from './hooks/lib/review-ledger-entry.mjs';
+// THE V1 IDENTITY HELPERS LIVE IN THE ADAPTER TOO (board 7dd3200a). They used
+// to be hoisted `function` declarations in this file, but §3's discharge verb
+// now needs the SAME v1 identity as a SELECTOR (`--legacy-handle`) that §2
+// stamps as a waiver trailer value here — and two independently-derived v1
+// identities across the two surfaces is a defect on its face: the handle read
+// off a waiver trailer must be the handle the discharge verb accepts. Moved
+// verbatim, so there is exactly one definition of each. An ESM import binding is
+// initialized before this module's body runs, so it is if anything SAFER than
+// the hoisted declarations it replaces (see the TDZ note further down: a `const`
+// there silently disabled the reviewed-bytes gate through the fail-open path).
+import {
+  normalizeLedgerEntry,
+  dischargeMarkerClass,
+  isExternalReviewEntry,
+  isEvidenceObject,
+  isUsableBlobSha,
+  receiptBlobEvidence,
+  receiptDeclaredPaths,
+  legacyReceiptHandle,
+} from './hooks/lib/review-ledger-entry.mjs';
+// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd). The shared
+// read-only inspector, used identically by BOTH flows of this CLI and by both
+// merge surfaces. It never refuses anything and cannot: see the header comment
+// above the disclosure block further down.
+import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 
 const target = process.cwd();
 
@@ -1170,6 +1191,47 @@ try {
 }
 
 // ===========================================================================
+// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd).
+//
+// WHAT IT IS: for each declared attestation path glob this commit touches, ONE
+// compact rollup naming how many of those paths have a COMPARABLE HUMAN
+// INSPECTION RECORD in the store, with the verdict distribution and a few
+// capped examples. Nothing more, and deliberately nothing more: the consumer
+// asked for a REFUSING gate here and that form was DECLINED, because a gate the
+// conductor must pass converts the conductor into the de-facto attestation
+// trigger, hollowing decision a7dbac2f (an attestation is a HUMAN's inspection).
+//
+// ITS OWN EMITTER, NOT warnSpend (§6 of the decision, explicit): a spend warning
+// is about the REVIEW RECEIPTS being spent by this commit. This is about
+// somebody's inspection of the ARTIFACTS the commit changes — a different
+// question, a different remedy, and folding it into `spend_warnings` would put
+// it in a bucket every reader of that field would mis-attribute.
+//
+// PLACED HERE ON PURPOSE: after every advisory, and BEFORE the reviewed-bytes
+// enforcement block, which must stay the LAST thing printed before the commit so
+// its refusal never reads as one more advisory.
+//
+// FAIL-OPEN, TOTAL (attestationDisclosureFor's own try/catch): a throw anywhere
+// in the config read, the git diff, the store read or the rendering degrades to
+// ONE disclosed line and the commit proceeds untouched. A disclosure may lose
+// its own voice; it may never cost a commit — a warning-only mechanism that can
+// abort a commit inverts its own ruling.
+// ===========================================================================
+const attestationDisclosure = attestationDisclosureFor('commit-reviewed', 'the staged bytes', () => {
+  // --no-renames so a renamed path is reported as a DELETE plus an ADD rather
+  // than one destination: an attestation named the OLD path, and a rename is
+  // exactly the event that should surface as "the path you inspected is gone".
+  // Deletions count for the same reason. -z for the path-mangling reason every
+  // other path read in this file uses it.
+  const r = spawnSync('git', ['diff', '--cached', '--no-renames', '--name-only', '-z'], { cwd: target, encoding: 'utf8', timeout: 30_000 });
+  if (r.error) throw r.error;
+  if (r.status !== 0) throw new Error(`git diff --cached --no-renames exited ${r.status}: ${(r.stderr || '').trim()}`);
+  return parseNulPathList(r.stdout);
+});
+for (const line of attestationDisclosure) console.error(line);
+
+// ===========================================================================
 // REVIEWED-BYTES ENFORCEMENT (decision 57984926 §2, slug review-ledger-v2-
 // lifecycle-refuse-flip-and-external-review-design; executes user ruling
 // b0ad640d's REFUSE-LATER half).
@@ -1828,6 +1890,13 @@ console.log(
     // asked for and turned out to be unnecessary" — the same
     // null-never-omitted convention waived_bytes uses.
     waiver_unused: waiverUnusedNote,
+    // ATTESTATION DISCLOSURE (decision 1f069af4 v2 §6) — its OWN field, never
+    // folded into spend_warnings: a reader of this report must be able to tell a
+    // review-receipt anomaly from "this commit changed artifacts a human
+    // inspected". EMPTY ARRAY on a dormant project (no declared globs), which is
+    // the shipped default; never omitted, so absence of the key means an older
+    // CLI rather than a project with nothing to disclose.
+    attestation_disclosure: attestationDisclosure,
   })
 );
 
@@ -1850,6 +1919,45 @@ console.log(
 //   file-scoped partition (commit's OWN diff) -> G6 published-history guard
 //   -> G5 amend + verify + consume + report both shas.
 // ===========================================================================
+
+/**
+ * ATTESTATION DISCLOSURE — the shared computation for BOTH flows (decision
+ * 1f069af4 v2). A HOISTED function declaration for the same reason safeLabel and
+ * withLedgerLock are: --target-sha amend mode runs before the -m flow's `const`s
+ * leave their temporal dead zone, and two independently-written disclosures
+ * across the two modes is a defect on its face — the amend path must disclose
+ * exactly what a fresh commit of the same bytes would.
+ *
+ * `touchedPathsFn` is a LAZY callback, not a value, so a DORMANT project (no
+ * declared globs — the shipped default, and Sterling's own state) never even
+ * runs the git diff: dormant means zero output and zero cost, not an empty
+ * report.
+ *
+ * ONE try/catch AROUND EVERYTHING, and it is the whole fail-open contract: the
+ * config read, the diff, the store read and the rendering all degrade to a
+ * single disclosed line. Returns the lines; the caller prints them and puts them
+ * on its own JSON report.
+ */
+function attestationDisclosureFor(tool, subject, touchedPathsFn) {
+  try {
+    // The ONE tolerant read (Codex review HIGH-1, 2026-09-01): unusable entries
+    // are dropped and DISCLOSED here rather than refused by the config schema —
+    // an advisory declaration that can kill a commit or a merge inverts this
+    // feature's own ruling. `dropped` is threaded through so a defective
+    // declaration still reaches its author.
+    const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
+    const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
+    if (declaredGlobs.length === 0 && !hasDrop) return []; // DORMANT — no diff, no store read, no output
+    const result = inspectAttestations({ projectRoot: target, touchedPaths: touchedPathsFn(), declaredGlobs });
+    return attestationDisclosureLines({ tool, result, declaredGlobs, subject, dropped });
+  } catch (err) {
+    return [
+      `${tool}: ATTESTATION DISCLOSURE SKIPPED — the disclosure computation itself threw ` +
+        `(${safeLabel(err && err.message ? err.message : err)}). Disclosed and NON-FATAL: nothing about this commit changes, because this ` +
+        `mechanism is advisory only and never a refusal. The attestation rollup for this invocation is missing — inspect the store by hand if you need it.`,
+    ];
+  }
+}
 
 /** git wrapper local to amend mode: returns {status, stdout, stderr, error}.
  *  `input` (optional) is piped to the child's stdin — used for
@@ -2086,6 +2194,30 @@ function runTargetShaMode(targetShaArg) {
         `receipt can never be spent, discharge it explicitly with 'node scripts/review-ledger.mjs discharge' — never by deleting the evidence.`
     );
   }
+
+  // ---------------------------------------------------------------------
+  // ATTESTATION DISCLOSURE, MEASURED AGAINST THE TARGET COMMIT'S OWN DIFF
+  // (decision 1f069af4 v2 §4: "commit-reviewed inspects the staged diff in -m
+  // mode AND the target commit's own diff in --target-sha mode"). An
+  // `if (!targetSha)` carve-out would leave every post-hoc amend silently
+  // undisclosed, and no new-commit test could ever see the gap.
+  //
+  // Its own diff-tree read rather than the `targetFiles` set computed above,
+  // because that one is deliberately rename-FOLLOWING for receipt matching while
+  // the disclosure is rename-SAFE: an attestation names the path a human
+  // inspected, and a rename is exactly the event that must surface as "the path
+  // you inspected is gone" rather than be silently carried to a new name.
+  //
+  // Printed BEFORE any mutation, and fail-open like every other invocation of
+  // this computation — a disclosure never costs an amend.
+  // ---------------------------------------------------------------------
+  const attestationDisclosure = attestationDisclosureFor('commit-reviewed', "the target commit's bytes", () => {
+    const r = gitRun(['diff-tree', '--root', '--no-commit-id', '--no-renames', '--name-only', '-r', '-z', resolvedSha]);
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error(`git diff-tree --no-renames exited ${r.status}: ${(r.stderr || '').trim()}`);
+    return parseNulPathList(r.stdout);
+  });
+  for (const line of attestationDisclosure) console.error(line);
 
   // ---------------------------------------------------------------------
   // G4b: REVIEWED-BYTES ENFORCEMENT, MEASURED AGAINST THE TARGET COMMIT'S
@@ -2590,6 +2722,10 @@ function runTargetShaMode(targetShaArg) {
       // See the -m flow's report: null on every run that did not ask for an
       // unnecessary waiver, never omitted.
       waiver_unused: waiverUnusedNote,
+      // Same field, same semantics, same emptiness convention as the -m flow's
+      // report (decision 1f069af4 v2 §6) — a consumer of this CLI's output must
+      // not have to know which mode produced it.
+      attestation_disclosure: attestationDisclosure,
     })
   );
 }
@@ -2610,85 +2746,18 @@ function runTargetShaMode(targetShaArg) {
 // be invisible to every new-commit test.
 // ===========================================================================
 
-/** A USABLE recorded blob value: exactly 40 hex characters, the shape `git
- *  hash-object` produces. Anything else is present-but-unusable evidence,
- *  which §2 treats as INCONSISTENT rather than absent.
- *  A hoisted `function`, NOT a module const, and that is load-bearing rather
- *  than stylistic: the -m flow runs at module top level, ABOVE this section, so
- *  a `const` regex here sits in its temporal dead zone when the verdict runs
- *  and every call throws 'Cannot access before initialization'. Because the
- *  enforcement is deliberately fail-open on a throw, that TDZ error surfaced
- *  not as a crash but as a CLEAN COMMIT with a REVIEWED-BYTES CHECK
- *  UNAVAILABLE note — i.e. the gate silently disabling itself (measured while
- *  building this slice). Same reason every other helper here is hoisted. */
-function isUsableBlobSha(v) {
-  return typeof v === 'string' && /^[0-9a-f]{40}$/i.test(v);
-}
-
-/** The one path spelling used on BOTH sides of every comparison here (mirrors
- *  the per-flow `normalizePath` consts — same rule, hoisted so the shared
- *  verdict can apply it too): backslashes to '/', a stripped leading './'. */
-function normalizeRepoPath(p) {
-  return String(p).replace(/\\/g, '/').replace(/^\.\//, '');
-}
-
-/** The receipt's recorded blob evidence: `{map, collisions}`, keyed by
- *  normalized path, values RAW AND UNFILTERED. That last part is load-bearing
- *  and is the difference between this and the advisory block's `recordedBlobs`:
- *  a present-but-unusable value ('not-a-sha', '', a number) must stay
- *  DISTINGUISHABLE from an absent one, because §2 refuses INCONSISTENT evidence
- *  while grandfathering ABSENT evidence. Filtering at read time — which the
- *  advisory could afford, since every outcome there was a warning — collapses
- *  those two into one and hands the trivial bypass (write junk instead of a sha)
- *  the grandfather clause.
- *
- *  ALIAS COLLISION IS AN EVIDENCE DEFECT, NOT A SPELLING PREFERENCE (Codex
- *  review MED, fix round 2026-08-31). Two recorded keys can normalize to ONE
- *  path ('src/a.mjs' and '.\\src\\a.mjs'). Recording the SAME sha under both is
- *  harmless — one path, one answer, so the map keeps it and nothing is flagged.
- *  Recording DIFFERENT shas means the receipt contradicts ITSELF about what it
- *  reviewed, and the previous first-spelling-wins rule silently picked one of
- *  the two: appending a MATCHING alias beside a MISMATCHING real key was
- *  therefore a one-line way to make the mismatch never be compared. Such a path
- *  is returned in `collisions`, and the verdict refuses on it as INCONSISTENT
- *  evidence rather than choosing a winner. */
-function receiptBlobEvidence(e) {
-  const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
-  const b = rs && typeof rs.blobs === 'object' && rs.blobs !== null && !Array.isArray(rs.blobs) ? rs.blobs : null;
-  const map = new Map();
-  const collisions = new Set();
-  if (!b) return { map, collisions };
-  for (const [p, sha] of Object.entries(b)) {
-    if (typeof p !== 'string' || p === '') continue;
-    const n = normalizeRepoPath(p);
-    if (!map.has(n)) {
-      map.set(n, sha);
-      continue;
-    }
-    const prev = map.get(n);
-    // Two usable shas compare case-insensitively (hex spelling is not evidence);
-    // anything else compares by identity, so two junk values only agree when
-    // they are literally the same value.
-    const agree = isUsableBlobSha(prev) && isUsableBlobSha(sha) ? prev.toLowerCase() === sha.toLowerCase() : Object.is(prev, sha);
-    if (!agree) collisions.add(n);
-  }
-  return { map, collisions };
-}
-
-/** The blob map alone — for the v1 fingerprint, where a collision changes the
- *  identifier's VALUE but never a verdict (the verdict reads the full evidence
- *  through receiptBlobEvidence and refuses on the collision). */
-function receiptBlobMap(e) {
-  return receiptBlobEvidence(e).map;
-}
-
-/** The territory the receipt DECLARES, normalized. Used together with the blob
- *  keys to decide COVERAGE — iterating the blob map alone would silently skip
- *  a declared-but-unbound path, which is precisely the partial-coverage hole
- *  §2 clause 2 exists to close. */
-function receiptDeclaredPaths(e) {
-  return Array.isArray(e && e.files) ? e.files.filter((f) => typeof f === 'string' && f !== '').map(normalizeRepoPath) : [];
-}
+// isUsableBlobSha / normalizeReceiptPath / receiptBlobEvidence / receiptBlobMap /
+// receiptDeclaredPaths ARE NO LONGER DECLARED HERE (board 7dd3200a). They moved
+// VERBATIM — bodies and reasoning comments alike — to
+// ./hooks/lib/review-ledger-entry.mjs and are imported at the top of this file;
+// see that import's note and the lib's V1 RECEIPT IDENTITY section for why.
+// Short version: §3's discharge verb now addresses a v1 entry by a `--legacy-
+// handle` that must be THE SAME v1 identity §2 stamps as a waiver trailer value
+// here, and two independently-derived v1 identities is a defect on its face.
+// THE TDZ HAZARD THE OLD COMMENTS HERE WARNED ABOUT IS CLOSED BY THE MOVE, NOT
+// REOPENED BY IT: an ESM import binding is initialized before this module's body
+// runs, which a `const` in this section was not — that hoisting rule still
+// governs every function that REMAINS in this section.
 
 /** The receipt ADMITS its content evidence does not cover everything it
  *  declares — v1's reviewed_state.truncated (strict true, never a truthy
@@ -2999,44 +3068,14 @@ function reviewedBytesVerdict(entries, touchedPaths, readBlobs, progress) {
   return { findings, unavailable, contradictory, unreadable, checked: p.checked };
 }
 
-/** A v1 receipt has no entry_id, so its waiver trailer carries a fingerprint
- *  of the RECEIPT'S OWN CONTENT (§2: "stable fingerprint for v1"). STABLE means
- *  deterministic given the receipt: two byte-identical receipts fingerprint
- *  identically (frozen pin E3 runs the same fixture twice and compares).
- *  Deliberately NOT derived from the commit sha, the clock, or randomUUID —
- *  a per-invocation value is a fingerprint of nothing and cannot say WHICH
- *  receipt was waived, which is the only thing the trailer is for.
- *  The inputs are the receipt's identity-bearing fields: agent_type, the
- *  dispatch instant, the DECLARED TERRITORY, and the recorded blob map (both
- *  sorted, so key order in the ledger file cannot change the answer). Guarded
- *  stringify for the same reason safeLabel exists — a ledger value is arbitrary
- *  JSON.
- *  `files` IS PART OF THE INPUT (roster review MED-1, fix round 2026-08-31):
- *  since file-scoped stamping, territory is one of the fields that distinguishes
- *  two otherwise-identical receipts (the measured shape: two dispatches in ONE
- *  message sharing agent_type AND the Start-millisecond, differing only in
- *  files[] — file-scoping S9). Omitting it made those two receipts waive under
- *  ONE trailer value, i.e. an audit trail that cannot say WHICH review was
- *  overridden — the single thing the trailer exists for.
- *  WIDTH: 32 hex characters (Codex review LOW) — 16 hex is 64 bits, and a
- *  waiver identifier is an audit key, not a cache key. 32 hex keeps
- *  `receipt-<fp>` at 40 characters, well inside waiverIdentity's 100-char
- *  trailer-value bound. */
-function v1ReceiptFingerprint(e) {
-  const blobs = [...receiptBlobMap(e).entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
-  const files = [...receiptDeclaredPaths(e)].sort();
-  let canonical;
-  try {
-    canonical = JSON.stringify([e && e.agent_type, e && e.at, files, blobs]);
-    if (typeof canonical !== 'string') canonical = '<unserializable>';
-  } catch {
-    canonical = '<unserializable>';
-  }
-  return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
-}
+// v1ReceiptFingerprint moved to ./hooks/lib/review-ledger-entry.mjs (board
+// 7dd3200a) together with the four helpers it reads through; `receipt-<fp>` is
+// spelled ONCE there, as legacyReceiptHandle, because `review-ledger discharge
+// --legacy-handle` accepts exactly the string this file stamps. Frozen pin E3
+// (same fixture twice, compared) still exercises it through this call site.
 
 /** The value stamped in `Review-Bytes-Waiver: <identity>` — v2's entry_id when
- *  it is present AND TRAILER-SAFE, else the v1 fingerprint.
+ *  it is present AND TRAILER-SAFE, else the v1 legacy handle.
  *  THE SHAPE CHECK IS NOT COSMETIC: the ledger is agent-writable, so an
  *  entry_id carrying \n would forge a trailer line inside the very block this
  *  CLI verifies — the same smuggling VALID_AGENT_TYPE closes for agent_type.
@@ -3045,7 +3084,7 @@ function v1ReceiptFingerprint(e) {
 function waiverIdentity(e) {
   const id = e && typeof e.entry_id === 'string' ? e.entry_id : '';
   if (/^[A-Za-z0-9._:-]{1,100}$/.test(id)) return id;
-  return `receipt-${v1ReceiptFingerprint(e)}`;
+  return legacyReceiptHandle(e);
 }
 
 /** The ONE refusal message, shared by both flows (§2: "aggregated into ONE

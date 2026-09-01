@@ -69,6 +69,7 @@
   "maintenance_queue": {
     "deep_threshold": 15
   },
+  "attestation_path_globs": [],
   "store_authority": "primary",
   "staleness": {
     "research_days": { "fast": 30, "medium": 90, "stable": 365 },

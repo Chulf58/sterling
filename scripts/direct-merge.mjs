@@ -18,6 +18,10 @@ import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/l
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { matchesGlob } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
+// Attestation disclosure (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2) — the SAME read-only inspector commit-reviewed
+// and merge-gate use; see the block above the merge action.
+import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
@@ -689,6 +693,59 @@ if (hasCheck) {
   console.error("direct-merge: no `check` script in the target's package.json — battery skipped (loud)");
 }
 
+// ===========================================================================
+// ATTESTATION DISCLOSURE (decision attestation-staleness-disclosure-only-never-
+// a-refusing-gate, 1f069af4 v2; board attestation-gate 9868a0dd).
+//
+// WHY THIS SURFACE EXISTS AT ALL, given the ruling was about COMMIT time: the
+// design's first sparring round found commit-only delivery FATAL as a complete
+// shape. Commit stderr reaches the CONDUCTOR, while decision a7dbac2f reserves
+// inspection judgment for the HUMAN — and the human stands HERE, at the merge
+// gate. So the same one computation runs at both moments; this is an amendment
+// to the user-ruled commit-time disclosure, never a replacement for it.
+//
+// PRINTED BEFORE THE MERGE ACTION, so a reader sees it while the decision is
+// still theirs to make; it is ALSO carried on the final JSON report below.
+// ADVISORY ONLY — it can never refuse this merge, and the whole computation
+// is fail-open: any throw degrades to one disclosed line (P1, and the
+// disclosure-not-gate ruling itself).
+//
+// TOUCHED SET = the branch vs its merge base, rename-SAFE (--no-renames, -z).
+// The `changed` set computed at the top of this file is deliberately NOT reused:
+// it is rename-following and newline-split, and an attestation names the path a
+// human inspected — a rename must surface as a gone path, not follow silently.
+//
+// THE GLOBS COME FROM readAttestationGlobs, NEVER FROM openProject's PARSED
+// CONFIG (Codex review HIGH-1, 2026-09-01). openProject runs parseConfig at the
+// top of this file, hundreds of lines before this fail-open wrapper exists, so
+// ANY validation of this advisory field there would terminate the merge command
+// outright — a declaration that can refuse a merge is exactly what this feature
+// was redesigned not to be. The schema is unrefined; the tolerant read below
+// drops unusable entries and DISCLOSES the drop.
+// ===========================================================================
+const attestationDisclosure = (() => {
+  try {
+    const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
+    const hasDrop = dropped.invalid_container || dropped.non_string > 0 || dropped.empty > 0 || dropped.duplicates.length > 0;
+    if (declaredGlobs.length === 0 && !hasDrop) return []; // DORMANT (shipped default) — no store read, no diff, no output
+    const d = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', '-z', '--end-of-options', mergeBase, branchTip], {
+      cwd: target,
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    if (d.error) throw d.error;
+    if (d.status !== 0) throw new Error(`git diff --no-renames ${mergeBase} ${branchTip} exited ${d.status}: ${(d.stderr || '').trim()}`);
+    const result = inspectAttestations({ projectRoot: target, touchedPaths: parseNulPathList(d.stdout), declaredGlobs });
+    return attestationDisclosureLines({ tool: 'direct-merge', result, declaredGlobs, subject: 'the branch tree', dropped });
+  } catch (e) {
+    return [
+      `direct-merge: ATTESTATION DISCLOSURE SKIPPED — the disclosure computation itself threw (${e?.message ?? e}). Disclosed and NON-FATAL: ` +
+        `the merge is unaffected, because this mechanism is advisory only and never a refusal.`,
+    ];
+  }
+})();
+for (const line of attestationDisclosure) console.error(line);
+
 // branch-manager throws raw Errors (it is a library, shared with the §8.1 gate and
 // the MCP server, so it cannot process.exit). Routing them through fail() here
 // gives the gate ONE failure shape instead of a stack trace after the battery.
@@ -699,6 +756,13 @@ try {
 } catch (e) {
   fail(`direct-merge: ${e?.message ?? e}`);
 }
+// The disclosure rides the machine-readable report too (decision 1f069af4 v2
+// §6), not only stderr: everything below prints `{ ...merged, … }` from one of
+// five exit points, so attaching it to `merged` once is what makes every one of
+// them carry it — including the sweep-failure and stale-bundle paths, which exit
+// early and would otherwise drop it. Empty array on a dormant project; never
+// omitted, so an absent key means an older CLI rather than nothing to disclose.
+merged.attestation_disclosure = attestationDisclosure;
 
 // BOARD-PAYMENT NUDGE (board-payment-nudge-at-merge-gate, user-directed
 // 2026-08-27): the merge just landed, so any open USER-source board item

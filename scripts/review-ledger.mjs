@@ -4,13 +4,44 @@
 // campaign slice S2b-3).
 //
 //   node scripts/review-ledger.mjs discharge \
-//     --entry-id <uuid> \
+//     (--entry-id <uuid> | --legacy-handle receipt-<32 hex>) \
 //     --digest   <sha256 hex of the EXACT current ledger bytes> \
 //     --class    <foreign-session|foreign-branch|no-live-territory> \
 //     --reason   "<single-line reason>"
 //
 //   exit 0 = discharged (a one-line JSON report on stdout)
 //   exit 1 = refused (the reason on stderr; NOTHING written, ever)
+//
+// TWO SELECTORS, ONE PER SCHEMA VERSION (§3 verbatim: "selector is entry_id (v2)
+// or a generated legacy handle"; board 7dd3200a). A v1 entry has no entry_id, so
+// before the handle existed a stranded LEGACY receipt could not be discharged at
+// all — it sat in the ledger forever, re-reported by H1 at every SessionStart and
+// re-disclosed by commit-reviewed at every commit, with the only escape being the
+// hand deletion §3 forbids. THE HANDLE IS NOT A NEW IDENTITY: it is the SAME
+// content fingerprint §2 already stamps as a v1 `Review-Bytes-Waiver` trailer
+// value, computed by the one shared legacyReceiptHandle() so a conductor can
+// carry the string from either surface to the other verbatim.
+//
+// EXACT FORM ONLY — NEVER A PREFIX, NEVER AN ABBREVIATION (anti-pattern
+// no-bounded-trail-guard-for-destructive-addressing, severity BLOCK). Discharge
+// OVERWRITES an agent-writable evidence record and there is no resurrection verb,
+// so the forgiving-addressing forms that are safe on a read are forbidden here:
+// `--legacy-handle` accepts `receipt-<32 lowercase hex>` character-for-character
+// and refuses everything else BEFORE the ledger is opened. Two v1 entries whose
+// content fingerprints collide are AMBIGUOUS: both are named and nothing is
+// written, exactly as a duplicate entry_id is.
+//
+// THE HANDLE DOES NOT MIGRATE THE ENTRY. §3 rejected in-place v1→v2 migration
+// ("a bulk rewrite of an agent-writable evidence file is an unreviewable write")
+// while licensing precisely this: "explicit discharge may add lifecycle fields to
+// a v1 entry as a requested transition". So a discharged v1 entry stays a v1
+// entry — its original evidence untouched, with `status` and `disposition` added
+// beside it. The shared adapter's dischargeMarkerClass authenticates that PAIR on
+// a legacy entry exactly as it does on a v2 one, which is what makes the
+// discharge actually take effect at H1 and commit-reviewed rather than being a
+// verb that reports success and changes nothing. A BARE `status:'discharged'` on
+// a v1 entry, with no contentful disposition, is still NOT a discharge and still
+// spends normally — that pass-through promise is unchanged.
 //
 // WHAT DISCHARGE IS FOR. A review receipt whose life ended without being spent
 // — the session that earned it is over, it belongs to another branch, or the
@@ -61,7 +92,13 @@ import { spawnSync } from 'node:child_process';
 // names every other reader already uses. This CLI selects and WRITES against
 // the RAW entry (so the on-disk shape is never rewritten by a read convention)
 // and READS its fields through the adapter.
-import { normalizeLedgerEntry } from './hooks/lib/review-ledger-entry.mjs';
+import {
+  normalizeLedgerEntry,
+  dischargeMarkerClass,
+  legacyReceiptHandle,
+  isLegacyEntry,
+  LEGACY_HANDLE_PATTERN,
+} from './hooks/lib/review-ledger-entry.mjs';
 
 const target = process.cwd();
 const argv = process.argv.slice(2);
@@ -81,6 +118,12 @@ const CLASSIFIER_VERSION = 1;
 const RECOGNIZED_CLASSES = ['foreign-session', 'foreign-branch', 'no-live-territory'];
 
 const REASON_MAX = 500; // same bound as commit-reviewed's --waive-bytes reason (decision 57984926 §2)
+
+// How many legacy handles an unknown-handle refusal prints (board 7dd3200a).
+// Bounded because a refusal is a message, not a report — but generous enough
+// that a real ledger's whole legacy set fits, since this listing is the only
+// place a derived handle is ever shown.
+const HANDLE_LIST_CAP = 20;
 
 // THE NOTE BOUND for `record-external` (§4: "--note sanitized and bounded").
 // Wider than REASON_MAX because a consult note summarizes a whole review round
@@ -151,7 +194,8 @@ function flagAll(name) {
 }
 
 const USAGE_DISCHARGE =
-  "usage: node scripts/review-ledger.mjs discharge --entry-id <uuid> --digest <sha256-hex-of-the-exact-current-ledger-bytes> " +
+  "usage: node scripts/review-ledger.mjs discharge (--entry-id <uuid> | --legacy-handle receipt-<32 hex>) " +
+  '--digest <sha256-hex-of-the-exact-current-ledger-bytes> ' +
   `--class <${RECOGNIZED_CLASSES.join('|')}> --reason "<single-line reason>"`;
 const USAGE_RECORD_EXTERNAL =
   'usage: node scripts/review-ledger.mjs record-external --file <repo-relative path> [--file <path> …] --provider <id> [--model <id>] ' +
@@ -200,11 +244,82 @@ if (verb === 'record-external') {
 // so a caller can never be told the wrong thing about which argument was
 // wrong. Nothing is read, locked or written until all four are well-formed.
 // ===========================================================================
-const entryIdRaw = flag('--entry-id');
-if (!flagGiven('--entry-id') || typeof entryIdRaw !== 'string' || entryIdRaw.trim() === '') {
-  fail(`review-ledger discharge: --entry-id <uuid> is required — it is the SELECTOR, and a discharge with no entry selected has no target. ${USAGE_DISCHARGE}`);
+// TWO SELECTORS, EXACTLY ONE PER INVOCATION (§3; board 7dd3200a). --entry-id
+// addresses a v2 entry; --legacy-handle addresses a v1 one. They are mutually
+// exclusive rather than "one wins": a command naming BOTH has two possible
+// targets, and silently preferring either would let a mistyped flag discharge an
+// entry the conductor never looked at — on a verb that overwrites evidence with
+// no resurrection path. PRESENCE, not truthiness, on both.
+const entryIdGiven = flagGiven('--entry-id');
+const legacyHandleGiven = flagGiven('--legacy-handle');
+
+// A REPEATED SELECTOR FLAG REFUSES — IT NEVER FIRST-WINS (Codex review MED-2,
+// thread 01a05c7b). `flag()` returns the FIRST occurrence's value and the checks
+// below only ask whether the flag is PRESENT, so `--legacy-handle X
+// --legacy-handle Y` silently acted on X while the caller was looking at Y. That
+// is the SAME defect class the exact-form rule closes one level up: a forgiving
+// reading of an ambiguous address on a call that overwrites evidence with no
+// resurrection path. "Two values for one selector" is exactly "two possible
+// targets", which the both-selectors rule below already refuses — so it gets the
+// same answer, whatever the values are. Refused even when the repeats are
+// IDENTICAL: a duplicated flag means the caller does not know what they typed,
+// and the cost of asking them to re-run is a second of typing against the cost
+// of discharging a receipt nobody chose.
+for (const selector of ['--entry-id', '--legacy-handle']) {
+  const occurrences = flagAll(selector);
+  if (occurrences.length > 1) {
+    fail(
+      `review-ledger discharge: ${selector} is given ${occurrences.length} times (${occurrences.map((v) => JSON.stringify(v)).join(', ')}) — a selector ` +
+        `repeated is a discharge with more than one possible target, and this verb NEVER silently takes the first. Discharge overwrites an agent-writable ` +
+        `evidence record and there is no resurrection verb, so acting on either value would be a guess about which receipt the conductor meant. Re-run with ` +
+        `exactly one ${selector}. Nothing written. ${USAGE_DISCHARGE}`
+    );
+  }
 }
-const entryId = entryIdRaw.trim();
+
+if (entryIdGiven && legacyHandleGiven) {
+  fail(
+    `review-ledger discharge: --entry-id and --legacy-handle are BOTH given — they are two different selectors addressing two different schema versions, ` +
+      `and a discharge with two possible targets has no target. Re-run with exactly one. Nothing written. ${USAGE_DISCHARGE}`
+  );
+}
+if (!entryIdGiven && !legacyHandleGiven) {
+  fail(
+    `review-ledger discharge: a SELECTOR is required — --entry-id <uuid> for a schema_version 2 entry, or --legacy-handle receipt-<32 hex> for a LEGACY v1 ` +
+      `entry (decision 57984926 §3). A discharge with no entry selected has no target. ${USAGE_DISCHARGE}`
+  );
+}
+
+const entryIdRaw = flag('--entry-id');
+if (entryIdGiven && (typeof entryIdRaw !== 'string' || entryIdRaw.trim() === '')) {
+  fail(`review-ledger discharge: --entry-id <uuid> was given with no value — the selector is what a discharge targets. Nothing written. ${USAGE_DISCHARGE}`);
+}
+const entryId = entryIdGiven ? entryIdRaw.trim() : null;
+
+// THE LEGACY HANDLE IS ACCEPTED IN ITS FULL EXACT FORM AND NOTHING ELSE
+// (anti-pattern no-bounded-trail-guard-for-destructive-addressing, severity
+// BLOCK). Discharge overwrites an agent-writable evidence record and offers no
+// resurrection, so no prefix, abbreviation, truncation, case fold or surrounding
+// whitespace is resolved for the caller: a handle is 'receipt-' plus exactly 32
+// lowercase hex characters, matched character-for-character against the value
+// legacyReceiptHandle() computes. The refusal SAYS SO, because the constraint is
+// counter-intuitive on a surface where 8-char prefixes resolve everywhere else in
+// Sterling — and the reason for the difference (this call destroys, those calls
+// do not) is what the reader needs to carry away.
+const legacyHandleRaw = flag('--legacy-handle');
+if (legacyHandleGiven && (typeof legacyHandleRaw !== 'string' || legacyHandleRaw.trim() === '')) {
+  fail(`review-ledger discharge: --legacy-handle was given with no value — the selector is what a discharge targets. Nothing written. ${USAGE_DISCHARGE}`);
+}
+const legacyHandle = legacyHandleGiven ? legacyHandleRaw : null;
+if (legacyHandle !== null && !LEGACY_HANDLE_PATTERN.test(legacyHandle)) {
+  fail(
+    `review-ledger discharge: --legacy-handle ${JSON.stringify(legacyHandle)} is not a legacy receipt handle. The one accepted form is 'receipt-' followed by ` +
+      `exactly 32 LOWERCASE HEX characters, EXACTLY as printed — this selector is NEVER prefix-resolved, abbreviated, case-folded or trimmed, because ` +
+      `discharge overwrites an agent-writable evidence record and has no resurrection verb, so a forgiving addressing form could silently retarget a ` +
+      `bystander receipt (anti-pattern no-bounded-trail-guard-for-destructive-addressing). The same string is what commit-reviewed stamps as a v1 ` +
+      `'Review-Bytes-Waiver' trailer value. Nothing written.`
+  );
+}
 
 const classRaw = flag('--class');
 if (!flagGiven('--class') || typeof classRaw !== 'string' || classRaw.trim() === '') {
@@ -216,6 +331,27 @@ if (!RECOGNIZED_CLASSES.includes(dischargeClass)) {
     `review-ledger discharge: UNRECOGNIZED class ${JSON.stringify(dischargeClass)} — the recognized unspendable classes are ${RECOGNIZED_CLASSES.join(', ')} ` +
       `(decision 57984926 §3). An arbitrary class string is refused, never recorded: a discharge is only legitimate for a receipt that CANNOT be spent, and ` +
       `accepting any class at all would turn this verb into "delete anything I do not want to see". Nothing written.`
+  );
+}
+
+// NO-LIVE-TERRITORY IS A v2-ONLY CLASS, AND THE SELECTOR ALREADY SETTLES IT
+// (§3: the classification "applies ONLY when ALL hold: v2 roster receipt,
+// structured non-empty territory, usable base_sha …"). Checked HERE, against the
+// selector, rather than left to verifyNoLiveTerritory's structured-territory
+// test: decision 8f137474's FLAT `files_source` predates v2, so a legacy entry
+// CAN carry files_source:'review-territory' and would otherwise slip past that
+// test into a conclusive-sounding verdict on a receipt §3 excludes by schema
+// version. The two foreign-* classes stay available to a legacy entry — a v1
+// receipt records session_id and branch flat, which is exactly the pair those
+// classes compare, and the stranded-v1 case this handle exists for is a foreign
+// session.
+if (legacyHandle !== null && dischargeClass === 'no-live-territory') {
+  fail(
+    `review-ledger discharge: --class 'no-live-territory' cannot be established for a LEGACY v1 entry. Decision 57984926 §3 makes a v2 roster receipt the ` +
+      `FIRST precondition of that classification, alongside structured non-empty territory and a usable base_sha — a v1 receipt's territory attribution is ` +
+      `the free-prose extraction measured unreliable by research finding 289cd172, so "none of these paths is live" computed over it would be a ` +
+      `conclusive-sounding verdict about the wrong files. Any ambiguity yields UNKNOWN, never no-live. Discharge it as 'foreign-session' or ` +
+      `'foreign-branch' if either holds, or judge it another way. Nothing written.`
   );
 }
 
@@ -817,46 +953,142 @@ function dischargeUnderLock() {
     refuse(`review-ledger discharge: ${ledgerFilePath} does not hold a JSON array (got ${typeof entries}) — refusing to rewrite it. Nothing written.`);
   }
 
-  // SELECTOR: exact entry_id equality on the RAW entry. No prefix matching and
-  // no "the only entry" / "the first entry" fallback — a forgiving selector on
-  // a state-changing operation is the shape anti-pattern
-  // no-bounded-trail-guard-for-destructive-addressing forbids, and here it
-  // would discharge a bystander as a consolation prize.
+  // SELECTOR: exact equality on the RAW entry, in whichever of the two spellings
+  // was given. No prefix matching and no "the only entry" / "the first entry"
+  // fallback — a forgiving selector on a state-changing operation is the shape
+  // anti-pattern no-bounded-trail-guard-for-destructive-addressing forbids, and
+  // here it would discharge a bystander as a consolation prize.
+  //
+  // EACH SELECTOR'S CANDIDATE SET IS SCHEMA-DISJOINT — the legacy arm considers
+  // ONLY legacy entries, and the v2 arm ONLY v2 entries (Codex review MED-1,
+  // thread 01a05c7b). isLegacyEntry is §3's "missing schema_version = legacy
+  // roster receipt", stated once in the shared adapter, so both arms ask one
+  // question one way.
+  //
+  // THE v2 ARM'S FILTER IS THE FIX, NOT DECORATION. It used to match EVERY object
+  // carrying the id, so a LEGACY entry that happened to carry the same entry_id as
+  // a real v2 entry joined the candidate set and made the selector AMBIGUOUS —
+  // blocking the discharge of a perfectly valid v2 receipt on the strength of a
+  // field a v1 entry was never supposed to have (and which anything writing the
+  // ledger can add). The ledger is agent-writable, so that was a one-key denial of
+  // service against the v2 arm. `entry_id` is meaningful ONLY inside the v2
+  // envelope; on a legacy entry it is an unowned stray field, and it is now read
+  // exactly that way — as a DIAGNOSTIC below, never as a selection candidate.
   const matches = [];
-  for (let i = 0; i < entries.length; i++) {
-    const e = entries[i];
-    if (e && typeof e === 'object' && typeof e.entry_id === 'string' && e.entry_id === entryId) matches.push(i);
+  if (legacyHandle !== null) {
+    for (let i = 0; i < entries.length; i++) {
+      if (!isLegacyEntry(entries[i])) continue;
+      if (legacyReceiptHandle(entries[i]) === legacyHandle) matches.push(i);
+    }
+  } else {
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i];
+      if (isLegacyEntry(e)) continue; // a stray entry_id on a v1 entry is not a v2 address
+      if (e && typeof e === 'object' && typeof e.entry_id === 'string' && e.entry_id === entryId) matches.push(i);
+    }
   }
   if (matches.length === 0) {
+    if (legacyHandle !== null) {
+      // THE ONE PLACE HANDLES ARE PRINTED. A handle is DERIVED, not stored, so a
+      // conductor holding a stranded v1 receipt has nowhere else to read it from
+      // — and a selector nobody can discover is a selector nobody can use. The
+      // list is of FULL EXACT handles (never truncated: a clipped handle here
+      // would train the very abbreviation this verb refuses) and is capped, since
+      // a refusal is a message, not a report.
+      const legacyIdx = entries.map((e, i) => (isLegacyEntry(e) ? i : -1)).filter((i) => i !== -1);
+      const shown = legacyIdx.slice(0, HANDLE_LIST_CAP);
+      const listing =
+        legacyIdx.length === 0
+          ? ' The ledger holds NO legacy v1 entries at all — every entry is schema_version 2, addressed by --entry-id.'
+          : ` The ${legacyIdx.length} legacy v1 entr${legacyIdx.length === 1 ? 'y' : 'ies'} present ${legacyIdx.length === 1 ? 'has' : 'have'} these handles: ` +
+            shown.map((i) => `${legacyReceiptHandle(entries[i])} (${safeLabel(normalizeLedgerEntry(entries[i]).agent_type)}, at ${safeLabel(entries[i].at)})`).join('; ') +
+            (legacyIdx.length > shown.length ? `; …and ${legacyIdx.length - shown.length} more` : '') +
+            '.';
+      refuse(
+        `review-ledger discharge: NO LEGACY LEDGER ENTRY has handle ${JSON.stringify(legacyHandle)} — ${entries.length} ` +
+          `entr${entries.length === 1 ? 'y' : 'ies'} checked. Nothing is discharged in its place and nothing is written: an unknown selector is a refusal, ` +
+          `never a substitute target, and it is never widened into a prefix search to find something close.${listing}`
+      );
+    }
+    // DIAGNOSTIC ONLY, RUN AFTER SELECTION HAS ALREADY FAILED (Codex review
+    // MED-1). A legacy entry carrying this entry_id was never a candidate above —
+    // that is the whole point of the disjoint sets — but it IS the likeliest
+    // reason a conductor is here, so the refusal names its handle rather than
+    // dead-ending. Looking it up HERE, on a path that has already decided to
+    // refuse, is what keeps it a diagnostic: nothing it finds can change the
+    // outcome, promote a target, or resolve an ambiguity. Before the legacy
+    // handle existed this refusal was terminal, and that is what stranded the
+    // receipt this feature exists for.
+    const strays = entries
+      .map((e, i) => (isLegacyEntry(e) && e && typeof e === 'object' && typeof e.entry_id === 'string' && e.entry_id === entryId ? i : -1))
+      .filter((i) => i !== -1);
+    const redirect =
+      strays.length === 0
+        ? ''
+        : ` NOTE: ${strays.length} LEGACY v1 entr${strays.length === 1 ? 'y carries' : 'ies carry'} that entry_id as a stray field, which is NOT a v2 address ` +
+          `— entry_id is meaningful only inside the v2 envelope, and a v1 entry is addressed by its generated handle (decision 57984926 §3). Re-run with ` +
+          `${strays.map((i) => `--legacy-handle ${legacyReceiptHandle(normalizeLedgerEntry(entries[i]))}`).join(' or ')}. Note that --class 'no-live-territory' ` +
+          `is not available for a v1 entry: §3 makes a v2 roster receipt its first precondition.`;
     refuse(
-      `review-ledger discharge: NO LEDGER ENTRY has entry_id ${JSON.stringify(entryId)} — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'} ` +
-        `checked, none match. Nothing is discharged in its place and nothing is written: an unknown selector is a refusal, never a substitute target.`
+      `review-ledger discharge: NO SCHEMA_VERSION 2 LEDGER ENTRY has entry_id ${JSON.stringify(entryId)} — ${entries.length} ` +
+        `entr${entries.length === 1 ? 'y' : 'ies'} checked, none match. Nothing is discharged in its place and nothing is written: an unknown selector is a ` +
+        `refusal, never a substitute target.${redirect}`
     );
   }
   if (matches.length > 1) {
+    if (legacyHandle !== null) {
+      // A HANDLE COLLISION NAMES BOTH SIDES AND WRITES NOTHING. Two v1 entries
+      // whose agent_type, dispatch instant, declared territory AND recorded blob
+      // map all agree are indistinguishable to this selector, so picking either
+      // would be picking at random on a call that overwrites evidence.
+      refuse(
+        `review-ledger discharge: ${matches.length} LEGACY ledger entries share the handle ${JSON.stringify(legacyHandle)} — the selector is AMBIGUOUS, so no ` +
+          `entry is discharged and NOTHING is written. The colliding entries are: ` +
+          matches
+            .map((i) => {
+              const n = normalizeLedgerEntry(entries[i]);
+              return `index ${i} (agent_type ${safeLabel(n.agent_type)}, at ${safeLabel(n.at)}, files ${safeLabel(n.files)})`;
+            })
+            .join('; ') +
+          `. A handle is a fingerprint of the receipt's own content (agent_type + dispatch instant + declared territory + recorded blobs), so a collision ` +
+          `means two receipts recorded identical content and neither can be told from the other here. Judge them by hand, or re-dispatch a reviewer for the ` +
+          `work they cover — this verb will not pick one at random.`
+      );
+    }
+    // v2 ENTRIES ONLY, by construction of the candidate set above (MED-1): a
+    // legacy entry carrying a stray copy of this id can no longer inflate this
+    // count, so reaching here means two REAL v2 entries genuinely share an id.
     refuse(
-      `review-ledger discharge: ${matches.length} ledger entries share entry_id ${JSON.stringify(entryId)} — the selector is AMBIGUOUS, so no entry is ` +
-        `discharged. Nothing written; repair the duplicate ids first.`
+      `review-ledger discharge: ${matches.length} schema_version 2 ledger entries share entry_id ${JSON.stringify(entryId)} — the selector is AMBIGUOUS, so ` +
+        `no entry is discharged. Nothing written; repair the duplicate ids first.`
     );
   }
   const index = matches[0];
   const rawEntry = entries[index];
+  // What the messages below call the target. One definition, so a refusal can
+  // never name the selector the caller did NOT use.
+  const selectorLabel = legacyHandle !== null ? `legacy handle ${JSON.stringify(legacyHandle)}` : `entry ${JSON.stringify(entryId)}`;
 
-  // v2 ONLY. §3 names "entry_id (v2) or a generated legacy handle"; the legacy
-  // handle is unspecified and unbuilt, so a v1 entry is REFUSED here rather
-  // than given an invented lifecycle. That refusal is also the honest one for
-  // no-live-territory, whose first precondition is "v2 roster receipt".
-  if (rawEntry.schema_version !== 2) {
-    refuse(
-      `review-ledger discharge: entry ${JSON.stringify(entryId)} is not a schema_version 2 ledger entry (schema_version=${safeLabel(rawEntry.schema_version)}) ` +
-        `— it is a LEGACY v1 receipt, which carries no lifecycle fields and no territory.source at all. The v2 entry_id selector does not address it, and ` +
-        `§3's generated legacy handle is not implemented, so there is nothing to discharge safely here. Nothing written.`
-    );
-  }
+  // SELECTOR/SCHEMA AGREEMENT IS ESTABLISHED BY THE CANDIDATE SETS, not by a
+  // check here (Codex review MED-1). A post-selection `schema_version !== 2`
+  // refusal used to stand at this point; it is GONE rather than kept as belt and
+  // braces, because with disjoint candidate sets it is unreachable, and an
+  // unreachable guard is the worse of the two options: it reads as the thing
+  // enforcing the rule, so the next reader relaxes the filter above believing
+  // this still catches it. `matches` therefore holds exactly one v2 entry on the
+  // v2 arm and exactly one legacy entry on the legacy arm, and the redirect a v1
+  // entry with a stray entry_id used to get is now issued by the zero-match
+  // refusal above, where it belongs.
   const norm = normalizeLedgerEntry(rawEntry);
-  if (norm.v2_deficient) {
+  // THE v2 ARM ONLY, for the same reason LOW-2 moved dischargeMarkerClass off this
+  // field: on the LEGACY arm `norm` IS the raw entry (the adapter returns a v1
+  // entry untouched), so a hand-written `v2_deficient: true` key would otherwise
+  // refuse the discharge of a perfectly ordinary v1 receipt — a one-key denial of
+  // service re-stranding the entry, in a ledger anything can write. On the v2 arm
+  // the field is computed by the adapter and is trustworthy.
+  if (legacyHandle === null && norm.v2_deficient) {
     refuse(
-      `review-ledger discharge: entry ${JSON.stringify(entryId)} claims schema_version 2 but is STRUCTURALLY DEFICIENT (missing entry_id/started_at/identity) ` +
+      `review-ledger discharge: ${selectorLabel} claims schema_version 2 but is STRUCTURALLY DEFICIENT (missing entry_id/started_at/identity) ` +
         `— commit-reviewed already withholds it from spending for that reason, and rewriting a malformed evidence record would manufacture a well-formed ` +
         `disposition out of a shape nothing produced. Nothing written.`
     );
@@ -868,7 +1100,40 @@ function dischargeUnderLock() {
   // state flip, and NEVER a rewritten disposition: a silently overwritten
   // justification lets a later, weaker reason replace the recorded one with no
   // trace. There is no resurrection verb either — see the header.
-  if (rawEntry.status === 'discharged') {
+  //
+  // ON A LEGACY ENTRY THE AUTHORITY IS THE MARKER CLASS, NOT THE BARE FIELD
+  // (board 7dd3200a). `status:'discharged'` alone on a v1 entry is NOT a
+  // lifecycle state — the shared adapter reads it as 'v1-no-lifecycle' and every
+  // spending surface still spends the receipt (frozen pin P4a) — so refusing
+  // here on the bare field would tell the conductor "already discharged" about a
+  // receipt that is demonstrably still being spent, and would re-strand exactly
+  // the entry this handle exists to free. So the legacy arm refuses on an
+  // AUTHENTICATED marker (the pair the verb itself writes) and on any recorded
+  // disposition it did not write, and otherwise proceeds — disclosing the stray
+  // field it is about to overwrite rather than overwriting it in silence.
+  if (legacyHandle !== null) {
+    if (dischargeMarkerClass(norm) === 'authenticated') {
+      const prior = rawEntry.disposition;
+      refuse(
+        `review-ledger discharge: the entry addressed by ${selectorLabel} is ALREADY DISCHARGED — class ${safeLabel(prior && prior.class)}, at ` +
+          `${safeLabel(prior && prior.at)}, reason ${safeLabel(prior && prior.reason)}. The recorded disposition is LEFT EXACTLY AS IT IS: a second discharge ` +
+          `would either flip a state that is already flipped or overwrite an accountable justification with a later one. Nothing written.`
+      );
+    }
+    if (rawEntry.disposition !== undefined && rawEntry.disposition !== null) {
+      refuse(
+        `review-ledger discharge: the entry addressed by ${selectorLabel} already carries a disposition ${safeLabel(rawEntry.disposition)} that this verb did ` +
+          `not write — it does not authenticate as a discharge (no contentful reason and recognized class), yet it records SOMETHING, and this verb will not ` +
+          `silently replace a justification a human may have meant. Repair or remove the field deliberately, then re-run. Nothing written.`
+      );
+    }
+    if (rawEntry.status !== undefined && rawEntry.status !== 'active' && rawEntry.status !== 'discharged') {
+      refuse(
+        `review-ledger discharge: the entry addressed by ${selectorLabel} carries an UNRECOGNIZED status ${safeLabel(rawEntry.status)} — the known lifecycle ` +
+          `states are 'active' and 'discharged'. Unknown signals halt (P5); nothing written.`
+      );
+    }
+  } else if (rawEntry.status === 'discharged') {
     const prior = rawEntry.disposition && typeof rawEntry.disposition === 'object' ? rawEntry.disposition : null;
     refuse(
       `review-ledger discharge: entry ${JSON.stringify(entryId)} is ALREADY DISCHARGED` +
@@ -879,7 +1144,12 @@ function dischargeUnderLock() {
         `accountable justification with a later one, and both are ways of losing the record this verb exists to keep. Nothing written.`
     );
   }
-  if (rawEntry.status !== undefined && rawEntry.status !== 'active') {
+  // v2 ARM ONLY — the legacy arm made this same check above, with 'discharged'
+  // deliberately excluded from it (a stray bare marker on a v1 entry is not a
+  // lifecycle state and must stay dischargeable). Reaching here on the v2 arm
+  // means the status is neither 'active' nor 'discharged', since the branch above
+  // already refused the latter.
+  if (legacyHandle === null && rawEntry.status !== undefined && rawEntry.status !== 'active') {
     refuse(
       `review-ledger discharge: entry ${JSON.stringify(entryId)} carries an UNRECOGNIZED status ${safeLabel(rawEntry.status)} — the known lifecycle states ` +
         `are 'active' and 'discharged'. Unknown signals halt (P5); nothing written.`
@@ -904,6 +1174,14 @@ function dischargeUnderLock() {
   // already exist on a real v2 entry) even the key order is unchanged. Every
   // OTHER entry in the array is written back untouched: this verb writes
   // exactly one entry.
+  //
+  // ON A LEGACY ENTRY THIS ADDS TWO KEYS AND MIGRATES NOTHING (board 7dd3200a).
+  // §3 rejected in-place v1→v2 migration outright while licensing exactly this
+  // shape — "explicit discharge may add lifecycle fields to a v1 entry as a
+  // REQUESTED TRANSITION" — so the entry stays v1: no schema_version is written,
+  // no field is renamed or nested, no evidence is rewritten. It simply gains
+  // `status` and `disposition` beside everything it already recorded, which is
+  // the same one-entry, evidence-preserving write the v2 arm performs.
   const dischargedEntry = {
     ...rawEntry,
     status: 'discharged',
@@ -928,9 +1206,40 @@ function dischargeUnderLock() {
   writeFileSync(tmpPath, JSON.stringify(next));
   renameSync(tmpPath, ledgerFilePath);
 
+  // THE STRAY-MARKER DISCLOSURE IS PRINTED HERE — AFTER renameSync, THE LINE THAT
+  // MAKES THE REPLACEMENT REAL, AND NOWHERE EARLIER (roster review LOW-1, then
+  // Codex re-verdict, thread 01a05c7b). It says a stray `status:'discharged'` on
+  // the target entry HAS BEEN replaced, which is a claim about a completed write.
+  // It has now moved twice, and the second move is the one that finishes the job:
+  // beside the marker check it fired on every refusal below it; above the write it
+  // still fired when writeFileSync/renameSync THREW — permissions, a full disk, a
+  // vanished .sterling — and that throw is NOT a Refusal, so it propagates out of
+  // withLedgerLock and is re-raised untouched at the call site, leaving the ledger
+  // byte-identical after stderr had already announced the replacement. "Nearly
+  // written" is written, as far as a reader deciding what to do next is concerned.
+  // Below the rename there is no failure path left that can un-write it.
+  if (legacyHandle !== null && rawEntry.status === 'discharged') {
+    console.error(
+      `review-ledger discharge: the legacy entry addressed by ${selectorLabel} carried a bare status:'discharged' with no disposition. That is NOT a ` +
+        `discharge — every reading surface still spends such a receipt (decision 57984926 §3's "missing status = active", read to its conclusion) — so this ` +
+        // WORDING IS FROZEN BY PIN L9, which asserts this exact phrase is ABSENT
+        // on every refusing path. Rewording it (e.g. to the past tense that now
+        // reads more naturally below the write) would satisfy that doesNotMatch
+        // for the wrong reason — drift, not correctness — and quietly hollow out
+        // the pin. The phrase stays; only its POSITION moved.
+        `discharge REPLACES the stray marker with an authenticated one. Disclosed, not silent.`
+    );
+  }
+
   return {
     discharged: true,
+    // BOTH SELECTOR FIELDS ARE ALWAYS PRESENT, one of them null — a report whose
+    // KEYS change with the selector cannot be read by a consumer that does not
+    // already know which selector was used. schema_version says which shape was
+    // written, so a reader never has to infer it from which field is populated.
     entry_id: entryId,
+    legacy_handle: legacyHandle,
+    schema_version: rawEntry.schema_version === 2 ? 2 : 1,
     agent_type: typeof norm.agent_type === 'string' ? norm.agent_type : null,
     class: dischargeClass,
     reason,

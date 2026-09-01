@@ -4985,6 +4985,37 @@ var configSchema = external_exports.object({
   // scripts/hooks/lib/undeclared-source.mjs (excluded wins over a matching
   // toolchain path_glob).
   undeclared_source_exclude_globs: external_exports.array(external_exports.string()).default([]),
+  // Attestation disclosure (decision attestation-staleness-disclosure-only-
+  // never-a-refusing-gate, 1f069af4; board attestation-gate 9868a0dd): the
+  // POSIX globs whose touched paths get a comparable-human-record rollup at
+  // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
+  // field can ever refuse an operation; the refusing form of this feature was
+  // DECLINED, because a gate the conductor must pass turns the conductor into
+  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
+  // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
+  // Sterling's own config declares none — the feature exists for consuming
+  // projects with render/asset paths.
+  // `z.unknown()` IS THE POINT, AND IT IS DELIBERATE (Codex review HIGH-1 +
+  // roster MEDIUM-1, 2026-09-01). This field cannot validate ANYTHING here — not
+  // element type, not emptiness, not duplicates — because direct-merge.mjs and
+  // merge-gate.mjs run parseConfig through openProject() long before the
+  // disclosure's fail-open wrapper exists, so ANY refusal on this field kills the
+  // whole merge command. Measured shapes that must not do that: `["", …]`,
+  // duplicated globs, and the bracket-less hand-edit
+  // `"attestation_path_globs": "renders/**"` (a plain string, not an array).
+  // An ADVISORY declaration that can refuse a merge inverts this feature's own
+  // ruling, which is the one thing the design is not allowed to do.
+  // z.unknown().default([]) PRESERVES the declared value verbatim rather than
+  // coercing or dropping it, and it forces any future consumer of the PARSED
+  // config to narrow this field explicitly instead of assuming string[].
+  // WHERE THE REAL READ LIVES: readAttestationGlobs() in
+  // scripts/lib/attestation-inspection.mjs is the ONE place this field is
+  // interpreted — it re-reads .sterling/config.json itself, drops a non-array
+  // container, non-string members, empty strings and exact duplicates, and
+  // DISCLOSES every drop in the rollup. No surface may take these globs from the
+  // parsed config object instead.
+  attestation_path_globs: external_exports.unknown().default([]),
   // §12 ensure-manifest: declarations are read back from the recorded config on
   // re-runs (no flags required), so the project name is recorded alongside them.
   project_name: external_exports.string().optional(),

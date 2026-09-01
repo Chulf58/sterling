@@ -122,6 +122,8 @@
 // the STRUCTURAL check belongs here (this is the one place that already knows
 // what a complete v2 entry looks like); the SPENDING decision still belongs to
 // the reader, same separation of concerns as content_evidence_status (F2).
+import { createHash } from 'node:crypto';
+
 /** A plain, non-null, non-array object. THE ONE PREDICATE FOR EVERY LEVEL OF A
  *  RECEIPT'S EVIDENCE — the `content_evidence` container here, and the `blobs`
  *  map and v1 `reviewed_state` container in commit-reviewed.mjs, which imports
@@ -209,6 +211,19 @@ export function normalizeLedgerEntry(entry) {
   // `undefined` exactly when the key is absent.
   const blobs = contentEvidence ? contentEvidence.blobs : entry.content_evidence;
   return {
+    // THE SCHEMA VERSION IS SURFACED, and it is the ONE discriminator a reader
+    // may use to tell the two shapes apart (roster review LOW-2, board 7dd3200a).
+    // Reaching this line means `entry.schema_version === 2` — the gate at the top
+    // of this function — so this key is written BY THE ADAPTER and is never the
+    // writer's copy of it. That distinction is the whole finding: `v2_deficient`
+    // reads as a v2-only marker, but on the LEGACY branch this function returns
+    // the raw entry UNTOUCHED, so a hand-written v1 entry carrying its own
+    // `v2_deficient` key had that key survive into the "normalized" view and could
+    // steer a reader down the v2 path. Nothing a v1 entry can carry reaches this
+    // object, so `schema_version === 2` is exactly as trustworthy as the gate it
+    // mirrors — and isLegacyEntry() below asks the question in one place for both
+    // raw and normalized entries.
+    schema_version: 2,
     // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
     // entry it refuses or waives (decision 57984926 §2). undefined for v1.
     entry_id: entry.entry_id,
@@ -302,42 +317,81 @@ export function normalizeLedgerEntry(entry) {
  *                        identity. Already withheld AND disclosed by the
  *                        deficiency path (MED-2); its discharge claim adds
  *                        nothing to that verdict.
- *    'v1-no-lifecycle' — a LEGACY entry carrying a stray status:'discharged'.
- *                        v1 has NO lifecycle at all — the discharge verb refuses
- *                        v1 entries outright — so this string was never written
- *                        by a discharge and cannot mean one. Treated as an
+ *    'v1-no-lifecycle' — a LEGACY entry carrying a status:'discharged' that is
+ *                        NOT backed by a contentful disposition. Treated as an
  *                        ORDINARY ACTIVE v1 receipt (spendable), which keeps the
- *                        v1 pass-through promise: a v1 entry's behavior through
- *                        every reader is unchanged by this slice.
+ *                        v1 pass-through promise: a bare status key — the one
+ *                        shape any ledger writer can produce with a single
+ *                        keystroke — can never retire somebody else's review
+ *                        evidence.
  *    'none'            — not claiming a discharge at all.
+ *
+ *  A LEGACY ENTRY CAN NOW REACH 'authenticated' (board 7dd3200a; decision
+ *  57984926 §3's legacy-handle selector). This branch used to return
+ *  'v1-no-lifecycle' UNCONDITIONALLY, and its stated reason was a fact about the
+ *  verb rather than about the shape: "the discharge verb refuses v1 entries
+ *  outright — so this string was never written by a discharge and cannot mean
+ *  one". Since scripts/review-ledger.mjs discharge accepts a generated legacy
+ *  handle, that premise is false: a v1 entry CAN now carry a genuine discharge,
+ *  written as the same {status, disposition} PAIR onto the untouched original
+ *  evidence (§3's rejected in-place migration is what keeps it a v1 entry —
+ *  "explicit discharge may add lifecycle fields to a v1 entry as a requested
+ *  transition"). Had this branch been left alone, discharging a v1 receipt would
+ *  have been a NO-OP at every reading surface — H1 would keep reporting it and
+ *  commit-reviewed would keep spending it — i.e. a verb that reports success and
+ *  changes nothing, which is worse than the refusal it replaced.
+ *  THE AUTHENTICATION BAR IS IDENTICAL FOR BOTH SCHEMA VERSIONS, deliberately:
+ *  the forgery this guards against (one agent-written key silently retiring real
+ *  reviewer evidence) is the SAME question on both shapes, so it gets the same
+ *  answer, and the ONLY thing that changes for v1 is which class an
+ *  unauthenticated marker falls to — 'v1-no-lifecycle' (SPENDABLE) rather than
+ *  v2's 'unauthenticated' (withheld and disclosed). That asymmetry is the
+ *  pass-through promise, kept: a v1 entry that has not been discharged behaves
+ *  exactly as it did before this change.
  */
 export function dischargeMarkerClass(normalized) {
   const e = normalized;
   if (!e || typeof e !== 'object' || e.status !== 'discharged') return 'none';
-  // v2_deficient is the v2-ONLY presence marker: undefined means the entry came
-  // out of the legacy early-return, i.e. it has no lifecycle to speak of.
-  if (e.v2_deficient === undefined) return 'v1-no-lifecycle';
+  // THE DISCRIMINATOR IS THE SCHEMA VERSION, NOT `v2_deficient` (roster review
+  // LOW-2, board 7dd3200a). This branch used to read `e.v2_deficient ===
+  // undefined`, which is a field the LEDGER WRITER controls on the legacy path:
+  // normalizeLedgerEntry returns a v1 entry byte-identical, so a hand-written
+  // {status:'discharged', v2_deficient:false} entry carrying no disposition fell
+  // through to the v2 tail, classed 'unauthenticated', and was WITHHELD FROM
+  // SPENDING — a two-key laundering route that suppresses real reviewer evidence
+  // and contradicts this docblock's own v1 pass-through promise. isLegacyEntry
+  // asks the adapter's OWN gate question (schema_version !== 2), and on a
+  // normalized v2 entry `schema_version` is written by the adapter rather than
+  // copied from the writer, so there is no key a v1 entry can add to reach the v2
+  // tail: setting schema_version:2 routes it through the v2 branch ENTIRELY,
+  // where `v2_deficient` is recomputed here and a contentless entry is correctly
+  // reported as deficient.
+  if (isLegacyEntry(e)) return isContentfulDisposition(e.disposition) ? 'authenticated' : 'v1-no-lifecycle';
   if (e.v2_deficient === true) return 'v2-deficient';
-  const d = e.disposition;
-  // An ARRAY passes typeof === 'object' but is not the disposition object a real
-  // discharge writes — the same reasoning the identity check above applies.
-  if (d === null || typeof d !== 'object' || Array.isArray(d)) return 'unauthenticated';
-  // CONTENTFUL, NOT MERELY PRESENT (final review, pre-merge). `disposition: {}`
-  // satisfied "a non-null object" and therefore classed as AUTHENTICATED — the
-  // ONE class excluded SILENTLY from spending and from H1's report. So an empty
-  // object, which a hand-edit or a truncated write produces trivially, could hide
-  // real reviewer evidence with no line printed anywhere: the exact failure the
-  // authentication check exists to prevent, reached by a two-character payload.
-  // The two fields checked here are the two the verb ALWAYS writes and the two a
-  // human actually needs — WHY it was discharged and UNDER WHICH recognized
-  // class — so no genuine discharge changes class, while every contentless or
-  // invented-class marker falls to 'unauthenticated', which is already the safe,
-  // NOT-SPENT-and-DISCLOSED path. The class list is §3's closed set, mirroring
-  // scripts/review-ledger.mjs's RECOGNIZED_CLASSES: a disposition naming a class
-  // the verb would have refused was not written by the verb.
+  return isContentfulDisposition(e.disposition) ? 'authenticated' : 'unauthenticated';
+}
+
+/** CONTENTFUL, NOT MERELY PRESENT (final review, pre-merge). `disposition: {}`
+ *  satisfied "a non-null object" and therefore classed as AUTHENTICATED — the
+ *  ONE class excluded SILENTLY from spending and from H1's report. So an empty
+ *  object, which a hand-edit or a truncated write produces trivially, could hide
+ *  real reviewer evidence with no line printed anywhere: the exact failure the
+ *  authentication check exists to prevent, reached by a two-character payload.
+ *  The two fields checked here are the two the verb ALWAYS writes and the two a
+ *  human actually needs — WHY it was discharged and UNDER WHICH recognized
+ *  class — so no genuine discharge changes class, while every contentless or
+ *  invented-class marker falls to the safe, NOT-SPENT-and-DISCLOSED path (or, on
+ *  a v1 entry, to the SPENDABLE 'v1-no-lifecycle' pass-through). The class list
+ *  is §3's closed set, mirroring scripts/review-ledger.mjs's RECOGNIZED_CLASSES:
+ *  a disposition naming a class the verb would have refused was not written by
+ *  the verb.
+ *  An ARRAY passes typeof === 'object' but is not the disposition object a real
+ *  discharge writes — the same reasoning the identity check above applies. */
+function isContentfulDisposition(d) {
+  if (!isEvidenceObject(d)) return false;
   const reasonOk = typeof d.reason === 'string' && d.reason.trim() !== '';
   const classOk = d.class === 'foreign-session' || d.class === 'foreign-branch' || d.class === 'no-live-territory';
-  return reasonOk && classOk ? 'authenticated' : 'unauthenticated';
+  return reasonOk && classOk;
 }
 
 /** The one predicate every spending/reporting surface asks: may this entry be
@@ -368,4 +422,166 @@ export function isAuthenticatedDischarge(normalized) {
  *  neither guard stands in for the other. */
 export function isExternalReviewEntry(normalized) {
   return !!normalized && typeof normalized === 'object' && normalized.kind === 'external_review';
+}
+
+// ===========================================================================
+// V1 RECEIPT IDENTITY — ONE COMPUTATION, TWO SURFACES (board 7dd3200a).
+//
+// A v1 entry has no entry_id, so BOTH surfaces that must name one derive a
+// stable identifier from the receipt's own content:
+//   * scripts/commit-reviewed.mjs stamps it in `Review-Bytes-Waiver: <identity>`
+//     (decision 57984926 §2: "entry_id for v2, stable fingerprint for v1");
+//   * scripts/review-ledger.mjs discharge accepts it as the SELECTOR
+//     (§3: "entry_id (v2) or a generated legacy handle").
+// §2's fingerprint and §3's handle are the SAME CONCEPT — "which v1 receipt is
+// this?" — so they are the same function. Two independently-derived v1
+// identities would be a defect on its face: the handle a conductor reads off a
+// waiver trailer must be the handle the discharge verb accepts, and any drift
+// between two copies silently breaks that in one direction or the other.
+// These five helpers moved here from commit-reviewed.mjs UNCHANGED for that
+// reason (the same "imports it rather than keeping a second copy" rule
+// isEvidenceObject above already follows); commit-reviewed.mjs's reviewed-bytes
+// verdict still uses receiptBlobEvidence/isUsableBlobSha/normalizeReceiptPath
+// through this import, so there is exactly one definition of each.
+// ===========================================================================
+
+/** A USABLE recorded blob value: exactly 40 hex characters, the shape `git
+ *  hash-object` produces. Anything else is present-but-unusable evidence,
+ *  which decision 57984926 §2 treats as INCONSISTENT rather than absent. */
+export function isUsableBlobSha(v) {
+  return typeof v === 'string' && /^[0-9a-f]{40}$/i.test(v);
+}
+
+/** The one path spelling used on BOTH sides of every comparison in the
+ *  reviewed-bytes verdict: backslashes to '/', a stripped leading './'.
+ *
+ *  NAMED normalizeReceiptPath, NOT normalizeRepoPath (roster review LOW-3, board
+ *  7dd3200a). `normalizeRepoPath` is TAKEN: it is @sterling/schemas' path
+ *  primitive, the invariant-2 owner, and it THROWS on a drive prefix, a parent
+ *  traversal or an absolute path — a dozen hook and script call sites depend on
+ *  exactly that. THIS function is deliberately LENIENT: it must never throw,
+ *  because it reads arbitrary agent-written ledger JSON inside a byte verdict
+ *  that is fail-open on the advisory side, and a throw there would silently
+ *  disable the check. Two functions with opposite failure contracts must not
+ *  share a name across one codebase — the next reader to add
+ *  `import { normalizeRepoPath } from '@sterling/schemas'` to a file that already
+ *  imports this one gets a silent semantic swap, in either direction. */
+export function normalizeReceiptPath(p) {
+  return String(p).replace(/\\/g, '/').replace(/^\.\//, '');
+}
+
+/** The receipt's recorded blob evidence: `{map, collisions}`, keyed by
+ *  normalized path, values RAW AND UNFILTERED. That last part is load-bearing:
+ *  a present-but-unusable value ('not-a-sha', '', a number) must stay
+ *  DISTINGUISHABLE from an absent one, because §2 refuses INCONSISTENT evidence
+ *  while grandfathering ABSENT evidence. Filtering at read time collapses those
+ *  two into one and hands the trivial bypass (write junk instead of a sha) the
+ *  grandfather clause.
+ *
+ *  ALIAS COLLISION IS AN EVIDENCE DEFECT, NOT A SPELLING PREFERENCE (Codex
+ *  review MED, fix round 2026-08-31). Two recorded keys can normalize to ONE
+ *  path ('src/a.mjs' and '.\\src\\a.mjs'). Recording the SAME sha under both is
+ *  harmless — one path, one answer, so the map keeps it and nothing is flagged.
+ *  Recording DIFFERENT shas means the receipt contradicts ITSELF about what it
+ *  reviewed, and a first-spelling-wins rule silently picks one of the two:
+ *  appending a MATCHING alias beside a MISMATCHING real key would otherwise be a
+ *  one-line way to make the mismatch never be compared. Such a path is returned
+ *  in `collisions`, and the verdict refuses on it as INCONSISTENT evidence
+ *  rather than choosing a winner. */
+export function receiptBlobEvidence(e) {
+  const rs = e && typeof e.reviewed_state === 'object' && e.reviewed_state !== null ? e.reviewed_state : null;
+  const b = rs && typeof rs.blobs === 'object' && rs.blobs !== null && !Array.isArray(rs.blobs) ? rs.blobs : null;
+  const map = new Map();
+  const collisions = new Set();
+  if (!b) return { map, collisions };
+  for (const [p, sha] of Object.entries(b)) {
+    if (typeof p !== 'string' || p === '') continue;
+    const n = normalizeReceiptPath(p);
+    if (!map.has(n)) {
+      map.set(n, sha);
+      continue;
+    }
+    const prev = map.get(n);
+    // Two usable shas compare case-insensitively (hex spelling is not evidence);
+    // anything else compares by identity, so two junk values only agree when
+    // they are literally the same value.
+    const agree = isUsableBlobSha(prev) && isUsableBlobSha(sha) ? prev.toLowerCase() === sha.toLowerCase() : Object.is(prev, sha);
+    if (!agree) collisions.add(n);
+  }
+  return { map, collisions };
+}
+
+/** The blob map alone — for the v1 fingerprint, where a collision changes the
+ *  identifier's VALUE but never a verdict (the verdict reads the full evidence
+ *  through receiptBlobEvidence and refuses on the collision). */
+export function receiptBlobMap(e) {
+  return receiptBlobEvidence(e).map;
+}
+
+/** The territory the receipt DECLARES, normalized. Used together with the blob
+ *  keys to decide COVERAGE — iterating the blob map alone would silently skip
+ *  a declared-but-unbound path, which is precisely the partial-coverage hole
+ *  §2 clause 2 exists to close. */
+export function receiptDeclaredPaths(e) {
+  return Array.isArray(e && e.files) ? e.files.filter((f) => typeof f === 'string' && f !== '').map(normalizeReceiptPath) : [];
+}
+
+/** A v1 receipt has no entry_id, so its identity is a fingerprint of the
+ *  RECEIPT'S OWN CONTENT (§2: "stable fingerprint for v1"). STABLE means
+ *  deterministic given the receipt: two byte-identical receipts fingerprint
+ *  identically. Deliberately NOT derived from the commit sha, the clock, or
+ *  randomUUID — a per-invocation value is a fingerprint of nothing and cannot
+ *  say WHICH receipt was waived or discharged, which is the only thing either
+ *  caller wants it for.
+ *  The inputs are the receipt's identity-bearing fields: agent_type, the
+ *  dispatch instant, the DECLARED TERRITORY, and the recorded blob map (both
+ *  sorted, so key order in the ledger file cannot change the answer). Guarded
+ *  stringify because a ledger value is arbitrary JSON.
+ *  `files` IS PART OF THE INPUT (roster review MED-1, fix round 2026-08-31):
+ *  since file-scoped stamping, territory is one of the fields that distinguishes
+ *  two otherwise-identical receipts (the measured shape: two dispatches in ONE
+ *  message sharing agent_type AND the Start-millisecond, differing only in
+ *  files[]). Omitting it made those two receipts waive under ONE trailer value,
+ *  i.e. an audit trail that cannot say WHICH review was overridden.
+ *  WIDTH: 32 hex characters (Codex review LOW) — 16 hex is 64 bits, and an audit
+ *  key is not a cache key. 32 hex keeps the handle at 40 characters, well inside
+ *  the 100-char trailer-value bound commit-reviewed's waiverIdentity applies. */
+export function v1ReceiptFingerprint(e) {
+  const blobs = [...receiptBlobMap(e).entries()].sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+  const files = [...receiptDeclaredPaths(e)].sort();
+  let canonical;
+  try {
+    canonical = JSON.stringify([e && e.agent_type, e && e.at, files, blobs]);
+    if (typeof canonical !== 'string') canonical = '<unserializable>';
+  } catch {
+    canonical = '<unserializable>';
+  }
+  return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
+/** THE HANDLE, in its ONE spelling: `receipt-<32 lowercase hex>`. This exact
+ *  string is what commit-reviewed stamps as a v1 waiver identity and what
+ *  `review-ledger discharge --legacy-handle` accepts, so a conductor can carry
+ *  one from either surface to the other verbatim. */
+export function legacyReceiptHandle(e) {
+  return `receipt-${v1ReceiptFingerprint(e)}`;
+}
+
+/** The handle's EXACT form, and the reason it is anchored on both ends. The
+ *  discharge verb OVERWRITES an agent-writable evidence record with no
+ *  resurrection path, so anti-pattern
+ *  no-bounded-trail-guard-for-destructive-addressing (severity BLOCK) forbids
+ *  accepting any forgiving spelling of it: no prefix, no abbreviation, no
+ *  case-insensitive or whitespace-tolerant match. A handle that does not match
+ *  this pattern character-for-character is refused BEFORE the ledger is read. */
+export const LEGACY_HANDLE_PATTERN = /^receipt-[0-9a-f]{32}$/;
+
+/** A LEGACY (v1) entry: no schema_version 2 envelope. §3's compatibility rule,
+ *  stated once — "missing schema_version = legacy roster receipt" — so the
+ *  handle surface and the entry_id surface cannot disagree about which entries
+ *  each one addresses. Takes the RAW entry (the shape on disk), not a
+ *  normalized one: normalizeLedgerEntry returns a legacy entry unchanged, so
+ *  both work, but the selector reads raw. */
+export function isLegacyEntry(raw) {
+  return !!raw && typeof raw === 'object' && !Array.isArray(raw) && raw.schema_version !== 2;
 }
