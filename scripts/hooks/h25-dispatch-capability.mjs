@@ -45,11 +45,19 @@
 // authoring belongs to the test-writer role, and H5 will deny a test-path
 // edit mid-work if the dispatch proceeds anyway — this catches the
 // misdispatch before the spawn, exactly like the capability advisory above.
-import { readStdin, allow, warnNonBlocking, loadConfig } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, loadConfig, repoRel } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
-import { hasUnsuppressedMatch, isReviewerClass, escapeRe as escapeReShared } from './lib/dispatch-advisory.mjs';
+import {
+  hasUnsuppressedMatch,
+  isReviewerClass,
+  escapeRe as escapeReShared,
+  scanClauses,
+  isSuppressedContext,
+} from './lib/dispatch-advisory.mjs';
+import { PATH_CANDIDATE_RE } from './lib/dispatch-prompt.mjs';
+import { readLedger, ledgerPath, fileHash } from './lib/ledger.mjs';
 import { PIPELINE_AGENT_TYPES, matchesGlob } from '@sterling/schemas';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 // Harness BUILT-IN subagent types (board a6b76e8c item 2, 2026-08-24 feedback batch: 11
@@ -89,7 +97,7 @@ const MCP_SHORT_NAMES = [
   'board_get', 'board_query', 'board_remove', 'board_update',
   'maintenance_query', 'maintenance_remove', 'handoff_read', 'handoff_write',
   'agent_exit', 'run_state', 'run_signal', 'run_escalate', 'capture_pending',
-  'concept_designed', 'no_capture',
+  'concept_designed', 'no_capture', 'knowledge_render',
 ];
 const KNOWN_TOOLS = [...PLATFORM_TOOLS, ...MCP_SHORT_NAMES];
 const MCP_SET = new Set(MCP_SHORT_NAMES);
@@ -143,6 +151,201 @@ function parseToolsLine(content) {
 }
 
 // ---------------------------------------------------------------------------
+// COMMAND-SHAPE ADVISORY (board 07deffab gap (3)): the KNOWN_TOOLS scan above
+// matches TOOL-NAME VOCABULARY only, so a brief that tells a shell-less agent
+// to run `gdlint`/`gdformat` fires nothing — H25 catches the word "Bash", not
+// the intent "go run a command". This is a SEPARATE, bounded grammar over the
+// raw prompt text, independent of KNOWN_TOOLS, and it fires only when the
+// target agent's grant holds NEITHER shell-execution tool — Bash nor
+// PowerShell, the only two in this ecosystem (h15-store-guard.mjs,
+// h23-output-axis.mjs and h24-gate-exit-lint.mjs all gate on exactly this
+// pair; there is no third).
+//
+// FOUR STRONG SHAPES ONLY (P1 — bounded under-warning beats a flood of
+// "run the tests"/"run through this list" false positives on ordinary
+// prose):
+//   1. `run <token>` / `execute <token>` — a command-shaped token right
+//      after the verb, EXCLUDING a short list of common English function
+//      words (the/a/an/it/this/via/without/...) that would otherwise turn
+//      "run the tests manually" into a false positive.
+//   2. `npm run ...` — unambiguous idiom, no stopword gate needed.
+//   3. `node <path>` — 'node' followed by a path- or script-extension-shaped
+//      token (optionally past `--flag` tokens), so the English noun "node"
+//      ("a graph node") never matches on its own.
+//   4. Fenced (```...```) or inline (`...`) text containing WHITESPACE or a
+//      shell metacharacter — a command with arguments or an operator. A BARE
+//      SINGLE-TOKEN backtick (`gdlint` alone) is explicitly NOT a trigger —
+//      that shape is at least as often a name reference in prose as an
+//      instruction to run it.
+const SHELL_TOOLS = new Set(['bash', 'powershell']);
+
+function hasShellCapability(grantList) {
+  return grantList.some((g) => SHELL_TOOLS.has(String(g).toLowerCase()));
+}
+
+// ROSTER REVIEW M2 FIX (two Mediums): (a) the run/execute/npm/node shape
+// checks now go through the SAME shared prohibition detector the sibling
+// arms use (hasUnsuppressedMatch, {checkSubjectVerb:false} — a COMMAND/shape
+// mention, not a subject-of-change verb window, matching the path-trigger
+// arm's own posture) so "do NOT run `npm test`" suppresses exactly like
+// "do NOT run Bash" does one section up — this was checking the RAW prompt
+// before, bypassing hasUnsuppressedMatch entirely. (b) a backticked/fenced
+// span whose FIRST TOKEN is a known MCP short name (the MCP_SET already in
+// scope) is now EXCLUDED from the shape grammar outright — a store call like
+// `knowledge_get <id>`/`board_remove <id>` is not a shell command, and
+// SHELL_ARG_OR_OP_RE's bare "any whitespace" test could not tell the two
+// apart, so briefs routinely backticking store calls to shell-less roster
+// agents (reviewer-*/librarian/test-writer) fired constantly (cry-wolf).
+// The run/execute/npm/node shapes route through hasUnsuppressedMatch
+// directly (the MCP/stopword exclusion is a safe negative lookahead there —
+// no delimiter-pairing to break). The backtick/fence shapes do NOT route
+// through hasUnsuppressedMatch — see the note further down for the two
+// concrete, measured reasons (delimiter pairing + multi-line clauses) — they
+// use the SAME underlying isSuppressedContext primitive via a dedicated loop
+// instead.
+const STRONG_SHAPE_STOPWORDS = [
+  'the', 'a', 'an', 'this', 'that', 'these', 'those', 'it', 'them',
+  'some', 'any', 'all', 'your', 'my', 'our', 'their', 'through',
+  'again', 'once', 'more', 'here', 'there', 'now', 'later', 'first',
+  'next', 'before', 'after', 'via', 'using', 'with', 'without', 'over',
+  'away', 'so',
+];
+// A 'run <token>'/'execute <token>' whose token IS a stopword or an MCP
+// short name is never even captured — excluded via negative lookahead right
+// where the token would start, so hasUnsuppressedMatch never sees it as a
+// candidate mention in the first place.
+const RUN_TOKEN_EXCLUDED_ALT = [...STRONG_SHAPE_STOPWORDS, ...MCP_SHORT_NAMES].map(escapeRe).join('|');
+// The prefixed MCP form (`run mcp__sterling__board_remove`) is excluded too —
+// a `mcp__<server>__` prefix before a short name is the same store call, and
+// warning on it is the cry-wolf class this arm's exclusions exist to prevent
+// (final roster review L1, board 07deffab).
+const RUN_TOKEN_RE = new RegExp(
+  `\\b(?:run|execute)\\s+\`?(?!(?:mcp__\\w+__)?(?:${RUN_TOKEN_EXCLUDED_ALT})\\b)([A-Za-z][\\w.-]*)\`?`,
+  'gi'
+);
+const NPM_RUN_RE = /\bnpm\s+run\b/gi;
+const NODE_PATH_RE = /\bnode\b\s+(?:--[\w-]+\s+)*(?:[\w.-]*\/[\w.-]+|[\w-]+\.(?:mjs|cjs|js|ts|py))\b/gi;
+
+// NOTE ON BACKTICK/FENCE HANDLING — deliberately NOT routed through
+// hasUnsuppressedMatch, for two DIFFERENT, both load-bearing reasons (fixed
+// during M2 verification, not part of the original review ask, but required
+// to make the ask correct):
+//
+//   (i) PAIRING. A negative lookahead planted at the OPENING delimiter
+//   (`` ` ``/```` ``` ````) to exclude an MCP-first-token span breaks the
+//   regex engine's normal greedy left-to-right PAIRING of delimiters: when
+//   the match attempt at a REAL opening backtick fails (because its content
+//   starts with an MCP name), the engine does not skip the whole span — it
+//   retries at the NEXT character, including the real span's OWN CLOSING
+//   backtick, which it then happily pairs with the NEXT real span's opening
+//   backtick, treating the PROSE BETWEEN two genuine code spans as a bogus
+//   third "command". Measured live during M2 verification: "call
+//   `knowledge_get <id>` to retrieve the spec, then `board_remove <id>`"
+//   matched " to retrieve the spec, then " as if it were backticked command
+//   text. The fix is structural, not a tighter lookahead: find every REAL
+//   pair first (plain, non-filtering regexes — the same greedy pairing that
+//   already worked before any exclusion existed), then apply BOTH the
+//   MCP-first-token exclusion and the shell-arg-or-op requirement as
+//   POST-HOC content predicates on each already-correctly-paired span.
+//
+//   (ii) MULTI-LINE. hasUnsuppressedMatch clause-scans its pattern argument
+//   PER CLAUSE (scanClauses splits on sentence/newline boundaries) — exactly
+//   wrong for a fenced block, whose own internal newlines would fragment it
+//   across clauses before the pattern ever gets to match the whole span.
+//
+// Both reasons point the same way: find matches against the FULL original
+// text with plain delimiter-pairing regexes, filter by content, then check
+// suppression SEPARATELY via the shared isSuppressedContext primitive (the
+// SAME clause-scoped negation logic hasUnsuppressedMatch itself uses),
+// keyed off each surviving match's absolute index via locateClause below.
+const FENCE_RE = /```[\w-]*\n([\s\S]*?)```/g;
+const INLINE_BACKTICK_RE = /`([^`\n]+)`/g;
+const SHELL_ARG_OR_OP_RE = /[\s|&;<>$(){}]/;
+
+function firstToken(s) {
+  const m = String(s ?? '').trim().match(/^\w+/);
+  if (!m) return '';
+  // A `mcp__<server>__`-prefixed name is the same store call as its short
+  // name — strip the prefix so MCP_SET recognizes both spellings (final
+  // roster review L1, board 07deffab: `_` is a word character, so the
+  // prefixed form otherwise reads as one unknown token and fires the
+  // command-shape advisory on a plain store-call mention).
+  return m[0].toLowerCase().replace(/^mcp__\w+?__/, '');
+}
+
+// A bare single-token backtick ('`gdlint`' alone) is deliberately NOT a
+// trigger (requires SHELL_ARG_OR_OP_RE somewhere in the span). A span whose
+// FIRST TOKEN is a known MCP short name is a store call, never a shell
+// command, and is excluded outright regardless of what follows it.
+function isCommandShapedSpan(content) {
+  return SHELL_ARG_OR_OP_RE.test(content) && !MCP_SET.has(firstToken(content));
+}
+
+function locateClause(clauses, text, absIndex) {
+  let cursor = 0;
+  for (const c of clauses) {
+    const idx = text.indexOf(c.text, cursor);
+    if (idx === -1) continue; // defensive; scanClauses' slices are always literal substrings in order
+    if (absIndex >= idx && absIndex < idx + c.text.length) {
+      return { clauseText: c.text, localIndex: absIndex - idx };
+    }
+    cursor = idx + c.text.length;
+  }
+  return null; // match starts inside boundary punctuation itself — an unlikely edge case; treated as NOT suppressed below (fail toward the advisory, not toward silence, since this is the rare case a real prohibition genuinely could not be located)
+}
+
+function hasUnsuppressedFenceOrBacktick(text) {
+  const clauses = scanClauses(text);
+
+  FENCE_RE.lastIndex = 0;
+  let fm;
+  while ((fm = FENCE_RE.exec(text))) {
+    if (!isCommandShapedSpan(fm[1])) continue;
+    const loc = locateClause(clauses, text, fm.index);
+    if (!loc || !isSuppressedContext(loc.clauseText, loc.localIndex, false)) return true;
+  }
+
+  // Fenced spans are stripped before the inline scan so a fence's own
+  // triple-backtick delimiters are never mistaken for an inline `...` span.
+  const stripped = text.replace(FENCE_RE, ' ');
+  const strippedClauses = scanClauses(stripped);
+  INLINE_BACKTICK_RE.lastIndex = 0;
+  let im;
+  while ((im = INLINE_BACKTICK_RE.exec(stripped))) {
+    if (!isCommandShapedSpan(im[1])) continue;
+    const loc = locateClause(strippedClauses, stripped, im.index);
+    if (!loc || !isSuppressedContext(loc.clauseText, loc.localIndex, false)) return true;
+  }
+  return false;
+}
+
+function hasCommandShapeMention(text) {
+  const t = String(text ?? '');
+  if (!t) return false;
+  if (hasUnsuppressedMatch(t, RUN_TOKEN_RE, { checkSubjectVerb: false })) return true;
+  if (hasUnsuppressedMatch(t, NPM_RUN_RE, { checkSubjectVerb: false })) return true;
+  if (hasUnsuppressedMatch(t, NODE_PATH_RE, { checkSubjectVerb: false })) return true;
+  return hasUnsuppressedFenceOrBacktick(t);
+}
+
+// Computed only once the target agent's real, evaluable grant is known to
+// hold NEITHER shell tool (callers only invoke this after that check) — an
+// unknown agent, an all-tools-default (no `tools:` line) or an unevaluable
+// grant can never assert this, matching the missing-tool advisory's own
+// posture of never claiming a grant it did not actually read.
+function commandShapeAdvisory(prompt) {
+  if (!hasCommandShapeMention(prompt)) return null;
+  return (
+    `H25 COMMAND-SHAPE ADVISORY — the brief instructs running commands but the agent holds no shell execution tool ` +
+      `(no Bash, no PowerShell in its installed grant). This is a SHAPE match — run/execute <token>, npm run, ` +
+      `node <path>, or fenced/backticked command text — independent of the tool-NAME scan above, so it catches a ` +
+      `brief that names a concrete command (e.g. a linter/formatter) without ever naming a platform tool. Warn-only, ` +
+      `never a block: re-target the dispatch to an agent holding shell access, re-scope the brief, or confirm the ` +
+      `command is not actually required.`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // SECOND ADVISORY: test-authoring dispatch-time lint (board 2f57ec84).
 // ---------------------------------------------------------------------------
 
@@ -167,32 +370,39 @@ const VERB_TRIGGER_RE = new RegExp(String.raw`\b(?:write|author|add|create)\b[^.
 // can never satisfy it.
 const TDD_TRIGGER_RE = /\bTDD\b[^.!?\n]{0,20}\b(?:start(?:ing)?|begin(?:ning)?|first|with\s+the\s+tests?)\b/i;
 
-// Negation guard: a prohibition aimed at the tests must never fire the verb
-// trigger, even when it names a trigger verb ('do not write tests') or the
-// enforcing hook itself ('never edit the tests — H5 will deny you' is
-// already the warning, said by the dispatcher — this hook must stay silent).
-const NEGATION_RE = /\b(?:do\s*not|don't|don’t|never)\b[^.!?\n]{0,40}\btests?\b/i;
-const LEAVE_ALONE_RE = /\bleave\b[^.!?\n]{0,40}\btests?\b[^.!?\n]{0,20}\balone\b/i;
-
-// Clause-scoped negation (review fix C1): a whole-brief negation match used
-// to silence every trigger in the ENTIRE prompt, even a later, unrelated
-// instruction in the same brief ("Don't touch the existing tests; write new
-// tests for the new module" wrongly stayed silent). Splitting on sentence/
-// segment boundaries — '.', '!', '?', ';', newline, and em/en dash — and
-// evaluating the negation guard PER CLAUSE means only the clause actually
-// containing the prohibition is silenced; any other clause with its own verb
-// or TDD trigger still warns. A comma is deliberately NOT a boundary here —
-// "don't touch the tests, just fix the bug" is one prohibition spanning a
-// comma, not two independent clauses.
-const CLAUSE_SPLIT_RE = /[.!?;\n–—]/;
-
+// Negation guard (board 07deffab gap (2)): a prohibition aimed at the tests
+// must never fire the verb trigger, even when it names a trigger verb ('do
+// not write tests') or the enforcing hook itself ('never edit the tests — H5
+// will deny you' is already the warning, said by the dispatcher — this hook
+// must stay silent). FORMERLY a private clause-splitter/negation pair
+// (CLAUSE_SPLIT_RE + NEGATION_RE, a whole-string, non-shared heuristic) —
+// REPLACED with the SAME shared, clause-scoped detector the path-trigger arm
+// below already uses (hasUnsuppressedMatch, checkSubjectVerb:false — this is
+// a TEST-authoring mention, not a tool/capability one, so the
+// subject-of-change verb window must stay off exactly as it does for
+// hasPathTrigger; see hasUnsuppressedMatch's own doc comment). One shared
+// detector, not two independently-drifting heuristics — the same rationale
+// board a6b76e8c gave for the tool-capability/H26 unification applies here
+// unchanged. PROHIBITION_RE's reach already covers every shape the old
+// NEGATION_RE covered (do not/don't/don't/never) plus forbid*/denies/denied/⛔
+// and the apostrophe-optional/curly-apostrophe forms NEGATION_RE special-
+// cased by hand.
+//
+// LEAVE_ALONE_RE ('leave the tests alone') was checked and DROPPED, not kept:
+// every pinned 'leave...alone' case (H25-TAL NEGATION (18)) pairs the phrase
+// with a non-trigger verb ('update the implementation'), so VERB_TRIGGER_RE
+// never matches that clause in the first place — the guard was defending a
+// combination ('leave...alone' co-occurring with a genuine write/author/add/
+// create + tests match in the SAME clause) that no pinned test exercises and
+// that grepping the suites for 'alone' turns up nowhere else. Confirmed by
+// running the full h25-test-authoring-lint(-hardening) suites after removal
+// (still green).
 function hasVerbOrTddTrigger(text) {
-  const clauses = String(text ?? '').split(CLAUSE_SPLIT_RE);
-  for (const clause of clauses) {
-    if (NEGATION_RE.test(clause) || LEAVE_ALONE_RE.test(clause)) continue; // this clause is a prohibition — silent
-    if (VERB_TRIGGER_RE.test(clause) || TDD_TRIGGER_RE.test(clause)) return true;
-  }
-  return false;
+  const t = String(text ?? '');
+  return (
+    hasUnsuppressedMatch(t, VERB_TRIGGER_RE, { checkSubjectVerb: false }) ||
+    hasUnsuppressedMatch(t, TDD_TRIGGER_RE, { checkSubjectVerb: false })
+  );
 }
 
 // Concrete path tokens in the brief: word/dot/dash/slash runs ending in an
@@ -255,6 +465,91 @@ function testAuthoringAdvisory(subagentType, prompt, cwd) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// THIRD ADVISORY: citation-staleness (board c1945057, warn-only, rides this
+// same PreToolUse Task|Agent entry — no new hook). A brief that cites
+// `path:line` may have been drafted against bytes that have since moved: the
+// measured incident (board c1945057) had every line number in one brief
+// drift within twenty minutes because the lane reporting them kept editing.
+// This never re-derives whether the CITED LINE is still correct (that needs
+// content diffing this hook does not attempt) — it only tells the dispatcher
+// the file's bytes changed since the CONDUCTOR's own last Read of it, the
+// cheap, honest signal: "go remeasure", never "the line is wrong".
+//
+// SILENT BY DEFAULT, not measured against absence: the ledger only ever
+// carries a HASHED entry for a path the conductor actually Read (board
+// 776d2b65's freshness design) — no entry, or only a legacy HASHLESS entry,
+// means UNVERIFIED, not stale, and this stays silent. Firing on absence would
+// be false staleness on every citation the conductor never happened to Read
+// via the hashed path, killing the advisory's signal — the same cry-wolf
+// risk the two advisories above are built to avoid. NEVER mtime — content
+// hash only (board c1945057 names mtime as a candidate; this deliberately
+// does not use it, since a touch with no content change is not staleness).
+//
+// LATEST entry, never hasFreshRead(): hasFreshRead() (lib/ledger.mjs) some()s
+// across EVERY entry for a path, so a stale early Read could vouch for a
+// citation alongside a later, mismatched one. A citation is measured against
+// the conductor's most RECENT knowledge of the file, not any historical
+// snapshot of it.
+const CITATION_RE = new RegExp(`(${PATH_CANDIDATE_RE.source}):(\\d+)(?:-\\d+)?`, 'g');
+
+function extractCitedPaths(text) {
+  const found = String(text ?? '').match(CITATION_RE) ?? [];
+  return [...new Set(found.map((m) => m.replace(/:\d+(?:-\d+)?$/, '')))];
+}
+
+function latestHashedEntry(entries, relPath) {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e && e.path === relPath && e.sha256) return e;
+  }
+  return null;
+}
+
+// Wrapped in its own top-level try/catch (never just the ledger read): an
+// unexpected failure here must never take down the two advisories above it —
+// same posture as hasPathTrigger's guarded loadConfig call.
+function citationStalenessAdvisory(prompt, cwd) {
+  try {
+    const text = String(prompt ?? '');
+    if (!text || !cwd) return null;
+    const cited = extractCitedPaths(text);
+    if (!cited.length) return null;
+    let entries;
+    try {
+      entries = readLedger(ledgerPath(cwd));
+    } catch {
+      return null; // a torn/unreadable ledger must not crash this advisory
+    }
+    if (!entries.length) return null;
+    const stale = [];
+    for (const citedPath of cited) {
+      const rel = repoRel(citedPath, cwd); // confines to the repo; null when outside it
+      if (!rel) continue;
+      const abs = join(cwd, rel);
+      let stat;
+      try {
+        stat = statSync(abs);
+      } catch {
+        continue; // does not exist on disk — nothing to compare
+      }
+      if (!stat.isFile()) continue;
+      const entry = latestHashedEntry(entries, rel);
+      if (!entry) continue; // no hashed evidence — unverified, not stale
+      const currentHash = fileHash(abs);
+      if (currentHash && currentHash !== entry.sha256) stale.push(rel);
+    }
+    if (!stale.length) return null;
+    const lines = stale.map((p) => `  - ${p}`).join('\n');
+    return (
+      `H25 CITATION-STALENESS ADVISORY — file changed since your last Read; remeasure these line citations:\n${lines}\n` +
+        `This does not claim the cited lines are wrong — only that the file's bytes moved since your last Read of it.`
+    );
+  } catch {
+    return null; // advisory-only: never take down the other H25 advisories
+  }
+}
+
 let input;
 try {
   input = readStdin();
@@ -275,15 +570,24 @@ try {
   const subagentType = input.tool_input?.subagent_type;
   if (!subagentType) allow(); // nothing to resolve capability against
 
-  // Computed once, independent of the capability checks below (it needs
-  // neither an installed agent file nor a parsed grant) — combined with
-  // whichever capability-advisory text (if any) `finish` is called with, so
-  // the two advisories never clobber each other when both apply.
+  // Computed once, independent of the capability checks below (neither needs
+  // an installed agent file nor a parsed grant) — combined with whichever
+  // capability-advisory text (if any) `finish` is called with, so no two of
+  // the (up to) four advisories ever clobber each other when several apply.
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
+  const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
+  // Assigned later, once the target agent's real grant is known to hold
+  // NEITHER shell tool — stays undefined on every branch that cannot know
+  // that (unknown agent, all-tools default, unevaluable grant), read by
+  // `finish` at call time via closure so every finish() call after that
+  // point picks it up automatically, exactly like taAdvisory/citeAdvisory.
+  let commandShapeMsg;
   function finish(capabilityMessage) {
     const parts = [];
     if (capabilityMessage) parts.push(capabilityMessage);
+    if (commandShapeMsg) parts.push(commandShapeMsg);
     if (taAdvisory) parts.push(taAdvisory);
+    if (citeAdvisory) parts.push(citeAdvisory);
     if (parts.length) emit(parts.join('\n\n'));
     allow();
   }
@@ -326,6 +630,11 @@ try {
     .map((s) => s.trim())
     .filter(Boolean);
   if (!grantList.length) finish();
+
+  // COMMAND-SHAPE ADVISORY (board 07deffab gap (3)): only evaluable now that
+  // a real, non-empty grant is known — fires only when it holds NEITHER
+  // shell-execution tool.
+  if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
 
   const mentioned = findMentionedTools(input.tool_input?.prompt);
   if (!mentioned.length) finish();

@@ -15,6 +15,29 @@
 // frozen suite (scripts/tests/h24-gate-exit-lint.test.mjs) is authoritative
 // where more specific.
 //
+// WARN ARM (board 07deffab item 1, Codex thread 01a05bbe A1) — a gate PIPED
+// into another command still masks its exit, but the deny rule above never
+// widened to cover it: pipes are the dominant legitimate way to trim gate
+// output (Sterling's own sessions use '| tail'/'| grep FAILED' constantly),
+// so a hard denial would fire constantly for no measured benefit. Measured
+// incident (2101 §1.3): a `tail` exit code was misread as the gate's, because
+// a pipeline's exit status is the LAST command's — the same masking class the
+// deny arm exists to catch, arriving through a construct it deliberately
+// permits. So: when a segment this hook's OWN gate recognizer (matchGate,
+// reused unchanged — never widened to "every pipe") matches is followed AT
+// TOP LEVEL by '|', H24 emits an ADVISORY (hookSpecificOutput.
+// additionalContext, exit 0 — NEVER exit 2 on this arm) naming the gate, the
+// pipe target, and the two safe rewrites: prefix the command with
+// 'set -o pipefail' (any flag-combining form — 'set -eo pipefail', 'set -euo
+// pipefail' — established EARLIER in the SAME submitted command string;
+// never assumed from an earlier call) so the pipeline's exit reflects the
+// gate's real status, or redirect to a file and inspect it separately
+// ('<gate> > out.log; grep ... out.log'). PIPESTATUS-based idioms are not
+// specially parsed — an occasional warning on a command that already
+// handles this via PIPESTATUS is accepted, not chased. This arm is visibly
+// distinct from the deny arm above (different wording, "ADVISORY" not
+// "masked") so the deny arm's zero-false-positive record stays legible.
+//
 // Scope choices pinned by the decision — do not widen without a new one:
 //  - quote-aware top-level scan: separators sitting inside '...'/"..." never
 //    count (mirrors the quote-tracking idiom in h14-bash-allowlist.mjs /
@@ -49,6 +72,12 @@
 //    backticks is the one constructible FALSE-DENY ('node --test x --grep
 //    \`a;b\`') — exotic, accepted alongside the '(...)' opacity choice, which
 //    also makes '$( )' contents opaque.
+//  - a piped gate followed by a top-level ';' escapes the DENY arm entirely
+//    (review L5, board 07deffab): 'npm test | tail; echo $?' segments so the
+//    pre-';' segment is 'tail', not a gate, so the deny loop never sees a
+//    match there — pre-existing under-deny, now PARTIALLY mitigated by the
+//    WARN arm above (which fires on the 'npm test | tail' pipe itself), but
+//    the ';' after the pipe is still never denied.
 import { readStdin, deny, allow, loadConfig } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
 
@@ -205,7 +234,9 @@ function scanTopLevel(cmd) {
 // lone '|' are deliberately excluded — see header.
 const MASKING = new Set([';', '||']);
 
-for (const { segment, sep } of scanTopLevel(command)) {
+const items = scanTopLevel(command);
+
+for (const { segment, sep } of items) {
   if (!sep || !MASKING.has(sep)) continue; // no masking separator follows this segment
   const trimmed = segment.trim();
   if (!trimmed) continue;
@@ -217,6 +248,56 @@ for (const { segment, sep } of scanTopLevel(command)) {
       `Never append ';' or '||' after a gate — a red suite must never read green. ` +
       `Run the gate as the last command, or chain with '&&' — a red exit propagates. ` +
       `Decision 6cdd1b02-4d4f-4d7d-b9cd-2887265e7f90.`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// WARN — a gate PIPED into another command (board 07deffab item 1, Codex
+// thread 01a05bbe A1). See header for the full rationale. Reuses matchGate
+// unchanged — deliberately "a recognized gate piped", never "every pipe".
+// ---------------------------------------------------------------------------
+
+// A 'set' invocation establishing the 'pipefail' shell option, in any
+// flag-combining form ('set -o pipefail', 'set -eo pipefail', 'set -euo
+// pipefail', ...). Deliberately loose (header: PIPESTATUS shapes are not
+// specially parsed) — matching the literal 'pipefail' token after a 'set'
+// command is definitive enough of intent without hand-parsing every
+// short-flag combination bash accepts.
+const SET_PIPEFAIL_RE = /^set\b.*\bpipefail\b/;
+
+const pipeWarnings = [];
+let pipefailEstablished = false;
+for (let i = 0; i < items.length; i++) {
+  const { segment, sep } = items[i];
+  const trimmed = segment.trim();
+  // Established for every segment STRICTLY AFTER this one — never assumed
+  // from an earlier call, only detected in THIS command string, and only
+  // once seen (sequential scan mirrors left-to-right shell execution order).
+  if (SET_PIPEFAIL_RE.test(trimmed)) pipefailEstablished = true;
+  if (sep !== '|' || pipefailEstablished) continue; // not a top-level pipe, or already exempted
+  const gate = matchGate(trimmed);
+  if (!gate) continue; // gate recognition only — never "every pipe"
+  const target = (items[i + 1]?.segment ?? '').trim() || '(unknown)';
+  pipeWarnings.push({ gate, target });
+}
+
+if (pipeWarnings.length) {
+  const lines = pipeWarnings.map(({ gate, target }) => `  - '${gate}' piped into '${target}'`).join('\n');
+  process.stdout.write(
+    JSON.stringify({
+      hookSpecificOutput: {
+        hookEventName: input.hook_event_name,
+        additionalContext:
+          `H24 ADVISORY (gate piped — distinct from the DENY rule above, never a denial) — a declared gate invocation is ` +
+          `piped into another command; a pipeline's exit status is the LAST command's, so the gate's failure can be silently ` +
+          `swallowed:\n${lines}\n` +
+          `Command: ${command}\n` +
+          `This is a WARNING, not a denial — piping to trim output ('| tail', '| grep FAILED') is common and legitimate. ` +
+          `Two safe rewrites: prefix the command with 'set -o pipefail' so the pipeline's exit reflects the gate's real status, ` +
+          `or redirect to a file and inspect it separately ('<gate> > out.log; grep ... out.log'). ` +
+          `Board 07deffab, Codex thread 01a05bbe.`,
+      },
+    })
   );
 }
 

@@ -79,6 +79,7 @@ This is the corridor that works, measured twice across two model families (resea
 H14's escape check applies only to arguments of a DECLARED RUN COMMAND — not to the fs helpers or read-only search calls, which carry their own separate guards.
 H14's escape check only denies arguments that resolve outside the project root — and the session scratchpad sits outside it, so nothing staged there can ever be reached by such a command.
 A probe you intend to delete is transient state, and P4 requires transient state to be removed by the mechanical event that ends its life, not by a remembered step — clean it up with the sanctioned fs helper, `node scripts/fs-remove.mjs scripts/zz-probe.mjs`, before you stop; a probe left in the repo tree is untracked source the moment you stop, and it will be treated as unowned territory, not as scratch work.
+A probe that DRIVES A HOOK never runs against the live checkout: hooks resolve `.sterling/` by walking UP from the stdin `cwd` to the nearest store, so a synthetic payload with the real repo (or any unisolated subdirectory) as `cwd` WRITES REAL SESSION STATE — measured 2026-08-31, a manual `h1-session-start` probe overwrote the live session cell and broke that session's commit gate (research_finding `h1-session-pollution-was-manual-probe-not-fixture-escape`). Build a throwaway fixture root the way every committed hook test does — `mkdtempSync(join(tmpdir(),...))` + `.sterling/config.json` + a store — and point the payload's `cwd` there.
 
 # Worked example
 

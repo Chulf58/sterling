@@ -477,3 +477,42 @@ test('H25-TAL-hardening (9): malformed .sterling/config.json must not suppress o
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// Case 10 — dash/newline-split prohibition (board 07deffab EXTENDS,
+// 2026-08-29 dome-farmer feedback: fired on briefs mentioning tests while
+// explicitly FORBIDDING test writes).
+// ---------------------------------------------------------------------------
+test('H25-TAL-hardening (10): "Please do not —\\nwrite new tests for this change; just fix the parser bug." never warns', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'coder');
+    const r = runHook(
+      taskInput(dir, {
+        subagent_type: 'coder',
+        prompt: 'Please do not —\nwrite new tests for this change; just fix the parser bug.',
+      }),
+      dir
+    );
+    assertNoTestAuthoringAdvisory(r, 'dash/newline-split prohibition (case 10)');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H25-TAL-hardening (11) CONTROL: an unrelated authoring clause after the same dash-split prohibition still warns', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeAgentDef(dir, 'coder');
+    const r = runHook(
+      taskInput(dir, {
+        subagent_type: 'coder',
+        prompt: 'Please do not touch the build config; write new tests for the parser module.',
+      }),
+      dir
+    );
+    assertTestAuthoringWarn(r, 'genuinely separate authoring clause after unrelated prohibition (case 11)');
+  } finally {
+    cleanup();
+  }
+});
