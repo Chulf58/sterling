@@ -317,7 +317,7 @@ function observedModelFromTranscript(transcriptPath) {
 // (never a live re-read at Stop — pin V2-3b) from config.models, never
 // installed frontmatter (rendered output can be stale).
 //
-// FIX ROUND finding HIGH-1 (Codex outside-family review, thread 01a0586b;
+// FIX ROUND HIGH-1 (Codex outside-family review, thread 01a0586b;
 // conductor-verified against packages/schemas/src/config.ts:171-175): the
 // REAL, single shared key for every reviewer-* agent_type is
 // `config.models.reviewers` — there is no per-role key (the schema names

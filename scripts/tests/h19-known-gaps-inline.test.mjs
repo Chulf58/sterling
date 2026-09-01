@@ -385,7 +385,7 @@ test('dedup: a second touch of the same article does not re-inline its gaps; a d
 
 // ---------------------------------------------------------------------------
 // (7) The probe-output/Bash pointer path stays gap-free — the accepted,
-// boarded exclusion (decision 53fd6f62; follow-up f1489964). The exclusion
+// boarded exclusion (decision 53fd6f62; follow-up board f1489964). The exclusion
 // pin that stood here was INVERTED DELIBERATELY on 2026-09-01 when board
 // f1489964 shipped the seam closure — exactly the deliberate change the old
 // pin existed to force (its own header named f1489964 as the sanctioned
