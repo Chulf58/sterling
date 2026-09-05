@@ -12,16 +12,37 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
-export function liveDispatches(root) {
+/**
+ * The same TTL read as liveDispatches(), but keeping the two NEGATIVE cases
+ * apart: a register that is genuinely ABSENT (nothing was ever dispatched —
+ * confirmed zero) versus one that EXISTS but cannot be read (corrupt JSON, or
+ * a shape that is not the register's array) — which is UNKNOWN, not zero.
+ * Returns {status:'ok'|'unknown', entries} — the null-vs-empty convention the
+ * observed-territory lib already uses. Added for the rotation note (board
+ * efbddf09): a note that silently claims "nothing was running" because the
+ * register was unreadable is exactly the false all-clear that cost ~330k
+ * tokens on 2026-09-04, so the writer needs the distinction the advisory
+ * consumers deliberately collapse.
+ */
+export function liveDispatchesOrUnknown(root) {
   const path = join(root, '.sterling', 'transient', 'dispatch-register.json');
-  if (!existsSync(path)) return [];
+  if (!existsSync(path)) return { status: 'ok', entries: [] };
   let entries;
   try {
     entries = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return [];
+    return { status: 'unknown', entries: [] };
   }
-  if (!Array.isArray(entries)) return [];
+  if (!Array.isArray(entries)) return { status: 'unknown', entries: [] };
+  return { status: 'ok', entries: filterLive(root, entries) };
+}
+
+/** Advisory read: both negative cases degrade to empty (the h22 posture). */
+export function liveDispatches(root) {
+  return liveDispatchesOrUnknown(root).entries;
+}
+
+function filterLive(root, entries) {
   let staleMinutes = 60;
   try {
     const cfg = JSON.parse(readFileSync(join(root, '.sterling', 'config.json'), 'utf8'));

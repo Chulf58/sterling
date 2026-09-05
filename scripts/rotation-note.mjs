@@ -12,6 +12,7 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { liveDispatchesOrUnknown } from './lib/dispatch-register.mjs';
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -103,6 +104,26 @@ const baseBranch = resolveBaseBranch();
 const commitsAheadRaw = baseBranch ? git(['rev-list', '--count', `${baseBranch}..HEAD`]) : null;
 const commitsAhead = commitsAheadRaw !== null && /^\d+$/.test(commitsAheadRaw) ? Number(commitsAheadRaw) : null;
 
+// LIVE DISPATCHES (board efbddf09): a subagent dispatched before the /clear
+// keeps running across it — the register is the only mechanical record of that,
+// and the note is the only thing the fresh session reads. Without it a coder
+// still writing files is invisible and a second one gets dispatched at the same
+// slice (measured 2026-09-04, ~330k subagent tokens wasted). "Live" is the H10
+// TTL, read through the ONE shared helper so this can never drift from what H10
+// and H26 call live; a session-less CLI can only apply the TTL half of H10's
+// (session_id AND TTL) test. Two negatives stay distinct: no register at all is
+// CONFIRMED-ZERO ([]), an unreadable one is UNKNOWN (null) — a silent [] there
+// would be a false all-clear, the exact failure this closes.
+const registerRead = liveDispatchesOrUnknown(cwd);
+const liveDispatches =
+  registerRead.status === 'ok'
+    ? registerRead.entries.map((e) => ({
+        agent_type: e?.agent_type ?? null,
+        agent_id: e?.agent_id ?? null,
+        territory: Array.isArray(e?.files) ? e.files : [],
+      }))
+    : null;
+
 const note = {
   next_slice: nextSlice,
   objective: (arg('objective') ?? '').trim() || null,
@@ -112,6 +133,7 @@ const note = {
   head_sha: git(['rev-parse', 'HEAD']),
   base_branch: baseBranch,
   commits_ahead: commitsAhead,
+  live_dispatches: liveDispatches,
   reason,
   at: new Date().toISOString(),
 };
@@ -126,6 +148,12 @@ process.stdout.write(
     (note.commits_ahead !== null
       ? `commits_ahead: ${note.commits_ahead} (vs ${note.base_branch})\n`
       : 'commits_ahead: unavailable (no origin/HEAD, main, or master to diff against — pass --into to a future version if this recurs)\n') +
+    // Silent when the set is a confirmed zero (P1 — nothing to check).
+    (liveDispatches === null
+      ? 'live_dispatches: UNKNOWN — the dispatch register exists but could not be read; check ListAgents before re-dispatching\n'
+      : liveDispatches.length
+        ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear\n`
+        : '') +
     (note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +
         `  1. exit and relaunch the Claude Code CLI now\n` +

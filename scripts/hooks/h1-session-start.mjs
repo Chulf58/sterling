@@ -718,10 +718,36 @@ try {
             : []
         )
         .join('\n');
+      // LIVE DISPATCHES AT ROTATION (board efbddf09): the note's live_dispatches
+      // is the only trace a fresh session has of a subagent that kept running
+      // across the /clear — re-print it so the conductor checks ListAgents
+      // instead of dispatching a second agent at the same slice (measured
+      // 2026-09-04). THREE STATES, deliberately distinct: a non-empty array is
+      // counted and enumerated; a CONFIRMED-EMPTY array prints NOTHING at all,
+      // not even a "0 dispatch(es)" line (P1 — no ceremony for a checked-clear);
+      // null is UNKNOWN (the writer found a register it could not read) and is
+      // disclosed as uncertainty, never as a fabricated count. An ABSENT field
+      // (a note from a writer predating this) is treated as the silent case —
+      // it is not evidence of uncertainty, and manufacturing a warning from it
+      // would fire on every legacy note.
+      const liveDispatches = note.live_dispatches;
+      let liveLine = '';
+      if (Array.isArray(liveDispatches) && liveDispatches.length) {
+        const rendered = liveDispatches
+          .map((d) => {
+            const territory = Array.isArray(d?.territory) && d.territory.length ? d.territory.join(', ') : 'no declared territory';
+            return `- ${d?.agent_type ?? 'agent'} (${d?.agent_id ?? 'unknown id'}) — ${territory}`;
+          })
+          .join('\n');
+        liveLine = `\n${liveDispatches.length} dispatch(es) were live at rotation — check ListAgents before re-dispatching:\n${rendered}`;
+      } else if (liveDispatches === null) {
+        liveLine =
+          `\nLIVE DISPATCHES: UNKNOWN — the dispatch register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching.`;
+      }
       rotationContext =
         `\n\nROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` +
         (cautions.length ? ` CAUTION: ${cautions.join('; ')}.` : '') +
-        `\n${fields}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
+        `\n${fields}${liveLine}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
         (note.reason === 'code-reload'
           ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.`
           : `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear — a /clear alone never reloads code, so relaunch now if that didn't happen yet.`);
@@ -754,18 +780,36 @@ try {
 // were already computed store-independently, above the `if (!store) allow()`
 // bail (computeH1DeadDispatchResidue) — folded into additionalContext here for
 // the normal (store-present) path.
+// ON source=clear THE WORD "DEAD" IS NOT EARNED (board efbddf09, measured
+// 2026-09-04): a subagent DID outlive a /clear and kept writing files while the
+// fresh session dispatched a second agent at the same slice. A missing
+// SubagentStop is evidence the register was never cleaned up, NOT evidence the
+// process ended — so the residue is still reported (its dirty-file list is the
+// useful part) but on a /clear it stops asserting death and points at the two
+// surfaces that can actually answer the question.
 const dispatchResidueContext = dispatchResidueLines.length
-  ? `\n\nDEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary — its SubagentStop(s) never fired, so the register is about to be wiped (P4).\n` +
+  ? `\n\nDEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary — its SubagentStop(s) never fired, so the register is about to be wiped (P4).` +
+    (input.source === 'clear'
+      ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear — cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.`
+      : '') +
+    `\n` +
     dispatchResidueLines.join('\n')
   : '';
 
 // IN-FLIGHT DISPATCH REGISTER (decision ec9eacaa): deleted UNCONDITIONALLY —
 // every source, resume included. Unlike H10's other three registers there is no
-// debt to verify and no source to gate on: an entry names a subagent process
-// that cannot survive a session boundary, so at ANY SessionStart every entry is
-// dead by definition (P4). Leaving one would defer a real duty on behalf of an
-// agent that no longer exists, which is exactly the silent duty hole the
-// staleness TTL exists to bound. COOPERATING WRITER (decision
+// debt to VERIFY and no source to gate on: an entry can only ever defer a duty
+// on behalf of an agent this NEW session cannot observe, which is exactly the
+// silent duty hole the staleness TTL exists to bound — so the register goes,
+// whatever the entries' processes are doing.
+// THE ORIGINAL JUSTIFICATION ("a subagent process cannot survive a session
+// boundary, so at ANY SessionStart every entry is dead by definition") WAS
+// WRONG and is corrected here, not merely softened (board efbddf09, measured
+// 2026-09-04): a dispatch DID outlive a /clear, kept writing files, and was
+// invisible to the fresh session precisely because this deletion left no trace.
+// The deletion behavior is unchanged and still correct; what changed is that
+// the note now carries the live set across the boundary (see ROTATION RESTORE
+// above) instead of the register being treated as worthless. COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0): see deleteRegisterUnderLock
 // above — on a lock timeout this warns and leaves the register intact rather
 // than deleting it unlocked; the next locked H22 fire prunes this session's

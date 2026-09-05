@@ -5258,7 +5258,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -8406,10 +8406,24 @@ try {
       const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).concat(
         typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
       ).join("\n");
+      const liveDispatches = note.live_dispatches;
+      let liveLine = "";
+      if (Array.isArray(liveDispatches) && liveDispatches.length) {
+        const rendered = liveDispatches.map((d) => {
+          const territory = Array.isArray(d?.territory) && d.territory.length ? d.territory.join(", ") : "no declared territory";
+          return `- ${d?.agent_type ?? "agent"} (${d?.agent_id ?? "unknown id"}) \u2014 ${territory}`;
+        }).join("\n");
+        liveLine = `
+${liveDispatches.length} dispatch(es) were live at rotation \u2014 check ListAgents before re-dispatching:
+${rendered}`;
+      } else if (liveDispatches === null) {
+        liveLine = `
+LIVE DISPATCHES: UNKNOWN \u2014 the dispatch register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching.`;
+      }
       rotationContext = `
 
 ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
-${fields}
+${fields}${liveLine}
 Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.`);
     }
   }
@@ -8424,7 +8438,7 @@ try {
 }
 var dispatchResidueContext = dispatchResidueLines.length ? `
 
-DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).
+DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).` + (input.source === "clear" ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear \u2014 cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.` : "") + `
 ` + dispatchResidueLines.join("\n") : "";
 await deleteRegisterUnderLock(input.cwd);
 var PERCALL_TMP_TTL_MS = 60 * 60 * 1e3;
