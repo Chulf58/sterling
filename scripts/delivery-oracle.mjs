@@ -1,0 +1,1158 @@
+#!/usr/bin/env node
+// DELIVERY ORACLE — layer 1, the STORE-TO-HOOK CONFORMANCE AUDIT (board
+// a6b118e4, objective knowledge-delivery-oracle; article 'delivery-oracle').
+//
+// It derives, FROM THE STORE, what knowledge delivery SHOULD happen for every
+// governed path, drives the BUNDLED hooks (hooks/*.mjs — the surface the
+// platform actually executes) with synthesized stdin payloads inside a
+// throwaway sandbox project, reads back all three delivery channels (stdout
+// hookSpecificOutput.additionalContext, the transient/delivery/pending.json
+// queue plus its UserPromptSubmit drain, and stderr+exit), and scores per-hook
+// recall/precision into a repeatable JSON report.
+//
+// WHAT IT MEASURES, AND WHAT IT CANNOT (disclosed, not buried): it observes
+// what a hook WRITES, never what reached an agent — H19 may only enqueue for a
+// later drain, H20's context goes to the dispatching conductor, active-run
+// subagents make H19 deliberately silent. A green run can coexist with broken
+// platform injection; layer 3 (live subagent acceptance probe) owns that half.
+//
+// HOOKS ACTUALLY AUDITED, exactly: h19-knowledge-delivery (file-touch),
+// h19-bash-delivery (pointer surface), h19-delivery-drain (the queue's second
+// half), h10-direct-capture (ownership agreement only) and h20-mechanism-axis
+// (the frozen probes). H23-OUTPUT-AXIS IS **NOT** AUDITED — an owed follow-up,
+// stated here rather than implied away. Its predicate is CONTENT-matched
+// (axis terms extracted from tool_response, three relevance floors, a
+// centrality check) rather than path-matched, so deriving its expectation means
+// mirroring the axis matcher itself; a cheap silence-only arm was considered
+// and rejected, because H23 is silent for at least four different reasons
+// (owned-path suppression, no term match, dedup, the pointer cap) and a verdict
+// that cannot tell them apart is exactly the multiply-caused silence
+// anti_pattern 1b141d1f warns about. The 'output_axis' payload arm in
+// synthesizePayload is live and contract-required, but nothing in main() drives
+// it yet — that is the shape of the follow-up.
+//
+// GITIGNORE is MIRRORED, not applied wholesale (pins A5/A5b/A5c/A5d, re-cut
+// after an outside-family review read the hook sources). An OWNED path that git
+// ignores still gets its full h19-knowledge-delivery case AND its
+// h19-bash-delivery case, resolving the same owners a non-ignored sibling
+// would: neither hook gates owner resolution on the ignore check
+// (h19-knowledge-delivery.mjs:~115 applies it ONLY to the unowned-frontier
+// decision; h19-bash-delivery.mjs:~81 has no ignore check at all). The check
+// still runs and its result rides every case as gitignore_check — RECORDED,
+// never suppressing. The one place it changes a verdict is the FRONTIER arm, so
+// the only gitignore exclusion this oracle mints is for an UNOWNED ignored path
+// (reason 'gitignored', record_id null), which is where H19 withholds its
+// unowned-territory notice and H10 its article demand.
+//
+// The expected set MIRRORS each hook's own predicate (same types, same
+// file_keys, same cap, same !working_tree filter) rather than asking an
+// independent question — so the oracle measures the hooks, not its own opinion.
+// Excluded paths are accounted for BY NAME (anti_pattern 1b141d1f: a deduping
+// notifier's silence is multiply-caused), never silently dropped.
+//
+//   node scripts/delivery-oracle.mjs [--project <dir>] [--probes <dir>] [--json]
+import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
+import {
+  readFileSync, writeFileSync, appendFileSync, mkdirSync, rmSync, existsSync,
+  readdirSync, mkdtempSync, statSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname, basename, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
+
+export const ORACLE_VERSION = 1;
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, '..');
+
+// The hook predicates this oracle mirrors, named once (h19-knowledge-delivery
+// :86, h19-bash-delivery:103, h23-output-axis:165, h10-direct-capture:1117).
+const OWNER_TYPES = ['feature_article', 'reference_material'];
+const HOOK_CAP = 100;          // H19/H23's ownership cap
+const ENUM_CAP = 5000;         // enumeration only — never a predicate
+
+const H19 = 'h19-knowledge-delivery.mjs';
+const H19_BASH = 'h19-bash-delivery.mjs';
+const H10 = 'h10-direct-capture.mjs';
+const DRAIN = 'h19-delivery-drain.mjs';
+
+// H10's demand-block header (h10-direct-capture.mjs:1712). Used as the LIVENESS
+// arm of the inverted ownership verdict: its absence means H10 never printed a
+// demand at all, which is unmeasured — never "the path is owned".
+const H10_DUTIES_MARKER = 'H10 ▸ duties before this session ends';
+
+const QUEUE_KINDS = ['delivery', 'frontier', 'bash_pointers', 'output_axis_pointers'];
+const PROBE_KINDS = ['agent', 'ask', 'consult'];
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
+
+const sha = (s) => createHash('sha256').update(s).digest('hex');
+const uniq = (xs) => [...new Set(xs)];
+const idsIn = (text) => uniq(String(text ?? '').match(UUID_RE) ?? []);
+
+// ---------------------------------------------------------------------------
+// deriveExpected — the store-side half.
+// ---------------------------------------------------------------------------
+
+/** Which of `paths` git ignores, or null when git cannot answer (no repo, no
+ *  git). Same contract as the hooks' gitIgnored: the CALLER owns the degrade,
+ *  and it degrades TOWARD signalling — a path we cannot prove is ignored stays
+ *  an expectation rather than vanishing from the audit. */
+function gitIgnored(paths, cwd) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return new Set();
+  const res = spawnSync('git', ['check-ignore', '-z', '--stdin'], {
+    cwd, input: list.join('\0') + '\0', encoding: 'utf8', timeout: 30_000,
+  });
+  if (res.status !== 0 && res.status !== 1) return null;
+  return new Set((res.stdout || '').split('\0').filter(Boolean));
+}
+
+/** Repo-relative POSIX paths a record CLAIMS — the enumeration seam only. The
+ *  field carrying paths is per TYPE (feature_article -> files[{path}],
+ *  reference_material -> location, decision/anti_pattern -> file_keys[]). */
+function claimedPaths(record) {
+  if (record.type === 'feature_article') return (record.files ?? []).map((f) => f?.path);
+  if (record.type === 'reference_material') return [record.location];
+  return record.file_keys ?? [];
+}
+
+/** A path this oracle is willing to MATERIALIZE inside its sandbox. Absolute
+ *  paths, drive letters, URLs, backslash forms and any `..` segment are refused:
+ *  a record's files[] is store data, and store data must never be able to steer
+ *  a sandbox write outside the sandbox. Refusal is per-path and named by the
+ *  caller, never a silent skip. */
+const isRepoPath = (p) => {
+  if (typeof p !== 'string' || p.length === 0) return false;
+  if (p.includes('://') || p.startsWith('/') || /^[A-Za-z]:/.test(p) || p.includes('\\')) return false;
+  if (p.split('/').some((seg) => seg === '..')) return false;
+  return true;
+};
+
+export function deriveExpected(store, { repoRoot: root } = {}) {
+  // 1. ENUMERATE candidate paths from the records themselves. This is not the
+  //    predicate — every path found here is re-asked through the hooks' own
+  //    query below, so an enumeration quirk can never widen an expectation.
+  const claimants = new Map(); // rel -> first record id that named it
+  const rejectedPaths = [];
+  for (const type of ['feature_article', 'reference_material', 'anti_pattern', 'decision']) {
+    // cap + 1 so a FULL page is detectable. A silently truncated enumeration
+    // under-reports the audit's own coverage, which is the one error class an
+    // audit may never make: it would read as "these records are conformant".
+    const records = store.query({ types: [type], cap: ENUM_CAP + 1 });
+    if (records.length > ENUM_CAP) {
+      throw new Error(
+        `deriveExpected: the ${type} enumeration hit its cap (${ENUM_CAP}) — the audit would silently cover only part of the store. ` +
+          'Raise ENUM_CAP in scripts/delivery-oracle.mjs and re-run; never report a capped run as a clean one.'
+      );
+    }
+    for (const record of records) {
+      for (const p of claimedPaths(record)) {
+        if (typeof p !== 'string' || !p) continue;
+        // Accounted for BY NAME, never dropped (anti_pattern 1b141d1f).
+        if (!isRepoPath(p)) { rejectedPaths.push({ rel: p, record_id: record.id }); continue; }
+        if (!claimants.has(p)) claimants.set(p, record.id);
+      }
+    }
+  }
+  const rels = [...claimants.keys()].sort();
+
+  // 2. NEIGHBOURS — the FRONTIER arm's candidates. H19's ignore check exists
+  //    solely to suppress the unowned-territory notice on ignored paths, and an
+  //    unowned path is by definition one no record names, so it can never come
+  //    out of the enumeration above. The bounded source is the DIRECTORIES
+  //    governed territory already lives in: one non-recursive readdir per
+  //    claimed directory, which finds an unowned file sitting beside an owned
+  //    one and never walks node_modules (no record claims anything there).
+  const claimedDirs = [...new Set(rels.map((r) => (r.includes('/') ? r.slice(0, r.lastIndexOf('/')) : '.')))];
+  const neighbours = new Set();
+  for (const d of claimedDirs) {
+    let entriesOnDisk;
+    try {
+      entriesOnDisk = readdirSync(join(root, d), { withFileTypes: true });
+    } catch { continue; } // a claimed directory that no longer exists is not a frontier
+    for (const e of entriesOnDisk) {
+      if (!e.isFile()) continue;
+      const rel = d === '.' ? e.name : `${d}/${e.name}`;
+      if (!claimants.has(rel) && isRepoPath(rel)) neighbours.add(rel);
+    }
+  }
+
+  // 3. One batched ignore check over claimed paths AND neighbours (the hooks ask
+  //    per path; the ANSWER is identical and this keeps the audit to one spawn).
+  const ignored = gitIgnored([...rels, ...neighbours], root);
+  const gitignore_check = ignored === null ? 'unavailable' : 'checked';
+
+  const entries = [];
+  // A path the oracle refuses to materialize is REPORTED, never dropped: an
+  // unaudited path that vanishes from the report reads as a conformant one.
+  for (const r of rejectedPaths) {
+    entries.push({ kind: 'exclusion', rel: r.rel, record_id: r.record_id, reason: 'unsafe_path' });
+  }
+  // FRONTIER SUPPRESSION, recorded by name. An UNOWNED path that git ignores is
+  // the one place gitignore actually changes a hook's behaviour: H19 withholds
+  // its unowned-territory notice there (h19-knowledge-delivery.mjs:~115) and H10
+  // withholds its article demand (h10-direct-capture.mjs:~1122). That
+  // suppression is scoped to THIS path — it never touches owner delivery, which
+  // is why an OWNED ignored path carries no exclusion at all.
+  for (const rel of [...neighbours].sort()) {
+    if (ignored?.has(rel)) {
+      entries.push({ kind: 'exclusion', rel, record_id: null, reason: 'gitignored' });
+    }
+  }
+  for (const rel of rels) {
+    const rawOwners = store.query({ types: OWNER_TYPES, file_keys: [rel], cap: HOOK_CAP });
+    const owners = rawOwners.filter((r) => !r.working_tree);
+    const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: HOOK_CAP });
+    const rationale = store.query({ types: ['decision'], file_keys: [rel], cap: HOOK_CAP });
+
+    // NO GITIGNORE SHORT-CIRCUIT HERE, deliberately — this is the arm an
+    // outside-family review overturned. Neither delivery hook gates OWNER
+    // resolution on the ignore check: h19-knowledge-delivery applies it only to
+    // the unowned-frontier decision (:~115) and h19-bash-delivery performs no
+    // ignore check at all (:~81). An oracle that excluded ignored paths
+    // wholesale asked NOTHING about exactly the territory where those two hooks
+    // can silently stop delivering. The check still RUNS, and its result is
+    // recorded on every case as gitignore_check — recorded, never suppressing.
+    // (board 1de3653b governs the FRONTIER signal, which is handled above.)
+
+    // A working-tree copy's article is deliberately not delivered against the
+    // live tree; each filtered-out claim is named rather than dropped.
+    for (const wt of rawOwners.filter((r) => r.working_tree)) {
+      entries.push({ kind: 'exclusion', rel, record_id: wt.id, reason: 'working_tree_article' });
+    }
+
+    const mk = (hook, payload_kind, expected) => {
+      const expected_ids = uniq([...expected.owners, ...expected.hazards, ...expected.rationale]);
+      entries.push({
+        kind: 'case',
+        fixture_id: `${hook}:${payload_kind}:${rel}`,
+        hook, payload_kind, rel,
+        expected, expected_ids, gitignore_check,
+      });
+    };
+    const ids = (rs) => rs.map((r) => r.id);
+
+    // H19 file-touch: owners + hazards (substance) + decisions (pointers).
+    if (owners.length || hazards.length || rationale.length) {
+      mk(H19, 'file_touch', { owners: ids(owners), hazards: ids(hazards), rationale: ids(rationale) });
+    }
+    // H19 bash pointers: owners + hazards only (h19-bash-delivery:102-108).
+    if (owners.length || hazards.length) {
+      mk(H19_BASH, 'bash', { owners: ids(owners), hazards: ids(hazards), rationale: [] });
+    }
+    // H10 ownership: the AGREEMENT arm. Derived from H19's cap-100 owner set on
+    // purpose — H10 asks the same question at cap 25, so a path owned by more
+    // records than its cap reads as UNOWNED there and shows up here as a miss
+    // rather than as a matching (and therefore invisible) expectation.
+    if (owners.length) {
+      mk(H10, 'h10_ownership', { owners: ids(owners), hazards: [], rationale: [] });
+    }
+  }
+  return entries;
+}
+
+// ---------------------------------------------------------------------------
+// synthesizePayload — the exact stdin shape each hook reads.
+// Returns the sandbox side-effects beside the stdin, because H10 takes its
+// touched set from DISK (.sterling/transient/touches.json), never from stdin.
+// ---------------------------------------------------------------------------
+
+export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {}) {
+  const c = caseOrProbe ?? {};
+  const kind = c.kind === 'case' ? c.payload_kind : c.kind;
+  const ti = c.tool_input ?? {};
+  const stdin = { cwd };
+  if (session_id) stdin.session_id = session_id;
+  // ABSENT, not empty: H19's AC6 silences agent touches on the enqueue rung, so
+  // a stray `agent_id: ''` would change the verdict rather than describe it.
+  if (agent_id) stdin.agent_id = agent_id;
+  const sandbox_writes = [];
+
+  switch (kind) {
+    case 'file_touch':
+      stdin.hook_event_name = c.event ?? 'PostToolUse';
+      stdin.tool_name = c.tool ?? 'Read';
+      stdin.tool_input = { file_path: join(cwd, c.rel) };
+      break;
+    case 'bash':
+      stdin.hook_event_name = c.event ?? 'PostToolUse';
+      stdin.tool_name = c.tool ?? 'Bash';
+      stdin.tool_input = { command: `grep -n TODO ${c.rel}` };
+      break;
+    case 'output_axis':
+      stdin.hook_event_name = c.event ?? 'PostToolUse';
+      stdin.tool_name = c.tool ?? 'Read';
+      stdin.tool_input = { file_path: join(cwd, c.rel) };
+      stdin.tool_response = c.tool_response ?? `contents of ${c.rel}`;
+      break;
+    case 'h10_ownership':
+      // NOTHING about the path in stdin — H10 reads the touched set from disk,
+      // and feeding it by stdin would audit a channel the hook does not use.
+      stdin.hook_event_name = c.event ?? 'Stop';
+      sandbox_writes.push({
+        rel: join('.sterling', 'transient', 'touches.json'),
+        json: [{ path: c.rel, at: new Date().toISOString() }],
+      });
+      break;
+    case 'agent':
+      stdin.hook_event_name = c.event ?? 'PreToolUse';
+      stdin.tool_name = c.tool ?? 'Task';
+      stdin.tool_input = { ...ti };
+      break;
+    case 'ask':
+      // AskUserQuestion has NO prompt field (decision f5638a84). The shape is
+      // whitelisted rather than copied so a synthesized prompt cannot leak in.
+      stdin.hook_event_name = c.event ?? 'PreToolUse';
+      stdin.tool_name = c.tool ?? 'AskUserQuestion';
+      stdin.tool_input = { questions: ti.questions ?? [] };
+      break;
+    case 'consult':
+      stdin.hook_event_name = c.event ?? 'PreToolUse';
+      stdin.tool_name = c.tool ?? 'mcp__codex__codex';
+      stdin.tool_input = { ...ti };
+      break;
+    default:
+      throw new Error(`synthesizePayload: unknown payload kind '${kind}' — an unrecognised surface is never half-synthesized (P5)`);
+  }
+  return { stdin, sandbox_writes };
+}
+
+// ---------------------------------------------------------------------------
+// parseDelivery — the three channels.
+// ---------------------------------------------------------------------------
+
+export function parseDelivery(hookResult, sandboxDir) {
+  const exit_code = hookResult?.code ?? null;
+  const stdout = String(hookResult?.stdout ?? '');
+  const stderr = String(hookResult?.stderr ?? '');
+
+  let harness_error;
+  let rendered_ids = [];
+  let additionalContext = '';
+  if (stdout.trim()) {
+    try {
+      const parsed = JSON.parse(stdout);
+      // SHAPE VALIDATION, not just parseability: a hook that printed a non-object
+      // or a bare `{}` produced a MALFORMED ARTIFACT, and reading that as silence
+      // credits the hook with a clean no-op it never performed. An object that
+      // carries other keys but no hookSpecificOutput is genuine silence.
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error(`hook stdout is ${Array.isArray(parsed) ? 'an array' : typeof parsed}, not a hook-output object`);
+      }
+      if (Object.keys(parsed).length === 0) {
+        throw new Error('hook stdout is an empty JSON object — a malformed artifact, not silence');
+      }
+      additionalContext = parsed?.hookSpecificOutput?.additionalContext ?? '';
+      rendered_ids = idsIn(additionalContext);
+    } catch (e) {
+      // NOT an empty result: null means "not measured". [] would score as a
+      // real MISS and blame the hook for a harness fault.
+      harness_error = `unparseable hook stdout: ${e.message}`;
+      rendered_ids = null;
+    }
+  }
+
+  const queued_by_kind = Object.fromEntries(QUEUE_KINDS.map((k) => [k, []]));
+  const pending = join(sandboxDir, '.sterling', 'transient', 'delivery', 'pending.json');
+  let queuedEntries = [];
+  if (existsSync(pending)) {
+    try {
+      const raw = JSON.parse(readFileSync(pending, 'utf8'));
+      // The queue's declared shape is an ARRAY of entries. Anything else is a
+      // malformed artifact (the shape h19-delivery-drain parks as corrupt) —
+      // scoring it as an empty queue would report a torn file as "nothing
+      // queued" and blame the producer for a delivery it may well have made.
+      if (!Array.isArray(raw)) throw new Error(`pending queue is ${raw === null ? 'null' : typeof raw}, not an array`);
+      queuedEntries = raw;
+    } catch (e) {
+      harness_error = harness_error ?? `malformed pending queue: ${e.message}`;
+    }
+  }
+  for (const entry of queuedEntries) {
+    const kind = entry?.kind ?? 'delivery';
+    // Ids are read from the WHOLE entry, not the payload alone: the drain
+    // re-resolves from the entry's `recipe` (decision db3392db), and a rendered
+    // full article names its record in the recipe while the prose body need not
+    // print the uuid at all. A frontier entry names territory and no record —
+    // assuming every queue entry is article-shaped drops the signal it carries.
+    const text = JSON.stringify(entry ?? null);
+    const parsedEntry = { kind, rel: entry?.rel ?? null, ids: idsIn(text), text };
+    (queued_by_kind[kind] ??= []).push(parsedEntry);
+  }
+  const queued_ids = uniq(Object.values(queued_by_kind).flat().flatMap((e) => e.ids));
+
+  const denied = exit_code === 2;
+  const denied_ids = denied ? idsIn(stderr) : [];
+
+  // DENY OUTRANKS INJECT: an exit-2 result that also printed context is a
+  // denial — the action did not proceed, whatever else was written.
+  let channel;
+  if (denied) channel = 'deny';
+  else if (harness_error) channel = 'harness_error';
+  else if (additionalContext) channel = 'inject';
+  else if (queuedEntries.length) channel = 'queue';
+  else if (exit_code === 1) channel = 'warn';
+  else channel = 'silent';
+
+  return {
+    rendered_ids, queued_ids, queued_by_kind, exit_code, channel, denied, denied_ids,
+    // The RAW channel text beside the ids: a full-article render carries the
+    // article's substance without necessarily printing its uuid, so scoring on
+    // ids alone would report a real delivery as a miss (measured 2026-09-05).
+    rendered_text: additionalContext,
+    queued_text: Object.values(queued_by_kind).flat().map((e) => e.text).join('\n'),
+    queued_entries: Object.values(queued_by_kind).flat().length,
+    stderr_text: stderr,
+    ...(harness_error ? { harness_error } : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Identity + run comparison.
+// ---------------------------------------------------------------------------
+
+/** The four board-named components, PLUS the two that also change what a run
+ *  means: the snapshot MODE (a fallback-taken run is not comparable to a
+ *  read-only one) and a digest of the delivery-relevant config. Absent extras
+ *  hash stably, so the four-component call is unchanged. */
+export function runIdentity({ snapshotDigest, bundleHash, rung, oracleVersion, snapshotMode, configDigest } = {}) {
+  return sha(JSON.stringify([snapshotDigest, bundleHash, rung, oracleVersion, snapshotMode ?? null, configDigest ?? null])).slice(0, 16);
+}
+
+export function caseIdentity(caseObj = {}) {
+  return sha(JSON.stringify([
+    caseObj.fixture_id ?? null,
+    caseObj.hook ?? null,
+    [...(caseObj.expected_ids ?? [])].sort(),
+  ])).slice(0, 16);
+}
+
+/** The expected-set hash a run diff keys on beside the fixture id. Covers the
+ *  WHOLE expectation, not just expected_ids: the PAYLOAD that was sent, the
+ *  deny expectation and the must-stay-absent set are all things whose change
+ *  moves the goalposts, and a diff that missed them would report an
+ *  expectation change as a regression (or launder one as a recovery). */
+export function expectedHash(expected_ids = [], extra = {}) {
+  return sha(JSON.stringify([
+    [...expected_ids].sort(),
+    [...(extra.expect_deny_ids ?? [])].sort(),
+    [...(extra.expected_absent_ids ?? [])].sort(),
+    extra.expect_deny ?? false,
+    extra.payload ?? null,
+  ])).slice(0, 16);
+}
+
+const passed = (c) => Boolean(c?.rendered || c?.drained);
+
+export function compareRuns(prev, next) {
+  const pass_to_miss = [];
+  const miss_to_pass = [];
+  const expectation_changed = [];
+  const unmeasured = [];
+  const before = new Map((prev?.cases ?? []).map((c) => [c.fixture_id, c]));
+  for (const c of next?.cases ?? []) {
+    const p = before.get(c.fixture_id);
+    if (!p) continue; // a brand-new case has no prior verdict to move from
+    // A MOVED GOALPOST IS NOT A REGRESSION — and it is not a recovery either.
+    if (p.expected_hash !== c.expected_hash) {
+      expectation_changed.push(c.fixture_id);
+      continue;
+    }
+    // NEITHER IS A BROKEN HARNESS. A case that could not be measured on either
+    // side has produced no verdict to compare, so calling it a regression would
+    // report a broken machine as a delivery failure — the same substitution the
+    // metrics filter above prevents, at the diff instead of the ratio.
+    if (c.harness_error || p.harness_error) {
+      unmeasured.push(c.fixture_id);
+      continue;
+    }
+    if (passed(p) && !passed(c)) pass_to_miss.push(c.fixture_id);
+    else if (!passed(p) && passed(c)) miss_to_pass.push(c.fixture_id);
+  }
+  return { pass_to_miss, miss_to_pass, expectation_changed, unmeasured };
+}
+
+// ---------------------------------------------------------------------------
+// Metrics. Division by zero is NULL — never NaN, never 0 ("0" reads as
+// "measured, and it was terrible", which is a different finding entirely).
+// ---------------------------------------------------------------------------
+
+const ratio = (hits, total) => (total === 0 ? null : hits / total);
+
+export function metrics(cases = []) {
+  const per_hook = {};
+  for (const c of cases) {
+    (per_hook[c.hook] ??= []).push(c);
+  }
+  for (const [hook, all] of Object.entries(per_hook)) {
+    // A HARNESS ERROR IS NOT A DELIVERY MISS. An unreadable sandbox, a git that
+    // would not run, a hook that could not start — none of that is evidence
+    // about delivery, and scoring it as a miss reports a broken MACHINE as "the
+    // hooks stopped delivering", which is the most expensive wrong conclusion
+    // this tool can produce. Unmeasured cases leave every ratio and are counted
+    // in their own field instead, so the reader sees coverage drop rather than
+    // quality drop.
+    const harness_errors = all.filter((c) => c.harness_error).length;
+    const list = all.filter((c) => !c.harness_error);
+    const eligible = list.filter((c) => c.eligible);
+    const queued = list.filter((c) => c.queued);
+    let hit = 0;
+    let delivered = 0;
+    for (const c of list) {
+      const expected = new Set(c.expected_ids ?? []);
+      for (const id of c.delivered_ids ?? []) {
+        delivered++;
+        if (expected.has(id)) hit++;
+      }
+    }
+    per_hook[hook] = {
+      eligible_recall: ratio(eligible.length, list.length),
+      rendered_recall: ratio(eligible.filter((c) => c.rendered).length, eligible.length),
+      eventual_recall: ratio(eligible.filter((c) => c.rendered || c.drained).length, eligible.length),
+      drained_recall: ratio(queued.filter((c) => c.drained).length, queued.length),
+      precision: ratio(hit, delivered),
+      harness_errors,
+      measured: list.length,
+    };
+  }
+  return { per_hook };
+}
+
+// ---------------------------------------------------------------------------
+// Sandbox reset — THE WHOLE transient/ tree, not just delivery/.
+//
+// A stale guard file converts a real delivery into a dedup silence and a stale
+// DENY LEDGER converts a first-attempt deny into an allow, but delivery/ is not
+// the only contaminating cell: H10's entire Stop demand block is gated on
+// transient/capture-nagged.json (h10-direct-capture.mjs:1714), so the FIRST
+// h10_ownership case spends the marker and every later one gets an empty
+// output that an inverted verdict would score as a PASS. pressure-nagged.json,
+// delegation-nagged.json, session-events.json and touches.json carry the same
+// class of cross-case state. So the whole directory goes, and each case
+// re-seeds only what it needs.
+//
+// The store is contaminated too (H10 MINTS article_missing items into the
+// sandbox db) — that is restored from the pristine snapshot per case by the
+// runner, which is not this function's business.
+// ---------------------------------------------------------------------------
+
+export function resetSandbox(sandboxDir, caseObj = {}) {
+  const dir = join(sandboxDir, '.sterling', 'transient');
+  // An override case's prior denial is written BEFORE this call and must
+  // survive it; the runner wipes and re-seeds those cases explicitly.
+  if (caseObj.seed_ledger) return { removed: false };
+  const existed = existsSync(dir);
+  rmSync(dir, { recursive: true, force: true });
+  return { removed: existed };
+}
+
+// ---------------------------------------------------------------------------
+// Probes — frozen, human-written, and validated STRICTLY: a probe that cannot
+// fail measures nothing, and a probe faking a field the real surface never
+// sends measures the wrong thing.
+// ---------------------------------------------------------------------------
+
+export function loadProbes(dir) {
+  const files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+  const probes = [];
+  for (const file of files) {
+    const path = join(dir, file);
+    const bad = (why) => { throw new Error(`delivery probe ${file}: ${why}`); };
+    let json;
+    try {
+      json = JSON.parse(readFileSync(path, 'utf8'));
+    } catch (e) {
+      bad(`unparseable JSON — ${e.message}`);
+    }
+    if (typeof json.id !== 'string' || !json.id) bad('missing id');
+    if (!PROBE_KINDS.includes(json.kind)) bad(`unknown kind '${json.kind}' — kind must be one of ${PROBE_KINDS.join('|')}`);
+    if (!Array.isArray(json.expected_ids)) bad('missing expected_ids — a probe with no expectation can never fail');
+    const ti = json.tool_input;
+    if (!ti || typeof ti !== 'object') bad('missing tool_input');
+    if (json.kind === 'ask') {
+      if (Object.hasOwn(ti, 'prompt')) bad('kind "ask" carries a prompt field — AskUserQuestion has none (decision f5638a84), and a synthesized one is a lie about the surface');
+      if (!Array.isArray(ti.questions)) bad('kind "ask" needs tool_input.questions[]');
+    } else if (typeof ti.prompt !== 'string' || !ti.prompt.trim()) {
+      bad(`kind "${json.kind}" needs a tool_input.prompt string`);
+    }
+    if (json.expect_deny && !(Array.isArray(json.expect_deny_ids) && json.expect_deny_ids.length)) {
+      bad('expect_deny with no expect_deny_ids — an unfalsifiable deny expectation is worse than none');
+    }
+    probes.push({
+      id: json.id,
+      kind: json.kind,
+      note: json.note ?? '',
+      tool_input: ti,
+      expected_ids: json.expected_ids,
+      expected_absent_ids: json.expected_absent_ids ?? [],
+      expect_deny: Boolean(json.expect_deny),
+      expect_deny_ids: json.expect_deny_ids ?? [],
+      seed_ledger: Boolean(json.seed_ledger),
+      file,
+    });
+  }
+  // SET-LEVEL LIVENESS ARM. A negative probe passes on completely empty output,
+  // so a set of negatives alone goes green against a matcher that is dead, a
+  // store that is empty, or a payload shape the hook never reads — it cannot
+  // fail the way retrieval fails. Every kind PRESENT must therefore carry at
+  // least one probe that expects a delivery, so the same run always contains
+  // something whose silence is a failure. An empty directory is not this
+  // function's business (the caller records it as a named exclusion).
+  if (probes.length) {
+    for (const kind of [...new Set(probes.map((p) => p.kind))]) {
+      if (!probes.some((p) => p.kind === kind && p.expected_ids.length > 0)) {
+        throw new Error(
+          `delivery probes: kind '${kind}' has no POSITIVE probe (every one expects nothing) — ` +
+            'a set of negatives alone passes against a dead matcher. Add a probe of this kind with a non-empty expected_ids.'
+        );
+      }
+    }
+  }
+  return probes;
+}
+
+// ---------------------------------------------------------------------------
+// The report. NOT under transient/ — h19-clear-session wipes transient at every
+// SessionStart, and a run history erased by the next session is not a history.
+// ---------------------------------------------------------------------------
+
+export function auditDir(projectRoot) {
+  return join(projectRoot, '.sterling', 'delivery-audit');
+}
+
+export function writeRunReport(projectRoot, report) {
+  const base = auditDir(projectRoot);
+  const runs = join(base, 'runs');
+  mkdirSync(runs, { recursive: true });
+  const identity = runIdentity({
+    snapshotDigest: report.identity?.snapshot_digest,
+    bundleHash: report.identity?.bundle_hash,
+    rung: report.identity?.rung,
+    oracleVersion: report.identity?.oracle_version,
+    snapshotMode: report.identity?.snapshot_mode,
+    configDigest: report.identity?.config_digest,
+  });
+  // No ':' in the basename — illegal on Windows, and parity is standing. Still
+  // lexicographically sortable by time.
+  const stamp = String(report.at).replace(/[:.]/g, '-');
+  const run_path = join(runs, `${stamp}-${identity}.json`);
+  writeFileSync(run_path, `${JSON.stringify(report, null, 2)}\n`);
+
+  const cases = report.cases ?? [];
+  const history_path = join(base, 'history.jsonl');
+  appendFileSync(history_path, `${JSON.stringify({
+    at: report.at,
+    identity: report.identity ?? {},
+    totals: {
+      cases: cases.length,
+      passed: cases.filter((c) => passed(c)).length,
+      harness_errors: cases.filter((c) => c.harness_error).length,
+    },
+    transitions: report.transitions ?? { pass_to_miss: [], miss_to_pass: [], expectation_changed: [] },
+  })}\n`);
+  return { run_path, history_path };
+}
+
+// ---------------------------------------------------------------------------
+// THE RUN — snapshot, sandbox, drive the BUNDLES, score, report.
+// ---------------------------------------------------------------------------
+
+/** sha256 over the bundled hook set — the surface the platform executes —
+ *  INCLUDING hooks.json. Registration is half the surface: the same bundles
+ *  registered on different events deliver differently, so a run whose only
+ *  change was a matcher edit must not carry the previous run's identity. */
+export function bundleHash(root = repoRoot) {
+  const dir = join(root, 'hooks');
+  const h = createHash('sha256');
+  for (const f of readdirSync(dir).filter((x) => x.endsWith('.mjs')).sort()) {
+    h.update(f).update(readFileSync(join(dir, f)));
+  }
+  const registry = join(dir, 'hooks.json');
+  h.update('hooks.json').update(existsSync(registry) ? readFileSync(registry) : Buffer.from('<absent>'));
+  return h.digest('hex').slice(0, 16);
+}
+
+function runHook(root, hook, stdin, sandboxDir) {
+  const res = spawnSync(process.execPath, [join(root, 'hooks', hook)], {
+    cwd: sandboxDir, input: JSON.stringify(stdin), encoding: 'utf8', timeout: 60_000,
+  });
+  return { code: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+}
+
+function buildSandbox(snapshotDb, config) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-delivery-oracle-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
+  writeFileSync(join(dir, '.sterling', 'sterling.db'), readFileSync(snapshotDb));
+  const git = (args) => spawnSync('git', ['-c', 'user.email=oracle@example.invalid', '-c', 'user.name=oracle', ...args], { cwd: dir, encoding: 'utf8' });
+  git(['init', '-q']);
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  git(['add', '-A']);
+  git(['commit', '-qm', 'oracle sandbox']);
+  return dir;
+}
+
+/** Restore the sandbox store from the pristine snapshot. H10 WRITES to the
+ *  store it is gated against (it mints/heals article_missing items), so without
+ *  this every case after the first runs against a store the previous case
+ *  mutated. WAL siblings go with it — a stale -wal would re-apply exactly the
+ *  frames being discarded. */
+function restoreStore(sandboxDir, snapshotDb) {
+  const dest = join(sandboxDir, '.sterling', 'sterling.db');
+  for (const sib of ['-wal', '-shm']) rmSync(dest + sib, { force: true });
+  writeFileSync(dest, readFileSync(snapshotDb));
+}
+
+/** Write a REAL prior denial for a seed_ledger probe: H20's ledger is
+ *  {entries: {<sorted ids joined by '|'>: {terms, recordIds}}, overrides: []}
+ *  (scripts/hooks/lib/delivery.mjs:252-296, written at h20:462). Without this,
+ *  seed_ledger only skipped a wipe — it seeded nothing, so an override probe
+ *  measured a FIRST attempt while claiming to measure a second.
+ *  DISCLOSED: `terms` is seeded EMPTY, so the override contract's delta floor
+ *  (h20:439) is trivially cleared by any retry. A seed_ledger probe therefore
+ *  measures the CITATION half of the override contract, not the delta half. */
+function seedPriorDenial(sandboxDir, recordIds) {
+  const ids = [...new Set(recordIds ?? [])].sort();
+  if (!ids.length) return null;
+  const dir = join(sandboxDir, '.sterling', 'transient', 'delivery');
+  mkdirSync(dir, { recursive: true });
+  const key = ids.join('|');
+  writeFileSync(
+    join(dir, 'deny-ledger-conductor.json'),
+    JSON.stringify({ entries: { [key]: { terms: [], recordIds: ids } }, overrides: [] })
+  );
+  return { key, recordIds: ids, terms_seeded: 0 };
+}
+
+/** CONTAINMENT, checked at every write and not only at the path filter:
+ *  isRepoPath screens store data on the way in, this refuses anything that
+ *  still resolves outside the sandbox (a symlinked parent, a form the filter did
+ *  not anticipate). Two independent guards, because the thing being trusted is
+ *  store content. EVERY sandbox write goes through here — materialize AND
+ *  applyWrites — so there is one chokepoint rather than one guarded path and
+ *  one unguarded one. */
+function sandboxPath(sandboxDir, rel, who) {
+  const root = resolve(sandboxDir);
+  const abs = resolve(sandboxDir, rel);
+  if (abs !== root && !abs.startsWith(root + sep)) {
+    throw new Error(`${who}: '${rel}' resolves outside the sandbox (${abs}) — refusing to write`);
+  }
+  return abs;
+}
+
+function materialize(sandboxDir, rel) {
+  const abs = sandboxPath(sandboxDir, rel, 'materialize');
+  mkdirSync(dirname(abs), { recursive: true });
+  // h19-bash-delivery requires the named path to exist as a REGULAR FILE.
+  if (!existsSync(abs)) writeFileSync(abs, `// oracle sandbox stand-in for ${rel}\n`);
+  return abs;
+}
+
+function applyWrites(sandboxDir, writes) {
+  for (const w of writes) {
+    const abs = sandboxPath(sandboxDir, w.rel, 'applyWrites');
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, JSON.stringify(w.json));
+  }
+}
+
+function newestPriorRun(projectRoot) {
+  const runs = join(auditDir(projectRoot), 'runs');
+  if (!existsSync(runs)) return null;
+  const files = readdirSync(runs).filter((f) => f.endsWith('.json')).sort();
+  for (const f of files.reverse()) {
+    try {
+      return JSON.parse(readFileSync(join(runs, f), 'utf8'));
+    } catch { /* a torn report is not a baseline — try the one before it */ }
+  }
+  return null;
+}
+
+async function main(argv) {
+  const arg = (name, fallback) => {
+    const i = argv.indexOf(name);
+    return i !== -1 ? argv[i + 1] : fallback;
+  };
+  const projectRoot = arg('--project', process.cwd());
+  const probeDir = arg('--probes', join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-probes'));
+  const dbPath = join(projectRoot, '.sterling', 'sterling.db');
+  if (!existsSync(dbPath)) {
+    console.error(`delivery-oracle: no Sterling store at ${dbPath} — not an initialized project`);
+    process.exit(1);
+  }
+  const config = existsSync(join(projectRoot, '.sterling', 'config.json'))
+    ? JSON.parse(readFileSync(join(projectRoot, '.sterling', 'config.json'), 'utf8'))
+    : {};
+  const rung = config?.delivery?.injection_rung ?? 'prompt';
+
+  const { SterlingStore } = await import(join(repoRoot, 'packages', 'store', 'dist', 'index.js'));
+
+  // SNAPSHOT (VACUUM INTO — never a file copy; the live store is WAL) through a
+  // READ-ONLY handle, and through NOTHING ELSE. SterlingStore's constructor
+  // opens WRITABLE and runs PRAGMA + DDL, and a writable open on a WAL database
+  // MUTATES the main file when it closes (anti_pattern 8616e72d) — an audit
+  // that claims to be read-only must not be able to write to the store it
+  // audits on ANY branch, so there is deliberately NO writable fallback: a
+  // failed read-only open ABORTS the run.
+  //
+  // SIDECARS ARE NEVER DELETED, and this deliberately departs from 8616e72d's
+  // conditional-cleanup recipe. That recipe records whether -wal/-shm existed
+  // BEFORE the open and removes what it did not see; against a LIVE store that
+  // is a race — a concurrent writer (the MCP server) can create the WAL between
+  // the check and the unlink, and the audit would then delete a live WAL
+  // holding another process's committed-but-uncheckpointed frames. The record's
+  // own principle (never touch what you did not create) is better served here
+  // by not deleting at all: a sidecar this open materialized is DISCLOSED and
+  // left in place, which costs an empty file and risks nothing.
+  const snapDir = mkdtempSync(join(tmpdir(), 'sterling-oracle-snap-'));
+  const snapshotDb = join(snapDir, 'snapshot.db');
+  const snapshot_mode = 'read_only';
+  const hadWal = existsSync(`${dbPath}-wal`);
+  const hadShm = existsSync(`${dbPath}-shm`);
+  try {
+    const ro = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      ro.exec(`VACUUM INTO '${snapshotDb.replace(/'/g, "''")}'`);
+    } finally {
+      ro.close();
+    }
+  } catch (e) {
+    console.error(
+      `delivery-oracle: READ-ONLY snapshot of ${dbPath} failed — ${e.message}\n` +
+        '  ABORTING. There is no writable fallback by design: a writable open mutates the live WAL store on close ' +
+        '(anti_pattern 8616e72d), and a read-only audit that can write to its own subject measures nothing.'
+    );
+    rmSync(snapDir, { recursive: true, force: true });
+    process.exit(1);
+  }
+  const sidecarsCreated = [
+    ...(!hadWal && existsSync(`${dbPath}-wal`) ? ['-wal'] : []),
+    ...(!hadShm && existsSync(`${dbPath}-shm`) ? ['-shm'] : []),
+  ];
+  if (sidecarsCreated.length) {
+    process.stderr.write(
+      `delivery-oracle: the read-only open materialized ${sidecarsCreated.join(' and ')} beside ${dbPath} and LEFT them in place ` +
+        '(deleting a sidecar a concurrent writer may own is the greater risk). Harmless; remove them yourself only with no writer running.\n'
+    );
+  }
+  const store = new SterlingStore(snapshotDb);
+
+  const at = new Date().toISOString();
+  const entries = deriveExpected(store, { repoRoot: projectRoot });
+  const cases = entries.filter((e) => e.kind === 'case');
+  const exclusions = entries.filter((e) => e.kind === 'exclusion');
+  // A MISSING OR EMPTY PROBE DIRECTORY IS A NAMED FINDING, not a quiet drop:
+  // with no probes the H20 arm produces no per_hook key at all, so the report
+  // reads as "H20 was not part of this audit" when the truth is "the subject
+  // half of the audit went missing". Recorded as an exclusion, in the same
+  // account-for-it-by-name discipline every other skipped path gets.
+  let probes = [];
+  if (!existsSync(probeDir)) {
+    exclusions.push({ kind: 'exclusion', rel: probeDir, record_id: null, reason: 'probe_dir_missing' });
+  } else {
+    probes = loadProbes(probeDir);
+    if (!probes.length) {
+      exclusions.push({ kind: 'exclusion', rel: probeDir, record_id: null, reason: 'probe_dir_empty' });
+    }
+  }
+
+  // SNAPSHOT DIGEST over the snapshot BYTES — the board's first branch, taken
+  // because VACUUM INTO was MEASURED byte-deterministic (2026-09-05, this
+  // repo's packages/store: three consecutive snapshots of an unchanged source
+  // store hashed identically, and a second PROCESS building the same records
+  // reproduced the same hash). One measured caveat, deliberately accepted: a
+  // snapshot OF a snapshot does NOT match its source snapshot, so these bytes
+  // track the source store's write history and not only its logical content —
+  // any store write moves the run identity. That is why compareRuns diffs per
+  // CASE by fixture_id + expected_hash and never bails on a changed identity.
+  const snapshotDigest = sha(readFileSync(snapshotDb)).slice(0, 16);
+  const bundle = bundleHash(repoRoot);
+
+  const sandbox = buildSandbox(snapshotDb, config);
+  const scored = [];
+  try {
+    // MATCH MODE, RECORDED PER ID (never collapsed to a boolean). A record
+    // counts as DELIVERED when the channel names its uuid ('id') or renders it
+    // under its quoted lineage token on a DELIVERY MARKER LINE ('token' — H19
+    // prints "▸ article 'slug'" and need not repeat the uuid in the body).
+    // The token arm is a known false-recall route: slugs are cited in ordinary
+    // prose by convention, so it is anchored to a marker line AND every
+    // token-only verdict is written to the report as match_modes[id]='token'
+    // for audit. An id-mode verdict needs no such scrutiny.
+    const tokenOf = (id) => {
+      const r = store.get(id);
+      const t = r?.slug ?? r?.title;
+      return t ? `'${t}'` : null;
+    };
+    const markerLines = (text) => String(text ?? '').split('\n').filter((l) => l.includes('▸') || l.includes('knowledge_get'));
+    const hitMode = (id, ids, text) => {
+      if (ids.includes(id)) return 'id';
+      const token = tokenOf(id);
+      if (token && markerLines(text).some((l) => l.includes(token))) return 'token';
+      return null;
+    };
+
+    const run = (unit, { hook, payloadCase, expected_ids, seed_ledger, drain, probe }) => {
+      // Order matters: wipe transient WHOLESALE, then seed only what this case
+      // needs. resetSandbox skips the wipe for a seed_ledger case, so the seed
+      // is written first and survives.
+      if (seed_ledger) rmSync(join(sandbox, '.sterling', 'transient'), { recursive: true, force: true });
+      const seeded = seed_ledger ? seedPriorDenial(sandbox, probe?.expect_deny_ids) : null;
+      resetSandbox(sandbox, { seed_ledger });
+      restoreStore(sandbox, snapshotDb);
+
+      const { stdin, sandbox_writes } = synthesizePayload(payloadCase, { cwd: sandbox, session_id: 'oracle-session' });
+      applyWrites(sandbox, sandbox_writes);
+      const parsed = parseDelivery(runHook(repoRoot, hook, stdin, sandbox), sandbox);
+      let drained_ids = [];
+      let drained_text = '';
+      let drain_error;
+      let drain_exit;
+      // Drain on QUEUE ENTRIES, not on parsed ids: an entry whose ids we could
+      // not read is exactly the one worth following to the drain.
+      if (drain && parsed.queued_entries) {
+        const drainParsed = parseDelivery(runHook(repoRoot, DRAIN, { cwd: sandbox, hook_event_name: 'UserPromptSubmit', session_id: 'oracle-session' }, sandbox), sandbox);
+        drained_ids = drainParsed.rendered_ids ?? [];
+        drained_text = drainParsed.rendered_text ?? '';
+        drain_exit = drainParsed.exit_code;
+        // THE DRAIN IS A HOOK RUN LIKE ANY OTHER and gets the same abnormality
+        // rule. Without this, unparseable drain stdout reads as "nothing
+        // drained" (blaming delivery for a harness fault) and a drain that
+        // crashed after printing matching text still scored drained:true.
+        if (drainParsed.harness_error) drain_error = `drain: ${drainParsed.harness_error}`;
+        else if (![0, 1, 2].includes(drainParsed.exit_code)) {
+          drain_error = `drain: abnormal exit ${drainParsed.exit_code} (contract is 0 allow / 1 warn / 2 deny)`;
+        }
+      }
+      const rendered_ids = parsed.rendered_ids ?? [];
+      const directIds = uniq([...rendered_ids, ...parsed.denied_ids]);
+      const directText = `${parsed.rendered_text}\n${parsed.stderr_text}`;
+      const observed = uniq([...directIds, ...parsed.queued_ids, ...drained_ids]);
+      const allText = `${directText}\n${parsed.queued_text}\n${drained_text}`;
+
+      // ABNORMAL SHAPES FAIL LOUD, and a loud failure is never a pass: an exit
+      // code outside the hook contract (0 allow / 1 warn / 2 deny) or stdout we
+      // could not parse means the case was NOT MEASURED.
+      let harness_error = parsed.harness_error;
+      if (!harness_error && ![0, 1, 2].includes(parsed.exit_code)) {
+        harness_error = `abnormal hook exit ${parsed.exit_code} (contract is 0 allow / 1 warn / 2 deny)`;
+      }
+      harness_error = harness_error ?? drain_error;
+
+      const match_modes = {};
+      for (const id of expected_ids) match_modes[id] = hitMode(id, observed, allText);
+      const covers = (ids, text) => expected_ids.length > 0 && expected_ids.every((id) => hitMode(id, ids, text) !== null);
+
+      let rendered = covers(directIds, directText);
+      let drainedOk = covers(drained_ids, drained_text);
+      let deny_expectation;
+      let absent_violations;
+
+      // H10 IS NOT A DELIVERY HOOK — it is the ownership half of the agreement
+      // check (H10 cap 25 vs H19 cap 100), so its verdict is INVERTED: the path
+      // passes when H10's demand does NOT name it as unowned territory.
+      // THE INVERSION NEEDS A LIVENESS ARM, or "H10 emitted nothing" (a spent
+      // capture-nagged marker, a crash, a store it could not read) scores
+      // identically to "H10 considers this path owned" — silence would PASS.
+      // The demand block prints H10_DUTIES_MARKER whenever it fires, and this
+      // case always arms a capture duty (touches.json seeded, nothing captured)
+      // against a freshly-wiped transient, so the marker MUST be present.
+      if (unit.payload_kind === 'h10_ownership') {
+        drainedOk = false;
+        const demand = directText;
+        if (!demand.includes(H10_DUTIES_MARKER)) {
+          harness_error = harness_error
+            ?? `H10 emitted no duties block (expected "${H10_DUTIES_MARKER}") — the ownership verdict is UNMEASURED, not a pass`;
+          rendered = false;
+        } else {
+          const namedUnowned = demand
+            .split('\n')
+            .some((line) => line.includes(unit.rel) && /unowned|owning article|article_missing/i.test(line));
+          // THE UNOWNED CONTROL INVERTS THE INVERSION. Every other H10 case
+          // passes when the path is NOT called unowned, which a predicate stuck
+          // at "everything is owned" satisfies perfectly. This arm must pass for
+          // the OPPOSITE reason — a path no record claims MUST be named — so the
+          // two arms together can only both pass if H10 is really discriminating.
+          rendered = unit.control === 'unowned' ? namedUnowned : !namedUnowned;
+        }
+      }
+
+      // PROBE EXPECTATIONS ARE SCORED, not merely validated: a deny that never
+      // came, a denial that named the wrong ruling, and a record that was
+      // supposed to STAY AWAY all change the verdict (the negative arm is the
+      // whole precision control — a probe whose absent-ids fire is a finding).
+      if (probe) {
+        const denyOk = probe.expect_deny
+          ? parsed.denied && (probe.expect_deny_ids ?? []).every((id) => hitMode(id, parsed.denied_ids, parsed.stderr_text) !== null)
+          : !parsed.denied;
+        // A NEGATIVE PROBE IS FALSIFIED BY ANY DELIVERY, not only by the ids it
+        // happened to enumerate. expected_absent_ids names what the author
+        // specifically feared; a probe that expects NOTHING and receives some
+        // other record has still fired on ungoverned territory, and scoring
+        // that as a pass makes the precision control unfalsifiable — the exact
+        // "cannot fail the way retrieval fails" defect the probe contract bans.
+        const isNegative = expected_ids.length === 0;
+        const violations = uniq([
+          ...(probe.expected_absent_ids ?? []).filter((id) => hitMode(id, observed, allText) !== null),
+          ...(isNegative ? observed : []),
+        ]);
+        deny_expectation = denyOk ? 'met' : 'violated';
+        absent_violations = violations;
+        const deliveryOk = expected_ids.length ? (rendered || drainedOk) : true;
+        rendered = deliveryOk && denyOk && violations.length === 0;
+      }
+
+      if (harness_error) { rendered = false; drainedOk = false; }
+
+      const delivered_ids = uniq([
+        ...expected_ids.filter((id) => match_modes[id] !== null),
+        ...observed.filter((id) => !expected_ids.includes(id)),
+      ]);
+      const caseObj = {
+        ...unit,
+        hook,
+        expected_ids,
+        // The hash covers the PAYLOAD and the probe's deny/absent expectations
+        // too — change any of them and this is a different question, reported as
+        // expectation_changed rather than as a regression.
+        expected_hash: expectedHash(expected_ids, {
+          expect_deny: probe?.expect_deny,
+          expect_deny_ids: probe?.expect_deny_ids,
+          expected_absent_ids: probe?.expected_absent_ids,
+          payload: sha(JSON.stringify(stdin)).slice(0, 16),
+        }),
+        eligible: expected_ids.length > 0,
+        queued: parsed.queued_entries > 0,
+        rendered,
+        drained: drainedOk,
+        ...(drain_exit === undefined ? {} : { drain_exit }),
+        delivered_ids,
+        match_modes,
+        // EXTRA is not automatically a precision fault: H19 delivers one-hop
+        // relies_on/relied_by pointers beside the owning article, and those
+        // uuids are correct delivery this expectation never named. Read a
+        // non-empty `extra` as "explain these", not as "the hook over-fired".
+        extra: delivered_ids.filter((id) => !expected_ids.includes(id)),
+        exit_code: parsed.exit_code,
+        channel: parsed.channel,
+        denied: parsed.denied,
+        ...(seeded ? { seeded_prior_denial: seeded } : {}),
+        ...(deny_expectation ? { deny_expectation } : {}),
+        ...(absent_violations ? { absent_violations } : {}),
+        ...(harness_error ? { harness_error } : {}),
+      };
+      return { ...caseObj, case_identity: caseIdentity(caseObj) };
+    };
+
+    for (const c of cases) {
+      materialize(sandbox, c.rel);
+      scored.push(run(
+        { fixture_id: c.fixture_id, rel: c.rel, payload_kind: c.payload_kind },
+        { hook: c.hook, payloadCase: c, expected_ids: c.expected_ids, drain: true }
+      ));
+    }
+    // THE UNOWNED CONTROL, one per run (never derived from the store — the
+    // point is a path NO record claims). Without it, every h10_ownership verdict
+    // in the report is satisfiable by an ownership predicate that answers
+    // "owned" to everything, and the whole H10 arm would read green while
+    // measuring nothing.
+    // A control claimed by a record would not be a control. Named loudly if so.
+    let controlRel = 'src/oracle-unowned-control.mjs';
+    if (cases.some((c) => c.rel === controlRel)) controlRel = `src/oracle-unowned-control-${Date.now()}.mjs`;
+    const controlCase = { kind: 'case', payload_kind: 'h10_ownership', rel: controlRel };
+    materialize(sandbox, controlRel);
+    scored.push(run(
+      { fixture_id: `${H10}:h10_ownership_control:${controlRel}`, rel: controlRel, payload_kind: 'h10_ownership', control: 'unowned' },
+      { hook: H10, payloadCase: controlCase, expected_ids: [], drain: false }
+    ));
+
+    for (const p of probes) {
+      scored.push(run(
+        { fixture_id: p.id, rel: null, payload_kind: p.kind, expect_deny: p.expect_deny },
+        { hook: 'h20-mechanism-axis.mjs', payloadCase: p, expected_ids: p.expected_ids, seed_ledger: p.seed_ledger, drain: false, probe: p }
+      ));
+    }
+  } finally {
+    store.close();
+    rmSync(sandbox, { recursive: true, force: true });
+    rmSync(snapDir, { recursive: true, force: true });
+  }
+
+  // The delivery-relevant config travels in the identity: payload_char_cap and
+  // the article/hazard caps change what a hook renders, so two runs that differ
+  // only there are not comparable and must not share an identity.
+  const configDigest = sha(JSON.stringify({
+    delivery: config?.delivery ?? null,
+    article_demand: config?.article_demand ?? null,
+  })).slice(0, 16);
+  const identity = {
+    snapshot_digest: snapshotDigest, bundle_hash: bundle, rung,
+    oracle_version: ORACLE_VERSION, snapshot_mode, config_digest: configDigest,
+  };
+  const prior = newestPriorRun(projectRoot);
+  const transitions = prior
+    ? compareRuns(prior, { identity, cases: scored })
+    : { pass_to_miss: [], miss_to_pass: [], expectation_changed: [], unmeasured: [] };
+  const report = {
+    schema: 1, at, identity,
+    cases: scored,
+    exclusions,
+    metrics: metrics(scored),
+    transitions,
+    golden: [],
+  };
+  const { run_path, history_path } = writeRunReport(projectRoot, report);
+
+  // THE VERDICT, and it is an EXIT CODE — not a number the reader has to notice.
+  // A failed CONTROL means the audit's own discrimination is gone (every H10
+  // verdict is then satisfiable by a predicate that answers "owned" to
+  // everything), and a harness error means part of the run was never measured.
+  // Both are conditions under which the ratios above must not be believed, so
+  // neither may exit 0. Probe VERDICTS are surfaced but do NOT fail the run:
+  // a probe miss is a finding about delivery, which is the thing being measured.
+  const controls = scored.filter((c) => c.control);
+  const controlFailures = controls.filter((c) => !c.rendered && !c.harness_error);
+  const harnessErrors = scored.filter((c) => c.harness_error);
+
+  if (argv.includes('--json')) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    console.log(`delivery-oracle: ${scored.length} case(s), ${exclusions.length} exclusion(s) — ${run_path}`);
+    for (const [hook, m] of Object.entries(report.metrics.per_hook)) {
+      const fmt = (v) => (v === null ? 'n/a' : v.toFixed(2));
+      const unmeasured = m.harness_errors ? ` · UNMEASURED ${m.harness_errors}` : '';
+      console.log(`  ${hook}: rendered ${fmt(m.rendered_recall)} · eventual ${fmt(m.eventual_recall)} · drained ${fmt(m.drained_recall)} · precision ${fmt(m.precision)} (n=${m.measured})${unmeasured}`);
+    }
+    for (const c of controls) {
+      console.log(`  control [${c.control}] ${c.fixture_id}: ${c.harness_error ? 'UNMEASURED' : c.rendered ? 'holds' : 'FAILED'}`);
+    }
+    for (const c of scored.filter((x) => x.deny_expectation)) {
+      const bits = [c.rendered ? 'pass' : 'MISS', `deny ${c.deny_expectation}`];
+      if (c.absent_violations?.length) bits.push(`ABSENT-VIOLATED ${c.absent_violations.length}`);
+      console.log(`  probe ${c.fixture_id}: ${bits.join(' · ')}`);
+    }
+    for (const x of exclusions.filter((e) => e.reason.startsWith('probe_dir'))) {
+      console.log(`  PROBE SET: ${x.reason} (${x.rel}) — the H20 arm did not run`);
+    }
+    if (harnessErrors.length) {
+      console.log(`  HARNESS ERRORS: ${harnessErrors.length} case(s) NOT MEASURED (excluded from every ratio above)`);
+      for (const c of harnessErrors) console.log(`    ${c.fixture_id}: ${c.harness_error}`);
+    }
+    if (controlFailures.length) console.log(`  CONTROL FAILED: ${controlFailures.map((c) => c.fixture_id).join(', ')} — the audit cannot discriminate; treat every verdict above as unproven`);
+    if (transitions.pass_to_miss.length) console.log(`  REGRESSIONS: ${transitions.pass_to_miss.join(', ')}`);
+    if (transitions.expectation_changed.length) console.log(`  expectation changed (not a regression): ${transitions.expectation_changed.length}`);
+    if (transitions.unmeasured?.length) console.log(`  unmeasured this run (not a regression): ${transitions.unmeasured.length}`);
+    console.log(`  history: ${history_path}`);
+  }
+
+  if (controlFailures.length || harnessErrors.length) process.exitCode = 1;
+}
+
+// Executed directly (never on import — the frozen pins import this module).
+// existsSync FIRST: statSync throws on an argv[1] that is not on disk.
+if (process.argv[1] && existsSync(process.argv[1]) && statSync(process.argv[1]).isFile()
+    && fileURLToPath(import.meta.url) === process.argv[1]) {
+  await main(process.argv.slice(2));
+}
