@@ -5,6 +5,10 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h20-mechanism-axis.mjs
+import { existsSync as existsSync5 } from "node:fs";
+import { join as join5 } from "node:path";
+
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
 import { dirname as dirname2, join as join2, resolve } from "node:path";
@@ -5196,11 +5200,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5218,7 +5227,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -7651,6 +7660,10 @@ function warnNonBlocking(message) {
   process.stderr.write(message);
   process.exit(1);
 }
+function loadConfig(cwd) {
+  const p = join2(cwd, ".sterling", "config.json");
+  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 function openStore(cwd) {
   const p = join2(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -7924,15 +7937,104 @@ function isQuestionShapedPrompt(text) {
   return t.includes("?") && QUESTION_WORDS_RE.test(t);
 }
 var input = readStdin();
-var outgoing = outgoingProposalText(input.tool_input);
-if (!outgoing) allow();
+function buildModelPin(inp) {
+  const PIN = "STERLING CODEX MODEL PIN (H20)";
+  const show = (v) => {
+    const s2 = JSON.stringify(String(v ?? ""));
+    return s2.length <= 120 ? s2 : `${s2.slice(0, 120)}\u2026`;
+  };
+  if (typeof inp.tool_name !== "string" || !inp.tool_name.startsWith("mcp__codex__")) return null;
+  const root = inp.cwd ? String(inp.cwd) : "";
+  const sterling = join5(root, ".sterling");
+  if (!existsSync5(join5(sterling, "sterling.db")) && !existsSync5(join5(sterling, "config.json"))) return null;
+  if (inp.tool_name !== "mcp__codex__codex") {
+    return {
+      line: `STERLING CODEX MODEL (H20) \u2014 this tool takes no model argument, so the thread keeps the model its opener started with. Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`
+    };
+  }
+  let config = null;
+  let unreadable = null;
+  try {
+    config = loadConfig(root);
+  } catch (e) {
+    unreadable = e && e.message || String(e);
+  }
+  const sp = config && typeof config.sparring_partner === "object" && config.sparring_partner ? config.sparring_partner : null;
+  const lines = [];
+  if (sp && sp.enabled === false) {
+    lines.push(
+      `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE (decision ea68735d point 3): this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
+    );
+  }
+  const callModel = typeof inp.tool_input?.model === "string" && inp.tool_input.model !== "" ? inp.tool_input.model : null;
+  const configured = sp && typeof sp.model === "string" && sp.model !== "" ? sp.model : null;
+  if (callModel !== null) {
+    lines.push(
+      `${PIN} \u2014 this call names model ${show(callModel)} EXPLICITLY, so the call-site value wins and Sterling leaves the input untouched${configured ? ` (config.sparring_partner.model is ${show(configured)} and was not applied)` : ""}.`
+    );
+    return { line: lines.join("\n") };
+  }
+  if (unreadable) {
+    lines.push(
+      `${PIN} \u2014 .sterling/config.json could not be parsed (${show(unreadable)}), so NO model was applied and the Codex CLI default is in force. Fix the config file; a consult is never denied over this.`
+    );
+    return { line: lines.join("\n") };
+  }
+  if (!configured) {
+    lines.push(
+      `${PIN} \u2014 no model is set in config.sparring_partner.model${config ? "" : " (no .sterling/config.json to read)"}, so this consult takes the Codex CLI default. Set one on the TUI System tab row 'Default Codex model'.`
+    );
+    return { line: lines.join("\n") };
+  }
+  lines.push(
+    `${PIN} \u2014 model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
+  );
+  return {
+    line: lines.join("\n"),
+    updatedInput: { ...inp.tool_input && typeof inp.tool_input === "object" ? inp.tool_input : {}, model: configured }
+  };
+}
+var pinMemo;
+function modelPin() {
+  if (pinMemo === void 0) pinMemo = buildModelPin(input);
+  return pinMemo;
+}
+function envelopeFor(extraContext) {
+  const pin = modelPin();
+  const parts = [];
+  if (pin?.line) parts.push(pin.line);
+  if (extraContext) parts.push(extraContext);
+  const hookSpecificOutput = { hookEventName: input.hook_event_name };
+  if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
+  if (parts.length) hookSpecificOutput.additionalContext = parts.join("\n\n");
+  return { hookSpecificOutput };
+}
+var emitted;
+function emitEnvelope(extraContext) {
+  if (emitted) {
+    process.stderr.write(
+      `H20: a SECOND stdout envelope was suppressed \u2014 the first write already carries the model pin, and two JSON objects on stdout would make the whole payload unparseable. Dropped payload: ${String(extraContext ?? "").slice(0, 400)}`
+    );
+    return;
+  }
+  emitted = true;
+  process.stdout.write(JSON.stringify(envelopeFor(extraContext)));
+}
+function finish(extraContext) {
+  const pin = modelPin();
+  if (!pin?.line && !pin?.updatedInput && !extraContext) allow();
+  emitEnvelope(extraContext);
+  process.exit(0);
+}
 var isQuestion = Array.isArray(input.tool_input?.questions);
 var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
-var store = openStore(input.cwd);
-if (!store) allow();
 try {
+  const outgoing = outgoingProposalText(input.tool_input);
+  if (!outgoing) finish();
+  const store = openStore(input.cwd);
+  if (!store) finish();
   const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
-  if (terms.length < AXIS_MIN_HITS) allow();
+  if (terms.length < AXIS_MIN_HITS) finish();
   const candidates = [
     ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
     ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
@@ -7969,7 +8071,7 @@ try {
       }
     }
   }
-  if (!candidates.length) allow();
+  if (!candidates.length) finish();
   if (isQuestion) {
     const questions = input.tool_input.questions;
     const perQuestion = questions.map((q, index) => {
@@ -8023,18 +8125,18 @@ try {
     }
   }
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) allow();
+  if (!scored.length) finish();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
   const fresh = scored.filter((x) => !isDelivered(guard, x.record));
-  if (!fresh.length) allow();
+  if (!fresh.length) finish();
   const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
   const articles = fresh.filter((x) => x.record.type === "feature_article");
   const priorAnswers = fresh.filter(
     (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
   );
-  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) allow();
+  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) finish();
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
   const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
   const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
@@ -8091,15 +8193,24 @@ try {
     ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
   ];
   recordAdvisoryFire(input.cwd, "h20", input.session_id);
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join("\n\n") }
-    })
-  );
-  const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
-  writeGuard(gPath, guard);
+  emitEnvelope(blocks.join("\n\n"));
+  try {
+    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+    markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
+    writeGuard(gPath, guard);
+  } catch (e) {
+    process.stderr.write(
+      `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+    );
+  }
   allow();
 } catch (e) {
-  warnNonBlocking(`H20: mechanism-axis delivery failed: ${e && e.message || e}`);
+  const failure = `H20: mechanism-axis delivery failed: ${e && e.message || e}`;
+  const pin = modelPin();
+  if (pin?.line || pin?.updatedInput) {
+    process.stderr.write(failure);
+    emitEnvelope(`\u26A0 ${failure} \u2014 the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
+    process.exit(0);
+  }
+  warnNonBlocking(failure);
 }

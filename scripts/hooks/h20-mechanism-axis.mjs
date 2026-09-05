@@ -53,7 +53,9 @@
 // not exclude — stage 2 now also requires hasDiscriminatingHit, a third floor
 // that a match matching ONLY generic terms (test, check, file, ...) cannot
 // clear on its own.
-import { readStdin, allow, deny, warnNonBlocking, openStore } from './lib/common.mjs';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { readStdin, allow, deny, warnNonBlocking, openStore, loadConfig } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
@@ -116,6 +118,190 @@ function isQuestionShapedPrompt(text) {
 }
 
 const input = readStdin();
+
+// ===========================================================================
+// CODEX MODEL PIN — THE FIRST STEP, AHEAD OF EVERYTHING BELOW (board 7423f7a2
+// slice 5; decision 8b329d57 as CORRECTED FORWARD; research_finding be284452).
+//
+// config.sparring_partner.model is the per-project SOURCE for which model a
+// consult lands on, and until now NOTHING read it — the TUI wrote the value and
+// no code path ever consumed it, which is the whole defect the user reported
+// ("the System tab ... just says default and doesnt work"). The server-side
+// `codex mcp-server -c model=` pin was REJECTED (per-clone file vs per-project
+// config, restart latency, breaks init's managed compare), so the mechanism is
+// the PER-CALL `model` parameter, filled here via hookSpecificOutput.updatedInput.
+//
+// PLACEMENT IS LOAD-BEARING, and it is why this block sits above the extraction:
+// every relevance path below exits early on ordinary shapes (no prompt, empty
+// prompt, too little vocabulary, no candidates, everything already delivered
+// this session). Those are normal consults; riding the model pin on whether the
+// store happened to match would make the model a lottery. So the pin is computed
+// here, unconditionally for a codex opener, and COMPOSED into every output path
+// through envelopeFor()/finish() — including the catch below.
+//
+// NEVER ON codex-reply: that tool's schema has no `model` field at all (a thread
+// inherits its opener's model), so the injection guard is the EXACT opener name,
+// not the 'mcp__codex__' matcher prefix that isConsult uses for the header.
+//
+// ADVISORY ALWAYS (decision ea68735d point 3): enabled:false prints a loud OFF
+// line and changes nothing else — enablement and model selection are separate
+// axes, and an explicitly user-asked consult still runs. An explicit call-site
+// model always wins. A missing, unreadable or empty-valued config injects
+// NOTHING and says so (P5 degraded-loud). No shape here ever denies.
+// ===========================================================================
+/**
+ * The model-pin decision for this call: `{ line, updatedInput? }`, or null when
+ * this is not a codex call (or not a Sterling project — P1, no ceremony).
+ * NEVER THROWS: a broken config is a disclosure, not an exception.
+ *
+ * Everything this block needs lives INSIDE this function (the label included):
+ * a top-level initialized const is a fail-closed-boundary finding in a hook
+ * classified 'blocking' (scripts/check-failclosed-boundary), and this change
+ * has no business adding new baseline debt to H20's existing set.
+ */
+function buildModelPin(inp) {
+  const PIN = 'STERLING CODEX MODEL PIN (H20)';
+  // EVERY UNTRUSTED VALUE THAT REACHES THE DISCLOSURE GOES THROUGH THIS
+  // (reviewer-security, 2026-09-05). .sterling/config.json is agent-writable, so
+  // sparring_partner.model — and the JSON.parse error text, which quotes the
+  // file's own bytes — are attacker-influenced strings landing verbatim in the
+  // conductor's context. JSON.stringify is the fix that matters: it escapes
+  // embedded NEWLINES and quotes, so a planted value can no longer break out of
+  // its line and forge a Sterling-voiced sentence beneath the pin; the clip
+  // bounds a value planted to flood the payload.
+  // SCOPE, deliberately: this escapes what is DISPLAYED, never what is INJECTED
+  // — updatedInput.model still crosses byte-for-byte, which frozen pin M-8
+  // requires and decision 8b329d57 rules ("free non-empty string verbatim, no
+  // validation" — there is no shell/TOML boundary on this route and codex
+  // validates ids server-side with a loud 400).
+  const show = (v) => {
+    const s = JSON.stringify(String(v ?? ''));
+    return s.length <= 120 ? s : `${s.slice(0, 120)}…`;
+  };
+  if (typeof inp.tool_name !== 'string' || !inp.tool_name.startsWith('mcp__codex__')) return null;
+  const root = inp.cwd ? String(inp.cwd) : '';
+  const sterling = join(root, '.sterling');
+  // Outside a Sterling project there is no config to read and nothing to say.
+  if (!existsSync(join(sterling, 'sterling.db')) && !existsSync(join(sterling, 'config.json'))) return null;
+
+  if (inp.tool_name !== 'mcp__codex__codex') {
+    // codex-reply and any future sibling: disclose, never touch the input.
+    return {
+      line:
+        `STERLING CODEX MODEL (H20) — this tool takes no model argument, so the thread keeps the model its opener started with. ` +
+        `Sterling changes nothing on this call; to move a conversation onto a different model, open a NEW consult.`,
+    };
+  }
+
+  let config = null;
+  let unreadable = null;
+  try {
+    config = loadConfig(root);
+  } catch (e) {
+    unreadable = (e && e.message) || String(e);
+  }
+  const sp = config && typeof config.sparring_partner === 'object' && config.sparring_partner ? config.sparring_partner : null;
+  const lines = [];
+  if (sp && sp.enabled === false) {
+    lines.push(
+      `${PIN} — the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). ` +
+        `That is ADVISORY, NEVER A GATE (decision ea68735d point 3): this consult is not blocked, and the model below still applies. ` +
+        `Turn it back on in the TUI System tab if the OFF state is stale.`
+    );
+  }
+  // The call's OWN model wins, always — the pin only fills an OMITTED value.
+  const callModel = typeof inp.tool_input?.model === 'string' && inp.tool_input.model !== '' ? inp.tool_input.model : null;
+  // An EMPTY configured value is the TUI's clear-to-unset signal, not a model id
+  // (main.ts applySparringModel deletes the key on an empty commit) — the two
+  // are one state, and codex would 400 on ''.
+  const configured = sp && typeof sp.model === 'string' && sp.model !== '' ? sp.model : null;
+
+  if (callModel !== null) {
+    lines.push(
+      `${PIN} — this call names model ${show(callModel)} EXPLICITLY, so the call-site value wins and Sterling leaves the input untouched` +
+        `${configured ? ` (config.sparring_partner.model is ${show(configured)} and was not applied)` : ''}.`
+    );
+    return { line: lines.join('\n') };
+  }
+  if (unreadable) {
+    lines.push(
+      `${PIN} — .sterling/config.json could not be parsed (${show(unreadable)}), so NO model was applied and the Codex CLI default is in force. ` +
+        `Fix the config file; a consult is never denied over this.`
+    );
+    return { line: lines.join('\n') };
+  }
+  if (!configured) {
+    lines.push(
+      `${PIN} — no model is set in config.sparring_partner.model` +
+        `${config ? '' : ' (no .sterling/config.json to read)'}, so this consult takes the Codex CLI default. ` +
+        `Set one on the TUI System tab row 'Default Codex model'.`
+    );
+    return { line: lines.join('\n') };
+  }
+  lines.push(
+    `${PIN} — model ${show(configured)} injected into this call from config.sparring_partner.model (.sterling/config.json), which named none. ` +
+      `A model named on the call itself would have won instead; an already-running codex-reply thread keeps its opener's model.`
+  );
+  return {
+    line: lines.join('\n'),
+    updatedInput: { ...(inp.tool_input && typeof inp.tool_input === 'object' ? inp.tool_input : {}), model: configured },
+  };
+}
+
+/** Computed ONCE, on first use, and memoized — `let` + a resolver rather than a
+ *  top-level initialized const for the same fail-closed-boundary reason as the
+ *  label above. buildModelPin never throws, so laziness changes no semantics:
+ *  every reader below goes through modelPin(). */
+let pinMemo;
+function modelPin() {
+  if (pinMemo === undefined) pinMemo = buildModelPin(input);
+  return pinMemo;
+}
+
+/** One envelope carrying the pin (always, when there is one) plus whatever
+ *  relevance carriage this path produced. The pin leads: it is one line about
+ *  the call itself, and the carriage below it can run to many. */
+function envelopeFor(extraContext) {
+  const pin = modelPin();
+  const parts = [];
+  if (pin?.line) parts.push(pin.line);
+  if (extraContext) parts.push(extraContext);
+  const hookSpecificOutput = { hookEventName: input.hook_event_name };
+  if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
+  if (parts.length) hookSpecificOutput.additionalContext = parts.join('\n\n');
+  return { hookSpecificOutput };
+}
+
+/** EXACTLY ONE STDOUT WRITE PER PROCESS, structurally rather than by ordering
+ *  discipline (outside-family review finding, 2026-09-05). Claude Code parses
+ *  this hook's stdout as ONE JSON object: two writes produce `{…}{…}`, which
+ *  parses as nothing at all — so updatedInput is dropped and the codex model pin
+ *  is lost exactly when something has already gone wrong. Every emit below goes
+ *  through here; a suppressed second envelope is DISCLOSED on stderr rather than
+ *  silently swallowed (P5). `let` with no initializer for the same
+ *  fail-closed-boundary reason as pinMemo above. */
+let emitted;
+function emitEnvelope(extraContext) {
+  if (emitted) {
+    process.stderr.write(
+      `H20: a SECOND stdout envelope was suppressed — the first write already carries the model pin, and two JSON objects on stdout would make the whole payload unparseable. Dropped payload: ${String(extraContext ?? '').slice(0, 400)}`
+    );
+    return;
+  }
+  emitted = true;
+  process.stdout.write(JSON.stringify(envelopeFor(extraContext)));
+}
+
+/** Exit 0, emitting the composed envelope — the replacement for a bare allow()
+ *  on every early-exit below. With no pin and no carriage it is exactly allow():
+ *  silence, so a non-codex dispatch that matched nothing still prints nothing. */
+function finish(extraContext) {
+  const pin = modelPin();
+  if (!pin?.line && !pin?.updatedInput && !extraContext) allow();
+  emitEnvelope(extraContext);
+  process.exit(0);
+}
+
 // TWO SURFACES, ONE MECHANISM (board 62806222 + board 4e6eb510). Task/Agent
 // carries the brief in tool_input.prompt; AskUserQuestion has no prompt field at
 // all and carries its text in questions[]/options[]. outgoingProposalText knows
@@ -123,17 +309,26 @@ const input = readStdin();
 // than half-scanned. Registering the matcher WITHOUT this would have produced a
 // hook that never fires and a probe that proves nothing, since silence is this
 // hook's default state.
-const outgoing = outgoingProposalText(input.tool_input);
-if (!outgoing) allow(); // nothing readable on this surface
 const isQuestion = Array.isArray(input.tool_input?.questions);
 const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');
 
-const store = openStore(input.cwd);
-if (!store) allow(); // not a Sterling project — no ceremony (P1)
-
 try {
+  // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where
+  // they were not before: outgoingProposalText reads an arbitrary tool_input and
+  // openStore THROWS on a corrupt or locked db (it returns null only for an
+  // ABSENT one — anti-pattern e13f0fb5 pins that distinction). An uncaught throw
+  // exits 1, and an exit-1 hook's stdout is not the envelope Claude Code reads
+  // updatedInput from, so the consult would silently lose its model pin — the
+  // exact loss the catch arm below was written to prevent, one statement too
+  // early to catch it. Inside the try, both failures land on that arm and the
+  // pin still ships.
+  const outgoing = outgoingProposalText(input.tool_input);
+  if (!outgoing) finish(); // nothing readable on this surface — the model pin still ships
+  const store = openStore(input.cwd);
+  if (!store) finish(); // no store — no relevance carriage possible, pin unaffected
+
   const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
-  if (terms.length < AXIS_MIN_HITS) allow(); // too little vocabulary to match on
+  if (terms.length < AXIS_MIN_HITS) finish(); // too little vocabulary to match on
 
   // STAGE 1 — narrow in the store. rank_terms genuinely FILTER (packages/store/
   // src/index.ts builds `... AND records_fts MATCH ?` with the terms OR-joined),
@@ -197,7 +392,7 @@ try {
       }
     }
   }
-  if (!candidates.length) allow();
+  if (!candidates.length) finish();
 
   // DENY-ONCE PRE-STEP (decision 68332e4b) — AskUserQuestion ONLY. Runs over the
   // SAME stage-1 candidate pool built above with the canonical rank_terms
@@ -330,7 +525,7 @@ try {
     .map((r) => ({ record: r, hits: axisHits(r, terms) }))
     .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing))
     .sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) allow();
+  if (!scored.length) finish();
 
   // Share H19's session guard, keyed on the dispatching context. A record
   // already delivered by file-touch is already in this context — re-injecting it
@@ -339,7 +534,7 @@ try {
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
   const fresh = scored.filter((x) => !isDelivered(guard, x.record));
-  if (!fresh.length) allow();
+  if (!fresh.length) finish();
 
   const hazards = fresh.filter((x) => x.record.type === 'anti_pattern').slice(0, HAZARD_CAP);
   const decisions = fresh.filter((x) => x.record.type === 'decision').slice(0, MAX_DECISIONS);
@@ -356,7 +551,7 @@ try {
   const priorAnswers = fresh.filter(
     (x) => x.record.type === 'research_finding' || x.record.type === 'disconfirmed_hypothesis' || x.record.type === 'open_question'
   );
-  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) allow();
+  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) finish();
 
   const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(', ');
   // Name the covered CENTRAL terms too, so the reader can see at a glance that
@@ -468,21 +663,53 @@ try {
   // the guard is what makes delivery once-per-session, so writing it before the
   // delivery lands turns any failure into permanent silent loss with no retry.
   recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: blocks.join('\n\n') },
-    })
-  );
-  // Only the SHOWN (capped) article pointers are marked delivered — same rule
-  // as cappedHazards: an article capped out of the payload was never actually
-  // read by the recipient, so it stays eligible for a later dispatch instead
-  // of being silently lost for the rest of the session.
-  const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-  markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
-  writeGuard(gPath, guard);
+  // Composed, not replaced: on a codex consult this envelope carries BOTH the
+  // model pin and the carriage (board 7423f7a2 — the pin is on every output
+  // path, and this is the one that already had an envelope).
+  emitEnvelope(blocks.join('\n\n'));
+  // POST-ENVELOPE BOOKKEEPING IS ITS OWN FAILURE DOMAIN (outside-family review,
+  // 2026-09-05). These marks CANNOT move above the write — the delivery-first
+  // ordering directly above is the H19 council rule, and inverting it would turn
+  // a failed delivery into permanent silent loss. So the only way to keep the
+  // stdout write single is to contain what follows it: a throw here would
+  // otherwise fall into the outer catch, which writes a SECOND envelope, and
+  // `{…}{…}` costs the model pin. stderr only, never a second envelope.
+  try {
+    // Only the SHOWN (capped) article pointers are marked delivered — same rule
+    // as cappedHazards: an article capped out of the payload was never actually
+    // read by the recipient, so it stays eligible for a later dispatch instead
+    // of being silently lost for the rest of the session.
+    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+    markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
+    writeGuard(gPath, guard);
+  } catch (e) {
+    // Cheap failure vs expensive one: a lost guard write costs at most a repeat
+    // delivery next dispatch; a lost envelope costs the pin and the carriage.
+    process.stderr.write(
+      `H20: delivery bookkeeping failed AFTER the envelope was written (${(e && e.message) || e}) — the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+    );
+  }
   allow();
 } catch (e) {
+  const failure = `H20: mechanism-axis delivery failed: ${(e && e.message) || e}`;
+  const pin = modelPin();
+  if (pin?.line || pin?.updatedInput) {
+    // THE LAST OUTPUT PATH. A relevance failure must not silently unpin the
+    // consult's model: warnNonBlocking exits 1, and an exit-1 hook's stdout is
+    // not the envelope Claude Code reads updatedInput from, so dropping through
+    // to it here would drop the pin exactly when something is already wrong.
+    // Loud on BOTH channels instead — stderr for the transcript, the payload
+    // line for the reader — and exit 0 so the pin survives (P5: visible, and
+    // still never a gate).
+    process.stderr.write(failure);
+    // Through emitEnvelope, never a bare write: if an envelope already landed
+    // this process, THAT one carries the pin and a second object here would
+    // corrupt it into unparseable text (the belt-and-braces half of the
+    // one-write rule — the ordinary route is the contained bookkeeping above).
+    emitEnvelope(`⚠ ${failure} — the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
+    process.exit(0);
+  }
   // Delivery is an aid, never a gate: loud but NON-blocking (P5 without AC7 harm).
-  warnNonBlocking(`H20: mechanism-axis delivery failed: ${(e && e.message) || e}`);
+  warnNonBlocking(failure);
 }
 // no close: every path above exits the process, releasing the handle (board f81b1987)

@@ -225,13 +225,50 @@ test('REGRESSION: a Task dispatch still renders the unchanged literal dispatch p
 });
 
 // --- 5. INERT: no prompt field at all ----------------------------------------
+//
+// INVERTED 2026-09-05, board 7423f7a2 (slice 5 — the codex model pin), by the
+// board item's own words: this pin "legitimately inverts to 'exit 0 + only the
+// pin line'". WHY it inverts: slice 5 makes H20's Pre arm fill
+// config.sparring_partner.model into a model-less codex call as its FIRST step,
+// ahead of every relevance early-exit, so the prompt-less shape that produced
+// NOTHING before now produces the model/enabled disclosure envelope — and only
+// that. What the pin still owns, unchanged in substance, is the INERTNESS of
+// the RELEVANCE path on this shape: no extraction, no candidates, no carriage,
+// no denial. The store is deliberately loaded with the motivating record here
+// (it was empty before) so "no carriage" is a measured absence against a record
+// that COULD have been delivered, not a vacuous one.
+// Full model-injection semantics are pinned separately in
+// scripts/tests/h20-consult-model-injection.test.mjs (M-6 owns the placement).
+//
+// SABOTAGE: let the relevance path run on a prompt-less payload (drop the
+// prompt guard so extraction falls back to the whole tool_input) — the carriage
+// header/record title appears and this pin goes red.
 
-test('INERT: a codex tool_name with no prompt field at all is ignored — exit 0, no crash, no context', () => {
-  const { dir, cleanup } = makeProject();
+test('INERT: a codex tool_name with no prompt field at all draws NO relevance carriage — exit 0, and stdout is the model-pin envelope and only that (INVERTED 2026-09-05, board 7423f7a2)', () => {
+  const { dir, store, cleanup } = makeProject();
   try {
+    fileMotivatingRecord(store);
     const r = runHook({ hook_event_name: 'PreToolUse', tool_name: 'mcp__codex__codex', tool_input: {}, cwd: dir }, dir);
-    assert.equal(r.code, 0);
-    assert.equal(r.stdout, '');
+    assert.equal(r.code, 0, 'a prompt-less consult is never denied (decision ea68735d point 3 — advisory, never gating)');
+    assert.notEqual(r.stdout.trim(), '', 'the model-pin envelope is emitted even on the shape that carries no relevance — the pin runs BEFORE the early exits (board 7423f7a2)');
+
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.hookSpecificOutput?.hookEventName, 'PreToolUse');
+    assert.notEqual(out.decision, 'block');
+    assert.notEqual(out.hookSpecificOutput?.permissionDecision, 'deny');
+
+    const ctx = [out.hookSpecificOutput?.additionalContext, out.systemMessage].filter((s) => typeof s === 'string').join('\n');
+    assert.doesNotMatch(ctx, /MECHANISM-AXIS DELIVERY \(H20\)/, 'no relevance carriage: there is no prompt to extract an axis from, so the delivery header must not appear');
+    assert.doesNotMatch(ctx, /Signal connected at boot but emitter initialises later/, 'the store HOLDS a deliverable record here — its absence from the output is the measured inertness of the relevance path');
+    assert.match(ctx, /model|sparring/i, 'what remains is the sparring model/enabled disclosure — the pin line, and nothing beyond it');
+
+    // This fixture's .sterling/config.json is `{}` — no sparring_partner.model —
+    // so the pin discloses without injecting anything.
+    const updated = out.hookSpecificOutput?.updatedInput;
+    assert.ok(
+      !updated || !Object.prototype.hasOwnProperty.call(updated, 'model'),
+      'with no model configured in this fixture, nothing is injected — Sterling never invents a model id',
+    );
   } finally {
     cleanup();
   }
