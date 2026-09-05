@@ -103,6 +103,26 @@ export const SANCTIONED_SCRIPTS = Object.freeze([
   // selector, a matching SHA-256 ledger digest, a recognized class and a reason,
   // and it can only supersede an entry that already exists.
   'scripts/review-ledger.mjs',
+  // INDIVIDUAL DISPOSITION (decision 1434cd54 Ruling 1 called this a TEMPORARY
+  // machine-local workaround; Ruling 6 forbids bulk-adding the unsanctioned
+  // writers). Decision 665be1f3 states it outright: "the writer is a small
+  // sanctioned CLI (scripts/rotation-note.mjs, no-capture.mjs precedent)" — it
+  // was DESIGNED as sanctioned and never wired in. Board 77fe18af, slice 1b.
+  'scripts/rotation-note.mjs',
+  // INDIVIDUAL DISPOSITION (decision 1434cd54): H10's Stop message prints the
+  // exact `node scripts/no-capture.mjs ...` command line as the sanctioned
+  // route to discharge a capture duty; a denied printed remedy is not a
+  // remedy. Board 77fe18af, slice 1b.
+  'scripts/no-capture.mjs',
+  // INDIVIDUAL DISPOSITION (decision 1434cd54): H5's frozen-test-wall denial
+  // names `scripts/test-repair.mjs` as THE sanctioned route past the wall.
+  // Board 77fe18af, slice 1b.
+  'scripts/test-repair.mjs',
+  // INDIVIDUAL DISPOSITION (board a6b118e4 point 9): the layer-1 conformance
+  // audit (scripts/delivery-oracle.mjs) must be runnable by a Bash-gated
+  // agent, not only by hand. Rides slice 1b's commit cycle as a fourth
+  // disposition.
+  'scripts/delivery-oracle.mjs',
 ]);
 
 /**

@@ -372,7 +372,7 @@ export const configSchema = z.object({
     .object({
       allow_scripts: z
         .array(z.string())
-        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'scripts/commit-reviewed.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs', 'packages/tui/bundle/sterling-tui.mjs', 'scripts/review-ledger.mjs']),
+        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'scripts/commit-reviewed.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs', 'packages/tui/bundle/sterling-tui.mjs', 'scripts/review-ledger.mjs', 'scripts/rotation-note.mjs', 'scripts/no-capture.mjs', 'scripts/test-repair.mjs', 'scripts/delivery-oracle.mjs']),
     })
     .default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered

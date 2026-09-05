@@ -61,6 +61,34 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // go red PRINTING BOTH ORDERS: that is a RE-POINT of this literal to the shipped
 // order, in one edit — never a reordering of the shipped list to match the test,
 // and never a relaxation of either deepEqual into a set comparison.
+//
+// RE-CUT 2026-09-05 (b) (re-cut discipline per decision 77c5b85a — same
+// mechanism, a second re-cut after slice 1b of board 77fe18af).
+//   OLD PREMISE: the shipped sanctioned set is these TEN entries.
+//   NEW PREMISE: it is FOURTEEN. Four scripts joined as SINGLE, INDIVIDUAL
+//     dispositions (decision 1434cd54 Ruling 6 forbids bulk-adding the
+//     unsanctioned store writers; each earns its own justification), appended
+//     in this order after `scripts/review-ledger.mjs`:
+//       - `scripts/rotation-note.mjs` — decision 665be1f3: always meant to be
+//         sanctioned (the context-rotation note writer), never actually added.
+//       - `scripts/no-capture.mjs` — H10's Stop text prints the exact command
+//         as the sanctioned remedy; a guard that denies its own printed
+//         remedy is the inverted-protection shape this suite exists to catch.
+//       - `scripts/test-repair.mjs` — H5's frozen-test denial names it BY NAME
+//         as THE route past the frozen-test wall; same inverted-protection
+//         shape.
+//       - `scripts/delivery-oracle.mjs` — board a6b118e4 point 9: the layer-1
+//         delivery audit must run from a Bash-gated agent, so its script
+//         needs the same sanctioned reach.
+//   WHAT DID NOT CHANGE: the widening rule (edit config.ts's shipped default
+//     and this module's mirror together, reviewed as the policy change it is)
+//     and the position-assumption discipline above (this author holds no read
+//     access to config.ts or store-remediation.mjs — H4 — so the four new
+//     entries are placed LAST, after `scripts/review-ledger.mjs`, following
+//     the same precedent; if the implementation placed them elsewhere the
+//     deepEqual and drift pin below both go red printing both orders, which is
+//     a RE-POINT of this literal, never a reordering of the shipped list to
+//     match the test).
 const SHIPPED = [
   'scripts/dispose-run.mjs',
   'scripts/init.mjs',
@@ -72,6 +100,10 @@ const SHIPPED = [
   'scripts/migrate-stores.mjs',
   'packages/tui/bundle/sterling-tui.mjs',
   'scripts/review-ledger.mjs',
+  'scripts/rotation-note.mjs',
+  'scripts/no-capture.mjs',
+  'scripts/test-repair.mjs',
+  'scripts/delivery-oracle.mjs',
 ];
 
 /**
@@ -183,6 +215,9 @@ test('appendMissingSanctioned: none present — appends all shipped sanctioned s
   // spelled a second time, so a single-sided edit to SHIPPED is caught here too.
   // `scripts/review-ledger.mjs` is appended last, matching the SHIPPED literal's
   // position assumption documented at the top of this file.
+  // RE-CUT 2026-09-05 (b): the four individually-dispositioned entries
+  // (rotation-note, no-capture, test-repair, delivery-oracle; board 77fe18af
+  // slice 1b) join at the end, after `scripts/review-ledger.mjs`.
   assert.deepEqual(next, [
     'scripts/some-other-script.mjs',
     'scripts/dispose-run.mjs',
@@ -195,6 +230,10 @@ test('appendMissingSanctioned: none present — appends all shipped sanctioned s
     'scripts/migrate-stores.mjs',
     'packages/tui/bundle/sterling-tui.mjs',
     'scripts/review-ledger.mjs',
+    'scripts/rotation-note.mjs',
+    'scripts/no-capture.mjs',
+    'scripts/test-repair.mjs',
+    'scripts/delivery-oracle.mjs',
   ]);
   assert.deepEqual(added, SHIPPED);
   assert.deepEqual(input, ['scripts/some-other-script.mjs'], 'input array is not mutated (pure function)');
@@ -225,6 +264,10 @@ test('appendMissingSanctioned: exactly one missing — only that one is appended
   // (board 891284a9), so it is present here too — without it this fixture would
   // be missing TWO scripts and `added` would carry two entries, which is a
   // different test from the "exactly one missing" behaviour pinned here.
+  // RE-CUT 2026-09-05 (b): the four individually-dispositioned entries
+  // (rotation-note, no-capture, test-repair, delivery-oracle; board 77fe18af
+  // slice 1b) join the shipped list too, so they are present here as well —
+  // without them this fixture would be missing FIVE scripts, not one.
   const input = [
     'scripts/a.mjs',
     'scripts/migrate-stores.mjs',
@@ -233,6 +276,10 @@ test('appendMissingSanctioned: exactly one missing — only that one is appended
     'scripts/b.mjs',
     'scripts/dispose-run.mjs',
     'scripts/review-ledger.mjs',
+    'scripts/rotation-note.mjs',
+    'scripts/no-capture.mjs',
+    'scripts/test-repair.mjs',
+    'scripts/delivery-oracle.mjs',
     'scripts/consume-exit.mjs',
     'scripts/architecture-projection.mjs',
     'scripts/domain-doctor.mjs',
@@ -255,6 +302,10 @@ test('appendMissingSanctioned: a partially-covered config gains exactly the gap,
   // joined the shipped list (board 891284a9) and is absent from this input, so it
   // is part of the gap, in SANCTIONED_SCRIPTS order (last, per the position
   // assumption documented at the top of this file).
+  // RE-CUT 2026-09-05 (b): the gap is now TWELVE entries — the four
+  // individually-dispositioned additions (rotation-note, no-capture,
+  // test-repair, delivery-oracle; board 77fe18af slice 1b) are also absent
+  // from this input, so they join the gap, in SANCTIONED_SCRIPTS order (last).
   assert.deepEqual(added, [
     'scripts/dispose-run.mjs',
     'scripts/init.mjs',
@@ -264,6 +315,10 @@ test('appendMissingSanctioned: a partially-covered config gains exactly the gap,
     'scripts/commit-reviewed.mjs',
     'packages/tui/bundle/sterling-tui.mjs',
     'scripts/review-ledger.mjs',
+    'scripts/rotation-note.mjs',
+    'scripts/no-capture.mjs',
+    'scripts/test-repair.mjs',
+    'scripts/delivery-oracle.mjs',
   ], 'the gap only — the two already-present migration scripts are not re-added, and the added set is in SANCTIONED_SCRIPTS order');
   assert.deepEqual(next, [...input, ...added]);
 });
@@ -290,18 +345,26 @@ test('appendMissingSanctioned: fully covered (scrambled order, unrelated entry i
   // fixture would no longer be fully covered and the no-op claim would be tested
   // against a config that genuinely needs an append — exactly the dead-premise
   // shape the board 52c1d504 re-cut recorded below.
+  // RE-CUT 2026-09-05 (b): "fully covered" now means FOURTEEN shipped entries —
+  // the four individually-dispositioned additions (rotation-note, no-capture,
+  // test-repair, delivery-oracle; board 77fe18af slice 1b) are present here too,
+  // interleaved out of canonical order, for the same reason.
   const input = [
     'scripts/migrate-stores.mjs',
     'scripts/some-admin-script.mjs',
+    'scripts/no-capture.mjs',
     'packages/tui/bundle/sterling-tui.mjs',
     'scripts/migration-preflight.mjs',
     'scripts/commit-reviewed.mjs',
     'scripts/review-ledger.mjs',
+    'scripts/test-repair.mjs',
     'scripts/domain-doctor.mjs',
+    'scripts/rotation-note.mjs',
     'scripts/architecture-projection.mjs',
     'scripts/consume-exit.mjs',
     'scripts/init.mjs',
     'scripts/dispose-run.mjs',
+    'scripts/delivery-oracle.mjs',
   ];
   const { next, added } = appendMissingSanctioned(input);
   assert.deepEqual(added, [], 'nothing appended — every shipped sanctioned script is present, regardless of its position');
