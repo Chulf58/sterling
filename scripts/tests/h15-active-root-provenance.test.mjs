@@ -1195,3 +1195,134 @@ test('PV-10b (expect GREEN today and after): a BACKSLASH spelling of an in-clone
 // PV-10 and PV-C1 stay green. Pinned separately from PV-10 because a
 // Windows-parity change is likely to touch BOTH case-folding and separator
 // normalization, and only separate pins say which one broke.
+
+// =============================================================================
+// SECTION 12 — A CONSUMER-DECLARED, PROJECT-LOCAL allow_scripts ENTRY.
+// Slice dome-farmer-issues-2026-09-05, follow-up ruling 2026-09-05 (prose-only
+// until this section): 5b82e94f binds EVERY allow_scripts entry — shipped or
+// consumer-declared — to the active plugin root, so a CONSUMING project can no
+// longer sanction a store-writing script that lives only in its OWN tree, even
+// one it names explicitly in its own config. h15-allowlist-default-merge.test.mjs
+// states this at its ⚠ SEMANTIC CONSEQUENCE note (:119) without pinning it.
+// PV-5 (:620) already denies a project-local file bearing a SHIPPED name, but
+// nothing there is consumer-configured — it cannot tell "project entries are
+// unconditionally clone-bound" apart from a future "project entries are
+// project-scoped" branch that would reopen exactly this. This section is that
+// missing pin.
+//
+// INVARIANT: "a consumer-declared allow_scripts entry does not sanction a
+// project-local store writer; only the same entry resolving to a regular file
+// inside the active plugin root is exempt."
+// =============================================================================
+
+// Unique to this section: appears in no shipped SANCTIONED_SCRIPTS entry and no
+// other fixture name in this file (CLONE_SCRIPTS, CASE_SCRIPTS above). PV-12
+// confirms this AT RUNTIME by importing the list, never by reading
+// scripts/lib/store-remediation.mjs source (H4 read wall) — this author did not
+// open that file.
+const CUSTOM_ENTRY = 'scripts/project-writer.mjs';
+
+// A world whose fixture config adds ONE consumer-declared custom entry on top
+// of the shared CONFIG, by overwriting the config.json makeWorld() already
+// wrote — the shared CONFIG constant, and every other pin that reads it, stays
+// untouched.
+function makeCustomEntryWorld() {
+  const w = makeWorld();
+  const cfg = {
+    ...CONFIG,
+    store_guard: { allow_scripts: [...CONFIG.store_guard.allow_scripts, CUSTOM_ENTRY] },
+  };
+  writeFileSync(join(w.project, '.sterling', 'config.json'), JSON.stringify(cfg));
+  return w;
+}
+
+test('PV-12-control-a (CONTROL, opposite reason, expect GREEN — proves the mechanism engaged): the custom entry resolving inside the active plugin root IS exempt', () => {
+  const { project, clone, cleanup } = makeCustomEntryWorld();
+  try {
+    writeFileSync(join(clone, CUSTOM_ENTRY), '// fixture: consumer-declared entry, genuinely inside the clone\n');
+    const r = runHook(`node ${join(clone, CUSTOM_ENTRY)} ${DB}`, project, seam(clone));
+    assert.notEqual(r.code, null, 'the gate must not crash on a genuinely in-clone consumer-declared entry');
+    assert.equal(
+      r.code,
+      0,
+      `IDENTICAL configured entry to PV-12, IDENTICAL config, differing ONLY in where the real file sits and which path invokes it. Without this arm PV-12's deny could mean "the entry was never read" or "nothing is ever exempt" — this is the evidence that the ENTRY ITSELF is honoured and only its LOCATION decided the verdict. stderr=${flat(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: stop reading project store_guard.allow_scripts into the entry set
+// entirely (only the shipped SANCTIONED_SCRIPTS list is consulted) — this pin
+// goes red (allow 0 -> deny 2) while PV-9a/PV-C1 (shipped entries) stay green,
+// isolating "the project's OWN declared entries are honoured at all" from
+// "which location they must resolve to".
+
+test('PV-12 (TREATMENT, expect RED — THE ACCEPTED CONSEQUENCE, PROSE-ONLY UNTIL NOW): a consumer-declared entry naming a project-local file does NOT sanction it', async () => {
+  const { SANCTIONED_SCRIPTS } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'store-remediation.mjs')).href);
+  assert.ok(
+    !SANCTIONED_SCRIPTS.includes(CUSTOM_ENTRY),
+    `${CUSTOM_ENTRY} collides with a shipped SANCTIONED_SCRIPTS entry, which would make this pin test the shipped-list question instead of the consumer-declared one — pick a different CUSTOM_ENTRY. Current list: ${JSON.stringify(SANCTIONED_SCRIPTS)}`
+  );
+
+  const { project, clone, cleanup } = makeCustomEntryWorld();
+  try {
+    // A REAL regular file, planted ONLY in the project's own tree — never in
+    // the clone. The consumer's own store_guard.allow_scripts names exactly
+    // this clone-relative word; decision 5b82e94f binds it to the active
+    // plugin root regardless of who declared it.
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    writeFileSync(join(project, CUSTOM_ENTRY), '// fixture: a real project-local store writer, named only by the consumer config\n');
+    const expected = canon(join(project, CUSTOM_ENTRY));
+
+    const r = runHook(`node ${CUSTOM_ENTRY} ${DB}`, project, seam(clone));
+    assert.notEqual(r.code, null, 'the gate must not crash on a consumer-declared project-local candidate');
+    assert.equal(
+      r.code,
+      2,
+      `THE ACCEPTED CONSEQUENCE, PINNED: 5b82e94f binds provenance to the active plugin root for EVERY allow_scripts entry, including one the CONSUMER declared in their own config — so a script that lives only in the consumer's own tree can no longer be sanctioned even by explicit configuration. Compare PV-12-control-a: identical entry, identical config, genuinely inside the clone, and ALLOWED. stderr=${flat(r.stderr)}`
+    );
+    const text = String(r.stderr ?? '').replace(/\s+/g, ' ');
+    assert.ok(
+      text.includes(expected) || text.includes(posix(expected)),
+      `5b82e94f step 8 requires the denial to NAME the resolved canonical candidate. Expected to find ${expected} (or its POSIX spelling) in the denial. stderr=${flat(r.stderr)}`
+    );
+    assert.match(
+      text,
+      /OUTSIDE the active plugin root/,
+      `the denial must attribute itself to CONTAINMENT — the candidate resolves outside the active plugin root — not to a bare "not sanctioned", or a future "project entries are project-scoped" branch could satisfy a weaker assertion while reopening exactly this. stderr=${flat(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: when an entry comes from the PROJECT's own store_guard.allow_scripts
+// (as opposed to the shipped SANCTIONED_SCRIPTS list), skip the active-plugin-
+// root containment check and accept a candidate resolving anywhere under the
+// PROJECT instead — i.e. treat project-declared entries as project-scoped. This
+// pin goes red (deny 2 -> allow 0) while PV-12-control-a stays green (its file
+// already sits inside the clone, so a project-scoped OR a root-scoped check both
+// pass it) — PV-12 is the ONLY pin in this file that tells the two apart.
+
+test('PV-12-control-b (CONTROL, expect ALLOW when supported — REALPATH IDENTITY, not lexical location): a project-side symlink to the genuine in-clone entry keeps the exemption', { skip: SYMLINK_SKIP }, () => {
+  const { project, clone, cleanup } = makeCustomEntryWorld();
+  try {
+    writeFileSync(join(clone, CUSTOM_ENTRY), '// fixture: consumer-declared entry, genuinely inside the clone\n');
+    mkdirSync(join(project, 'scripts'), { recursive: true });
+    symlinkSync(join(clone, CUSTOM_ENTRY), join(project, CUSTOM_ENTRY));
+
+    const r = runHook(`node ${CUSTOM_ENTRY} ${DB}`, project, seam(clone));
+    assert.notEqual(r.code, null, 'the gate must not crash on a project-side symlink to a genuine clone file');
+    assert.equal(
+      r.code,
+      0,
+      `a PROJECT-SIDE SYMLINK whose realpath IS the genuine in-clone file must be ALLOWED — proving REALPATH IDENTITY governs the exemption, not lexical project-vs-clone location. If PV-12's deny were instead keyed on "the invoking word lexically points somewhere under the project", this pin would wrongly deny too. stderr=${flat(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: decide containment by inspecting the INVOKING WORD's lexical
+// location (does it look like it starts under the project directory?) rather
+// than the realpath'd candidate — this pin goes red (allow 0 -> deny 2) while
+// PV-12 stays green, isolating "identity, not spelling or location" as its own
+// claim.
