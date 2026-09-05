@@ -33,8 +33,19 @@ import { join } from 'node:path';
 // Bundle every scripts/hooks/h*.mjs (from srcDir) into standalone single-file
 // bundles under outDir (invariant 4: dependency-light, esbuild-bundled, no
 // workspace imports at runtime). Returns the emitted absolute paths.
-export async function buildHooks({ root, srcDir, outDir }) {
-  const entries = readdirSync(srcDir).filter((f) => f.startsWith('h') && f.endsWith('.mjs'));
+// `only` (optional, an array of entry basenames) restricts the build to those
+// entries — the test seam harness (scripts/tests/lib/seam-hook.mjs) builds ONE
+// hook into a temp dir per suite. An `only` naming an entry that is not in
+// srcDir is refused, never silently built as nothing.
+export async function buildHooks({ root, srcDir, outDir, only }) {
+  const all = readdirSync(srcDir).filter((f) => f.startsWith('h') && f.endsWith('.mjs'));
+  let entries = all;
+  if (only !== undefined) {
+    if (!Array.isArray(only) || only.length === 0) throw new Error('buildHooks: `only` must be a non-empty array of hook entry basenames');
+    const missing = only.filter((e) => !all.includes(e));
+    if (missing.length) throw new Error(`buildHooks: \`only\` names entries not present in ${srcDir}: ${missing.join(', ')}`);
+    entries = all.filter((e) => only.includes(e));
+  }
   const emitted = [];
   for (const entry of entries) {
     await build({

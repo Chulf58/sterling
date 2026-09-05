@@ -434,13 +434,21 @@ const BASELINE = {
     // identities and FOUNDING_BASELINE_TOTAL stays 107. This is the detector
     // re-mint loop board 92f7e826 (identity schema v3) exists to address — a
     // text edit to a baselined statement looks exactly like new debt.
-    { statement: 'if (offendingIsDbSeal) { const match = DB_MENTION_RE.exec(command); const matchedText = match ? matc … #d2276435' },
+    // RE-MINTED 2026-09-05 (#d2276435 -> #0ec06b48, #208cc889 -> #8ef2002a): the
+    // H15 provenance rebuild (decisions 5b82e94f / 95c2c109, board 891284a9)
+    // added the provenance line and deleted the false "only writes,
+    // redirections, and moves/copies INTO the store" clause (pin PV-8b), which
+    // changed both denials' TEXT and therefore their identity digests. Same two
+    // statements, same debt, nothing entered or left the finding set; the new
+    // `offendingProvenance` variable is declared bare and initialized INSIDE the
+    // guarded try, so it adds no entry. FOUNDING_BASELINE_TOTAL unchanged by this.
+    { statement: 'if (offendingIsDbSeal) { const match = DB_MENTION_RE.exec(command); const matchedText = match ? matc … #0ec06b48' },
     // The terminal verdict itself. Its argument list is executable code
     // (`allowScripts.join(', ')`), so a throw there voids the gate at the very
     // moment it was about to deny — hence a finding like any other. (It is a
     // top-level statement, so it is caught by the statement rule; the deny-arg
     // entries below are the same hazard inside the CATCH handlers.)
-    { statement: "deny( 'H15: shell write access to the Sterling store is denied — the store is read and written throu … #208cc889" },
+    { statement: "deny( 'H15: shell write access to the Sterling store is denied — the store is read and written throu … #8ef2002a" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H15', `[stdin] hook input could not be read or parsed (${(e && e.mes … #5ae443d6" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H15', `[cwd] the hook input's cwd could not be resolved to a project … #11a2e619" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H15', `Internal error while preprocessing the command text for the s … #25d119c3" },
@@ -494,12 +502,14 @@ const BASELINE = {
     { statement: 'const NARROW_CLIP = 700;' },
     { statement: 'const QUESTION_WORDS_RE = /\\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|we … #e6205657' },
     { statement: 'const input = readStdin();' },
-    { statement: 'const outgoing = outgoingProposalText(input.tool_input);' },
-    { statement: 'if (!outgoing) allow();' },
+    // DELETED 2026-09-05 (board 7423f7a2 slice 5, reviewer-correctness finding):
+    // `const outgoing = …`, `if (!outgoing) finish();`, `const store =
+    // openStore(…)` and `if (!store) finish();` moved INSIDE the top-level try —
+    // an openStore throw used to exit 1 with no envelope and silently lose the
+    // codex model pin. Four unguarded statements left the finding set, so the
+    // ratchet turns DOWN: FOUNDING_BASELINE_TOTAL 106 -> 102.
     { statement: 'const isQuestion = Array.isArray(input.tool_input?.questions);' },
     { statement: "const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsWith('mcp__codex__');" },
-    { statement: 'const store = openStore(input.cwd);' },
-    { statement: 'if (!store) allow();' },
     // ROTATED AGAIN 2026-09-01 (#f084420c -> #ec8f5e26): the consumer-feedback
     // branch's shared-lib recompiles shifted this statement's bundled text.
     // RE-EXAMINED: same single try, catch semantics unchanged, no new unguarded
@@ -508,7 +518,21 @@ const BASELINE = {
     // advisory firing counter into h20's top-level try WITHOUT rotating this
     // entry, so the check was red at HEAD; the S3 commit absorbs the repair and
     // says so. Same statement, same debt — the counter swallows its own errors.
-    { statement: 'try { const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS); if (terms.length < AXIS_MIN_HITS) al … #ec8f5e26' },
+    // ROTATED AGAIN 2026-09-05 (#ec8f5e26 -> #3201ecdb): same allow()->finish()
+    // rotation as the two entries above; the outer try and its catch semantics
+    // are unchanged (the catch still never denies — H20 is advisory there).
+    // ROTATED AGAIN 2026-09-05 (#3201ecdb -> #f62ba302): the four statements above
+    // moved into this try, so its text (and digest) moved; catch semantics unchanged.
+    // ROTATED AGAIN 2026-09-05 (#f62ba302 -> #c5e5d9cf): the outside-family review's
+    // one-stdout-write fix landed INSIDE this try — the success path's markDelivered/
+    // writeGuard are now wrapped in a LOCAL try whose catch writes stderr only, so a
+    // bookkeeping throw can no longer reach the outer catch and emit a second
+    // envelope. RE-EXAMINED: one entry in, one stale entry out, total unmoved at 102;
+    // the inner catch swallows (stderr, then execution continues to allow()), the
+    // OUTER try and its catch semantics are unchanged, and the edit added no new
+    // unguarded top-level statement — `let emitted;` is uninitialized, like pinMemo.
+    // Verified by RUNNING the check.
+    { statement: 'try { // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where // they were not … #c5e5d9cf' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart
@@ -528,7 +552,7 @@ const BASELINE = {
 // 107 → 106 at S4 (2026-08-30): MAX_STAMP_BYTES deleted with the stamp
 // apparatus (78dc9bd6/fe861066); the Pre-statement entry rotated in place.
 // The ratchet only turns downward — fewer is a rotation, never a regression.
-const FOUNDING_BASELINE_TOTAL = 106;
+const FOUNDING_BASELINE_TOTAL = 102;
 
 const CLASSES = new Set(['blocking', 'advisory', 'exempt']);
 const LABEL = 'fail-closed boundary';

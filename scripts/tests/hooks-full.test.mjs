@@ -1,4 +1,4 @@
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { buildSeamHook } from './lib/seam-hook.mjs';
 import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { runWiringCheck } from '../lib/wiring-check.mjs';
 import { renderInstalledAgent } from '../lib/agent-distribution.mjs';
@@ -17,13 +18,24 @@ const NOW = '2026-06-10T12:00:00.000Z';
 let SterlingStore;
 let ProjectRegistry;
 let parseConfig;
+// The seam-spawnable H15 bundle (decision 95c2c109 F2): H15 reads
+// STERLING_PLUGIN_ROOT only when its own walk-up finds no plugin tree, so the
+// one H15 test below that names a fixture root through the seam must spawn a
+// bundle built into a marker-free temp dir, never the source under scripts/hooks/.
+let H15_SEAM;
+after(() => H15_SEAM?.cleanup());
 before(async () => {
+  H15_SEAM = await buildSeamHook('h15-store-guard.mjs');
   ({ SterlingStore, ProjectRegistry } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
   ({ parseConfig } = await import(pathToFileURL(join(root, 'packages', 'schemas', 'dist', 'index.js')).href));
 });
 
 function runHook(script, input, cwd, env = {}) {
-  const r = spawnSync(process.execPath, [join(HOOKS, script)], {
+  return runHookAt(join(HOOKS, script), input, cwd, env);
+}
+// Same envelope, explicit hook path — for a bundle built outside scripts/hooks/.
+function runHookAt(hookPath, input, cwd, env = {}) {
+  const r = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,
@@ -1093,11 +1105,57 @@ test('H10: an internal throw (corrupt config) degrades loud via check_skipped, n
 
 // --------------------------- H15 ---------------------------
 
+// FIXTURE RE-CUT 2026-09-05 — ACTIVE-PLUGIN-ROOT PROVENANCE SHIPPED (decision
+// 5b82e94f `h15-realpath-binding-active-plugin-root-provenance`; re-cut
+// discipline per decision 77c5b85a — state the old and new premise, never bend
+// an assertion until it goes green).
+//   OLD PREMISE (the three "sanctioned script passes" assertions below): the
+//     SPELLING of the executable word was the grant. H15 compared that word to a
+//     shipped `allow_scripts` entry by string equality, so this tmpdir fixture
+//     needed no file at `scripts/dispose-run.mjs` and no plugin root at all.
+//   NEW PREMISE: spelling grants NOTHING. The word must canonicalize
+//     (realpathSync.native) to a REGULAR FILE contained under the canonicalized,
+//     LAYOUT-VALIDATED active plugin root, at a clone-relative POSIX path equal
+//     to an entry — no bare-name fallback (anti_pattern caecf8a6, block).
+//   HOW IT IS RE-CUT: the fixture project is made into a valid active plugin root
+//     (the three layout markers + a real file at each sanctioned path it invokes)
+//     and the STERLING_PLUGIN_ROOT test seam names it, with the agent-settable
+//     CLAUDE_PLUGIN_ROOT scrubbed. EVERY COMMAND STRING IS BYTE-IDENTICAL.
+//   CLAIMS UNCHANGED: store references are denied naming the §10 tools; a
+//     sanctioned script passes; unrelated commands are untouched.
+//   NOTE ON WHAT WENT RED: only the FIRST sanctioned assertion (dispose-run) was
+//     reported red, because an early assertion masks every later one in the same
+//     test (anti_pattern f1d66bef) — the init and TUI-launcher assertions two
+//     lines below were failing behind it and are covered by the same re-cut.
 test('H15 store guard: shell references to the store are denied naming the §10 tools; sanctioned scripts and unrelated commands pass', () => {
   const { dir, cleanup } = makeProject();
   try {
+    // The active plugin root this test's sanctioned invocations must resolve
+    // into. The project IS the root here — the SELF-HOSTED shape (decision
+    // a206a529: a relative word resolves against the PROJECT CWD, the way the
+    // shell resolves it). The consumer shape, where a planted
+    // `<project>/scripts/init.mjs` must DENY, is pinned separately and
+    // exhaustively in scripts/tests/h15-active-root-provenance.test.mjs (PV-5).
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture' }));
+    mkdirSync(join(dir, 'hooks'), { recursive: true });
+    writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+    for (const rel of ['scripts/dispose-run.mjs', 'scripts/init.mjs', 'packages/tui/bundle/sterling-tui.mjs']) {
+      const abs = join(dir, ...rel.split('/'));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, '// fixture script — never executed by this test\n');
+    }
+
+    // Spawned from the seam bundle, not scripts/hooks/ (95c2c109 F2 — see H15_SEAM above).
     const run = (command) =>
-      runHook('h15-store-guard.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'PowerShell', tool_input: { command } }), dir);
+      runHookAt(H15_SEAM.hookPath, hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'PowerShell', tool_input: { command } }), dir, {
+        // CLAUDE_PLUGIN_ROOT is AGENT-SETTABLE and is never provenance (5b82e94f
+        // step 1) — dropped so an ambient live-session value cannot decide these
+        // verdicts (an `undefined` value is omitted from the child env by
+        // node:child_process, which is how the provenance suite scrubs it too).
+        STERLING_PLUGIN_ROOT: dir,
+        CLAUDE_PLUGIN_ROOT: undefined,
+      });
 
     const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
     assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');

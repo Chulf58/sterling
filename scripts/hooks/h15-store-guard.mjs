@@ -81,6 +81,11 @@ import { parseConfig } from '@sterling/schemas';
 // third copy with no pin holding it. The module is dependency-free by contract
 // (node builtins only), so it costs this bundle nothing.
 import { appendMissingSanctioned } from '../lib/store-remediation.mjs';
+// ACTIVE-PLUGIN-ROOT PROVENANCE (decision 5b82e94f, adopting 1434cd54 Ruling 3).
+// The exemption compares FILE IDENTITY, never spelling — see the invariant
+// paragraph at the head of that module, which is the authority for this file's
+// sanctioned-script branch.
+import { resolveActivePluginRoot, sanctionedProvenance } from './lib/sanctioned-provenance.mjs';
 
 // THE INPUT BOUNDARY IS ITSELF A GATE — same F5 class as the preprocessing
 // wrap below (board 01afa03e; the fix H17 already carries for its own
@@ -217,7 +222,7 @@ if (!mentionsStore) allow(); // no store path anywhere in the command — irrele
 // 2026-08-29; board 94d6368a.) A zod `.default([...])` applies ONLY when the key
 // is ABSENT, so an explicit `store_guard.allow_scripts` used to SHADOW the
 // shipped sanctioned list entirely: a project that named one script of its own
-// silently lost all nine shipped entries, and every script Sterling sanctioned
+// silently lost all ten shipped entries, and every script Sterling sanctioned
 // afterwards stayed unreachable there — silently, and indistinguishably from
 // "never allowlisted". Measured casualties: packages/tui/bundle/sterling-tui.mjs
 // in every consuming project (77c5b85a), and — the trap that must never spring —
@@ -636,32 +641,150 @@ function executableWords(str) {
   return words;
 }
 
-// Interpreters whose FIRST non-flag argument is the script they execute.
-// Matched by EXACT word, not basename: `/tmp/evil/node scripts/init.mjs`
-// must not inherit the exemption (fail-closed, this file's standing posture —
-// a missed exemption only ever costs a deny).
+// Interpreters whose script argument is the file they execute, when invoked
+// PLAINLY (`<interpreter> <script> <args>`). Matched by EXACT word, not
+// basename: `/tmp/evil/node scripts/init.mjs` must not inherit the exemption
+// (fail-closed, this file's standing posture — a missed exemption only ever
+// costs a deny).
 const INTERPRETER_WORDS = new Set(['node', 'nodejs', 'bash', 'sh', 'zsh', 'python', 'python3']);
 
-// Whole-word EQUALITY, never endsWith/includes: `/tmp/scripts/init.mjs` is a
-// DIFFERENT, attacker-choosable file that merely ends with the sanctioned
-// name, and any writable directory with that suffix would otherwise unlock
-// the store. Only a leading `./` is normalized away — `./scripts/init.mjs`
-// and `scripts/init.mjs` name the same file.
-function isSanctionedScript(word, entries) {
-  const w = word.startsWith('./') ? word.slice(2) : word;
-  return entries.some((entry) => w === entry);
+// THE PLAIN-INVOCATION INVARIANT (decision 95c2c109 F1, as TIGHTENED by the
+// independent correctness + security reviews of 2026-09-05): a sanctioned
+// script is run as plain `<interpreter> <script> <args>` — NOTHING between the
+// interpreter and the script. So the candidate is words[1] and nothing else,
+// and if words[1] begins with `-` the fragment carries an interpreter option
+// and gets NO exemption, whatever the option is.
+//
+// WHY POSITIONAL AND NOT A LIST. The first cut of F1 enumerated code-execution
+// options (-e, --import, -r, …) and fell to review within the hour, on both
+// sides: glued short forms (`python3 -c'code' <script>`, `-m<mod>`), stdin-
+// program options (`bash -s <script> <<EOF`, `python3 - <script>`), node's
+// underscore spellings (`--experimental_loader=`) and file-loading options
+// (`--env-file`, `--test-reporter`) all escaped the list while a GENUINE clone
+// file sat in candidate position — and the list's whole-fragment scan denied
+// the repo's own sanctioned commit path, `commit-reviewed.mjs -m "<msg>"`,
+// whenever the message named the store. Every interpreter in INTERPRETER_WORDS
+// stops option parsing at the script path, so a `-` word AFTER the script is
+// the script's own argument and can never inject code; a `-` word BEFORE it
+// is an interpreter option and the invariant is already broken. The positional
+// rule closes the whole class without naming a single flag (rebuild-over-
+// patch: remove the cause, do not add handlers for its effects). Cost: an
+// interpreter option before a sanctioned script (`node --no-warnings <script>`)
+// is a false deny, recoverable by dropping the option — no shipped launcher,
+// H1/H10 remedy or CLAUDE.md invocation prints one.
+//
+// The fragment's EXECUTABLE CANDIDATE: the word whose FILE IDENTITY decides the
+// exemption. Either the fragment's own executable word, or — for an interpreter
+// form — words[1]. `interpreterOption` is the offending `-` word when the
+// invariant is broken (the candidate is then the first later non-`-` word,
+// carried ONLY so the denial can name what would have run). `viaInterpreter`
+// is carried because the DENIAL WORDING keys on it (see the provenance-line
+// gate at the denial bodies below), never the verdict.
+function fragmentExecutableCandidate(fragment) {
+  const words = executableWords(fragment);
+  if (!words.length) return { word: null, viaInterpreter: false, interpreterOption: null };
+  if (!INTERPRETER_WORDS.has(words[0])) return { word: words[0], viaInterpreter: false, interpreterOption: null };
+  if (words.length < 2) return { word: null, viaInterpreter: true, interpreterOption: null };
+  // `+` is an option prefix too for bash/sh/zsh (`+o`, `+x`); a `+`-led words[1]
+  // is never a script path in any sanctioned entry, so treating it as an option
+  // keeps the invariant literally true rather than accidentally fail-closed.
+  if (words[1].startsWith('-') || words[1].startsWith('+')) {
+    const later = words.slice(2).find((w) => !w.startsWith('-') && !w.startsWith('+')) ?? null;
+    return { word: later, viaInterpreter: true, interpreterOption: words[1] };
+  }
+  return { word: words[1], viaInterpreter: true, interpreterOption: null };
 }
 
-function fragmentRunsSanctionedScript(fragment, entries) {
+// WHOLE-WORD STRING EQUALITY IS GONE (decision 5b82e94f, superseding a206a529's
+// spelling-bound check). `isSanctionedScript` compared TEXT, and text says
+// nothing about which file the OS opens: research_finding cc35e43c EXECUTED the
+// bypass — a project-local symlink plus a lexically-normalized `..` validated
+// the genuine in-clone file while the planted one ran, straight past the
+// database seal. The exemption now binds the FILE, via
+// scripts/hooks/lib/sanctioned-provenance.mjs. Read that module's invariant
+// paragraph before changing anything here; in particular there is NO bare-name
+// fallback, because the fallback IS the bypass (anti_pattern caecf8a6, BLOCK).
+// A PREDECESSOR FRAGMENT OUTSIDE A SMALL KNOWN-SAFE LIST DISQUALIFIES EVERY
+// LATER EXEMPTION IN THE SAME COMMAND (Codex rounds 2-3, 2026-09-05). The
+// positional rule judges one fragment, but the ENVIRONMENT and CWD are per
+// command: `export NODE_OPTIONS='--require=/tmp/evil.cjs' && node <sanctioned>`
+// puts the code-loading option into the environment one fragment earlier, and
+// fragment 2 is then a textbook plain invocation that would be exempt while
+// node preloads attacker code. A first cut enumerated MUTATORS (export,
+// declare, assignments, …) and fell the same hour: `command export`, `builtin
+// export`, `{ export X; node …; }`, `( export X; node … )` and a function
+// definition `node() { … }` all begin with a word the list did not name. So the
+// list is inverted: a predecessor is SAFE only when its first word is one of a
+// handful of verbs that can neither mutate the shell's environment nor its
+// cwd AND the fragment carries no shell expansion at all, or when it was
+// itself granted the sanctioned exemption — the FINAL verdict, rider check
+// included (a child process cannot touch the parent shell, but a rider on the
+// same fragment can). Both refinements are Codex round 4: `printf -v PATH %s 0`
+// assigns through a builtin option, and `echo "$((PATH=0))"` assigns through
+// arithmetic expansion BEFORE echo runs, so neither the verb nor the word list
+// is sufficient on its own — `printf` is dropped outright and any `$` or
+// backtick in the raw fragment makes it unsafe. Everything else — `cd`
+// included, which closes the compound-`cd` mis-resolution the CWD clause used
+// to disclose — withholds the exemption from every later fragment; those
+// fragments are then classified like any other, so a store-naming one is
+// denied. Cost: a sanctioned script chained after anything but a literal echo
+// needs its own command line, which is how every shipped remedy prints it.
+function fragmentIsSafePredecessor(fragment) {
+  const SAFE_PREDECESSOR_WORDS = new Set(['echo', 'true', ':', 'pwd']);
   const words = executableWords(fragment);
-  if (!words.length) return false;
-  if (isSanctionedScript(words[0], entries)) return true; // directly executed
-  if (!INTERPRETER_WORDS.has(words[0])) return false;
-  for (let i = 1; i < words.length; i++) {
-    if (words[i].startsWith('-')) continue; // an interpreter flag, not the script
-    return isSanctionedScript(words[i], entries); // the first non-flag arg IS the script
+  if (!words.length) return true; // an empty fragment (`;;`, trailing separator) is nothing
+  if (!SAFE_PREDECESSOR_WORDS.has(words[0])) return false;
+  // No expansion of any kind and NO redirect: `echo payload > scripts/init.mjs
+  // && node scripts/init.mjs …` overwrites the sanctioned file one fragment
+  // before running it (final security pass, 2026-09-05 — inside Ruling 4's
+  // disclaimed same-UID class, closed anyway because a safe verb has no
+  // legitimate reason to redirect ahead of a sanctioned run).
+  return !/[$`<>]/.test(String(fragment)); // a literal echo only
+}
+
+function fragmentSanctionedProvenance(fragment, entries, ctx) {
+  const { word, viaInterpreter, interpreterOption } = fragmentExecutableCandidate(fragment);
+  if (ctx?.unsafePredecessor && (viaInterpreter || (word !== null && word.includes('/')))) {
+    return {
+      allow: false,
+      word,
+      viaInterpreter,
+      detail: {
+        allow: false,
+        candidate: null,
+        reason:
+          `an EARLIER fragment of this command (${JSON.stringify(ctx.unsafePredecessor)}) is not on the known-safe predecessor list (a literal echo, true, :, pwd — no expansion — ` +
+          `or a sanctioned invocation), so the interpreter's environment and cwd can no longer be assumed to be the ones the platform launched — an exported ` +
+          `NODE_OPTIONS/BASH_ENV/PYTHONPATH makes the interpreter load code before the script it was handed, a \`cd\` moves what a relative path names, and a ` +
+          `function definition can shadow the interpreter word itself (decision 95c2c109 F1, Codex rounds 2-3). Run the sanctioned script on its own command line.`,
+      },
+    };
   }
-  return false;
+  if (interpreterOption !== null) {
+    // F1 (95c2c109): decided BEFORE provenance is even consulted — the later
+    // word may well be a genuine clone file, and that is exactly what the
+    // exploit relies on. `word` is kept so the denial's provenance line prints
+    // (it keys on viaInterpreter + a non-null word).
+    return {
+      allow: false,
+      word: word ?? interpreterOption,
+      viaInterpreter,
+      detail: {
+        allow: false,
+        candidate: null,
+        reason:
+          `the fragment carries the interpreter option ${interpreterOption} between the interpreter and the script, so it is not a plain ` +
+          `\`<interpreter> <script> <args>\` run and NO sanctioned-script exemption is available — an interpreter option can load or evaluate ` +
+          `code (node -r/--import/-e, bash -c/-s, python -c/-m/-, …), so the first non-option word (${word ?? 'none'}) is not necessarily the ` +
+          `file that executes (decision 95c2c109 F1). Run the sanctioned script plainly, options AFTER the script path belong to the script and are fine.`,
+      },
+    };
+  }
+  if (word === null) {
+    return { allow: false, word: null, viaInterpreter, detail: null };
+  }
+  const detail = sanctionedProvenance(word, entries, ctx);
+  return { allow: detail.allow, word, viaInterpreter, detail };
 }
 
 // Decision 0b4d3c8c denies redirections INTO the store, not every redirection
@@ -801,7 +924,17 @@ function classifyFragment(fragment) {
 
 let offending = null;
 let offendingIsDbSeal = false;
+// The provenance line for the OFFENDING fragment, or '' when it must not be
+// printed. See the gate at the assignment below.
+let offendingProvenance;
 try {
+  offendingProvenance = ''; // initialized INSIDE the guarded body (fail-closed baseline: a bare `let` is safe-listed, an initialized one is a finding)
+  // THE ACTIVE PLUGIN ROOT, derived ONCE per invocation, from THIS hook's own
+  // location — the source file under scripts/hooks/ when a pin spawns it, the
+  // esbuild bundle under hooks/ in production. Never CLAUDE_PLUGIN_ROOT, never
+  // config (decision 5b82e94f step 1).
+  const pluginRoot = resolveActivePluginRoot(import.meta.url, process.env);
+  const provenanceCtx = { pluginRoot, cwd: input.cwd, unsafePredecessor: null };
   for (const frag of splitFragments(command)) {
     // The sanctioned-script escape is judged PER FRAGMENT (AC-E): a sanctioned
     // script elsewhere in a compound command must never launder a writing
@@ -814,12 +947,36 @@ try {
     // sanctioned executable never sanctions (see
     // sanctionedFragmentHasShellRider above) — such a fragment falls through
     // to ordinary classification instead of being waved past.
-    const sanctioned = fragmentRunsSanctionedScript(frag, allowScripts);
-    if (sanctioned && !sanctionedFragmentHasShellRider(frag)) continue;
+    const sanctioned = fragmentSanctionedProvenance(frag, allowScripts, provenanceCtx);
+    const exempt = sanctioned.allow && !sanctionedFragmentHasShellRider(frag);
+    // Recorded AFTER this fragment is judged and BEFORE the next: the fragment
+    // itself is classified normally; only its successors lose the exemption. A
+    // fragment that was granted the exemption — the FINAL verdict, rider check
+    // included — is a safe predecessor (a child process cannot mutate the
+    // parent shell; a rider on the fragment could). Records the first unsafe
+    // predecessor for the denial wording.
+    if (provenanceCtx.unsafePredecessor === null && !exempt && !fragmentIsSafePredecessor(frag)) {
+      provenanceCtx.unsafePredecessor = frag.trim().slice(0, 80);
+    }
+    if (exempt) continue;
     const result = classifyFragment(frag);
     if (result.write) {
       offending = result.fragment;
       offendingIsDbSeal = Boolean(result.dbSeal);
+      // PROVENANCE IS PRINTED SELECTIVELY, AND THAT IS A WORDING RULE, NOT A
+      // VERDICT RULE — it never affects the allow decision (5b82e94f step 8
+      // asks the denial to explain itself, nothing more). Most denials have
+      // nothing to do with provenance: the executable candidate for
+      // `grep -c . .sterling/sterling.db` is the word `grep`, and telling the
+      // operator that `<project>/grep` does not exist would be noise that reads
+      // as the reason for the refusal. So the line is printed only when the
+      // candidate could plausibly have BEEN a sanctioned script — an
+      // interpreter form (`node <path> …`) or a word carrying a path separator
+      // — which is exactly the population that types a correct-looking command
+      // and needs to learn WHICH FILE it actually resolved to.
+      const d = sanctioned.detail;
+      const looksLikeAScriptInvocation = Boolean(sanctioned.word) && (sanctioned.viaInterpreter || sanctioned.word.includes('/'));
+      offendingProvenance = d && !d.allow && looksLikeAScriptInvocation ? `Sanctioned-script provenance: ${d.reason}\n` : '';
       break;
     }
   }
@@ -856,7 +1013,8 @@ if (offendingIsDbSeal) {
       `Matched substring: "${matchedText}" at offset ${offset} in the command text.\n` +
       'This is a raw command-text DB seal: it matches the literal text of the command, not a resolved path or write target, so syntactic role and verb are intentionally ignored — it fires the same whether the literal sits in a path, inside a quoted search pattern, or in a redirect target, and regardless of whether the verb is a write or a normally read-only one like grep.\n' +
       'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
-      `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts) — a sanctioned name exempts a fragment ONLY when it is that fragment's EXECUTABLE argument; the same name in a comment, a quoted flag value, or an unrelated path exempts nothing.\n` +
+      `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts) — an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root; the same name in a comment, a quoted flag value, an unrelated path, or a project-local file of the same name exempts nothing.\n` +
+      offendingProvenance +
       'If the running MCP server predates the current code, RESTART THE SESSION — never write around the surface.'
   );
 }
@@ -866,8 +1024,16 @@ deny(
     `Denied fragment: ${offending}\n` +
     'This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) — the denial does not assert the command was proven to write.\n' +
     'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
-    `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts).\n` +
+    `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts) — an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root.\n` +
+    offendingProvenance +
     ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included — DB access is the MCP tool surface's job, never raw shell.\n" +
-    'Non-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c) — only writes, redirections, and moves/copies INTO .sterling/ are denied.\n' +
+    // THE FALSE CLAUSE IS DELETED (5b82e94f / pin PV-8b). It used to read "only
+    // writes, redirections, and moves/copies INTO .sterling/ are denied", which
+    // is not H15's surface: the raw command-text DB seal fires on ANY occurrence
+    // of the literal for EVERY verb, reads included, and the sanctioned-script
+    // branch denies on PROVENANCE having classified nothing at all. A denial
+    // that misstates its own rule sends the operator to rewrite a command that
+    // was never the problem.
+    'Non-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c); the closed-world classifier above is what decides, and a verb it does not recognize as read-only is denied.\n' +
     'If the running MCP server predates the current code, RESTART THE SESSION — never write around the surface.'
 );

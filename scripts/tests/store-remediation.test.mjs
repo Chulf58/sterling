@@ -32,6 +32,35 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // The shipped list, spelled out ONCE in this suite as a literal. Every other
 // expectation below derives from this constant rather than from the module
 // under test, so a corrupted SANCTIONED_SCRIPTS cannot make its own tests pass.
+//
+// RE-CUT 2026-09-05 (re-cut discipline per decision 77c5b85a, the same one this
+// file's header block below already records).
+//   OLD PREMISE: the shipped sanctioned set is these NINE entries.
+//   NEW PREMISE: it is TEN. `scripts/review-ledger.mjs` was added as a SINGLE,
+//     INDIVIDUAL disposition under decision 1434cd54 Ruling 6 — which forbids
+//     BULK-adding the 12 unsanctioned store writers and requires each to earn
+//     its own disposition — because decision 57984926 (3) makes
+//     `node <clone>/scripts/review-ledger.mjs discharge …` the ONE route for an
+//     unspendable review receipt, and H1 prints that route. A remedy the guard
+//     denies is not a remedy: 1434cd54 Ruling 2 names exactly that shape ("the
+//     sanctioned recovery route … is UNREACHABLE BY ITS OPERATOR"), and the
+//     consuming project reported it live on 2026-09-03. Board 891284a9, slice 1
+//     of objective dome-farmer-issues-2026-09-05.
+//   WHAT DID NOT CHANGE: the widening rule. This list grows ONLY by editing
+//     config.ts's shipped default and this module's mirror together, reviewed as
+//     the policy change it is — which is what the drift pin below enforces, and
+//     it is NOT weakened by this re-cut.
+//
+// ⚠ POSITION ASSUMPTION, STATED SO A RED IS DIAGNOSED IN ONE LINE: this author
+// holds no read access to packages/schemas/src/config.ts or to
+// scripts/lib/store-remediation.mjs (H4 read wall), so the new entry is placed
+// LAST — after `packages/tui/bundle/sterling-tui.mjs` — following the precedent
+// of the previous addition (board 52c1d504 appended the TUI launcher at the end)
+// and of board 891284a9's own pointer at store-remediation.mjs:79. If the
+// implementation placed it elsewhere, the deepEqual and the drift pin below both
+// go red PRINTING BOTH ORDERS: that is a RE-POINT of this literal to the shipped
+// order, in one edit — never a reordering of the shipped list to match the test,
+// and never a relaxation of either deepEqual into a set comparison.
 const SHIPPED = [
   'scripts/dispose-run.mjs',
   'scripts/init.mjs',
@@ -42,6 +71,7 @@ const SHIPPED = [
   'scripts/migration-preflight.mjs',
   'scripts/migrate-stores.mjs',
   'packages/tui/bundle/sterling-tui.mjs',
+  'scripts/review-ledger.mjs',
 ];
 
 /**
@@ -94,6 +124,12 @@ test('SANCTIONED_SCRIPTS: exact contents, exact order, frozen, and element-ident
   assert.ok(SANCTIONED_SCRIPTS.includes('scripts/migration-preflight.mjs'), 'the mandated migration remediation stays sanctioned (decision bc0f81e3, the Salesforce trap)');
   assert.ok(SANCTIONED_SCRIPTS.includes('scripts/migrate-stores.mjs'), 'the mandated migration remediation stays sanctioned (decision bc0f81e3, the Salesforce trap)');
   assert.ok(SANCTIONED_SCRIPTS.includes('packages/tui/bundle/sterling-tui.mjs'), 'the TUI launcher — the false-deny that triggered board 52c1d504 — is carried by the reach, repo-relative, never as a bare basename');
+  // RE-CUT 2026-09-05: the third incident, pinned by name on the same footing as
+  // the two above, so a future edit that drops it is LOUD rather than merely
+  // different. Its absence was measured in the field — the consuming project's
+  // 2026-09-03 unreachable-receipt-discharge report — and decision 57984926 (3)
+  // makes this script the only discharge route (board 891284a9).
+  assert.ok(SANCTIONED_SCRIPTS.includes('scripts/review-ledger.mjs'), 'the receipt-discharge route stays sanctioned (decision 57984926 (3); 1434cd54 Ruling 2 — a sanctioned recovery route its operator cannot run is not a route)');
 
   // CONTROL (must pass for the opposite reason): the list is a closed set, not
   // "everything under scripts/". A script that is not shipped-sanctioned is
@@ -142,6 +178,11 @@ test('appendMissingSanctioned: everything it adds is a SHIPPED sanctioned script
 test('appendMissingSanctioned: none present — appends all shipped sanctioned scripts, in order, after existing entries', () => {
   const input = ['scripts/some-other-script.mjs'];
   const { next, added } = appendMissingSanctioned(input);
+  // RE-CUT 2026-09-05: written out INDEPENDENTLY of SHIPPED (not `[input,
+  // ...SHIPPED]`), deliberately — this is the one place the expected order is
+  // spelled a second time, so a single-sided edit to SHIPPED is caught here too.
+  // `scripts/review-ledger.mjs` is appended last, matching the SHIPPED literal's
+  // position assumption documented at the top of this file.
   assert.deepEqual(next, [
     'scripts/some-other-script.mjs',
     'scripts/dispose-run.mjs',
@@ -153,6 +194,7 @@ test('appendMissingSanctioned: none present — appends all shipped sanctioned s
     'scripts/migration-preflight.mjs',
     'scripts/migrate-stores.mjs',
     'packages/tui/bundle/sterling-tui.mjs',
+    'scripts/review-ledger.mjs',
   ]);
   assert.deepEqual(added, SHIPPED);
   assert.deepEqual(input, ['scripts/some-other-script.mjs'], 'input array is not mutated (pure function)');
@@ -179,6 +221,10 @@ test('appendMissingSanctioned: empty input — next becomes exactly the shipped 
 test('appendMissingSanctioned: exactly one missing — only that one is appended; present entries are NOT moved to canonical position', () => {
   // every shipped script except migration-preflight, deliberately in a
   // NON-canonical order with unrelated admin entries interleaved.
+  // RE-CUT 2026-09-05: `scripts/review-ledger.mjs` joined the shipped list
+  // (board 891284a9), so it is present here too — without it this fixture would
+  // be missing TWO scripts and `added` would carry two entries, which is a
+  // different test from the "exactly one missing" behaviour pinned here.
   const input = [
     'scripts/a.mjs',
     'scripts/migrate-stores.mjs',
@@ -186,6 +232,7 @@ test('appendMissingSanctioned: exactly one missing — only that one is appended
     'scripts/init.mjs',
     'scripts/b.mjs',
     'scripts/dispose-run.mjs',
+    'scripts/review-ledger.mjs',
     'scripts/consume-exit.mjs',
     'scripts/architecture-projection.mjs',
     'scripts/domain-doctor.mjs',
@@ -204,6 +251,10 @@ test('appendMissingSanctioned: exactly one missing — only that one is appended
 test('appendMissingSanctioned: a partially-covered config gains exactly the gap, appended after everything recorded', () => {
   const input = ['scripts/migration-preflight.mjs', 'scripts/a.mjs', 'scripts/migrate-stores.mjs'];
   const { next, added } = appendMissingSanctioned(input);
+  // RE-CUT 2026-09-05: the gap is now EIGHT entries — `scripts/review-ledger.mjs`
+  // joined the shipped list (board 891284a9) and is absent from this input, so it
+  // is part of the gap, in SANCTIONED_SCRIPTS order (last, per the position
+  // assumption documented at the top of this file).
   assert.deepEqual(added, [
     'scripts/dispose-run.mjs',
     'scripts/init.mjs',
@@ -212,6 +263,7 @@ test('appendMissingSanctioned: a partially-covered config gains exactly the gap,
     'scripts/domain-doctor.mjs',
     'scripts/commit-reviewed.mjs',
     'packages/tui/bundle/sterling-tui.mjs',
+    'scripts/review-ledger.mjs',
   ], 'the gap only — the two already-present migration scripts are not re-added, and the added set is in SANCTIONED_SCRIPTS order');
   assert.deepEqual(next, [...input, ...added]);
 });
@@ -233,12 +285,18 @@ test('appendMissingSanctioned: a partially-covered config gains exactly the gap,
 // deliberately scrambled order with an unrelated admin entry between them.
 
 test('appendMissingSanctioned: fully covered (scrambled order, unrelated entry interleaved) — idempotent no-op', () => {
+  // RE-CUT 2026-09-05: "fully covered" now means TEN shipped entries, so
+  // `scripts/review-ledger.mjs` is present (board 891284a9). Without it this
+  // fixture would no longer be fully covered and the no-op claim would be tested
+  // against a config that genuinely needs an append — exactly the dead-premise
+  // shape the board 52c1d504 re-cut recorded below.
   const input = [
     'scripts/migrate-stores.mjs',
     'scripts/some-admin-script.mjs',
     'packages/tui/bundle/sterling-tui.mjs',
     'scripts/migration-preflight.mjs',
     'scripts/commit-reviewed.mjs',
+    'scripts/review-ledger.mjs',
     'scripts/domain-doctor.mjs',
     'scripts/architecture-projection.mjs',
     'scripts/consume-exit.mjs',

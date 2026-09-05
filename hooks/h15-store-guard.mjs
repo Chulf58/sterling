@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h15-store-guard.mjs
 import { existsSync as existsSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5062,11 +5062,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5084,7 +5089,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5253,7 +5258,19 @@ var SANCTIONED_SCRIPTS = Object.freeze([
   "scripts/commit-reviewed.mjs",
   "scripts/migration-preflight.mjs",
   "scripts/migrate-stores.mjs",
-  "packages/tui/bundle/sterling-tui.mjs"
+  "packages/tui/bundle/sterling-tui.mjs",
+  // INDIVIDUAL DISPOSITION, not a bulk add (decision 1434cd54 Ruling 6 forbids
+  // bulk-adding the 12 unsanctioned store-writers; this one earned its own).
+  // Decision 57984926 (3) makes `scripts/review-ledger.mjs discharge` the ONE
+  // explicit route for a receipt that can never be spent, and H1's SessionStart
+  // report PRINTS that route. Without this entry H15 denies it, which is exactly
+  // the shape Ruling 2 names as its sharpest finding — "the sanctioned recovery
+  // route ... is UNREACHABLE BY ITS OPERATOR" — and what the consuming project
+  // reported on 2026-09-03. A remedy the guard denies is not a remedy.
+  // The verb is not a general store-write grant: discharge refuses without a
+  // selector, a matching SHA-256 ledger digest, a recognized class and a reason,
+  // and it can only supersede an entry that already exists.
+  "scripts/review-ledger.mjs"
 ]);
 function appendMissingSanctioned(allowScripts2) {
   if (!Array.isArray(allowScripts2)) {
@@ -5264,6 +5281,191 @@ function appendMissingSanctioned(allowScripts2) {
   const existing = allowScripts2;
   const added = SANCTIONED_SCRIPTS.filter((s) => !existing.includes(s));
   return { next: added.length ? [...existing, ...added] : existing, added };
+}
+
+// scripts/hooks/lib/sanctioned-provenance.mjs
+import { realpathSync, statSync } from "node:fs";
+import { isAbsolute, join as join2, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+var realNative = realpathSync.native ?? realpathSync;
+var toPosix = (p) => String(p).split(sep).join("/");
+var WORD_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
+var ABSENT_CODES = /* @__PURE__ */ new Set(["ENOENT", "ENOTDIR"]);
+var PLUGIN_MARKERS = [
+  [".claude-plugin/plugin.json", (dir) => statSync(join2(dir, ".claude-plugin", "plugin.json")).isFile()],
+  ["hooks/", (dir) => statSync(join2(dir, "hooks")).isDirectory()],
+  ["hooks/hooks.json", (dir) => statSync(join2(dir, "hooks", "hooks.json")).isFile()]
+];
+function probePluginLayout(dir) {
+  for (const [name, probe] of PLUGIN_MARKERS) {
+    let ok = false;
+    let threw = null;
+    try {
+      ok = probe(dir);
+    } catch (e) {
+      ok = false;
+      threw = ABSENT_CODES.has(e && e.code) ? null : e;
+    }
+    if (!ok) return { ok: false, missing: name, unreadable: threw !== null, error: threw };
+  }
+  return { ok: true, missing: null, unreadable: false, error: null };
+}
+function pluginLayoutFailure(dir) {
+  const r = probePluginLayout(dir);
+  return r.ok ? null : r.missing;
+}
+var WALK_UP_LIMIT = 6;
+function resolveActivePluginRoot(moduleUrl, env = process.env) {
+  let dir;
+  try {
+    dir = fileURLToPath(new URL(".", moduleUrl));
+  } catch (e) {
+    return {
+      root: null,
+      source: "walk-up",
+      reason: `the running hook's own module URL could not be resolved to a path (${e && e.message || e}); no sanctioned-script exemption is available and the test seam is not consulted.`
+    };
+  }
+  let walkUpFailure;
+  {
+    let lastFailure = null;
+    for (let i = 0; i < WALK_UP_LIMIT; i++) {
+      const probe = probePluginLayout(dir);
+      if (probe.unreadable) {
+        return {
+          root: null,
+          source: "walk-up",
+          reason: `the plugin-layout marker ${probe.missing} at ${toPosix(dir)} could not be READ (${probe.error && probe.error.code || probe.error && probe.error.message || probe.error}); an unreadable marker on the running hook's own walk-up is a fault, not an absence, so no sanctioned-script exemption is available and the test seam is not consulted.`
+        };
+      }
+      const missing = probe.missing;
+      if (!missing) {
+        let canonical;
+        try {
+          canonical = realNative(dir);
+        } catch (e) {
+          return {
+            root: null,
+            source: "walk-up",
+            reason: `the active plugin root ${toPosix(dir)} could not be canonicalized (${e && e.code || e && e.message || e}); no sanctioned-script exemption is available.`
+          };
+        }
+        return { root: canonical, source: "walk-up", reason: `active plugin root ${toPosix(canonical)} (derived from the running hook's own location)` };
+      }
+      lastFailure = { dir, missing };
+      const parent = join2(dir, "..");
+      if (parent === dir) break;
+      dir = parent;
+    }
+    walkUpFailure = `no ancestor within ${WALK_UP_LIMIT} levels of the running hook's own location carries the plugin layout (nearest candidate ${toPosix(lastFailure?.dir ?? "")} is missing ${lastFailure?.missing ?? ".claude-plugin/plugin.json"})`;
+  }
+  const seam = typeof env?.STERLING_PLUGIN_ROOT === "string" ? env.STERLING_PLUGIN_ROOT.trim() : "";
+  if (seam !== "") {
+    const missing = pluginLayoutFailure(seam);
+    if (missing) {
+      return {
+        root: null,
+        source: "seam",
+        reason: `the active plugin root named by STERLING_PLUGIN_ROOT (${toPosix(seam)}) FAILED PLUGIN LAYOUT VALIDATION \u2014 the marker ${missing} is absent. A root whose layout cannot be validated is not trusted (the seam was consulted because ${walkUpFailure}), so no sanctioned-script exemption is available.`
+      };
+    }
+    let canonical;
+    try {
+      canonical = realNative(seam);
+    } catch (e) {
+      return {
+        root: null,
+        source: "seam",
+        reason: `the active plugin root named by STERLING_PLUGIN_ROOT (${toPosix(seam)}) could not be canonicalized (${e && e.code || e && e.message || e}); no sanctioned-script exemption is available.`
+      };
+    }
+    return {
+      root: canonical,
+      source: "seam",
+      reason: `active plugin root ${toPosix(canonical)} (STERLING_PLUGIN_ROOT test seam, layout-validated; consulted because ${walkUpFailure})`
+    };
+  }
+  return {
+    root: null,
+    source: "walk-up",
+    reason: `no ACTIVE PLUGIN ROOT could be derived from the running hook's own location \u2014 ${walkUpFailure}. An unresolvable plugin root WITHHOLDS every sanctioned-script exemption rather than granting one.`
+  };
+}
+function sanctionedProvenance(word, entries, opts) {
+  const pluginRoot = opts?.pluginRoot ?? { root: null, reason: "no plugin root was supplied to the provenance check" };
+  const cwd = opts?.cwd;
+  const entrySet = Array.isArray(entries) ? entries : [];
+  const named = `compared against the sanctioned entry set [${entrySet.join(", ")}]`;
+  if (typeof word !== "string" || word === "") {
+    return { allow: false, candidate: null, reason: "no executable candidate could be read from the fragment; no exemption." };
+  }
+  if (!pluginRoot.root) {
+    return { allow: false, candidate: null, reason: pluginRoot.reason };
+  }
+  if (!WORD_SYNTAX.test(word)) {
+    return {
+      allow: false,
+      candidate: null,
+      reason: `the executable candidate ${JSON.stringify(word)} is outside the sanctionable word syntax (letters, digits and _ . / + - only \u2014 no backslash, ~, $, backtick, colon or glob). Not sanctioned.`
+    };
+  }
+  if (typeof cwd !== "string" || cwd === "") {
+    return { allow: false, candidate: null, reason: "the project cwd is unknown, so a relative candidate cannot be resolved the way the shell would resolve it; no exemption." };
+  }
+  const rawCandidate = isAbsolute(word) ? word : `${String(cwd).replace(/[\\/]+$/, "")}${sep}${word}`;
+  let canonicalCandidate;
+  try {
+    canonicalCandidate = realNative(rawCandidate);
+  } catch (e) {
+    return {
+      allow: false,
+      candidate: null,
+      reason: `the executable candidate ${JSON.stringify(word)} (resolved from the project cwd as ${toPosix(rawCandidate)}) could not be canonicalized (${e && e.code || e && e.message || e}) \u2014 it does not exist, or it is a dangling symlink. A candidate that cannot be resolved to a regular file inside the active plugin root is DENIED; there is no bare-name fallback.`
+    };
+  }
+  let stat;
+  try {
+    stat = statSync(canonicalCandidate);
+  } catch (e) {
+    return {
+      allow: false,
+      candidate: canonicalCandidate,
+      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)}, which could not be stat'd (${e && e.code || e && e.message || e}). Not sanctioned.`
+    };
+  }
+  if (!stat.isFile()) {
+    return {
+      allow: false,
+      candidate: canonicalCandidate,
+      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)}, which is NOT A REGULAR FILE (${stat.isDirectory() ? "directory" : "special file"}). A sanctioned entry names a shipped script; not sanctioned.`
+    };
+  }
+  const rel = relative(pluginRoot.root, canonicalCandidate);
+  const escapes = rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../") || isAbsolute(rel);
+  if (escapes) {
+    return {
+      allow: false,
+      candidate: canonicalCandidate,
+      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)}, which is OUTSIDE the active plugin root ${toPosix(pluginRoot.root)}. Provenance binds the FILE, not the spelling: a project-local file matching a sanctioned NAME is a different file from the shipped one. Not sanctioned.`
+    };
+  }
+  const relPosix = toPosix(rel);
+  const matched = entrySet.some((entry) => {
+    const e = typeof entry === "string" ? entry.startsWith("./") ? entry.slice(2) : entry : null;
+    return e !== null && relPosix === e;
+  });
+  if (!matched) {
+    return {
+      allow: false,
+      candidate: canonicalCandidate,
+      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)} \u2014 a real file inside the active plugin root ${toPosix(pluginRoot.root)}, at clone-relative path ${relPosix}, which is not ${named}. Not sanctioned.`
+    };
+  }
+  return {
+    allow: true,
+    candidate: canonicalCandidate,
+    reason: `sanctioned: ${toPosix(canonicalCandidate)} is the shipped ${relPosix} inside the active plugin root ${toPosix(pluginRoot.root)}.`
+  };
 }
 
 // scripts/hooks/h15-store-guard.mjs
@@ -5281,7 +5483,7 @@ try {
 }
 var inSterlingProject;
 try {
-  inSterlingProject = Boolean(input.cwd) && existsSync2(join2(input.cwd, ".sterling"));
+  inSterlingProject = Boolean(input.cwd) && existsSync2(join3(input.cwd, ".sterling"));
 } catch (e) {
   deny(
     environmentDefectDenial(
@@ -5591,20 +5793,55 @@ function executableWords(str) {
   return words;
 }
 var INTERPRETER_WORDS = /* @__PURE__ */ new Set(["node", "nodejs", "bash", "sh", "zsh", "python", "python3"]);
-function isSanctionedScript(word, entries) {
-  const w = word.startsWith("./") ? word.slice(2) : word;
-  return entries.some((entry) => w === entry);
-}
-function fragmentRunsSanctionedScript(fragment, entries) {
+function fragmentExecutableCandidate(fragment) {
   const words = executableWords(fragment);
-  if (!words.length) return false;
-  if (isSanctionedScript(words[0], entries)) return true;
-  if (!INTERPRETER_WORDS.has(words[0])) return false;
-  for (let i = 1; i < words.length; i++) {
-    if (words[i].startsWith("-")) continue;
-    return isSanctionedScript(words[i], entries);
+  if (!words.length) return { word: null, viaInterpreter: false, interpreterOption: null };
+  if (!INTERPRETER_WORDS.has(words[0])) return { word: words[0], viaInterpreter: false, interpreterOption: null };
+  if (words.length < 2) return { word: null, viaInterpreter: true, interpreterOption: null };
+  if (words[1].startsWith("-") || words[1].startsWith("+")) {
+    const later = words.slice(2).find((w) => !w.startsWith("-") && !w.startsWith("+")) ?? null;
+    return { word: later, viaInterpreter: true, interpreterOption: words[1] };
   }
-  return false;
+  return { word: words[1], viaInterpreter: true, interpreterOption: null };
+}
+function fragmentIsSafePredecessor(fragment) {
+  const SAFE_PREDECESSOR_WORDS = /* @__PURE__ */ new Set(["echo", "true", ":", "pwd"]);
+  const words = executableWords(fragment);
+  if (!words.length) return true;
+  if (!SAFE_PREDECESSOR_WORDS.has(words[0])) return false;
+  return !/[$`<>]/.test(String(fragment));
+}
+function fragmentSanctionedProvenance(fragment, entries, ctx) {
+  const { word, viaInterpreter, interpreterOption } = fragmentExecutableCandidate(fragment);
+  if (ctx?.unsafePredecessor && (viaInterpreter || word !== null && word.includes("/"))) {
+    return {
+      allow: false,
+      word,
+      viaInterpreter,
+      detail: {
+        allow: false,
+        candidate: null,
+        reason: `an EARLIER fragment of this command (${JSON.stringify(ctx.unsafePredecessor)}) is not on the known-safe predecessor list (a literal echo, true, :, pwd \u2014 no expansion \u2014 or a sanctioned invocation), so the interpreter's environment and cwd can no longer be assumed to be the ones the platform launched \u2014 an exported NODE_OPTIONS/BASH_ENV/PYTHONPATH makes the interpreter load code before the script it was handed, a \`cd\` moves what a relative path names, and a function definition can shadow the interpreter word itself (decision 95c2c109 F1, Codex rounds 2-3). Run the sanctioned script on its own command line.`
+      }
+    };
+  }
+  if (interpreterOption !== null) {
+    return {
+      allow: false,
+      word: word ?? interpreterOption,
+      viaInterpreter,
+      detail: {
+        allow: false,
+        candidate: null,
+        reason: `the fragment carries the interpreter option ${interpreterOption} between the interpreter and the script, so it is not a plain \`<interpreter> <script> <args>\` run and NO sanctioned-script exemption is available \u2014 an interpreter option can load or evaluate code (node -r/--import/-e, bash -c/-s, python -c/-m/-, \u2026), so the first non-option word (${word ?? "none"}) is not necessarily the file that executes (decision 95c2c109 F1). Run the sanctioned script plainly, options AFTER the script path belong to the script and are fine.`
+      }
+    };
+  }
+  if (word === null) {
+    return { allow: false, word: null, viaInterpreter, detail: null };
+  }
+  const detail = sanctionedProvenance(word, entries, ctx);
+  return { allow: detail.allow, word, viaInterpreter, detail };
 }
 var PLAIN_WORD_RE = /^[A-Za-z0-9_./~+-]+$/;
 function redirectsIntoStore(str) {
@@ -5644,14 +5881,26 @@ function classifyFragment(fragment) {
 }
 var offending = null;
 var offendingIsDbSeal = false;
+var offendingProvenance;
 try {
+  offendingProvenance = "";
+  const pluginRoot = resolveActivePluginRoot(import.meta.url, process.env);
+  const provenanceCtx = { pluginRoot, cwd: input.cwd, unsafePredecessor: null };
   for (const frag of splitFragments(command)) {
-    const sanctioned = fragmentRunsSanctionedScript(frag, allowScripts);
-    if (sanctioned && !sanctionedFragmentHasShellRider(frag)) continue;
+    const sanctioned = fragmentSanctionedProvenance(frag, allowScripts, provenanceCtx);
+    const exempt = sanctioned.allow && !sanctionedFragmentHasShellRider(frag);
+    if (provenanceCtx.unsafePredecessor === null && !exempt && !fragmentIsSafePredecessor(frag)) {
+      provenanceCtx.unsafePredecessor = frag.trim().slice(0, 80);
+    }
+    if (exempt) continue;
     const result = classifyFragment(frag);
     if (result.write) {
       offending = result.fragment;
       offendingIsDbSeal = Boolean(result.dbSeal);
+      const d = sanctioned.detail;
+      const looksLikeAScriptInvocation = Boolean(sanctioned.word) && (sanctioned.viaInterpreter || sanctioned.word.includes("/"));
+      offendingProvenance = d && !d.allow && looksLikeAScriptInvocation ? `Sanctioned-script provenance: ${d.reason}
+` : "";
       break;
     }
   }
@@ -5676,8 +5925,8 @@ Denied fragment: ${offending}
 Matched substring: "${matchedText}" at offset ${offset} in the command text.
 This is a raw command-text DB seal: it matches the literal text of the command, not a resolved path or write target, so syntactic role and verb are intentionally ignored \u2014 it fires the same whether the literal sits in a path, inside a quoted search pattern, or in a redirect target, and regardless of whether the verb is a write or a normally read-only one like grep.
 Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 a sanctioned name exempts a fragment ONLY when it is that fragment's EXECUTABLE argument; the same name in a comment, a quoted flag value, or an unrelated path exempts nothing.
-If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`
+Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root; the same name in a comment, a quoted flag value, an unrelated path, or a project-local file of the same name exempts nothing.
+` + offendingProvenance + "If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
   );
 }
 deny(
@@ -5685,8 +5934,6 @@ deny(
 Denied fragment: ${offending}
 This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) \u2014 the denial does not assert the command was proven to write.
 Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts).
-.sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.
-Non-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c) \u2014 only writes, redirections, and moves/copies INTO .sterling/ are denied.
-If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`
+Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root.
+` + offendingProvenance + ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.\nNon-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c); the closed-world classifier above is what decides, and a verb it does not recognize as read-only is denied.\nIf the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
 );

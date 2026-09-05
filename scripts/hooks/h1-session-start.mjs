@@ -167,6 +167,14 @@ function paint(rows) {
  *  faking fixtures inside that live clone's own .sterling/. */
 function pluginRoot() {
   if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
+  return walkUpPluginRoot();
+}
+/** The walk-up half of pluginRoot() alone — never the env seam. Used where the
+ *  root is about to be PRINTED AS A COMMAND (the receipt remedy below): an
+ *  env-first value is agent-influenceable under the threat model decision
+ *  95c2c109 F2 closed in H15, so the paste-ready line must come from the
+ *  running hook's own location only. */
+function walkUpPluginRoot() {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
     if (existsSync(join(dir, '.claude-plugin', 'plugin.json'))) return dir;
@@ -448,10 +456,54 @@ const receiptLines = (() => {
     return [];
   }
 })();
+// THE REMEDY PRINTS THE RESOLVED CLONE PATH, NOT A PLACEHOLDER (decision
+// 95c2c109, MEDIUM a): `<clone>` is outside H15's sanctionable word syntax, so
+// a conductor pasting the line as printed was DENIED — the sanctioned route was
+// on the allowlist while the displayed command still could not run (the other
+// half of anti_pattern 43bebe5c). H1 knows its own clone: pluginRoot() is the
+// same walk-up the rest of this hook trusts. Forward slashes keep the word
+// inside H15's syntax on WSL/Linux; on native Windows the drive colon still
+// falls outside it — the disclosed parity item in sanctioned-provenance.mjs,
+// not solved here. Unresolvable root → a placeholder that SAYS it is one,
+// never a fabricated path. TWO FENCES (security review + Codex, 2026-09-05):
+// the root comes from walkUpPluginRoot(), never the env-first pluginRoot() —
+// STERLING_PLUGIN_ROOT is agent-influenceable under the threat model F2 closed
+// in H15, and a remedy pointing at a foreign tree is one H15 then refuses,
+// which recreates the very "printed remedy cannot run" defect this fixes; and
+// a root outside H15's own sanctionable word syntax (no `;`, newline, backtick,
+// `$` or space) is never echoed into a paste-ready command — the placeholder
+// prints instead.
+const REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
+const remedyClone = (() => {
+  try {
+    const r = walkUpPluginRoot();
+    if (!r) return null;
+    const posix = String(r).split('\\').join('/').replace(/\/+$/, '');
+    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
+  } catch {
+    return null;
+  }
+})();
 const receiptContext = receiptLines.length
   ? `\n\nSURVIVING REVIEW RECEIPTS (H1): ${receiptLines.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json — earned by a reviewer dispatch that ended, but never stamped into a commit.\n` +
     receiptLines.join('\n') +
-    `\nA receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) — its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed. Judge each one and remove it by hand, or re-dispatch a reviewer for the work it covered.`
+    `\nA receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) — its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.\n` +
+    // THE REMEDY MUST BE THE SANCTIONED ONE. This used to say "remove it by
+    // hand", which is (a) DENIED — H15 seals .sterling/ from the shell, so the
+    // conductor cannot take that route, the same "sanctioned recovery route
+    // unreachable by its operator" shape decision 1434cd54 Ruling 2 records —
+    // and (b) destructive: a hand-edit destroys the evidence decision 57984926
+    // promises to preserve, records no disposition, and races the discharge
+    // verb's atomic locked replace. A hook that prints a denied remedy
+    // manufactures a workaround. `scripts/review-ledger.mjs` is a
+    // SANCTIONED_SCRIPTS entry as of the same slice, so the route below actually
+    // runs. ONE TEXT FOR BOTH LEDGER SHAPES (v1 and v2 share this report path):
+    // a wording fix applied to one shape would leave the other — the v1
+    // receipts, which decision 57984926 keeps alive on purpose — still printing
+    // the denied remedy.
+    `Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):\n` +
+    `  node ${remedyClone ?? '<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>'}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"\n` +
+    `A LEGACY v1 receipt (no schema_version) has no entry_id — select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.`
   : '';
 const store = openStore(input.cwd);
 if (!store) {

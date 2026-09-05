@@ -38,20 +38,52 @@
 // MUTATION DISCIPLINE (decision 23afbc83): every pin carries a SABOTAGE comment
 // naming the one-line change that must turn it RED. All were EXECUTED against
 // the source hook 2026-08-27; the recorded outcome is in each comment.
+//
+// ---------------------------------------------------------------------------
+// FIXTURE RE-CUT 2026-09-05 — ACTIVE-PLUGIN-ROOT PROVENANCE SHIPPED.
+// (Re-cut discipline per decision 77c5b85a: state old premise -> new premise;
+// never bend an assertion until it goes green.)
+// ---------------------------------------------------------------------------
+// OLD PREMISE: `node scripts/init.mjs …` was exemption-ELIGIBLE because the word
+//   SPELLED a config entry — H15 compared strings, so the fixture project needed
+//   no file at that path.
+// NEW PREMISE (decision 5b82e94f `h15-realpath-binding-active-plugin-root-
+//   provenance`): the word must canonicalize to a REGULAR FILE under the
+//   canonicalized, layout-validated ACTIVE PLUGIN ROOT at a clone-relative POSIX
+//   path equal to an entry. Spelling grants nothing.
+// WHAT CHANGED: `makeProject()` builds the fixture project AS a valid plugin root
+//   (the three markers + a real file at every path used in executable position)
+//   and `runHook()` points the STERLING_PLUGIN_ROOT test seam at it, scrubbing an
+//   inherited CLAUDE_PLUGIN_ROOT (agent-settable, never provenance). EVERY
+//   COMMAND STRING IS BYTE-IDENTICAL; only the world changed.
+// THIS IS NOT COSMETIC — IT IS WHAT KEEPS RID-1..RID-6 FROM GOING HOLLOW. Every
+//   rider pin's sabotage ("drop `$(`/backticks/`[<>](`/redirectsIntoStore from
+//   the rider check") only reddens if the fragment WOULD OTHERWISE BE EXEMPT.
+//   In a project that is not a plugin root, `node scripts/init.mjs` is refused
+//   the exemption on provenance grounds, so removing the rider check changes
+//   nothing and all six pins pass while pinning nothing. Re-cutting only
+//   RID-C1/RID-C2 (the two that went red) and leaving the fixture otherwise
+//   alone would have produced exactly that silent hollowing.
+// Pins with their own premise change: RID-C1, RID-C2.
 
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { buildSeamHook } from './lib/seam-hook.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 
 let SterlingStore;
+// The seam-spawnable H15 bundle (95c2c109 F2) — built once per suite.
+let SEAM;
+after(() => SEAM?.cleanup());
 before(async () => {
+  SEAM = await buildSeamHook('h15-store-guard.mjs');
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
 });
 
@@ -65,13 +97,26 @@ function runHook(command, cwd) {
     tool_name: 'Bash',
     tool_input: { command },
   };
-  const r = spawnSync(process.execPath, [join(HOOKS, 'h15-store-guard.mjs')], {
+  // H1's clone-currency probe must never fire inside a hook unit test.
+  const childEnv = { ...process.env, STERLING_CURRENCY_DISABLE: '1' };
+  // FIXTURE RE-CUT (5b82e94f step 1): CLAUDE_PLUGIN_ROOT is AGENT-SETTABLE and is
+  // never provenance — scrubbed so an ambient live-session value cannot decide
+  // these verdicts. STERLING_PLUGIN_ROOT is the TEST-ONLY seam and names the
+  // fixture project, which IS the active plugin root.
+  delete childEnv.CLAUDE_PLUGIN_ROOT;
+  childEnv.STERLING_PLUGIN_ROOT = cwd;
+  // SPAWN LOCATION RE-CUT (decision 95c2c109 F2): the hook is a FRESH BUNDLE
+  // built from the live sources into a marker-free temp dir (see
+  // scripts/tests/lib/seam-hook.mjs). The active root PREFERS the running
+  // hook's own walk-up and reads STERLING_PLUGIN_ROOT only when that walk-up
+  // finds no plugin tree — so spawning the SOURCE hook from scripts/hooks/
+  // would resolve THIS repo as the root and silently ignore the seam.
+  const r = spawnSync(process.execPath, [SEAM.hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,
     timeout: 60_000,
-    // H1's clone-currency probe must never fire inside a hook unit test.
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
+    env: childEnv,
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -85,10 +130,36 @@ const CONFIG = {
   store_guard: { allow_scripts: ['scripts/init.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'] },
 };
 
+// FIXTURE RE-CUT (5b82e94f steps 2 + 4): every path used in EXECUTABLE position
+// must exist as a real regular file inside the active plugin root. RID-C3's
+// decoy `scripts/not-sanctioned.mjs` is created too, on purpose: with the file
+// PRESENT its deny is attributable to entry-set membership alone, so its
+// sabotage ("exempt any `*.mjs` in executable position") stays live. Absent, the
+// regular-file check would carry the deny and the pin would be hollow.
+const PLUGIN_FILES = [
+  'scripts/init.mjs',
+  'scripts/migration-preflight.mjs',
+  'scripts/migrate-stores.mjs',
+  'scripts/not-sanctioned.mjs',
+];
+
 function makeProject() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h15rider-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  // The three plugin-layout markers 5b82e94f step 2 validates before trusting a
+  // root; a206a529 already ruled the seam MARKER-VALIDATED and fail-closed, so an
+  // unmarked fixture would sanction nothing and RID-C1/RID-C2 would be red for a
+  // fixture reason rather than a behavioural one.
+  mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture' }));
+  mkdirSync(join(dir, 'hooks'), { recursive: true });
+  writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  for (const rel of PLUGIN_FILES) {
+    const abs = join(dir, ...rel.split('/'));
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, '// fixture script — never executed by these pins\n');
+  }
   // A REAL store db — project-root resolution keys on it existing.
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   const cleanup = () => {
@@ -107,6 +178,15 @@ function makeProject() {
 // configured launchers is worse than the hole it closes.
 // =========================================================================
 
+// RE-CUT 2026-09-05 — PIN-LEVEL PREMISE CHANGE (decision 5b82e94f).
+// OLD PREMISE: `scripts/migration-preflight.mjs` was exempt by SPELLING in a
+//   fixture project holding no such file.
+// NEW PREMISE: exempt because it resolves, inside the layout-validated active
+//   plugin root, to a regular file at exactly that clone-relative path.
+// CLAIM UNCHANGED: this is THE load-bearing control — the fragment names the
+//   sealed db, so only the exemption can allow it. Red here still means the
+//   narrowing became "deny the launchers", and every DENY pin below would then
+//   be passing for the wrong reason.
 test('RID-C1 (control, STRONG): `node scripts/migration-preflight.mjs --db .sterling/sterling.db` — the bc0f81e3 remediation floor, direct --db form — stays ALLOWED', () => {
   const { dir, cleanup } = makeProject();
   try {
@@ -118,7 +198,17 @@ test('RID-C1 (control, STRONG): `node scripts/migration-preflight.mjs --db .ster
 // SABOTAGE (executed): force the anchored allowlist result to false at the call
 // site — this pin goes red (allow 0 -> deny 2) via the DB seal. CARRIER: the
 // allowlist exemption.
+// SABOTAGE (added by the re-cut): make the provenance check return false
+// unconditionally, or refuse to resolve a RELATIVE word against the project cwd
+// — red the same way (allow 0 -> deny 2). RID-C1/RID-C2 are this file's only
+// arms that would notice either.
 
+// RE-CUT 2026-09-05 — PIN-LEVEL PREMISE CHANGE (decision 5b82e94f).
+// OLD PREMISE: exempt by SPELLING; no file needed at the path.
+// NEW PREMISE: exempt because it resolves to a regular file inside the
+//   layout-validated active plugin root at exactly `scripts/migrate-stores.mjs`.
+// CLAIM UNCHANGED: the allowlist is a LIST — the narrowing must leave EVERY
+//   configured launcher working, not only the one the reproduction used.
 test('RID-C2 (control, STRONG): `node scripts/migrate-stores.mjs --db .sterling/sterling.db` — the second half of the remediation floor — stays ALLOWED', () => {
   const { dir, cleanup } = makeProject();
   try {

@@ -55,20 +55,64 @@
 // MUTATION DISCIPLINE (decision 23afbc83): every pin below carries a SABOTAGE
 // comment naming the one-line implementation change that must turn it RED.
 // None of them is executed here — this file's author holds no Bash by design.
+//
+// ---------------------------------------------------------------------------
+// FIXTURE RE-CUT 2026-09-05 — ACTIVE-PLUGIN-ROOT PROVENANCE SHIPPED.
+// (Re-cut discipline per decision 77c5b85a: an assertion whose PREMISE died is
+// RE-CUT with its old/new premise stated in a comment; bending an assertion
+// until it goes green is how a suite stops being evidence.)
+// ---------------------------------------------------------------------------
+// OLD PREMISE, shared by every ALLOW pin in this file: the SPELLING of the
+//   executable word was itself the grant. H15 compared that word against a
+//   `config.store_guard.allow_scripts` entry by STRING EQUALITY, so a tmpdir
+//   fixture project needed no file to exist at the sanctioned path — anywhere.
+// NEW PREMISE (decision 5b82e94f `h15-realpath-binding-active-plugin-root-
+//   provenance`, user-approved 2026-09-05; the binding decision a206a529's two
+//   ⚠ amendments pointed at): SPELLING GRANTS NOTHING. The word must canonicalize
+//   (realpathSync.native) to a REGULAR FILE contained under the canonicalized,
+//   LAYOUT-VALIDATED active plugin root (`hooks/`, `.claude-plugin/plugin.json`,
+//   `hooks/hooks.json`), at a clone-relative POSIX path that EXACTLY equals an
+//   entry. No bare-name fallback (anti_pattern caecf8a6, severity block).
+// WHAT CHANGED HERE: `makeProject()` now builds the fixture project AS a valid
+//   active plugin root — the three layout markers, plus a real regular file at
+//   every path this file names in executable position — and `runHook()` points
+//   the STERLING_PLUGIN_ROOT test seam at it while scrubbing an inherited
+//   CLAUDE_PLUGIN_ROOT. EVERY COMMAND STRING BELOW IS BYTE-IDENTICAL to before;
+//   only the world it runs in changed. That is deliberate:
+//     (a) it keeps each pin's ORIGINAL claim exactly, with one variable moved;
+//     (b) it is the SELF-HOSTED shape decision a206a529 requires to keep
+//         working — "relative words resolve against the PROJECT CWD, the way
+//         the shell resolves them" — and which the new suite pins as PV-C3;
+//     (c) IT IS WHAT KEEPS THE DENY PINS FROM GOING HOLLOW. Re-cutting the
+//         allow pins to an absolute path in a SEPARATE clone, while leaving
+//         AL-1..AL-5 invoking project-relative words, would make their named
+//         sabotages inert: a fragment whose smuggled name resolves to nothing
+//         can never be exempted however the exemption is mis-written, so those
+//         pins would pass while pinning nothing. The consumer-shaped
+//         (project ≠ clone) form is pinned exhaustively and separately in
+//         scripts/tests/h15-active-root-provenance.test.mjs; this file's
+//         subject is ANCHORING, and anchoring is what it keeps isolating.
+// The three pins whose own premise changed carry their own OLD/NEW block below:
+//   AL-C3, AL-9-control, AL-8.
 
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { buildSeamHook } from './lib/seam-hook.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 
 let SterlingStore;
+// The seam-spawnable H15 bundle (95c2c109 F2) — built once per suite.
+let SEAM;
+after(() => SEAM?.cleanup());
 before(async () => {
+  SEAM = await buildSeamHook('h15-store-guard.mjs');
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
 });
 
@@ -82,13 +126,27 @@ function runHook(command, cwd) {
     tool_name: 'Bash',
     tool_input: { command },
   };
-  const r = spawnSync(process.execPath, [join(HOOKS, 'h15-store-guard.mjs')], {
+  // H1's clone-currency probe must never fire inside a hook unit test.
+  const childEnv = { ...process.env, STERLING_CURRENCY_DISABLE: '1' };
+  // FIXTURE RE-CUT (5b82e94f step 1): CLAUDE_PLUGIN_ROOT is AGENT-SETTABLE and
+  // is never provenance — it is scrubbed so a run launched from inside a live
+  // Sterling session cannot leak the real clone in and have these pins silently
+  // test the ambient session instead of the fixture. STERLING_PLUGIN_ROOT is the
+  // TEST-ONLY seam, and it names the fixture project, which IS the active root.
+  delete childEnv.CLAUDE_PLUGIN_ROOT;
+  childEnv.STERLING_PLUGIN_ROOT = cwd;
+  // SPAWN LOCATION RE-CUT (decision 95c2c109 F2): the hook is a FRESH BUNDLE
+  // built from the live sources into a marker-free temp dir (see
+  // scripts/tests/lib/seam-hook.mjs). The active root PREFERS the running
+  // hook's own walk-up and reads STERLING_PLUGIN_ROOT only when that walk-up
+  // finds no plugin tree — so spawning the SOURCE hook from scripts/hooks/
+  // would resolve THIS repo as the root and silently ignore the seam.
+  const r = spawnSync(process.execPath, [SEAM.hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,
     timeout: 60_000,
-    // H1's clone-currency probe must never fire inside a hook unit test.
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
+    env: childEnv,
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -108,10 +166,40 @@ const CONFIG = {
   store_guard: { allow_scripts: ['scripts/init.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs'] },
 };
 
+// FIXTURE RE-CUT (5b82e94f steps 2 + 4): every path this file ever puts in
+// EXECUTABLE position must exist as a REAL REGULAR FILE inside the active
+// plugin root, or the exemption is refused on provenance grounds before the
+// entry-set comparison is reached. UNSANCTIONED is created too, deliberately:
+// with the file PRESENT, AL-C4's deny is attributable to entry-set membership
+// alone (the same isolation PV-C2 provides in the provenance suite) and its
+// named sabotage — "match any script-looking *.mjs in executable position" —
+// stays live. With the file absent, that sabotage would be blocked by the
+// regular-file check and AL-C4 would be hollow.
+const PLUGIN_FILES = [
+  'scripts/init.mjs',
+  'scripts/migration-preflight.mjs',
+  'scripts/migrate-stores.mjs',
+  UNSANCTIONED,
+];
+
 function makeProject() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h15allow-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  // The three plugin-layout markers 5b82e94f step 2 validates BEFORE trusting a
+  // root. a206a529 already ruled the STERLING_PLUGIN_ROOT seam MARKER-VALIDATED
+  // and fail-closed ("a bogus override must fail closed rather than silently
+  // re-finding the real clone"), so an unmarked fixture would sanction nothing
+  // and every ALLOW pin here would be red for a fixture reason.
+  mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture' }));
+  mkdirSync(join(dir, 'hooks'), { recursive: true });
+  writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  for (const rel of PLUGIN_FILES) {
+    const abs = join(dir, ...rel.split('/'));
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, '// fixture script — never executed by these pins\n');
+  }
   // A REAL store db file, matching how every other hook test builds a project —
   // project-root resolution keys on .sterling/sterling.db actually existing.
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
@@ -179,6 +267,16 @@ test('AL-C2 (control, expect GREEN today and after): `node scripts/migrate-store
 // this pin goes red (allow 0 -> deny 2) while AL-C1 stays green, which is
 // exactly why a second launcher shape is pinned separately.
 
+// RE-CUT 2026-09-05 — PIN-LEVEL PREMISE CHANGE (decision 5b82e94f).
+// OLD PREMISE: the word `scripts/migration-preflight.mjs` was exempt because it
+//   SPELLED a config entry; the fixture project contained no such file and did
+//   not need to.
+// NEW PREMISE: the word must realpath to a regular file under the layout-
+//   validated active plugin root at exactly that clone-relative path. The
+//   fixture project now IS that root and now CONTAINS that file.
+// CLAIM UNCHANGED: a sanctioned script doing sanctioned store work stays
+//   ALLOWED, and this is still the arm that proves the exemption EXISTS — a
+//   hardening that denies everything is not a fix (5b82e94f's own fence).
 test('AL-C3 (control, STRONG half, expect GREEN today and after): `node scripts/migration-preflight.mjs .sterling/sterling.db` — a sanctioned script doing sanctioned store work — stays ALLOWED', () => {
   const { dir, cleanup } = makeProject();
   try {
@@ -197,6 +295,12 @@ test('AL-C3 (control, STRONG half, expect GREEN today and after): `node scripts/
 // this pin goes red (allow 0 -> deny 2) via the DB seal, while AL-C1/AL-C2
 // stay green because they name no store path. That asymmetry is the whole
 // point of pinning C3 beside C1.
+// SABOTAGE (added by the re-cut, provenance-era and equally load-bearing):
+// make the provenance check return false unconditionally, or drop the
+// project-cwd resolution of a RELATIVE word so only absolute candidates are
+// considered — this pin goes red (allow 0 -> deny 2) the same way. The
+// relative-word half is what the self-hosted machine runs on, and AL-C3 is
+// this file's only arm that would notice it disappearing.
 
 test('AL-C4 (control, STRONG half — the opposite reason): `node scripts/not-a-sanctioned-script.mjs .sterling/sterling.db` is DENIED — the exemption is the only difference from AL-C3', () => {
   const { dir, cleanup } = makeProject();
@@ -416,6 +520,26 @@ test('AL-4-control (expect GREEN today and after): `rm -f .sterling/sterling.db 
 // `scripts/init.mjs`; it is not equal to it. Only whole-word equality (not
 // `endsWith`) on that comparison closes this.
 
+// RE-CUT 2026-09-05 — PIN-LEVEL PREMISE CHANGE (decision 5b82e94f).
+// OLD PREMISE: `scripts/init.mjs` was exempt by SPELLING, in a fixture project
+//   that contained no such file.
+// NEW PREMISE: it is exempt because it resolves, inside the layout-validated
+//   active plugin root, to a regular file at exactly `scripts/init.mjs`.
+// CLAIM UNCHANGED: the genuinely sanctioned launcher against the sealed db is
+//   ALLOWED, so AL-9's deny below is attributable to the token-boundary
+//   comparison and not to the exemption having been removed.
+// ⚠ REPORTED, NOT SILENTLY FIXED — AL-9's ISOLATION IS NOW WEAKER, and this is
+//   the honest sentence about it. AL-9's subject `/tmp/scripts/init.mjs` is now
+//   denied by TWO independent guards: the token-boundary equality it was
+//   written to isolate, AND containment (a `/tmp` path is not under the active
+//   root). So the `token.endsWith(entry)` sabotage AL-9 names no longer reddens
+//   it — AL-9 has become defense-in-depth rather than the sole load-bearing pin
+//   for whole-word equality. AL-9 is left BYTE-IDENTICAL (a frozen pin whose
+//   claim is still TRUE is not a test author's to rewrite). The isolating shape
+//   under provenance is a real in-clone file whose clone-relative path ENDS
+//   WITH a sanctioned entry (e.g. `scripts/vendor/scripts/init.mjs`); it
+//   belongs in the provenance suite as a new pin, and is surfaced to the
+//   conductor as a coverage gap rather than smuggled in here.
 test('AL-9-control (control, expect GREEN today and after): `node scripts/init.mjs .sterling/sterling.db` — the genuinely sanctioned launcher against the sealed db — stays ALLOWED', () => {
   const { dir, cleanup } = makeProject();
   try {
@@ -622,6 +746,18 @@ test('AL-7 (expect GREEN today and after): `ls /tmp # .sterling/sterling.db` sta
 // store at all and would be allowed by the no-store-mention path, making the
 // pin hollow — with it, only the exemption can produce the allow.
 
+// RE-CUT 2026-09-05 — PIN-LEVEL PREMISE CHANGE (decision 5b82e94f).
+// OLD PREMISE: the exec word was exempt by SPELLING, and the repeated argument
+//   token was a bare string that happened to match a config entry.
+// NEW PREMISE: BOTH occurrences now name a real regular file inside the active
+//   plugin root at the sanctioned clone-relative path — which is what keeps the
+//   sabotage below live. Under a fixture where the repeated token resolved to
+//   nothing, a "suspicious repetition" rule could never fire on it and this pin
+//   would be hollow.
+// CLAIM UNCHANGED, INCLUDING ITS FLAGGED-ARGUABLE STATUS: the EXECUTABLE
+//   argument is sanctioned; a repeated occurrence in argument position neither
+//   adds nor removes authority. 5b82e94f did not rule on repetition, so the
+//   arguable-case note above stands exactly as written.
 test('AL-8 (expect GREEN today; verdict ALLOW after the fix — see the arguable-case note above): `node scripts/init.mjs .sterling/sterling.db scripts/init.mjs` is ALLOWED', () => {
   const { dir, cleanup } = makeProject();
   try {

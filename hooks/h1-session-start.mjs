@@ -5231,11 +5231,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5253,7 +5258,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -8136,6 +8141,9 @@ function paint(rows) {
 }
 function pluginRoot() {
   if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
+  return walkUpPluginRoot();
+}
+function walkUpPluginRoot() {
   let dir = dirname5(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
     if (existsSync4(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
@@ -8250,11 +8258,25 @@ var receiptLines = (() => {
     return [];
   }
 })();
+var REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
+var remedyClone = (() => {
+  try {
+    const r = walkUpPluginRoot();
+    if (!r) return null;
+    const posix = String(r).split("\\").join("/").replace(/\/+$/, "");
+    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
+  } catch {
+    return null;
+  }
+})();
 var receiptContext = receiptLines.length ? `
 
 SURVIVING REVIEW RECEIPTS (H1): ${receiptLines.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json \u2014 earned by a reviewer dispatch that ended, but never stamped into a commit.
 ` + receiptLines.join("\n") + `
-A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed. Judge each one and remove it by hand, or re-dispatch a reviewer for the work it covered.` : "";
+A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.
+Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):
+  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"
+A LEGACY v1 receipt (no schema_version) has no entry_id \u2014 select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` : "";
 var store = openStore(input.cwd);
 if (!store) {
   if (dispatchResidueLines.length || receiptContext) {
