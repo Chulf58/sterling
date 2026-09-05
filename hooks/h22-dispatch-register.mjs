@@ -5078,11 +5078,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5100,7 +5105,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5660,6 +5665,9 @@ function normalizeLedgerEntry(entry) {
     v2_deficient: v2Deficient
   };
 }
+function isUsableBlobSha(v) {
+  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
+}
 
 // scripts/hooks/lib/observed-territory.mjs
 import { existsSync as existsSync4, statSync as statSync3 } from "node:fs";
@@ -5810,6 +5818,20 @@ function buildContentEvidence(cwd, files) {
   if (failureReason) result.failure_reason = failureReason;
   return result;
 }
+function territoryBindingFault(evidence, declaredFiles) {
+  const declared = Array.isArray(declaredFiles) ? [...new Set(declaredFiles.filter((f) => typeof f === "string" && f !== ""))] : [];
+  const expected = declared.slice(0, REVIEWED_BLOBS_CAP);
+  const ev = isEvidenceObject(evidence) ? evidence : {};
+  const named = [
+    ...isEvidenceObject(ev.blobs) ? Object.keys(ev.blobs) : [],
+    ...Array.isArray(ev.absent_paths) ? ev.absent_paths.filter((p) => typeof p === "string" && p !== "") : []
+  ];
+  const expectedSet = new Set(expected);
+  const namedSet = new Set(named);
+  const foreign = [...new Set(named.filter((p) => !expectedSet.has(p)))];
+  const missing = ev.failure_reason ? [] : expected.filter((p) => !namedSet.has(p));
+  return { expected, foreign, missing, faulty: foreign.length > 0 || missing.length > 0 };
+}
 function observedModelFromTranscript(transcriptPath) {
   if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
   let tail;
@@ -5864,22 +5886,71 @@ function normIdentity(v) {
   return null;
 }
 var MAX_WALK_BACK = 20;
+var SAFE_ATTRIBUTION_CASE = "current-message-unique";
 function attributeBlocks(transcriptPath, agentType) {
   const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
   if (typeof agentType !== "string" || agentType === "") {
-    return { blocks: lastBlocks, attribution: "union" };
+    return {
+      blocks: lastBlocks,
+      attribution: "union",
+      positional: { safe: false, case: "no-agent-type", detail: "this SubagentStart carried no usable agent_type, so no block could be type-matched at all" }
+    };
   }
   let matched = lastBlocks.filter((b) => typeof b.subagent_type === "string" && b.subagent_type === agentType);
-  if (matched.length === 1) return { blocks: matched, attribution: "block" };
-  if (matched.length > 1) return { blocks: matched, attribution: "union" };
+  if (matched.length === 1) {
+    return {
+      blocks: matched,
+      attribution: "block",
+      positional: { safe: true, case: SAFE_ATTRIBUTION_CASE, detail: `exactly one '${agentType}' block in the current dispatching message` }
+    };
+  }
+  if (matched.length > 1) {
+    return {
+      blocks: matched,
+      attribution: "union",
+      positional: {
+        safe: false,
+        case: "same-type-siblings",
+        detail: `${matched.length} same-type ('${agentType}') blocks sit in the current dispatching message and no stdin field says WHICH one this spawn is`
+      }
+    };
+  }
   for (let skip = 1; skip <= MAX_WALK_BACK; skip++) {
     const blocks = lastDispatchBlocks(transcriptPath, skip);
     if (!blocks.length) continue;
     matched = blocks.filter((b) => typeof b.subagent_type === "string" && b.subagent_type === agentType);
-    if (matched.length === 1) return { blocks: matched, attribution: "block" };
-    if (matched.length > 1) return { blocks: matched, attribution: "union" };
+    if (matched.length === 1) {
+      return {
+        blocks: matched,
+        attribution: "block",
+        positional: {
+          safe: false,
+          case: "walk-back",
+          detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched one ${skip} dispatching message(s) earlier, which is the measured off-by-one shape (decision c91b351d)`
+        }
+      };
+    }
+    if (matched.length > 1) {
+      return {
+        blocks: matched,
+        attribution: "union",
+        positional: {
+          safe: false,
+          case: "walk-back",
+          detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched ${matched.length} same-type blocks ${skip} dispatching message(s) earlier`
+        }
+      };
+    }
   }
-  return { blocks: lastBlocks, attribution: "union" };
+  return {
+    blocks: lastBlocks,
+    attribution: "union",
+    positional: {
+      safe: false,
+      case: "terminal-union",
+      detail: `no '${agentType}' block was found in the current dispatching message or anywhere in the bounded backward walk, so territory fell back to the union of the last message's blocks`
+    }
+  };
 }
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
@@ -5949,10 +6020,10 @@ function withLedgerLock(sterlingDir, run) {
   }
   if (!acquired) {
     process.stderr.write("H22: review-ledger lock timed out \u2014 proceeding UNLOCKED (degraded-loud); a concurrent writer may lose this update\n");
-    return run();
+    return run(false);
   }
   try {
-    return run();
+    return run(true);
   } finally {
     rmdirSync(lockPath);
   }
@@ -5981,12 +6052,21 @@ try {
   const registerPath = join3(input.cwd, ".sterling", "transient", "dispatch-register.json");
   const pruneForeign = (raw) => raw.filter((e) => e && e.session_id === input.session_id);
   if (event === "SubagentStart") {
-    const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
-    const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
+    const { blocks: matchedBlocks, attribution, positional } = attributeBlocks(input.transcript_path, input.agent_type);
+    const { candidates, files_source: declaredFilesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
+    let filesSource = declaredFilesSource;
     for (const w of territoryWarnings) process.stderr.write(w + "\n");
-    if (typeof input.agent_type === "string" && input.agent_type.startsWith("reviewer-") && filesSource !== "review-territory") {
+    const reviewerClassStart = typeof input.agent_type === "string" && input.agent_type.startsWith("reviewer-");
+    if (reviewerClassStart && declaredFilesSource !== "review-territory") {
       process.stderr.write(
         `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s) \u2014 territory falls back to free-prose extraction, which measurably over-captures context-mentioned files (board f60ff6d8). Every code-touching reviewer dispatch should carry an explicit REVIEW-TERRITORY: [...] line in its prompt.
+`
+      );
+    }
+    if (reviewerClassStart && !positional.safe) {
+      filesSource = "unattributable";
+      process.stderr.write(
+        `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to a dispatch block by position [${positional.case}]: ${positional.detail}. SubagentStart carries no tool_use_id (research_finding ffa6219c), so the attributed territory may belong to a DIFFERENT dispatch. Its receipt records territory.source 'unattributable': scripts/commit-reviewed.mjs will NEVER stamp or consume it, and it stays in the ledger for a human to judge. observed_files (read from this agent's OWN transcript at Stop) remains the receipt's only trustworthy territory.
 `
       );
     }
@@ -6070,20 +6150,54 @@ try {
         }
       }
     }
-    if (departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-")) {
+    const sterlingRoot = join3(input.cwd, ".sterling");
+    const readLedgerArray = () => {
+      try {
+        const p = join3(sterlingRoot, "review-ledger.json");
+        if (existsSync5(p)) {
+          const raw = JSON.parse(readFileSync3(p, "utf8"));
+          if (Array.isArray(raw)) return raw;
+        }
+      } catch {
+      }
+      return [];
+    };
+    const matchesThisDispatch = (e) => {
+      const normalized = normalizeLedgerEntry(e);
+      if (!normalized) return false;
+      if (typeof normalized.agent_id === "string" && typeof input.agent_id === "string") {
+        return normalized.agent_id === input.agent_id;
+      }
+      return !!departing && normalized.agent_type === departing.agent_type && normalized.at === departing.at;
+    };
+    const departingIsReviewer = !!departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-");
+    const existingReceiptRaw = readLedgerArray().find(matchesThisDispatch);
+    const existingReceipt = existingReceiptRaw ? normalizeLedgerEntry(existingReceiptRaw) : null;
+    const resumeCandidate = departing ? null : existingReceipt;
+    const resumeIsReviewer = !!resumeCandidate && typeof resumeCandidate.agent_type === "string" && resumeCandidate.agent_type.startsWith("reviewer-");
+    if (departingIsReviewer || resumeIsReviewer) {
+      const stopAgentType = departingIsReviewer ? departing.agent_type : resumeCandidate.agent_type;
+      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : departing.files;
       const sterlingDir = join3(input.cwd, ".sterling");
       const identity = gitReceiptIdentity(input.cwd);
-      const contentEvidence = buildContentEvidence(input.cwd, departing.files);
+      const evidenceByTerritory = /* @__PURE__ */ new Map();
+      const territoryKey = (files) => (Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : []).sort().join("\n");
+      const evidenceFor = (files) => {
+        const key = territoryKey(files);
+        if (!evidenceByTerritory.has(key)) evidenceByTerritory.set(key, buildContentEvidence(input.cwd, files));
+        return evidenceByTerritory.get(key);
+      };
+      const contentEvidence = evidenceFor(stopTerritoryFiles);
       const resolvedModel = resolveReviewerModel(departing, input.transcript_path, input.agent_transcript_path);
       const observed = observedToolPaths(input.agent_transcript_path, input.cwd);
       if (observed === null) {
         const shape = typeof input.agent_transcript_path === "string" && input.agent_transcript_path !== "" ? `present but unobservable ('${input.agent_transcript_path}')` : "absent from stdin";
         process.stderr.write(
-          `H22: no observed evidence for reviewer '${departing.agent_id}' (agent_type '${departing.agent_type}') \u2014 agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.
+          `H22: no observed evidence for reviewer '${input.agent_id}' (agent_type '${stopAgentType}') \u2014 agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.
 `
         );
       }
-      withLedgerLock(sterlingDir, () => {
+      withLedgerLock(sterlingDir, (lockAcquired) => {
         const ledgerPath = join3(sterlingDir, "review-ledger.json");
         let ledger = [];
         try {
@@ -6094,19 +6208,134 @@ try {
         } catch {
           ledger = [];
         }
-        const ledgerEntryMatchesDeparting = (e) => {
-          const normalized = normalizeLedgerEntry(e);
-          if (!normalized) return false;
-          if (typeof normalized.agent_id === "string" && typeof departing.agent_id === "string") {
-            return normalized.agent_id === departing.agent_id;
+        const existingIndex = ledger.findIndex(matchesThisDispatch);
+        if (existingIndex !== -1) {
+          const raw = ledger[existingIndex];
+          const existing = normalizeLedgerEntry(raw);
+          const label = `agent_id '${input.agent_id}' (agent_type '${stopAgentType}')`;
+          if (!existing || existing.schema_version !== 2) {
+            process.stderr.write(
+              `H22: a review receipt for ${label} is already present in .sterling/review-ledger.json and is a LEGACY (pre-v2) entry \u2014 skipping duplicate promotion; a legacy receipt is never refreshed in place and never migrated (pin V2-6)
+`
+            );
+            return;
           }
-          return normalized.agent_type === departing.agent_type && normalized.at === departing.at;
-        };
-        if (ledger.some(ledgerEntryMatchesDeparting)) {
+          if (existing.status === "discharged") {
+            process.stderr.write(
+              `H22: NOT REFRESHING a DISCHARGED review receipt for ${label} \u2014 it was explicitly ruled unspendable and is preserved as it stands (decision 57984926 \xA73). This Stop's finish time and content evidence are NOT recorded; dispatch a fresh reviewer if this work needs a live receipt.
+`
+            );
+            return;
+          }
+          const receiptBranch = normIdentity(existing.branch);
+          const hereBranch = normIdentity(identity.branch);
+          if (receiptBranch !== null && hereBranch !== null && receiptBranch !== hereBranch) {
+            process.stderr.write(
+              `H22: REFUSING to refresh the review receipt for ${label} \u2014 it was earned on branch '${receiptBranch}' and this Stop fired on '${hereBranch}'. A receipt's evidence is bound to the branch that earned it (decision 0408b295), so it is left byte-identical: nothing about this Stop is recorded on it.
+`
+            );
+            return;
+          }
+          const receiptSession = normIdentity(existing.session_id);
+          const hereSession = normIdentity(input.session_id);
+          if (receiptSession !== null && hereSession !== null && receiptSession !== hereSession) {
+            process.stderr.write(
+              `H22: REFUSING to refresh the review receipt for ${label} \u2014 it was earned in session '${receiptSession}' and this Stop fired in session '${hereSession}'. A receipt's evidence is bound to the session that earned it (decision 0408b295), so it is left byte-identical: nothing about this Stop is recorded on it. Dispatch a fresh reviewer if this round of work needs its own receipt.
+`
+            );
+            return;
+          }
+          const bindingRefusal = (subject, fault) => `H22: REFUSING to refresh the review receipt for ${label} \u2014 ${subject} does not bind the receipt's DECLARED territory` + (fault.foreign.length > 0 ? `; it names ${fault.foreign.length} path(s) the receipt never declared: ${fault.foreign.join(", ")}` : "") + (fault.missing.length > 0 ? `; it silently omits ${fault.missing.length} declared path(s) with no failure_reason to account for them: ${fault.missing.join(", ")}` : "") + `. Declared territory (${fault.expected.length} path(s)): ${fault.expected.join(", ") || "<none>"}. The receipt is left EXACTLY as it stands: evidence that describes another territory would make it claim coverage of bytes nobody hashed, and the reviewed-bytes gate would then refuse the commit for every declared path. This receipt is not repairable by a further refresh \u2014 DISCHARGE it (scripts/review-ledger.mjs discharge) or dispatch a FRESH review of this territory.
+`;
+          const carriedFault = territoryBindingFault(raw.content_evidence, existing.files);
+          if (carriedFault.faulty) {
+            process.stderr.write(bindingRefusal("the content evidence it already carries", carriedFault));
+            return;
+          }
+          if (!lockAcquired) {
+            process.stderr.write(
+              `H22: SKIPPING the review-receipt refresh for ${label} \u2014 the review-ledger lock timed out and a refresh is NEVER written unlocked (an unlocked whole-array rewrite can clobber a concurrent consume). The receipt keeps its previous finished_at, content evidence and observed files; this Stop's evidence is lost, which is bounded, rather than risking the receipt itself.
+`
+            );
+            return;
+          }
+          const refreshEvidence = evidenceFor(existing.files);
+          const builtFault = territoryBindingFault(refreshEvidence, existing.files);
+          if (builtFault.faulty) {
+            process.stderr.write(bindingRefusal("the content evidence built for this Stop", builtFault));
+            return;
+          }
+          const priorResume = raw.resume_count;
+          const priorResumeUsable = Number.isInteger(priorResume) && priorResume >= 0;
+          if (priorResume !== void 0 && !priorResumeUsable) {
+            process.stderr.write(
+              `H22: the review receipt for ${label} carries an UNUSABLE resume_count (${JSON.stringify(priorResume)}) \u2014 this hook only ever writes a non-negative integer, so that value was not written by a refresh. It is RESET to 1 for this round rather than incremented from a value that means nothing; how many rounds preceded this one is unrecoverable from the receipt.
+`
+            );
+          }
+          const nextResumeCount = priorResumeUsable ? priorResume + 1 : 1;
+          const priorEvidence = isEvidenceObject(raw.content_evidence) ? raw.content_evidence : null;
+          const priorBlobs = priorEvidence && isEvidenceObject(priorEvidence.blobs) ? priorEvidence.blobs : null;
+          const observedReadsThisRound = new Set(observed ? observed.reads : []);
+          const rebaselineRefused = [];
+          const droppedUnbound = [];
+          const nextEvidence = { ...refreshEvidence };
+          if (isEvidenceObject(nextEvidence.blobs)) {
+            const mergedBlobs = { ...nextEvidence.blobs };
+            for (const [p, freshSha] of Object.entries(nextEvidence.blobs)) {
+              const prior = priorBlobs ? priorBlobs[p] : void 0;
+              const priorUsable = isUsableBlobSha(prior);
+              if (priorUsable && isUsableBlobSha(freshSha) && prior.toLowerCase() === freshSha.toLowerCase()) continue;
+              if (observedReadsThisRound.has(p)) continue;
+              rebaselineRefused.push({ path: p, prior_sha: priorUsable ? prior : null, current_sha: freshSha, round: nextResumeCount });
+              if (priorUsable) mergedBlobs[p] = prior;
+              else {
+                delete mergedBlobs[p];
+                droppedUnbound.push(p);
+              }
+            }
+            nextEvidence.blobs = mergedBlobs;
+          }
+          if (droppedUnbound.length > 0) {
+            const note = `refused to rebaseline ${droppedUnbound.length} declared path(s) recording no prior sha, so they are deliberately left UNBOUND rather than bound to bytes this reviewer is not known to have read: ${droppedUnbound.join(", ")}`;
+            nextEvidence.failure_reason = nextEvidence.failure_reason ? `${nextEvidence.failure_reason}; ${note}` : note;
+            const boundCount = isEvidenceObject(nextEvidence.blobs) ? Object.keys(nextEvidence.blobs).length : 0;
+            nextEvidence.status = boundCount === builtFault.expected.length ? "complete" : boundCount === 0 ? "unavailable" : "partial";
+          }
+          if (builtFault.expected.length === 0) {
+            process.stderr.write(
+              `H22: NOT advancing finished_at on the review receipt for ${label} \u2014 its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing; the rest of the refresh (resume_count, observed files, content evidence) is recorded as usual.
+`
+            );
+          } else {
+            raw.finished_at = finishedAt;
+          }
+          raw.content_evidence = nextEvidence;
+          if (observed) {
+            const priorObserved = Array.isArray(raw.observed_files) ? raw.observed_files.filter((f) => typeof f === "string" && f !== "") : [];
+            raw.observed_files = [.../* @__PURE__ */ new Set([...priorObserved, ...observed.reads, ...observed.writes])];
+            raw.observed_source = "subagent-transcript";
+            if (observed.truncated) raw.observed_truncated = true;
+          }
+          raw.resume_count = nextResumeCount;
+          if (rebaselineRefused.length > 0) {
+            const priorRefused = Array.isArray(raw.rebaseline_refused) ? raw.rebaseline_refused : [];
+            raw.rebaseline_refused = [...priorRefused, ...rebaselineRefused];
+            process.stderr.write(
+              `H22: REFUSED TO REBASELINE ${rebaselineRefused.length} path(s) on the review receipt for ${label} \u2014 their bytes moved since the recorded evidence and NOTHING in this round's observed reads shows this reviewer looked at them, so the receipt keeps the sha it actually reviewed: ${rebaselineRefused.map((r) => `${r.path} (recorded ${r.prior_sha ? r.prior_sha.slice(0, 12) : "nothing"}, on disk ${String(r.current_sha).slice(0, 12)})`).join(", ")}. The reviewed-bytes gate will refuse a commit carrying those bytes \u2014 re-dispatch a reviewer over them rather than waiving, unless the change is genuinely outside what was reviewed.
+`
+            );
+          }
           process.stderr.write(
-            `H22: a review receipt for agent_id '${departing.agent_id}' (agent_type '${departing.agent_type}', at '${departing.at}') is already present in .sterling/review-ledger.json \u2014 skipping duplicate promotion
+            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate \u2014 finished_at, content evidence and observed files updated (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.
 `
           );
+        } else if (!departingIsReviewer) {
+          process.stderr.write(
+            `H22: the review receipt for agent_id '${input.agent_id}' (agent_type '${stopAgentType}') is no longer in .sterling/review-ledger.json \u2014 it was consumed (stamped onto a commit) between this Stop's lookup and its ledger write, and there is no register entry left to promote from. Nothing is written: a spent receipt is never re-minted. Dispatch a reviewer if this round of work needs its own receipt.
+`
+          );
+          return;
         } else {
           ledger.push({
             schema_version: 2,
@@ -6161,7 +6390,14 @@ try {
               observed_source: "subagent-transcript",
               ...observed.truncated ? { observed_truncated: true } : {}
             } : {},
-            content_evidence: contentEvidence,
+            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`departing.files`,
+            // one line above), not for whatever territory the outside-the-lock
+            // precompute happened to use: this branch is reachable when the
+            // receipt found at decision time was consumed while the lock was
+            // being acquired, and the precompute would then describe THAT
+            // receipt's territory rather than this fresh mint's. A cache HIT in
+            // every ordinary mint (the precompute used exactly these files).
+            content_evidence: evidenceFor(departing.files),
             disposition: null
           });
         }

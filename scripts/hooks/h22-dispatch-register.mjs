@@ -70,7 +70,11 @@ import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/disp
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './lib/dispatch-advisory.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { readTail } from './lib/transcript.mjs';
-import { normalizeLedgerEntry } from './lib/review-ledger-entry.mjs';
+// isEvidenceObject / isUsableBlobSha are IMPORTED, never re-spelled here: the
+// refresh's per-path sha comparison (below) has to read a receipt's recorded
+// evidence with exactly the predicates commit-reviewed's byte gate reads it
+// with, or the two surfaces disagree about what "a recorded sha" is.
+import { normalizeLedgerEntry, isEvidenceObject, isUsableBlobSha } from './lib/review-ledger-entry.mjs';
 import { observedToolPaths } from './lib/observed-territory.mjs';
 
 // REGISTER LOCK (decision register-writers-cooperating-lock, 1e0ba0d0, board
@@ -266,6 +270,48 @@ function buildContentEvidence(cwd, files) {
   return result;
 }
 
+// TERRITORY BINDING — THE ONE PREDICATE, ASKED OF TWO DIFFERENT EVIDENCE
+// OBJECTS (fix round, board c9f92090). A receipt's content_evidence is only
+// meaningful as a statement ABOUT ITS DECLARED TERRITORY, so the question
+// "does this evidence bind that territory?" gets ONE definition rather than a
+// copy per call site — the two sites differ in WHICH object they ask about,
+// never in what the answer means:
+//   (a) the evidence the receipt ALREADY CARRIES, as found on disk — a receipt
+//       corrupted by an earlier round (exactly what the live 2026-09-05 defect
+//       produced: two foreign paths bound, five declared paths unbound, status
+//       'complete') must never be silently rebound into a fresh-looking one.
+//       Its remedy is a discharge or a fresh review, not a quiet fix-up.
+//   (b) the evidence this Stop just BUILT, before it is written — structurally
+//       correct by construction now that the refresh hashes the receipt's own
+//       territory, and checked anyway because the failure it guards is silent
+//       and its cost is a receipt claiming coverage it never had.
+//
+// THE PREDICATE: the evidence may name no path the receipt does not declare,
+// and — unless it DISCLOSES why, via failure_reason — must name every declared
+// path within the hashing cap. `failure_reason` is the ONLY disclosure
+// accepted: it is the field buildContentEvidence sets whenever a present file
+// could not be hashed (the V2-HASH-FAIL shape), and a status string is not a
+// substitute — 'unavailable'/'partial' are DERIVED verdicts, satisfiable by any
+// hand-written entry, and every legitimate producer that omits a declared path
+// records a failure_reason beside them. A declared file that is merely ABSENT
+// on disk is named in absent_paths, so it binds normally and needs no excuse.
+// TRUNCATION: compared against the CAPPED expectation, since evidence past
+// REVIEWED_BLOBS_CAP was never hashed by design (and says so via truncated).
+function territoryBindingFault(evidence, declaredFiles) {
+  const declared = Array.isArray(declaredFiles) ? [...new Set(declaredFiles.filter((f) => typeof f === 'string' && f !== ''))] : [];
+  const expected = declared.slice(0, REVIEWED_BLOBS_CAP);
+  const ev = isEvidenceObject(evidence) ? evidence : {};
+  const named = [
+    ...(isEvidenceObject(ev.blobs) ? Object.keys(ev.blobs) : []),
+    ...(Array.isArray(ev.absent_paths) ? ev.absent_paths.filter((p) => typeof p === 'string' && p !== '') : []),
+  ];
+  const expectedSet = new Set(expected);
+  const namedSet = new Set(named);
+  const foreign = [...new Set(named.filter((p) => !expectedSet.has(p)))];
+  const missing = ev.failure_reason ? [] : expected.filter((p) => !namedSet.has(p));
+  return { expected, foreign, missing, faulty: foreign.length > 0 || missing.length > 0 };
+}
+
 // MODEL PROVENANCE (decision 57984926) — the reviewer{} envelope's model,
 // model_family, model_source. RECORDING, not a mismatch guard: decision
 // f5802025's rejection of an actual-vs-pinned escalation backstop stands
@@ -401,6 +447,22 @@ function normIdentity(v) {
 // finds nothing does it fall back to a 'union' of the last message's blocks.
 const MAX_WALK_BACK = 20;
 
+// TERRITORY BY POSITION — THE POSITIONAL-SAFETY VERDICT (board c9f92090 part
+// (a)). SubagentStart carries {session_id, transcript_path, cwd, prompt_id,
+// agent_id, agent_type} and NO tool_use_id (research_finding ffa6219c, four
+// fixtures checked), so NOTHING binds this Start to the Agent block that
+// spawned it: the match below is POSITIONAL, and it is only structurally
+// sound when exactly one same-type block sits in the CURRENT dispatching
+// message. Every other shape is a guess that has already been measured wrong
+// (decision c91b351d: a sequential fresh same-type reviewer dispatch had its
+// territory stamped OFF BY ONE through the walk-back). `attribution`
+// ('block'|'union') is the pre-existing H26 label and is NOT that verdict —
+// a walk-back single match is marked 'block' yet is exactly the unsafe shape
+// — so the verdict rides its OWN field rather than being inferred from the
+// label, and the label stays byte-identical for every existing consumer.
+// The CASE is carried, not just a boolean, because the reviewer-class
+// disclosure at SubagentStart names which of the three unsafe shapes fired.
+const SAFE_ATTRIBUTION_CASE = 'current-message-unique';
 function attributeBlocks(transcriptPath, agentType) {
   const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
   // A missing/empty stdin.agent_type must never be matched against a block
@@ -408,22 +470,76 @@ function attributeBlocks(transcriptPath, agentType) {
   // mint a false 'block' attribution (the label H26 warns on). Require a real
   // string on BOTH sides before treating it as a match.
   if (typeof agentType !== 'string' || agentType === '') {
-    return { blocks: lastBlocks, attribution: 'union' };
+    return {
+      blocks: lastBlocks,
+      attribution: 'union',
+      positional: { safe: false, case: 'no-agent-type', detail: 'this SubagentStart carried no usable agent_type, so no block could be type-matched at all' },
+    };
   }
   let matched = lastBlocks.filter((b) => typeof b.subagent_type === 'string' && b.subagent_type === agentType);
-  if (matched.length === 1) return { blocks: matched, attribution: 'block' };
-  if (matched.length > 1) return { blocks: matched, attribution: 'union' };
+  if (matched.length === 1) {
+    return {
+      blocks: matched,
+      attribution: 'block',
+      positional: { safe: true, case: SAFE_ATTRIBUTION_CASE, detail: `exactly one '${agentType}' block in the current dispatching message` },
+    };
+  }
+  if (matched.length > 1) {
+    return {
+      blocks: matched,
+      attribution: 'union',
+      positional: {
+        safe: false,
+        case: 'same-type-siblings',
+        detail: `${matched.length} same-type ('${agentType}') blocks sit in the current dispatching message and no stdin field says WHICH one this spawn is`,
+      },
+    };
+  }
   for (let skip = 1; skip <= MAX_WALK_BACK; skip++) {
     const blocks = lastDispatchBlocks(transcriptPath, skip);
     if (!blocks.length) continue; // this dispatching message had no blocks with a string prompt — keep walking, the loop is still bounded by MAX_WALK_BACK
     matched = blocks.filter((b) => typeof b.subagent_type === 'string' && b.subagent_type === agentType);
-    if (matched.length === 1) return { blocks: matched, attribution: 'block' };
-    if (matched.length > 1) return { blocks: matched, attribution: 'union' };
+    // ANY walk-back result is positionally unsafe, INCLUDING a single match:
+    // the walk-back exists for the cross-batch race, and the measured
+    // off-by-one (decision c91b351d) took exactly this branch — a fresh
+    // same-type dispatch was attributed an EARLIER message's block. The
+    // 'block' label is preserved for H26 (unchanged behavior); the verdict is
+    // not.
+    if (matched.length === 1) {
+      return {
+        blocks: matched,
+        attribution: 'block',
+        positional: {
+          safe: false,
+          case: 'walk-back',
+          detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched one ${skip} dispatching message(s) earlier, which is the measured off-by-one shape (decision c91b351d)`,
+        },
+      };
+    }
+    if (matched.length > 1) {
+      return {
+        blocks: matched,
+        attribution: 'union',
+        positional: {
+          safe: false,
+          case: 'walk-back',
+          detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched ${matched.length} same-type blocks ${skip} dispatching message(s) earlier`,
+        },
+      };
+    }
   }
   // Bounded walk found no type-match anywhere: fall back to the union of the
   // last dispatching message's blocks, same as the pre-fix behavior, but now
   // explicitly marked imprecise.
-  return { blocks: lastBlocks, attribution: 'union' };
+  return {
+    blocks: lastBlocks,
+    attribution: 'union',
+    positional: {
+      safe: false,
+      case: 'terminal-union',
+      detail: `no '${agentType}' block was found in the current dispatching message or anywhere in the bounded backward walk, so territory fell back to the union of the last message's blocks`,
+    },
+  };
 }
 
 function candidatesFromBlocks(blocks) {
@@ -598,10 +714,17 @@ function withLedgerLock(sterlingDir, run) {
   }
   if (!acquired) {
     process.stderr.write('H22: review-ledger lock timed out — proceeding UNLOCKED (degraded-loud); a concurrent writer may lose this update\n');
-    return run();
+    // `acquired` is handed to the body (board c9f92090 part (b)) so a caller
+    // that must NOT take the unlocked route can refuse it for its own path
+    // without changing this posture for the append path, which has taken it
+    // since the ledger shipped. The RESUME REFRESH is such a path: it rewrites
+    // an EXISTING entry, so an unlocked whole-array write there can clobber a
+    // concurrent commit-reviewed consume — skipping loses one refresh, the
+    // unlocked route can lose a whole receipt.
+    return run(false);
   }
   try {
-    return run();
+    return run(true);
   } finally {
     rmdirSync(lockPath);
   }
@@ -676,8 +799,9 @@ try {
   const pruneForeign = (raw) => raw.filter((e) => e && e.session_id === input.session_id);
 
   if (event === 'SubagentStart') {
-    const { blocks: matchedBlocks, attribution } = attributeBlocks(input.transcript_path, input.agent_type);
-    const { candidates, files_source: filesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
+    const { blocks: matchedBlocks, attribution, positional } = attributeBlocks(input.transcript_path, input.agent_type);
+    const { candidates, files_source: declaredFilesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
+    let filesSource = declaredFilesSource;
     for (const w of territoryWarnings) process.stderr.write(w + '\n');
     // OBSERVED-EVIDENCE UPGRADE, PART (1) (decision review-territory-observed-evidence,
     // 9500cce1) — warn-only, never a gate (h19-dispatch-staging posture: this
@@ -688,9 +812,51 @@ try {
     // declaration" and gets this loud absence warning for a reviewer-class
     // dispatch. Exact 'reviewer-' prefix (not a bare 'reviewer' substring) —
     // matches every other reviewer-class check in this file.
-    if (typeof input.agent_type === 'string' && input.agent_type.startsWith('reviewer-') && filesSource !== 'review-territory') {
+    const reviewerClassStart = typeof input.agent_type === 'string' && input.agent_type.startsWith('reviewer-');
+    // Judged against the DECLARED source, before the unattributable override
+    // below can rewrite it: a reviewer brief that DID carry a valid
+    // REVIEW-TERRITORY line must never also be told it carried none, whatever
+    // the positional verdict turns out to be. Two different defects, two
+    // different messages.
+    if (reviewerClassStart && declaredFilesSource !== 'review-territory') {
       process.stderr.write(
         `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s) — territory falls back to free-prose extraction, which measurably over-captures context-mentioned files (board f60ff6d8). Every code-touching reviewer dispatch should carry an explicit REVIEW-TERRITORY: [...] line in its prompt.\n`
+      );
+    }
+    // TERRITORY BY POSITION (board c9f92090 part (a)) — REVIEWER-CLASS ONLY.
+    // A positionally-unsafe attribution (see attributeBlocks above) means the
+    // block this territory came from may belong to a DIFFERENT dispatch, and a
+    // reviewer entry becomes a DURABLE RECEIPT that the merge gate reads as an
+    // attestation. Recording a guessed territory there is a false attestation
+    // waiting to be stamped (measured: decision c91b351d), so the source is
+    // marked 'unattributable' and scripts/commit-reviewed.mjs refuses to spend
+    // it — the receipt survives with its observed_files (bound to THIS agent's
+    // own transcript at Stop), which is the only territory evidence actually
+    // tied to this dispatch.
+    //
+    // NON-REVIEWER CLASSES ARE UNCHANGED ('union' / 'block' as before): their
+    // only consumers are H10's deferral and H26's advisory, where an imprecise
+    // attribution costs a bounded over-defer or one advisory line — H10's
+    // asymmetry deliberately prefers bounded over-defer (decision 5a9fd5ac),
+    // and there is no durable artifact to falsify.
+    //
+    // AN EXPLICIT DECLARATION DOES NOT RESCUE AN UNSAFE POSITION: the
+    // declaration is read out of the SAME possibly-wrong block. What it does
+    // rescue is the opposite reading — an explicitly declared
+    // 'REVIEW-TERRITORY: []' under a SAFE attribution stays
+    // files_source:'review-territory' (pin T2), because emptiness is not
+    // unattributability.
+    //
+    // KNOWN, ACCEPTED CONSEQUENCE (H26, advisory-only): h26-dispatch-overlap
+    // exempts files_source:'review-territory' entries from its claimed_files
+    // fallback, so a reviewer entry re-labelled here compares against
+    // claimed_files like every free-prose entry. That is the correct direction
+    // — a declaration read off a possibly-wrong block is not authoritative
+    // territory — and it can only change advisory wording, never a duty.
+    if (reviewerClassStart && !positional.safe) {
+      filesSource = 'unattributable';
+      process.stderr.write(
+        `H22: UNATTRIBUTABLE TERRITORY — reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to a dispatch block by position [${positional.case}]: ${positional.detail}. SubagentStart carries no tool_use_id (research_finding ffa6219c), so the attributed territory may belong to a DIFFERENT dispatch. Its receipt records territory.source 'unattributable': scripts/commit-reviewed.mjs will NEVER stamp or consume it, and it stays in the ledger for a human to judge. observed_files (read from this agent's OWN transcript at Stop) remains the receipt's only trustworthy territory.\n`
       );
     }
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
@@ -905,7 +1071,88 @@ try {
       }
     }
 
-    if (departing && typeof departing.agent_type === 'string' && departing.agent_type.startsWith('reviewer-')) {
+    // RESUMED REVIEWER (board c9f92090 part (b)). The register entry is
+    // REMOVED at the FIRST Stop (the removal block further down), so when a
+    // reviewer is resumed — a follow-up message to an agent that already
+    // stopped — its SECOND Stop finds NO `departing` at all and today's hook
+    // takes the "unmatched agent_id → clean no-op" path: the second round of
+    // review work leaves NO trace, and the receipt still claims the FIRST
+    // round's finish time and bytes. So the refresh is keyed on agent_id
+    // against the LEDGER, which is the durable side and is present in BOTH
+    // shapes — whether or not the register entry survived. This unlocked read
+    // is only a DECISION read (it decides which shape this Stop is and what
+    // territory to hash); the authoritative match is re-made inside the lock.
+    const sterlingRoot = join(input.cwd, '.sterling');
+    const readLedgerArray = () => {
+      try {
+        const p = join(sterlingRoot, 'review-ledger.json');
+        if (existsSync(p)) {
+          const raw = JSON.parse(readFileSync(p, 'utf8'));
+          if (Array.isArray(raw)) return raw;
+        }
+      } catch {
+        // malformed ledger degrades to empty, same posture as everywhere else
+      }
+      return [];
+    };
+    // Matches THIS dispatch. agent_id is the register's own unique key and is
+    // stamped into identity.agent_id on every v2 promotion; a v1 entry (and a
+    // pre-identity v2 one) never carries it and so can never false-match — the
+    // agent_type+at fallback below is reachable only when a register entry is
+    // in hand to compare against (finding HIGH-2's discrimination is preserved:
+    // two distinct dispatches sharing agent_type+at each carry their own real
+    // agent_id and always take the agent_id branch).
+    const matchesThisDispatch = (e) => {
+      const normalized = normalizeLedgerEntry(e);
+      if (!normalized) return false;
+      if (typeof normalized.agent_id === 'string' && typeof input.agent_id === 'string') {
+        return normalized.agent_id === input.agent_id;
+      }
+      return !!departing && normalized.agent_type === departing.agent_type && normalized.at === departing.at;
+    };
+    const departingIsReviewer = !!departing && typeof departing.agent_type === 'string' && departing.agent_type.startsWith('reviewer-');
+    // THIS DISPATCH'S EXISTING RECEIPT, CONSULTED UNCONDITIONALLY (fix round,
+    // HIGH — measured live 2026-09-05 on the real ledger). This read used to be
+    // skipped whenever a register entry was in hand ("reading it twice would
+    // just widen the window"), and that assumption is FALSE for a resumed
+    // reviewer: a follow-up message to an already-stopped agent can produce a
+    // FRESH SubagentStart, so the resumed dispatch DOES have a register entry
+    // again — and that entry's `files` are re-attributed from the NEWEST
+    // dispatching message, which under a concurrent same-batch dispatch is
+    // ANOTHER agent's territory. The Stop then hashed those foreign paths and
+    // the refresh wrote them into a receipt whose territory.files was never
+    // rewritten: receipt 27024ff2 (reviewer-security, five H15 paths) came out
+    // with content_evidence bound to two h22/commit-reviewed paths and
+    // status:'complete', and commit-reviewed correctly refused the commit with
+    // NO RECORDED BYTES for all five declared paths. So the ledger is asked
+    // FIRST, always, and the RECEIPT — not any register entry — decides what a
+    // refresh hashes (decision 9500cce1: declared territory is authoritative
+    // and is never re-derived; on a refresh the receipt's own territory.files IS
+    // that declaration).
+    // Matched on the RAW entry and normalized afterwards — normalizeLedgerEntry
+    // maps a v2 entry's NESTED shape to flat fields, so feeding it its own
+    // output would find nothing to read and report an empty receipt.
+    const existingReceiptRaw = readLedgerArray().find(matchesThisDispatch);
+    const existingReceipt = existingReceiptRaw ? normalizeLedgerEntry(existingReceiptRaw) : null;
+    // The RESUME candidate keeps its narrower meaning — "no register entry at
+    // all, so this Stop can only be a resume" — because the consumed-receipt
+    // branch further down is keyed on exactly that shape.
+    const resumeCandidate = departing ? null : existingReceipt;
+    const resumeIsReviewer = !!resumeCandidate && typeof resumeCandidate.agent_type === 'string' && resumeCandidate.agent_type.startsWith('reviewer-');
+    if (departingIsReviewer || resumeIsReviewer) {
+      // The reviewer identity for this Stop, from whichever side actually
+      // carries it. A resumed reviewer has no register entry, so the receipt
+      // it is refreshing is the only record of its agent_type and its DECLARED
+      // territory — which the refresh reads but NEVER rewrites (decision
+      // 9500cce1: declared territory is authoritative and is not re-derived).
+      const stopAgentType = departingIsReviewer ? departing.agent_type : resumeCandidate.agent_type;
+      // THE TERRITORY TO HASH COMES FROM THE RECEIPT WHENEVER ONE EXISTS, and
+      // from the register entry ONLY for a genuinely fresh mint (see the
+      // unconditional ledger read above for the measured defect). A receipt in
+      // hand means this Stop can only REFRESH it, and a refresh's evidence must
+      // describe the territory that receipt DECLARES — never a register entry's
+      // re-scraped guess about it.
+      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : departing.files;
       // Lock-guarded (see withLedgerLock above) — this durable ledger has no
       // TTL/H1-wipe safety net, unlike the register below, so a lost update
       // here would be a permanent loss of reviewer evidence rather than a
@@ -922,7 +1169,28 @@ try {
       // Also read here rather than inside the lock — it names the bytes as
       // they stood when the review ENDED, and the lock wait is time in which
       // they could move.
-      const contentEvidence = buildContentEvidence(input.cwd, departing.files);
+      //
+      // MEMOIZED BY TERRITORY, so the object that gets WRITTEN can never
+      // describe a different path set than the entry it is written onto. The
+      // authoritative entry is re-matched INSIDE the lock, and the ledger can
+      // change in between (a concurrent consume deletes the receipt this Stop
+      // meant to refresh, so the same Stop must now MINT from the register
+      // entry instead) — with a single precomputed object, that swap silently
+      // recorded one territory's bytes under another territory's declaration,
+      // which is the defect above in its second form. The normal path is a
+      // cache HIT on the precompute below (same posture as before: hashed
+      // outside the lock, at the review-END bytes); only the rare swap pays a
+      // git spawn under the lock, which is the correct price for evidence that
+      // matches what it is filed against.
+      const evidenceByTerritory = new Map();
+      const territoryKey = (files) =>
+        (Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === 'string' && f !== ''))] : []).sort().join('\n');
+      const evidenceFor = (files) => {
+        const key = territoryKey(files);
+        if (!evidenceByTerritory.has(key)) evidenceByTerritory.set(key, buildContentEvidence(input.cwd, files));
+        return evidenceByTerritory.get(key);
+      };
+      const contentEvidence = evidenceFor(stopTerritoryFiles);
       const resolvedModel = resolveReviewerModel(departing, input.transcript_path, input.agent_transcript_path);
       // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision review-territory-observed-evidence,
       // 9500cce1) — CORROBORATION ONLY, computed from the DEPARTING SUBAGENT'S
@@ -956,10 +1224,10 @@ try {
             ? `present but unobservable ('${input.agent_transcript_path}')`
             : 'absent from stdin';
         process.stderr.write(
-          `H22: no observed evidence for reviewer '${departing.agent_id}' (agent_type '${departing.agent_type}') — agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.\n`
+          `H22: no observed evidence for reviewer '${input.agent_id}' (agent_type '${stopAgentType}') — agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.\n`
         );
       }
-      withLedgerLock(sterlingDir, () => {
+      withLedgerLock(sterlingDir, (lockAcquired) => {
         const ledgerPath = join(sterlingDir, 'review-ledger.json');
         let ledger = [];
         try {
@@ -1003,21 +1271,357 @@ try {
         // reintroduces the false-dedupe HIGH-2 fixed — DISPATCH-IDENTITY's two
         // dispatches each carry their own real, distinct agent_id, so they
         // always take the agent_id branch and are correctly told apart.
-        const ledgerEntryMatchesDeparting = (e) => {
-          const normalized = normalizeLedgerEntry(e);
-          if (!normalized) return false;
-          if (typeof normalized.agent_id === 'string' && typeof departing.agent_id === 'string') {
-            return normalized.agent_id === departing.agent_id;
+        //
+        // THE MATCH IS NOW THE REFRESH SELECTOR TOO (board c9f92090 part (b)):
+        // the same identity that says "do not promote this twice" says "this is
+        // the receipt THIS resumed reviewer already owns". matchesThisDispatch
+        // is defined once, above the lock, so the decision read and this
+        // authoritative one can never diverge.
+        const existingIndex = ledger.findIndex(matchesThisDispatch);
+        if (existingIndex !== -1) {
+          // RESUME REFRESH (board c9f92090 part (b)) — replaces the old
+          // unconditional "skipping duplicate promotion". The old behavior was
+          // right about the COUNT (one dispatch, one receipt — the
+          // LEDGER-IDEMPOTENCY pin still holds) and wrong about the CONTENT: a
+          // second Stop for the same agent_id is a SECOND ROUND OF REVIEW, and
+          // leaving the receipt frozen at the first round's finish time and
+          // first round's bytes attests to a review that is no longer the one
+          // that happened.
+          //
+          // WHAT A REFRESH MAY TOUCH, and nothing else: finished_at (the new
+          // review-END instant), content_evidence (the bytes as they stand
+          // NOW), observed_* (UNION with what was already observed — the first
+          // round's evidence is not erased by the second), and resume_count.
+          // NEVER entry_id (its identity on the merge-gate surface, and the
+          // key --waive-bytes names), NEVER identity.* (session/branch/base_sha
+          // /agent_id — the expiry axes, decision 0408b295), NEVER the
+          // reviewer{} snapshot (model provenance is taken at dispatch, pin
+          // V2-3b), and NEVER territory.files (declared territory is
+          // authoritative and is never re-derived, decision 9500cce1).
+          const raw = ledger[existingIndex];
+          const existing = normalizeLedgerEntry(raw);
+          const label = `agent_id '${input.agent_id}' (agent_type '${stopAgentType}')`;
+          // FAIL-CLOSED GATE 1 — LEGACY SHAPE. A v1 (or pre-identity v2) entry
+          // matched through the agent_type+at fallback has no finished_at,
+          // content_evidence or observed_* to refresh; rewriting it would
+          // MIGRATE it in place, which pin V2-6 forbids. Old behavior verbatim:
+          // skip, disclosed.
+          if (!existing || existing.schema_version !== 2) {
+            process.stderr.write(
+              `H22: a review receipt for ${label} is already present in .sterling/review-ledger.json and is a LEGACY (pre-v2) entry — skipping duplicate promotion; a legacy receipt is never refreshed in place and never migrated (pin V2-6)\n`
+            );
+            return;
           }
-          return normalized.agent_type === departing.agent_type && normalized.at === departing.at;
-        };
-        if (ledger.some(ledgerEntryMatchesDeparting)) {
-          // Names the actual duplicate IDENTITY (agent_id), not a stock phrase
-          // (strengthened LEDGER-IDEMPOTENCY pin) — proving this reasons about
-          // identity, not merely agent_type+at coincidence.
+          // FAIL-CLOSED GATE 2 — DISCHARGED. A discharged receipt was
+          // explicitly ruled unspendable and PRESERVED (decision 57984926 §3).
+          // Refreshing it would make a settled adjudication look live again.
+          if (existing.status === 'discharged') {
+            process.stderr.write(
+              `H22: NOT REFRESHING a DISCHARGED review receipt for ${label} — it was explicitly ruled unspendable and is preserved as it stands (decision 57984926 §3). This Stop's finish time and content evidence are NOT recorded; dispatch a fresh reviewer if this work needs a live receipt.\n`
+            );
+            return;
+          }
+          // FAIL-CLOSED GATE 3 — DIFFERENT BRANCH. A receipt's life is bound to
+          // the session and branch that earned it (decision 0408b295);
+          // refreshing one from another branch would relabel evidence earned
+          // elsewhere as current. POSITIVE EVIDENCE ONLY, the same rule
+          // commit-reviewed applies: both sides must carry a usable identity
+          // before a mismatch can refuse.
+          const receiptBranch = normIdentity(existing.branch);
+          const hereBranch = normIdentity(identity.branch);
+          if (receiptBranch !== null && hereBranch !== null && receiptBranch !== hereBranch) {
+            process.stderr.write(
+              `H22: REFUSING to refresh the review receipt for ${label} — it was earned on branch '${receiptBranch}' and this Stop fired on '${hereBranch}'. A receipt's evidence is bound to the branch that earned it (decision 0408b295), so it is left byte-identical: nothing about this Stop is recorded on it.\n`
+            );
+            return;
+          }
+          // FAIL-CLOSED GATE 3b — DIFFERENT SESSION (fix round, MEDIUM). Decision
+          // 0408b295 binds a receipt to BOTH expiry axes — "a receipt from a
+          // different session or branch" — and gate 3 above mirrored only the
+          // branch half. A receipt earned by an EARLIER session could therefore be
+          // refreshed (new finish instant, re-hashed bytes) by a Stop belonging to
+          // a different session, which is the same relabelling of foreign evidence
+          // as current that the branch gate refuses, on the axis that has no
+          // checkout to blame. POSITIVE EVIDENCE ONLY, identical in form to the
+          // branch gate and to commit-reviewed's own partition rule: both sides
+          // must carry a usable session identity before a mismatch can refuse, so
+          // a receipt with no recorded session_id (legacy/pre-expiry) and a Stop
+          // with no session_id on stdin both stay refreshable exactly as before.
+          // ORDER IS DELIBERATE — this sits AFTER the branch gate so a Stop that
+          // is foreign on BOTH axes is still reported as the BRANCH mismatch: that
+          // is the axis whose remedy a reader can act on (check the branch out),
+          // whereas a foreign session's only remedy is a fresh dispatch.
+          const receiptSession = normIdentity(existing.session_id);
+          const hereSession = normIdentity(input.session_id);
+          if (receiptSession !== null && hereSession !== null && receiptSession !== hereSession) {
+            process.stderr.write(
+              `H22: REFUSING to refresh the review receipt for ${label} — it was earned in session '${receiptSession}' and this Stop fired in session '${hereSession}'. A receipt's evidence is bound to the session that earned it (decision 0408b295), so it is left byte-identical: nothing about this Stop is recorded on it. Dispatch a fresh reviewer if this round of work needs its own receipt.\n`
+            );
+            return;
+          }
+          // THE REFUSAL BOTH TERRITORY-BINDING ARMS PRINT — one wording, so the
+          // two arms cannot drift into saying different things about the same
+          // violation, and one remedy, because a receipt that cannot describe
+          // its own territory is not repairable by another refresh.
+          const bindingRefusal = (subject, fault) =>
+            `H22: REFUSING to refresh the review receipt for ${label} — ${subject} does not bind the receipt's DECLARED territory` +
+            (fault.foreign.length > 0 ? `; it names ${fault.foreign.length} path(s) the receipt never declared: ${fault.foreign.join(', ')}` : '') +
+            (fault.missing.length > 0 ? `; it silently omits ${fault.missing.length} declared path(s) with no failure_reason to account for them: ${fault.missing.join(', ')}` : '') +
+            `. Declared territory (${fault.expected.length} path(s)): ${fault.expected.join(', ') || '<none>'}. The receipt is left EXACTLY as it stands: evidence that describes another territory would make it claim coverage of bytes nobody hashed, and the reviewed-bytes gate would then refuse the commit for every declared path. This receipt is not repairable by a further refresh — DISCHARGE it (scripts/review-ledger.mjs discharge) or dispatch a FRESH review of this territory.\n`;
+
+          // FAIL-CLOSED GATE 3c — THE RECEIPT'S OWN EVIDENCE IS ALREADY
+          // MALFORMED (board c9f92090 pins TERRITORY GUARD). Checked on the
+          // entry AS FOUND ON DISK, before anything about this Stop is applied,
+          // and BEFORE the lock gate — a receipt whose recorded evidence
+          // already violates its own declared territory is unsound whether or
+          // not this Stop could have won the lock, and refreshing it would
+          // launder a corrupted round into a fresh-looking one (finished_at
+          // moved forward, resume_count incremented, the malformed evidence
+          // replaced as though nothing had happened). That is precisely the
+          // shape the live defect wrote onto receipt 27024ff2, and its honest
+          // remedies are discharge or a fresh review.
+          const carriedFault = territoryBindingFault(raw.content_evidence, existing.files);
+          if (carriedFault.faulty) {
+            process.stderr.write(bindingRefusal('the content evidence it already carries', carriedFault));
+            return;
+          }
+          // FAIL-CLOSED GATE 4 — UNLOCKED. withLedgerLock proceeds UNLOCKED on
+          // timeout, which the APPEND path has always accepted. A refresh must
+          // not take that route: it rewrites an EXISTING entry, so an unlocked
+          // whole-array write can clobber a concurrent commit-reviewed consume
+          // — losing a whole receipt to save one refresh. Skip loudly instead
+          // (same posture as the register lock's skip-never-unlocked rule,
+          // decision 1e0ba0d0).
+          if (!lockAcquired) {
+            process.stderr.write(
+              `H22: SKIPPING the review-receipt refresh for ${label} — the review-ledger lock timed out and a refresh is NEVER written unlocked (an unlocked whole-array rewrite can clobber a concurrent consume). The receipt keeps its previous finished_at, content evidence and observed files; this Stop's evidence is lost, which is bounded, rather than risking the receipt itself.\n`
+            );
+            return;
+          }
+          // TERRITORY-BINDING GUARD (fix round, HIGH — the measured live
+          // defect's backstop). The evidence written by a refresh is built HERE
+          // from `existing.files`, the receipt's own declared territory, so by
+          // construction it describes the right path set. This checks that
+          // construction instead of trusting it, because the failure it guards
+          // is SILENT and its cost is a receipt that claims complete coverage of
+          // a territory it never hashed — which is exactly what shipped: two
+          // foreign paths bound, five declared paths unbound, status 'complete'.
+          // THE PREDICATE, in one sentence: the evidence may name no path the
+          // receipt does not declare, and — unless it discloses why (a
+          // failure_reason, the V2-HASH-FAIL shape) — must name every declared
+          // path within the hashing cap. A refusal here leaves the receipt
+          // EXACTLY as it stands: no finished_at, no evidence, no resume_count,
+          // because a refresh that cannot describe its own territory has nothing
+          // trustworthy to contribute.
+          const refreshEvidence = evidenceFor(existing.files);
+          const builtFault = territoryBindingFault(refreshEvidence, existing.files);
+          if (builtFault.faulty) {
+            process.stderr.write(bindingRefusal('the content evidence built for this Stop', builtFault));
+            return;
+          }
+
+          // RESUME COUNT — PRESERVE-AND-INCREMENT ONLY FROM A NON-NEGATIVE
+          // INTEGER (fix round, LOW). The old expression folded EVERY unusable
+          // value ('3', -1, 1.5, null, {}) into 0 and then wrote 1, silently
+          // RESETTING a counter whose whole job is to say how many rounds this
+          // receipt has accumulated. A value this hook never wrote is a fact
+          // about the ledger worth one line, not something to swallow.
+          // ABSENT IS NOT "ANYTHING ELSE": a receipt promoted before any resume
+          // legitimately carries no resume_count at all, and that first refresh
+          // is the ORDINARY path — silent, and 1 is the honest count. Only a
+          // PRESENT-but-unusable value is disclosed, because only that is a
+          // reset.
+          const priorResume = raw.resume_count;
+          const priorResumeUsable = Number.isInteger(priorResume) && priorResume >= 0;
+          if (priorResume !== undefined && !priorResumeUsable) {
+            process.stderr.write(
+              `H22: the review receipt for ${label} carries an UNUSABLE resume_count (${JSON.stringify(priorResume)}) — this hook only ever writes a non-negative integer, so that value was not written by a refresh. It is RESET to 1 for this round rather than incremented from a value that means nothing; how many rounds preceded this one is unrecoverable from the receipt.\n`
+            );
+          }
+          const nextResumeCount = priorResumeUsable ? priorResume + 1 : 1;
+
+          // NEVER SILENTLY REBASELINE (fix round, HIGH). buildContentEvidence
+          // hashes the DECLARED territory at CURRENT bytes, which on a FIRST
+          // promotion is exactly right — the reviewer just finished reading that
+          // territory. On a REFRESH it is not: the territory was hashed once
+          // already, and any path whose bytes MOVED since then would be rebound
+          // to the new sha with nothing whatsoever showing that this round looked
+          // at it. commit-reviewed then finds receipt sha == index sha and stamps
+          // a Reviewed-By-Agent trailer over bytes no review ever saw — the
+          // resume path laundering unreviewed content through a real receipt.
+          //
+          // THE RULE AS IMPLEMENTED, stated at exactly the strength it holds: a
+          // refresh may REBIND a path only on POSITIVE EVIDENCE that THIS AGENT
+          // READ IT AT SOME POINT IN ITS OWN TRANSCRIPT — the path appears in the
+          // read set observedToolPaths extracts from stdin.agent_transcript_path.
+          // That is a claim about the AGENT's whole observable history, NOT about
+          // this round: the extraction scans the transcript's 1MB tail with no
+          // round boundary in it, so a read recorded in round ONE is
+          // indistinguishable here from a read recorded in round two. Otherwise
+          // the PRIOR sha stands: the receipt keeps attesting the bytes it
+          // actually reviewed, so the byte gate compares the index against those
+          // and refuses, which is the outcome an unreviewed change must produce.
+          // Unchanged paths keep their sha either way (rebinding a path to the
+          // value it already has is not a rebaseline and is never reported).
+          //
+          // DISCLOSED RESIDUAL — THE ROUND BOUNDARY IS NOT ENFORCED (security
+          // round 2; boarded, deliberately NOT fixed here). Because the read set
+          // carries no round boundary, one laundering route survives this guard:
+          // round one legitimately reads path P; P is edited afterwards by anyone;
+          // a NO-OP follow-up Stop then finds P in the transcript's read set and
+          // rebinds it to the edited bytes, and commit-reviewed stamps a trailer
+          // over content the reviewer never saw. The guard still closes the case
+          // the live defect produced (a path this agent NEVER read cannot be
+          // rebound at all), which is why it ships as it stands.
+          // INTENDED FIX, when the lib is opened: filter the transcript's
+          // tool_use reads to entries whose timestamp is AFTER the receipt's
+          // PRIOR finished_at, and treat an unusable/absent timestamp as NOT THIS
+          // ROUND (fail-closed — the same direction every unprovable claim takes
+          // on this path). It lives in scripts/hooks/lib/observed-territory.mjs,
+          // which is outside this slice's territory; until it lands, read every
+          // sentence about "this round" on this path as "this agent's transcript".
+          //
+          // READS ONLY, NOT WRITES: a path the agent WROTE is a path whose bytes
+          // it authored, and self-authored bytes are the one thing an independent
+          // review receipt must never vouch for.
+          // NO OBSERVED EVIDENCE AT ALL (observed === null — the transcript was
+          // absent or unreadable, already disclosed above) is NOT permission: it
+          // is the absence of the only proof this gate accepts, so every changed
+          // path keeps its prior sha. That is bounded — the receipt stays exactly
+          // as trustworthy as it was — where the alternative is unbounded.
+          //
+          // A PATH WITH NO PRIOR RECORDED SHA is treated the same way and its
+          // fresh binding is DROPPED rather than kept: round one recorded no
+          // claim about it (the file was absent then, or hashing failed), so
+          // binding it now would turn a receipt the byte gate refuses for
+          // incomplete coverage into one it accepts, on the strength of a round
+          // that read nothing. prior_sha is recorded as null for that shape.
+          //
+          // SCOPE, stated so the next reader does not assume more: this compares
+          // the BLOB MAP only. A path that was bound and is now ABSENT keeps the
+          // fresh probe's absence, and status/absent_paths/truncation/
+          // failure_reason are the fresh probe's throughout — an unbound path
+          // already fails commit-reviewed's coverage rule, so no rebaseline can
+          // buy a PASS through that door.
+          const priorEvidence = isEvidenceObject(raw.content_evidence) ? raw.content_evidence : null;
+          const priorBlobs = priorEvidence && isEvidenceObject(priorEvidence.blobs) ? priorEvidence.blobs : null;
+          const observedReadsThisRound = new Set(observed ? observed.reads : []);
+          const rebaselineRefused = [];
+          const droppedUnbound = [];
+          const nextEvidence = { ...refreshEvidence };
+          if (isEvidenceObject(nextEvidence.blobs)) {
+            const mergedBlobs = { ...nextEvidence.blobs };
+            for (const [p, freshSha] of Object.entries(nextEvidence.blobs)) {
+              const prior = priorBlobs ? priorBlobs[p] : undefined;
+              const priorUsable = isUsableBlobSha(prior);
+              // Hex spelling is not evidence — compare case-insensitively, the
+              // same way receiptBlobEvidence compares two recorded shas.
+              if (priorUsable && isUsableBlobSha(freshSha) && prior.toLowerCase() === freshSha.toLowerCase()) continue;
+              if (observedReadsThisRound.has(p)) continue;
+              rebaselineRefused.push({ path: p, prior_sha: priorUsable ? prior : null, current_sha: freshSha, round: nextResumeCount });
+              if (priorUsable) mergedBlobs[p] = prior;
+              else {
+                delete mergedBlobs[p];
+                droppedUnbound.push(p);
+              }
+            }
+            nextEvidence.blobs = mergedBlobs;
+          }
+          // A DROPPED BINDING IS STILL A DECLARED PATH, AND MUST STAY NAMED
+          // (security round 2, reviewer-correctness R2). The drop above removes a
+          // fresh binding for a path the probe found PRESENT, so that path lands
+          // in NEITHER blobs nor absent_paths — and evidence that silently omits a
+          // declared path is exactly what GATE 3c above calls unrepairably
+          // corrupt. Left unfixed, this hook would mint, one line earlier, the
+          // very corruption it refuses to touch on the next Stop: the receipt
+          // would be frozen out of every future refresh for a defect H22 itself
+          // wrote. So the omission is DISCLOSED instead of silent —
+          // failure_reason is the field the whole codebase already reads as "this
+          // evidence does not cover everything, and here is why", and it is what
+          // the binding predicate accepts as an account for a missing path.
+          // NOT absent_paths: the file IS on disk, and an absence sentinel means
+          // a reviewed DELETION to commit-reviewed — a false statement about the
+          // tree, traded for a true one about the evidence.
+          // STATUS FOLLOWS THE MERGED FACTS, by buildContentEvidence's OWN rule
+          // (bound == declared -> complete; nothing bound -> unavailable; else
+          // partial), so the receipt can never claim 'complete' coverage while a
+          // declared path sits deliberately unbound. Downstream this reads as
+          // partial/incomplete evidence: commit-reviewed refuses any commit that
+          // touches the unbound path, which is the correct verdict for bytes no
+          // review round is known to have seen.
+          if (droppedUnbound.length > 0) {
+            const note =
+              `refused to rebaseline ${droppedUnbound.length} declared path(s) recording no prior sha, so they are deliberately left UNBOUND rather than bound to bytes this reviewer is not known to have read: ${droppedUnbound.join(', ')}`;
+            nextEvidence.failure_reason = nextEvidence.failure_reason ? `${nextEvidence.failure_reason}; ${note}` : note;
+            const boundCount = isEvidenceObject(nextEvidence.blobs) ? Object.keys(nextEvidence.blobs).length : 0;
+            // builtFault.expected is the DECLARED, cap-sliced path set the
+            // binding guard just checked this evidence against — one spelling of
+            // "the declared territory" for both the guard and this verdict.
+            nextEvidence.status = boundCount === builtFault.expected.length ? 'complete' : boundCount === 0 ? 'unavailable' : 'partial';
+          }
+
+          // FINISHED_AT IS NOT RENEWED FOR A ZERO-EVIDENCE RECEIPT (security
+          // round 2, LOW). Every guard above is a statement ABOUT DECLARED PATHS
+          // — the territory-binding predicate, the per-path rebaseline check, the
+          // sha comparison — so on a receipt whose declared territory is EMPTY
+          // they are all vacuously satisfied, and a bare no-op Stop could walk
+          // finished_at forward forever. That timestamp is not decoration: it is
+          // the horizon commit-reviewed's staleness advisory measures against
+          // (12h), so an empty-territory receipt could be kept permanently
+          // "fresh" while attesting precisely nothing, and the one signal a
+          // reader has that it is old would never fire.
+          // The rest of the refresh still lands (resume_count, observed_*,
+          // content_evidence), so the resume is recorded — what is withheld is
+          // only the claim that a review ENDED again just now.
+          // EMPTINESS IS READ OFF THE SAME DECLARED SET the guards used, never a
+          // second spelling of it.
+          if (builtFault.expected.length === 0) {
+            process.stderr.write(
+              `H22: NOT advancing finished_at on the review receipt for ${label} — its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing; the rest of the refresh (resume_count, observed files, content evidence) is recorded as usual.\n`
+            );
+          } else {
+            raw.finished_at = finishedAt;
+          }
+          raw.content_evidence = nextEvidence;
+          if (observed) {
+            const priorObserved = Array.isArray(raw.observed_files) ? raw.observed_files.filter((f) => typeof f === 'string' && f !== '') : [];
+            raw.observed_files = [...new Set([...priorObserved, ...observed.reads, ...observed.writes])];
+            raw.observed_source = 'subagent-transcript';
+            // Absent-unless-true, never flipped back to false: a truncated
+            // first round stays truncated evidence even if the second round's
+            // tail window happened to cover everything.
+            if (observed.truncated) raw.observed_truncated = true;
+          }
+          raw.resume_count = nextResumeCount;
+          // ACCUMULATED, never overwritten, and TOP-LEVEL beside observed_* /
+          // resume_count rather than inside content_evidence: this is a fact
+          // about the REFRESH, and content_evidence is replaced wholesale every
+          // round, so a refusal recorded inside it would erase the previous
+          // round's. Absent-unless-true, like observed_truncated — a refresh with
+          // nothing refused never adds the key.
+          if (rebaselineRefused.length > 0) {
+            const priorRefused = Array.isArray(raw.rebaseline_refused) ? raw.rebaseline_refused : [];
+            raw.rebaseline_refused = [...priorRefused, ...rebaselineRefused];
+            process.stderr.write(
+              `H22: REFUSED TO REBASELINE ${rebaselineRefused.length} path(s) on the review receipt for ${label} — their bytes moved since the recorded evidence and NOTHING in this round's observed reads shows this reviewer looked at them, so the receipt keeps the sha it actually reviewed: ${rebaselineRefused
+                .map((r) => `${r.path} (recorded ${r.prior_sha ? r.prior_sha.slice(0, 12) : 'nothing'}, on disk ${String(r.current_sha).slice(0, 12)})`)
+                .join(', ')}. The reviewed-bytes gate will refuse a commit carrying those bytes — re-dispatch a reviewer over them rather than waiving, unless the change is genuinely outside what was reviewed.\n`
+            );
+          }
           process.stderr.write(
-            `H22: a review receipt for agent_id '${departing.agent_id}' (agent_type '${departing.agent_type}', at '${departing.at}') is already present in .sterling/review-ledger.json — skipping duplicate promotion\n`
+            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate — finished_at, content evidence and observed files updated (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.\n`
           );
+        } else if (!departingIsReviewer) {
+          // RESUME PATH ONLY: the decision read above found this dispatch's
+          // receipt, and it is gone now — commit-reviewed consumed it between
+          // the two reads (it DELETES a stamped receipt). There is no register
+          // entry to promote from, and minting a fresh receipt from nothing
+          // would manufacture evidence for a review whose receipt was already
+          // legitimately spent. Skip, disclosed.
+          process.stderr.write(
+            `H22: the review receipt for agent_id '${input.agent_id}' (agent_type '${stopAgentType}') is no longer in .sterling/review-ledger.json — it was consumed (stamped onto a commit) between this Stop's lookup and its ledger write, and there is no register entry left to promote from. Nothing is written: a spent receipt is never re-minted. Dispatch a reviewer if this round of work needs its own receipt.\n`
+          );
+          return;
         } else {
           // session_id comes from the REGISTER entry, not from stdin: it is the
           // session that dispatched the reviewer. (The prune above already
@@ -1090,7 +1694,14 @@ try {
                   ...(observed.truncated ? { observed_truncated: true } : {}),
                 }
               : {}),
-            content_evidence: contentEvidence,
+            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`departing.files`,
+            // one line above), not for whatever territory the outside-the-lock
+            // precompute happened to use: this branch is reachable when the
+            // receipt found at decision time was consumed while the lock was
+            // being acquired, and the precompute would then describe THAT
+            // receipt's territory rather than this fresh mint's. A cache HIT in
+            // every ordinary mint (the precompute used exactly these files).
+            content_evidence: evidenceFor(departing.files),
             disposition: null,
           });
         }

@@ -372,7 +372,27 @@ try {
 // Normalize ONCE, at read time — every downstream read in this file (validity,
 // eligibility, file-scoping, spend advisories, trailer stamping) sees the flat
 // legacy shape regardless of whether the raw entry was v1 or v2.
-ledger = ledger.map(normalizeLedgerEntry);
+//
+// THE REFRESH MARKER IS CAPTURED HERE, at the same instant (fix round, MEDIUM
+// — the consume TOCTOU). H22 now REFRESHES a resumed reviewer's receipt in
+// place: same entry_id, new finished_at, new content evidence, incremented
+// resume_count. `git commit` runs hooks inline and can take seconds, so a
+// refresh can land BETWEEN this read (which decided what to stamp, and checked
+// the reviewed bytes) and the post-commit consume — and the consume matches by
+// entry_id, so it would DELETE an entry carrying evidence that was never part
+// of the decision this commit stamped. Recording what finished_at/resume_count
+// looked like when the decision was made lets the consume tell "the entry I
+// stamped" from "an entry that has moved since", and keep the latter.
+// KEYED BY THE NORMALIZED OBJECT: for a v2 entry the adapter returns a NEW
+// object (unique per array element), and for a v1 entry it returns the raw
+// entry itself — both are stable identities for a Map, and both are exactly
+// what flows into stampEntries.
+const refreshMarkers = new Map();
+ledger = ledger.map((rawEntry) => {
+  const normalized = normalizeLedgerEntry(rawEntry);
+  refreshMarkers.set(normalized, refreshMarker(rawEntry));
+  return normalized;
+});
 
 const guidance =
   'commit-reviewed: no un-consumed review-ledger entries — dispatch a reviewer before committing, or commit bare and answer at the merge gate';
@@ -532,7 +552,28 @@ const eligibleEntries = [];
 // was NOT spent is exactly what the reader needs to weigh. (Kept separate from
 // spendWarnings, which is declared further down — this runs before it.)
 const foreignDisclosures = [];
+// UNATTRIBUTABLE TERRITORY (board c9f92090) — its own disclosure list for the
+// same reason foreign and deferred receipts have theirs: three different
+// withholdings with three different remedies must not read as one.
+const unattributableDisclosures = [];
 for (const e of validEntries) {
+  // CHECKED BEFORE THE EXPIRY AXES, deliberately. Foreignness is a receipt
+  // being spent in the WRONG PLACE — it is still spendable from its own
+  // session/branch, so its disclosure tells the reader where to go.
+  // Unattributability is a receipt whose territory can never be trusted
+  // ANYWHERE, so naming it as merely foreign would send a reader to spend it on
+  // the branch that earned it, which is exactly what must not happen.
+  if (isUnattributableTerritoryEntry(e)) {
+    unattributableDisclosures.push(
+      `commit-reviewed: UNATTRIBUTABLE RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}, ${ageLabel(e.at)}) ` +
+        `records territory.source 'unattributable': H22 could not bind that reviewer dispatch to a dispatch block by position (SubagentStart carries no tool_use_id, ` +
+        `research_finding ffa6219c), so the files it recorded [${usableTerritoryFiles(e).join(', ')}] may be ANOTHER dispatch's territory — the off-by-one measured in ` +
+        `decision c91b351d. Stamping it would attest to a review of files nobody can show this reviewer saw, so it is never spent, on any branch. It stays in the ` +
+        `ledger untouched: judge it against the receipt's observed_files (read from that agent's own transcript, the only territory evidence bound to it), then either ` +
+        `dispatch a reviewer for THIS diff or discharge it explicitly with 'node scripts/review-ledger.mjs discharge' — never by deleting the evidence.`
+    );
+    continue;
+  }
   // POSITIVE EVIDENCE ONLY on both axes: the receipt must CARRY a usable
   // identity AND this side must know its own, before a mismatch can withhold a
   // stamp. A pre-expiry receipt (no session_id/branch at all) is unjudgeable
@@ -564,15 +605,25 @@ for (const e of validEntries) {
       `reports it at the next SessionStart; consume it deliberately from its own branch/session, or remove it by hand once you have judged it.`
   );
 }
+for (const line of unattributableDisclosures) console.error(line);
 for (const line of foreignDisclosures) console.error(line);
 if (eligibleEntries.length === 0) {
-  // Every receipt present is foreign. Refuse exactly as a ledger with zero
-  // valid entries does — a bare commit here would silently ship an unreviewed
-  // diff wearing no trailer, which the merge gate would then refuse anyway.
-  // Nothing is consumed: the foreign receipts above survive verbatim.
+  // Every receipt present is foreign and/or unattributable. Refuse exactly as a
+  // ledger with zero valid entries does — a bare commit here would silently
+  // ship an unreviewed diff wearing no trailer, which the merge gate would then
+  // refuse anyway. Nothing is consumed: every receipt above survives verbatim.
+  // BOTH COUNTS ARE NAMED (board c9f92090): reporting an unattributable receipt
+  // as "foreign" would tell the reader to spend it from the session/branch that
+  // earned it, which is the one thing that must never happen to it.
+  const why = [
+    foreignDisclosures.length > 0 ? `${foreignDisclosures.length} FOREIGN (earned in another session/branch)` : null,
+    unattributableDisclosures.length > 0 ? `${unattributableDisclosures.length} UNATTRIBUTABLE (territory could not be bound to their dispatch, board c9f92090)` : null,
+  ]
+    .filter(Boolean)
+    .join(' and ');
   fail(
-    `commit-reviewed: every un-consumed review receipt is FOREIGN (see the ${foreignDisclosures.length} disclosure(s) above) — none of them reviewed work in this ` +
-      `session on this branch, so none is stamped and none is consumed. Dispatch a reviewer for THIS diff, or commit bare with 'git commit' and answer at the merge gate.`
+    `commit-reviewed: no un-consumed review receipt is spendable here — ${why} (see the disclosure(s) above). None is stamped and none is consumed. ` +
+      `Dispatch a reviewer for THIS diff, or commit bare with 'git commit' and answer at the merge gate.`
   );
 }
 
@@ -1840,6 +1891,39 @@ try {
         );
         return true;
       }
+      // REFRESHED MID-COMMIT — THE EVIDENCE WINS (fix round, MEDIUM). Same
+      // window as the discharge case above, same resolution: `git commit` runs
+      // hooks inline, and H22's resumed-reviewer path can REFRESH this very
+      // entry while they run — new finished_at, re-hashed content evidence,
+      // incremented resume_count, all under the SAME entry_id the match above
+      // keys on. Deleting it would destroy a second round of review evidence
+      // that this commit's stamp never saw and its byte check never covered.
+      // THE STAMPED OCCURRENCE IS STILL CLAIMED, exactly as in the discharge
+      // case, so no OTHER entry sharing this identity is spliced out in its
+      // place — the only thing skipped is the deletion.
+      // WHAT SURVIVES IS DISCLOSED, never silent: the trailer for the round
+      // that WAS reviewed is already in the commit, and the receipt is left
+      // spendable, so the next invocation re-offers it (with its own byte
+      // check against the then-current bytes).
+      // A MISSING marker is treated as a MISMATCH, and named as such rather
+      // than printed as a change from null: it means this stamped entry was
+      // never seen by the eligibility read that records markers, so there is
+      // nothing to compare and the safe answer on this path is always "keep".
+      const stampedMarker = refreshMarkers.get(unclaimedStamped[i]);
+      const freshMarker = refreshMarker(e);
+      const wasStamped = (k) => (stampedMarker === undefined ? '<not recorded at eligibility>' : JSON.stringify(stampedMarker[k]));
+      if (stampedMarker === undefined || !boundedDeepEqual(freshMarker, stampedMarker, IDENTITY_DEPTH_CAP)) {
+        unclaimedStamped.splice(i, 1);
+        console.error(
+          `commit-reviewed: RECEIPT REFRESHED DURING COMMIT — ${JSON.stringify(normFresh.agent_type)}'s receipt (entry_id ${JSON.stringify(ledgerEntryId(normFresh))}) ` +
+            `changed between this invocation's eligibility read and the post-commit consume (finished_at ${wasStamped('finished_at')} -> ` +
+            `${JSON.stringify(freshMarker.finished_at)}, resume_count ${wasStamped('resume_count')} -> ${JSON.stringify(freshMarker.resume_count)}), ` +
+            `so a resumed reviewer's SECOND round landed while 'git commit' ran. LEFT UNCONSUMED: its new evidence was never part of the decision this commit stamped ` +
+            `and was never byte-checked here, so deleting it would destroy a review round this commit cannot vouch for. The trailer already earned stands; the receipt ` +
+            `remains in the ledger and is re-offered — with a fresh byte check — on the next commit-reviewed invocation.`
+        );
+        return true;
+      }
       unclaimedStamped.splice(i, 1);
       return false; // consumes exactly one stamped occurrence
     });
@@ -1871,6 +1955,11 @@ console.log(
     // What was deliberately NOT spent, for the same reason spend_warnings are
     // echoed here: a reader of this report must see the withheld receipts too.
     foreign_receipts: foreignDisclosures,
+    // Withheld because their TERRITORY could not be bound to the dispatch that
+    // earned them (board c9f92090) — a third withholding class with a third
+    // remedy, so it is reported separately from foreign and deferred for the
+    // same reason those two are separate from each other.
+    unattributable_receipts: unattributableDisclosures,
     // Withheld by FILE SCOPE rather than by session/branch identity (board
     // 51d93c34) — reported separately because the two withholdings mean
     // different things and have different remedies.
@@ -2070,8 +2159,20 @@ function runTargetShaMode(targetShaArg) {
   } catch {
     ledger = []; // malformed ledger degrades to empty, same posture as the -m flow
   }
-  // Same one-adapter normalization as the -m flow above.
-  ledger = ledger.map(normalizeLedgerEntry);
+  // Same one-adapter normalization as the -m flow above — and the same
+  // refresh-marker capture, for the same reason: `git commit --amend` runs
+  // hooks inline too, so a resumed reviewer's refresh can land between this
+  // read and the consume, under the entry_id the consume matches on. The rule
+  // is mirrored rather than shared because this mode is deliberately
+  // self-contained (see this function's header); the marker itself comes from
+  // the ONE hoisted refreshMarker helper, so the two flows cannot drift about
+  // what a marker IS.
+  const refreshMarkers = new Map();
+  ledger = ledger.map((rawEntry) => {
+    const normalized = normalizeLedgerEntry(rawEntry);
+    refreshMarkers.set(normalized, refreshMarker(rawEntry));
+    return normalized;
+  });
   const validEntries = [];
   for (const e of ledger) {
     // DISCHARGED — same exclusion as the -m flow, through the same helper and
@@ -2105,15 +2206,51 @@ function runTargetShaMode(targetShaArg) {
   }
 
   // ---------------------------------------------------------------------
+  // UNATTRIBUTABLE TERRITORY — same exclusion as the -m flow, through the same
+  // shared predicate and for the same reason (board c9f92090): a receipt whose
+  // territory could not be bound to its own dispatch is never spendable, and an
+  // `if (!targetSha)` carve-out would leave post-hoc amends able to stamp
+  // exactly the receipt the -m flow refuses. Checked BEFORE the base_sha gate so
+  // an unattributable receipt is reported as what it is rather than as a
+  // base-mismatch, and so it can never be counted as a candidate for the amend.
+  // ---------------------------------------------------------------------
+  const unattributableDisclosures = [];
+  const spendableEntries = [];
+  for (const e of validEntries) {
+    if (isUnattributableTerritoryEntry(e)) {
+      unattributableDisclosures.push(
+        `commit-reviewed: UNATTRIBUTABLE RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records ` +
+          `territory.source 'unattributable': H22 could not bind that reviewer dispatch to a dispatch block by position (board c9f92090), so the files it recorded ` +
+          `[${usableTerritoryFiles(e).join(', ')}] may be ANOTHER dispatch's territory. It is never stamped onto any commit, including this amend, and it stays in ` +
+          `the ledger untouched — judge it against its observed_files, then dispatch a reviewer or discharge it explicitly with 'node scripts/review-ledger.mjs discharge'.`
+      );
+    } else {
+      spendableEntries.push(e);
+    }
+  }
+  for (const line of unattributableDisclosures) console.error(line);
+  if (spendableEntries.length === 0) {
+    fail(
+      `commit-reviewed: no review receipt is spendable on this amend — all ${validEntries.length} valid ledger entr${validEntries.length === 1 ? 'y is' : 'ies are'} ` +
+        `UNATTRIBUTABLE (see the disclosure(s) above): their recorded territory could not be bound to the dispatch that earned them, so stamping one would attest ` +
+        `to a review of files nobody can show that reviewer saw. Nothing amended, nothing consumed.`
+    );
+  }
+
+  // ---------------------------------------------------------------------
   // G3: eligible receipts must carry base_sha === target sha. Missing or
   // different base_sha is a LOUD refusal naming base_sha — never a silent
   // judgement.
   // ---------------------------------------------------------------------
-  const baseMatchingEntries = validEntries.filter((e) => typeof e.base_sha === 'string' && e.base_sha === resolvedSha);
+  const baseMatchingEntries = spendableEntries.filter((e) => typeof e.base_sha === 'string' && e.base_sha === resolvedSha);
   if (baseMatchingEntries.length === 0) {
     fail(
-      `commit-reviewed: no eligible review receipt carries base_sha === the target sha (${resolvedSha}) — ${validEntries.length} valid ` +
-        `ledger entr${validEntries.length === 1 ? 'y' : 'ies'} checked, none match. A receipt earned against a different base cannot be attributed to ` +
+      // COUNTS THE SPENDABLE SET, not every valid entry: an unattributable
+      // receipt was already excluded and disclosed by its own class above, and
+      // counting it here would tell the reader a base_sha mismatch was checked
+      // on a receipt this flow never considered.
+      `commit-reviewed: no eligible review receipt carries base_sha === the target sha (${resolvedSha}) — ${spendableEntries.length} valid ` +
+        `ledger entr${spendableEntries.length === 1 ? 'y' : 'ies'} checked, none match. A receipt earned against a different base cannot be attributed to ` +
         `this exact commit's tree. Nothing amended, nothing consumed.`
     );
   }
@@ -2699,7 +2836,7 @@ function runTargetShaMode(targetShaArg) {
   // a serialized key — see the -m flow's identical reasoning above), RE-READ
   // rather than reuse `ledger` so an entry promoted mid-amend survives.
   try {
-    consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries);
+    consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries, refreshMarkers);
   } catch (e) {
     console.error(
       `commit-reviewed: AMEND SUCCEEDED (original ${resolvedSha}, new ${newSha}) but the review ledger was NOT consumed ` +
@@ -2714,6 +2851,8 @@ function runTargetShaMode(targetShaArg) {
       original_sha: resolvedSha,
       new_sha: newSha,
       reviewed_by: stampEntries.map((e) => e.agent_type),
+      // Same third withholding class the -m flow reports (board c9f92090).
+      unattributable_receipts: unattributableDisclosures,
       deferred_receipts: deferredDisclosures,
       waived_bytes:
         waivedReceipts.length > 0
@@ -3126,6 +3265,39 @@ function ledgerEntryId(e) {
   return e && typeof e.entry_id === 'string' && e.entry_id !== '' ? e.entry_id : null;
 }
 
+/** THE REFRESH MARKER — what a receipt's REFRESHABLE half looked like at the
+ *  moment this invocation read it (fix round, MEDIUM: the consume TOCTOU).
+ *
+ *  A receipt is no longer immutable once written. H22's resumed-reviewer path
+ *  refreshes an entry IN PLACE — same entry_id and identity, new finished_at,
+ *  re-hashed content evidence, incremented resume_count — and `git commit`
+ *  runs hooks inline, so that refresh can land AFTER this CLI decided what to
+ *  stamp and checked the reviewed bytes, but BEFORE the post-commit consume.
+ *  The consume matches on entry_id, which is exactly the field a refresh does
+ *  NOT change, so the refreshed entry would be deleted as though it were the
+ *  one that was stamped — destroying a round of review evidence that was never
+ *  part of the stamped decision, and leaving no record that it existed.
+ *
+ *  READ FROM THE RAW ENTRY, not the normalized view: `resume_count` is a
+ *  top-level field the read adapter does not surface (it is refresh
+ *  bookkeeping, not evidence), so the marker is taken where both fields live.
+ *  finished_at IS surfaced (as reviewed_state.completed_at), but reading both
+ *  halves from ONE place is what keeps them describing one instant.
+ *
+ *  TOTAL AND VALUE-SHAPED: every value is passed through raw (any JSON is
+ *  possible in an agent-writable file) and `undefined` normalizes to null on
+ *  BOTH sides, since both markers are built by this same function. The consume
+ *  compares them with the same boundedDeepEqual the identity match uses, so a
+ *  pathological value fails to compare EQUAL and therefore fails toward
+ *  KEEPING the entry — the safe direction on this path. */
+function refreshMarker(rawEntry) {
+  if (!rawEntry || typeof rawEntry !== 'object' || Array.isArray(rawEntry)) return { finished_at: null, resume_count: null };
+  return {
+    finished_at: rawEntry.finished_at === undefined ? null : rawEntry.finished_at,
+    resume_count: rawEntry.resume_count === undefined ? null : rawEntry.resume_count,
+  };
+}
+
 /** DISCHARGED (decision 57984926 §3) — an entry explicitly ruled unspendable by
  *  `scripts/review-ledger.mjs discharge` and PRESERVED in place. Both flows
  *  exclude these before validation, so they are never valid, eligible, counted,
@@ -3198,10 +3370,39 @@ function isStructuredTerritoryEntry(e) {
   return !!e && e.files_source === 'review-territory' && usableTerritoryFiles(e).length > 0;
 }
 
+/** UNATTRIBUTABLE TERRITORY (board c9f92090 part (a)) — h22-dispatch-register
+ *  could not bind this reviewer dispatch to a dispatch block BY POSITION
+ *  (SubagentStart carries no tool_use_id, research_finding ffa6219c), so the
+ *  territory it recorded may belong to a DIFFERENT dispatch. The receipt is
+ *  therefore NEVER SPENDABLE here: not stamped, not consumed, not deleted,
+ *  disclosed by name — the same posture a discharged or foreign receipt gets,
+ *  and for the same reason (stamping it would attest to a review of files
+ *  nobody can show this reviewer saw).
+ *
+ *  THIS IS NOT THE EMPTY-FILES CASE, and the two must never be collapsed. An
+ *  empty files[] WITHOUT this source stays the UNATTRIBUTED class of decision
+ *  c45b6ee4 — ALWAYS stamped, because an empty territory is the strongest
+ *  unverifiable-territory signal and withholding there would destroy real
+ *  review evidence. The discriminator is the SOURCE, never the emptiness: a
+ *  reviewer brief's explicit `REVIEW-TERRITORY: []` records
+ *  'review-territory' and is unaffected, and no pre-existing receipt can carry
+ *  'unattributable' at all (H22 never wrote that value before this board), so
+ *  every legacy receipt keeps its exact prior class. */
+function isUnattributableTerritoryEntry(e) {
+  return !!e && e.files_source === 'unattributable';
+}
+
 /** Lock-guarded read-modify-write consume, shared shape with the -m flow's
  *  inline consume block but self-contained (own ledgerFilePath/sterlingDir
  *  args) so --target-sha amend mode never depends on that flow's locals. */
-function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
+/** `refreshMarkers` is the caller's eligibility-time marker map (see
+ *  refreshMarker). A caller that passes NONE (null) opts out of the
+ *  refreshed-during-commit check entirely — the pre-marker behavior — rather
+ *  than having every entry read as "marker missing", which would silently stop
+ *  consuming anything and reopen the stale-receipt leak. A caller that DOES
+ *  pass a map is asserting it recorded one per stamped entry, so a miss there
+ *  is a real mismatch and keeps the entry. */
+function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries, refreshMarkers = null) {
   const IDENTITY_DEPTH_CAP = 64;
   const boundedDeepEqual = (a, b, depth) => {
     if (a === b) return true;
@@ -3261,6 +3462,28 @@ function consumeStampedEntries(ledgerFilePath, sterlingDir, stampEntries) {
             `never deleted (decision 57984926 §3). It will not be spent again — every spending surface ignores a discharged entry.`
         );
         return true;
+      }
+      // REFRESHED MID-AMEND — THE EVIDENCE WINS. Identical rule and identical
+      // reasoning to the -m flow's consume block (see there for the full
+      // argument): a resumed reviewer's refresh keeps the entry_id this match
+      // keys on, so without this check the amend would delete a second round of
+      // review evidence it never stamped and never byte-checked. The stamped
+      // occurrence is still CLAIMED; only the deletion is skipped.
+      if (refreshMarkers) {
+        const stampedMarker = refreshMarkers.get(unclaimedStamped[i]);
+        const freshMarker = refreshMarker(e);
+        const wasStamped = (k) => (stampedMarker === undefined ? '<not recorded at eligibility>' : JSON.stringify(stampedMarker[k]));
+        if (stampedMarker === undefined || !boundedDeepEqual(freshMarker, stampedMarker, IDENTITY_DEPTH_CAP)) {
+          unclaimedStamped.splice(i, 1);
+          console.error(
+            `commit-reviewed: RECEIPT REFRESHED DURING AMEND — ${JSON.stringify(normFresh.agent_type)}'s receipt (entry_id ${JSON.stringify(ledgerEntryId(normFresh))}) ` +
+              `changed between this invocation's eligibility read and the post-amend consume (finished_at ${wasStamped('finished_at')} -> ` +
+              `${JSON.stringify(freshMarker.finished_at)}, resume_count ${wasStamped('resume_count')} -> ${JSON.stringify(freshMarker.resume_count)}). ` +
+              `LEFT UNCONSUMED: its new evidence was never part of the decision this amend stamped and was never byte-checked here. The trailer already earned ` +
+              `stands; the receipt remains in the ledger and is re-offered — with a fresh byte check — on the next commit-reviewed invocation.`
+          );
+          return true;
+        }
       }
       unclaimedStamped.splice(i, 1);
       return false;

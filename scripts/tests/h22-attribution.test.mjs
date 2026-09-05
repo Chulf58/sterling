@@ -262,6 +262,16 @@ test('H22 attribution PIN2: same-type twins — two test-writer blocks + one cod
     assert.deepEqual([...entry.files].sort(), ['src/fileA.mjs', 'src/fileB.mjs'], 'files are the union of the two same-type blocks');
     assert.ok(!entry.files.includes('src/fileC.mjs'), 'the coder sibling block never contributes files to a test-writer attribution');
     assert.equal(entry.attribution, 'union', 'several same-type blocks -> union attribution');
+    // board c9f92090 slice 2: the reviewer-class 'unattributable' override
+    // (REVIEWER-R1/R2/R3 below) must never leak onto a non-reviewer type —
+    // this SAME shape (several same-type siblings) is exactly REVIEWER-R1's
+    // unsafe case, but agent_type here is 'test-writer', not 'reviewer-*'.
+    // SABOTAGE: key the unattributable override on the SHAPE alone (siblings
+    // count / walk-back / terminal union) instead of also requiring
+    // agent_type.startsWith('reviewer-') — this assertion goes red
+    // (files_source would read 'unattributable' instead of
+    // 'free-prose-fallback').
+    assert.equal(entry.files_source, 'free-prose-fallback', "a non-reviewer type never gets the reviewer-only 'unattributable' override, even under the identical unsafe (several-siblings) shape");
   } finally {
     cleanup();
   }
@@ -297,6 +307,148 @@ test('H22 attribution PIN3: cross-batch walk-back — a late-starting agent whos
     assert.deepEqual([...entry.files].sort(), ['src/fileA.mjs'], 'walk-back finds M1\'s coder block, not M2\'s test-writer block');
     assert.ok(!entry.files.includes('src/fileB.mjs'), 'M2 (the last message, zero type matches) never contributes files here');
     assert.equal(entry.attribution, 'block', 'a single type-matching block found by walk-back is still a precise block attribution');
+    // board c9f92090 slice 2: this SAME walk-back shape is exactly
+    // REVIEWER-R2's unsafe case (the c91b351d off-by-one) when agent_type is
+    // reviewer-class — here agent_type is 'coder', so the reviewer-only
+    // override must never fire.
+    // SABOTAGE: key the unattributable override on the SHAPE alone (a
+    // walk-back match) instead of also requiring
+    // agent_type.startsWith('reviewer-') — this assertion goes red
+    // (files_source would read 'unattributable' instead of
+    // 'free-prose-fallback').
+    assert.equal(entry.files_source, 'free-prose-fallback', "a non-reviewer type never gets the reviewer-only 'unattributable' override, even under the identical unsafe (walk-back) shape");
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// REVIEWER-CLASS TERRITORY-BY-POSITION (board c9f92090, slice 2, spec item
+// (a)) — SPEC ONLY, red-first, authored from the board record (opened via
+// board_get), not from scripts/hooks/h22-dispatch-register.mjs's internals
+// (H4 read wall honored — that hook was never opened by this file's author).
+//
+// SPEC UNDER TEST (board c9f92090, verbatim):
+//   "attributeBlocks is SAFE only when exactly one same-type Agent block sits
+//    in the CURRENT dispatching message. For reviewer-class dispatches
+//    (agent_type starts with 'reviewer-') the three unsafe cases — more than
+//    one same-type sibling in the message, ANY walk-back match (including a
+//    single one, the c91b351d off-by-one), and the terminal union — record
+//    territory.source:'unattributable' with a loud stderr line naming the
+//    case; the safe single-block case and every NON-reviewer class keep
+//    today's behaviour byte-identical (non-reviewer unsafe = 'union')."
+// The register-level home of "territory.source" (per the pre-existing
+// decision 8f137474/h22-review-territory.test.mjs contract, where every
+// register entry already carries files_source: 'review-territory' |
+// 'free-prose-fallback', later nested as ledger territory.source at
+// SubagentStop promotion) is files_source; the new value this slice adds is
+// a third literal, 'unattributable'.
+//
+// REVIEWER-R0 is the CONTROL, placed FIRST (per this role's own multi-cause
+// discipline): without it, a green REVIEWER-R1/R2/R3 is indistinguishable
+// from "every reviewer-class dispatch is unconditionally flagged
+// unattributable regardless of safety" — a far more aggressive, wrong
+// implementation that would ALSO pass R1-R3 for the wrong reason.
+//
+// SABOTAGE (all four tests below): revert the unsafe-case classification
+// back to plain 'union'/'block' — i.e. treat a reviewer-class dispatch
+// exactly like a non-reviewer one, dropping the files_source:'unattributable'
+// override entirely ("unattributable branch flipped back to union"). Under
+// that sabotage, REVIEWER-R1/R2/R3 each go red (files_source stays
+// 'free-prose-fallback' instead of 'unattributable', and the stderr
+// disclosure never fires); REVIEWER-R0 stays green either way, which is
+// exactly why it cannot substitute for the other three.
+// ===========================================================================
+
+test('H22 attribution REVIEWER-R0 (CONTROL, placed FIRST): the SAFE case — exactly one reviewer-correctness block in the current message — is UNCHANGED: attribution:block, files_source stays free-prose-fallback, never unattributable', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    writeParentTranscript(dir, [
+      taskLine([taskBlock('Task', 'reviewer-correctness', 'please review src/rSafe.mjs for correctness')]),
+    ]);
+
+    const r = runH22(h22Input(dir, { agent_id: 'agent-rev-safe', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-rev-safe');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.attribution, 'block', 'exactly one type-matching block is still a precise block attribution for a reviewer too');
+    assert.equal(entry.files_source, 'free-prose-fallback', 'the SAFE case is untouched by the new unattributable override — this is the control that R1/R2/R3 depend on to mean anything');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H22 attribution REVIEWER-R1: UNSAFE case 1 — more than one same-type reviewer sibling in the current message — files_source becomes unattributable, disclosed loudly', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    writeParentTranscript(dir, [
+      taskLine([
+        taskBlock('Task', 'reviewer-correctness', 'review src/r1a.mjs'),
+        taskBlock('Task', 'reviewer-correctness', 'also review src/r1b.mjs'),
+        taskBlock('Task', 'coder', 'implement src/r1c.mjs'),
+      ]),
+    ]);
+
+    const r = runH22(h22Input(dir, { agent_id: 'agent-rev-sibling', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-rev-sibling');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.files_source, 'unattributable', 'two same-type reviewer siblings in one message means SubagentStart (which carries no tool_use_id) cannot tell which physical dispatch this Start belongs to');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'the case is disclosed loudly, never silent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H22 attribution REVIEWER-R2: UNSAFE case 2 — a SINGLE walk-back match (the c91b351d off-by-one) — files_source becomes unattributable even though only one block matched', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    writeParentTranscript(dir, [
+      taskLine([taskBlock('Task', 'reviewer-correctness', 'M1: review src/r2a.mjs')]), // M1
+      textLine('conductor narrates between dispatches'),
+      taskLine([taskBlock('Task', 'coder', 'M2: implement src/r2b.mjs')]), // M2 (last dispatching message, zero type matches)
+    ]);
+
+    const r = runH22(h22Input(dir, { agent_id: 'agent-rev-walkback', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-rev-walkback');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(
+      entry.files_source,
+      'unattributable',
+      'a reviewer-class walk-back match is unsafe even at exactly ONE match — for a NON-reviewer type this exact shape is attribution:block (see PIN3 above), but a reviewer dispatch cannot be bound to a specific earlier block by position alone'
+    );
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H22 attribution REVIEWER-R3: UNSAFE case 3 — terminal union (zero reviewer-correctness matches anywhere in the bounded walk) — files_source becomes unattributable', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    writeParentTranscript(dir, [
+      taskLine([taskBlock('Task', 'coder', 'M1: touch src/r3a.mjs')]),
+      taskLine([
+        taskBlock('Task', 'coder', 'M2: touch src/r3b.mjs'),
+        taskBlock('Task', 'test-writer', 'M2: touch src/r3c.mjs'),
+      ]),
+    ]);
+
+    const r = runH22(h22Input(dir, { agent_id: 'agent-rev-terminal', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const reg = readRegister(dir);
+    const entry = reg.find((e) => e.agent_id === 'agent-rev-terminal');
+    assert.ok(entry, 'entry was appended');
+    assert.equal(entry.files_source, 'unattributable', 'zero type matches anywhere in the bounded walk falls to the terminal union of the last message\'s blocks, which is unsafe for a reviewer-class dispatch');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
   } finally {
     cleanup();
   }
