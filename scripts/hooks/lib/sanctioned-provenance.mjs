@@ -28,6 +28,22 @@
 //                keeps `commit-reviewed.mjs -m "<msg>"` exempt. Enforced by the
 //                candidate extractor in h15-store-guard.mjs, which owns the word
 //                grammar; it removes reach (a deny), adding no per-flag case.
+//                WHAT THIS CLAUSE DOES NOT BUY (distinct from the file-level
+//                "what this does not buy" section below, which quotes Ruling 4):
+//                the plain-invocation clause and the
+//                unsafe-predecessor rule beside it are both PER COMMAND — they
+//                see one Bash tool call's text and nothing before it, so they
+//                cannot say anything about state set by an EARLIER call. The
+//                cross-call vector (`export NODE_OPTIONS=…` in call 1, a plain
+//                sanctioned invocation in call 2) is closed by the HARNESS, not
+//                by this module: each Bash tool call runs in a FRESH SHELL, so
+//                an export in one call is not visible in the next — MEASURED on
+//                this platform 2026-09-05. That is a platform fact, not a
+//                guarantee of the design: a harness that PERSISTED shell state
+//                between calls would reopen the vector, and no static per-call
+//                hook could see it, because the mutation would never appear in
+//                any command text a hook is handed. Re-probe it when the
+//                platform moves (verify-at-build register, decision 19678617).
 //   ROOT.        Derived from the RUNNING BUNDLE's own `import.meta.url` by a
 //                bounded walk-up to the nearest ancestor carrying the full
 //                plugin layout (`hooks/`, `hooks/hooks.json`,

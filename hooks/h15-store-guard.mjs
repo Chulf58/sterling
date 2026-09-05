@@ -5833,7 +5833,7 @@ function fragmentIsSafePredecessor(fragment) {
 }
 function fragmentSanctionedProvenance(fragment, entries, ctx) {
   const { word, viaInterpreter, interpreterOption } = fragmentExecutableCandidate(fragment);
-  if (ctx?.unsafePredecessor && (viaInterpreter || word !== null && word.includes("/"))) {
+  if (ctx?.unsafePredecessor) {
     return {
       allow: false,
       word,
@@ -5897,13 +5897,15 @@ function classifyFragment(fragment) {
   if (verb === "git") return { write: classifyGit(trimmed), fragment: trimmed };
   if (verb === "find") return { write: classifyFind(trimmed), fragment: trimmed };
   if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
-  return { write: true, fragment: trimmed };
+  return { write: true, fragment: trimmed, unknownVerb: true };
 }
 var offending = null;
 var offendingIsDbSeal = false;
+var offendingUnknownVerb;
 var offendingProvenance;
 try {
   offendingProvenance = "";
+  offendingUnknownVerb = false;
   const pluginRoot = resolveActivePluginRoot(import.meta.url, process.env);
   const provenanceCtx = { pluginRoot, cwd: input.cwd, unsafePredecessor: null };
   for (const frag of splitFragments(command)) {
@@ -5917,6 +5919,7 @@ try {
     if (result.write) {
       offending = result.fragment;
       offendingIsDbSeal = Boolean(result.dbSeal);
+      offendingUnknownVerb = Boolean(result.unknownVerb);
       const d = sanctioned.detail;
       const looksLikeAScriptInvocation = Boolean(sanctioned.word) && (sanctioned.viaInterpreter || sanctioned.word.includes("/"));
       offendingProvenance = d && !d.allow && looksLikeAScriptInvocation ? `Sanctioned-script provenance: ${d.reason}
@@ -5953,7 +5956,15 @@ deny(
   `H15: shell write access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
 Denied fragment: ${offending}
 This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) \u2014 the denial does not assert the command was proven to write.
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
+` + // THE DISCRIMINATOR THAT ACTUALLY FIRED, when it was the fallback (board
+  // 31b2c872): every other deny path here has a positive finding behind it (a
+  // redirect into the store, sed -i, a writing git subverb). This one has
+  // none — it is a store-path MENTION under a verb the allowlist does not
+  // recognise — and saying so is the difference between "add your verb to
+  // READONLY_VERBS or use the tool surface" and hunting for a write that was
+  // never detected.
+  (offendingUnknownVerb ? `Discriminator: this fragment NAMES a store path and its verb ('${firstWord(offending)}') is not in the read-only verb allowlist \u2014 that combination alone is the denial. No write was detected in it.
+` : "") + `Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
 Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root.
 ` + offendingProvenance + ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.\nNon-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c); the closed-world classifier above is what decides, and a verb it does not recognize as read-only is denied.\nIf the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
 );

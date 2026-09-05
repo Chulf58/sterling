@@ -460,6 +460,17 @@ export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
       // to see the ruling's lifecycle without a second lookup.
       lines.push(`— "${label}" → ${kind} [${d.id}] [${statusBracket(d)}]: ${substance}`);
     }
+    // THE DELTA FLOOR IS A COUNT, AND THE DENIAL NOW SAYS SO (board fb7c43fb):
+    // present only when THIS attempt cited a denied ruling and still fell short,
+    // so a first attempt's message is byte-identical to before. The required
+    // count is INTERPOLATED from DELTA_MIN_NEW_TERMS, never written into the
+    // string — a message quoting a stale literal is worse than no number at all.
+    if (r.delta && typeof r.delta.new_terms === 'number') {
+      lines.push(
+        `  re-ask delta: your re-ask added ${r.delta.new_terms} of the ≥${DELTA_MIN_NEW_TERMS} new terms required to override — ` +
+          `state what is UNRESOLVED and why, in words the prior attempt did not use; repeating the same question with the id pasted in is denied again.`
+      );
+    }
   }
   const idList = [...new Set(citedIds)];
   lines.push(renderOverrideLine(idList));

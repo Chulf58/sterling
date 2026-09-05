@@ -247,6 +247,11 @@ for (const { segment, sep } of items) {
       `Command: ${command}\n` +
       `Never append ';' or '||' after a gate — a red suite must never read green. ` +
       `Run the gate as the last command, or chain with '&&' — a red exit propagates. ` +
+      `THE '&&' REMEDY IS ADDRESSED TO THE CONDUCTOR: H24 is registered globally, so this text also reaches SUBAGENTS. ` +
+      `A ROSTER subagent that holds Bash (coder, debugger) registers H14 on its own frontmatter, and H14's single-command ` +
+      `allowlist denies chaining before any prefix match — so for those two the only remedy is to run the gate as ONE ` +
+      `command on its own. H14 rides frontmatter, NOT global registration, so a Bash-bearing agent spawned OUTSIDE the ` +
+      `roster is not confined by it and '&&' may work there; do not read this line as a promise about your own sandbox. ` +
       `Decision 6cdd1b02-4d4f-4d7d-b9cd-2887265e7f90.`
   );
 }

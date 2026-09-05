@@ -167,7 +167,7 @@ function buildModelPin(inp) {
   // file's own bytes — are attacker-influenced strings landing verbatim in the
   // conductor's context. JSON.stringify is the fix that matters: it escapes
   // embedded NEWLINES and quotes, so a planted value can no longer break out of
-  // its line and forge a Sterling-voiced sentence beneath the pin; the clip
+  // its line and fabricate a Sterling-voiced sentence beneath the pin; the clip
   // bounds a value planted to flood the payload.
   // SCOPE, deliberately: this escapes what is DISPLAYED, never what is INJECTED
   // — updatedInput.model still crosses byte-for-byte, which frozen pin M-8
@@ -453,6 +453,14 @@ try {
       // by pasting R1's id and adding filler words (reviewer finding).
       const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
       let overridden = null;
+      // THE SHORTFALL, for the deny text (board fb7c43fb): a re-ask that CITED a
+      // denied ruling and still fell under the floor used to be denied with no
+      // hint that the floor is a count, let alone which count it missed — so the
+      // remedy read as "say it again" and the next attempt missed by the same
+      // margin. Best (largest) new-term count over the cited-and-eligible ledger
+      // entries; stays null for a first attempt, which cited nothing and has no
+      // delta to report.
+      let shortfall = null;
       for (const [key, entry] of Object.entries(ledger.entries)) {
         if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
         if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
@@ -460,6 +468,9 @@ try {
         if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
           overridden = { key, recordIds: entry.recordIds };
           break;
+        }
+        if (shortfall === null || newTerms.length > shortfall.new_terms) {
+          shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
         }
       }
       if (overridden) {
@@ -489,7 +500,7 @@ try {
       // it): (re)seed the ledger entry so a LATER retry can be measured
       // against THIS attempt's terms, never silently overwritten.
       if (!ledger.entries[key]) ledger.entries[key] = { terms: p.subTerms, recordIds };
-      unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record) });
+      unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
     }
 
     writeDenyLedger(ledgerPath, ledger);

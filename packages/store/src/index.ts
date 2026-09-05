@@ -361,6 +361,14 @@ export type ToolStore = Pick<
   // uncapped, full-match-set threshold count beside query()'s own window.
   | 'countAboveScore'
   | 'get'
+  // PHYSICAL mount membership — the append-join discharge's project-local owner
+  // lookup and its target refusal (packages/mcp-server/src/tools.ts) both need
+  // to know whether a record actually lives in the project database, which is
+  // the one mount their transaction can commit on and the one file H10 reads.
+  // A record's body `scope` cannot answer that (anti_pattern
+  // [record-body-scope-is-not-physical-store-identity]), so the surface exposes
+  // the question instead of letting the tool layer infer it.
+  | 'projectStoreHolds'
   // knowledge_get resolves 8-char id PREFIXES through this index (decision
   // 27f148c2) — the citation format the whole repo writes, which get() alone
   // cannot serve because it matches a full id only.
@@ -2006,6 +2014,29 @@ export class SterlingStore {
     // hydrateAll re-attaches the DERIVED status/superseded_by and materializes
     // links[] from record_relations ([stable-identity-design-v2]).
     return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body) as DurableRecord])[0]);
+  }
+
+  /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id: string): boolean {
+    return this.db.prepare('SELECT 1 FROM records WHERE id = ?').get(id) !== undefined;
   }
 
   /**

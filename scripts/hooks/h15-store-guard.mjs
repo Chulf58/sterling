@@ -744,7 +744,15 @@ function fragmentIsSafePredecessor(fragment) {
 
 function fragmentSanctionedProvenance(fragment, entries, ctx) {
   const { word, viaInterpreter, interpreterOption } = fragmentExecutableCandidate(fragment);
-  if (ctx?.unsafePredecessor && (viaInterpreter || (word !== null && word.includes('/')))) {
+  // UNCONDITIONAL ON THE PREDECESSOR (board fb7c43fb N-1, 2026-09-05). The gate
+  // used to require `viaInterpreter || word.includes('/')`, which let a
+  // SLASH-FREE bare-basename candidate past it — and a bare name is still
+  // resolved against the cwd an unsafe predecessor may have moved (`cd` is
+  // exactly what the predecessor list refuses to assume away), so the one shape
+  // the condition excluded was not a safe one. Dropping it only REMOVES allow
+  // surface: a fragment that would have been exempt now falls through to
+  // ordinary classification, which denies it iff it names the store.
+  if (ctx?.unsafePredecessor) {
     return {
       allow: false,
       word,
@@ -919,16 +927,28 @@ function classifyFragment(fragment) {
   if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
 
   // Unknown verb mentioning the store: err CLOSED (in doubt, deny).
-  return { write: true, fragment: trimmed };
+  // TAGGED so the denial can name THIS discriminator (board 31b2c872): reaching
+  // here means the fragment mentions a store path AND its verb is absent from
+  // READONLY_VERBS — nothing about the command was examined for writing, and a
+  // reader who believes a write was detected goes looking for one that is not
+  // there.
+  return { write: true, fragment: trimmed, unknownVerb: true };
 }
 
 let offending = null;
 let offendingIsDbSeal = false;
+// Whether the offending fragment reached the closed-world fallback (unrecognised
+// verb + store mention) rather than any of the positive write tests above.
+// DECLARED BARE and initialized INSIDE the guarded body, exactly like
+// `offendingProvenance` below: an initialized top-level `let` is a fail-closed
+// boundary finding, and that ratchet only shrinks.
+let offendingUnknownVerb;
 // The provenance line for the OFFENDING fragment, or '' when it must not be
 // printed. See the gate at the assignment below.
 let offendingProvenance;
 try {
   offendingProvenance = ''; // initialized INSIDE the guarded body (fail-closed baseline: a bare `let` is safe-listed, an initialized one is a finding)
+  offendingUnknownVerb = false; // same rule, same reason
   // THE ACTIVE PLUGIN ROOT, derived ONCE per invocation, from THIS hook's own
   // location — the source file under scripts/hooks/ when a pin spawns it, the
   // esbuild bundle under hooks/ in production. Never CLAUDE_PLUGIN_ROOT, never
@@ -963,6 +983,7 @@ try {
     if (result.write) {
       offending = result.fragment;
       offendingIsDbSeal = Boolean(result.dbSeal);
+      offendingUnknownVerb = Boolean(result.unknownVerb);
       // PROVENANCE IS PRINTED SELECTIVELY, AND THAT IS A WORDING RULE, NOT A
       // VERDICT RULE — it never affects the allow decision (5b82e94f step 8
       // asks the denial to explain itself, nothing more). Most denials have
@@ -1023,6 +1044,16 @@ deny(
   'H15: shell write access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY.\n' +
     `Denied fragment: ${offending}\n` +
     'This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) — the denial does not assert the command was proven to write.\n' +
+    // THE DISCRIMINATOR THAT ACTUALLY FIRED, when it was the fallback (board
+    // 31b2c872): every other deny path here has a positive finding behind it (a
+    // redirect into the store, sed -i, a writing git subverb). This one has
+    // none — it is a store-path MENTION under a verb the allowlist does not
+    // recognise — and saying so is the difference between "add your verb to
+    // READONLY_VERBS or use the tool surface" and hunting for a write that was
+    // never detected.
+    (offendingUnknownVerb
+      ? `Discriminator: this fragment NAMES a store path and its verb ('${firstWord(offending)}') is not in the read-only verb allowlist — that combination alone is the denial. No write was detected in it.\n`
+      : '') +
     'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
     `Sanctioned scripts/launchers: ${allowScripts.join(', ')} (config store_guard.allow_scripts) — an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root.\n` +
     offendingProvenance +

@@ -7846,6 +7846,11 @@ function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
       const substance = normalizedMarker ? `${clippedText}${clippedText ? " " : ""}${normalizedMarker}` : clippedText;
       lines.push(`\u2014 "${label}" \u2192 ${kind} [${d.id}] [${statusBracket(d)}]: ${substance}`);
     }
+    if (r.delta && typeof r.delta.new_terms === "number") {
+      lines.push(
+        `  re-ask delta: your re-ask added ${r.delta.new_terms} of the \u2265${DELTA_MIN_NEW_TERMS} new terms required to override \u2014 state what is UNRESOLVED and why, in words the prior attempt did not use; repeating the same question with the id pasted in is denied again.`
+      );
+    }
   }
   const idList = [...new Set(citedIds)];
   lines.push(renderOverrideLine(idList));
@@ -8094,6 +8099,7 @@ try {
     for (const p of perQuestion) {
       const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
       let overridden = null;
+      let shortfall = null;
       for (const [key2, entry] of Object.entries(ledger.entries)) {
         if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
         if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
@@ -8101,6 +8107,9 @@ try {
         if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
           overridden = { key: key2, recordIds: entry.recordIds };
           break;
+        }
+        if (shortfall === null || newTerms.length > shortfall.new_terms) {
+          shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
         }
       }
       if (overridden) {
@@ -8115,7 +8124,7 @@ try {
       const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
       const key = denyIntentKey(recordIds);
       if (!ledger.entries[key]) ledger.entries[key] = { terms: p.subTerms, recordIds };
-      unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record) });
+      unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
     }
     writeDenyLedger(ledgerPath, ledger);
     if (unresolved.length) {

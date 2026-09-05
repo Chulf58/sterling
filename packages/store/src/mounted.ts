@@ -174,6 +174,17 @@ export class MountedStores {
     return undefined;
   }
 
+  /** PHYSICAL mount membership: the PROJECT store ALONE, never the fan (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). This is the same physical
+   *  database H10 opens and the only mount withTransaction can commit on, so a caller
+   *  whose atomicity or whose parity with H10 depends on "is this record project-local"
+   *  asks HERE. It deliberately does NOT consult the record's body `scope`: create()
+   *  routes by scope, but every later write routes by storeHolding (by id), and `scope`
+   *  is caller-writable — so the field and the mount can disagree in both directions. */
+  projectStoreHolds(id: string): boolean {
+    return this.project.projectStoreHolds(id);
+  }
+
   /** Project-first concatenation of every mounted store's id index (any status,
    *  tombstones included). A citation checker MUST span mounts: legitimately
    *  cited ids live in the shared domain stores as often as in the project one,

@@ -730,16 +730,26 @@ test('(b4): an `admitted` field that is present but blank FAILS — the escape h
 // SABOTAGE (PREDICTED, not executed — see the header): accept any `admitted` value that is not undefined ->
 // (b4) red, exit 0.
 
-test('(b5) [THE PIN THAT MAKES A BUMP LOUD]: the shipped baseline declares exactly 107 founding entries — raising the in-file lock to admit a 108th cannot be done without also editing this line', () => {
+// LOWERED 107 -> 102 (conductor repair, 2026-09-05, recorded via
+// scripts/test-repair.mjs). The ratchet turned DOWN when real debt was paid:
+// the register's own rung comment records "ratchet turns DOWN:
+// FOUNDING_BASELINE_TOTAL 106 -> 102". Slice 1 (commit 49902d8, the H15
+// provenance rebuild) lowered the constant WITHOUT lowering this pin in the
+// same change, which is the discipline miss this pin's own failure message
+// names — so the suite ran red on this branch from that commit until this
+// repair. Lowering the pin does NOT weaken it: the only direction it guards is
+// a RAISE (admitting new unjustified debt), and shrink-only is enforced
+// independently by the checker itself.
+test('(b5) [THE PIN THAT MAKES A BUMP LOUD]: the shipped baseline declares exactly 102 founding entries — raising the in-file lock to admit a 103rd cannot be done without also editing this line', () => {
   const r = run([], root);
   assert.equal(r.code, 0, `real-repo scan must pass: ${r.out}`);
   assert.match(
     r.out,
-    /107 founding/,
-    'the shipped founding total is 107; if a real fix lowered it, lower this pin in the SAME change and say so in the commit'
+    /102 founding/,
+    'the shipped founding total is 102; if a real fix lowered it, lower this pin in the SAME change and say so in the commit'
   );
 });
-// SABOTAGE (PREDICTED, not executed — see the header): change FOUNDING_BASELINE_TOTAL to 108 and append one
+// SABOTAGE (PREDICTED, not executed — see the header): change FOUNDING_BASELINE_TOTAL to 103 and append one
 // unjustified baseline entry -> (b5) red on the regex (and the run also fails the
 // ratchet, because the appended statement is not observed). Changing the constant
 // ALONE -> (b5) red on the exit code via the founding lock. Both doors are closed

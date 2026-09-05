@@ -1114,7 +1114,39 @@ try {
   // question of an already-persisted item's file keys (board ef206eca): the
   // demand and the item it leaves behind must never be able to disagree about
   // what "owned" means.
-  const isUnowned = (p) => !store.query({ types: ['feature_article', 'reference_material'], file_keys: [p], cap: 25 }).some((r) => !r.working_tree);
+  //
+  // THE JOIN IS NO LONGER A WINDOW (issues log 2026-09-01: "demanded an article
+  // for an OWNED file"). It used to run at cap: 25, so a path named by more than
+  // 25 feature_article/reference_material records could have its owner ordered
+  // out of the window and read as UNOWNED — a false demand whose remedy ("create
+  // the owning article") writes a duplicate of the article that already owned it.
+  // count() runs the SAME base filter query() does (types + file_keys, no
+  // rank_terms here), so cap: total is the whole matched set by construction
+  // rather than a bigger guess; total 0 skips the second call entirely. Store
+  // failures still propagate exactly as before — the duty gate's own catch owns
+  // the fail-loud direction, and the cap was never what made it safe.
+  const ownersSeen = new Map();
+  const ownerRows = (p) => {
+    if (ownersSeen.has(p)) return ownersSeen.get(p);
+    const filter = { types: ['feature_article', 'reference_material'], file_keys: [p] };
+    const total = store.count(filter);
+    const rows = total === 0 ? [] : store.query({ ...filter, cap: total });
+    ownersSeen.set(p, rows);
+    return rows;
+  };
+  const isUnowned = (p) => !ownerRows(p).some((r) => !r.working_tree);
+  // What the join actually SAW for one demanded path — so a false demand is
+  // diagnosable from the deny text alone instead of by re-running the query by
+  // hand. "none" is the ordinary case; a row listed here was matched and then
+  // EXCLUDED (it declares a working_tree, i.e. it owns another tree's copy of
+  // this path), which is precisely the shape that looks like a hook defect.
+  const ownerRowsNote = (p) => {
+    const rows = ownerRows(p);
+    if (!rows.length) return 'none';
+    return rows
+      .map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''})`)
+      .join('; ');
+  };
   let unowned = paths.filter(isUnowned);
   // A gitignored path is never governed territory (board 1de3653b) — it cannot
   // be owned, so demanding an article for it is a false demand. A failed ignore
@@ -1774,9 +1806,17 @@ try {
     // Article demand nag.
     if (articleDemand) {
       const capList = (arr) => (arr.length > 5 ? `${arr.slice(0, 5).join(', ')} +${arr.length - 5} more` : arr.join(', '));
+      // OWNER ROWS THE JOIN SAW, per named path (issues log 2026-09-01): a demand
+      // for a file the reader believes is owned is unfalsifiable without this —
+      // "none" says the join found nothing at all, while a listed row says it
+      // found an owner and EXCLUDED it (working_tree), which is a different bug
+      // with a different fix.
+      const ownerEvidence = unowned.slice(0, 5).map((p) => `${p} → owners seen: ${ownerRowsNote(p)}`);
       parts.push(
         `• articles: article demand — ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)` +
-          `${newUnowned.length ? ` (${newUnowned.length} new)` : ''}: ${capList(unowned)} → knowledge_create type feature_article (reference_material kind doc for a governing document)`
+          `${newUnowned.length ? ` (${newUnowned.length} new)` : ''}: ${capList(unowned)} → knowledge_create type feature_article (reference_material kind doc for a governing document)` +
+          `\n  ownership join (uncapped, types feature_article+reference_material, excluding records that declare a working_tree): ${ownerEvidence.join(' | ')}` +
+          `${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ''}`
       );
     }
 

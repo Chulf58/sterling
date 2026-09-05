@@ -8309,7 +8309,21 @@ try {
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
-  const isUnowned = (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree);
+  const ownersSeen = /* @__PURE__ */ new Map();
+  const ownerRows = (p) => {
+    if (ownersSeen.has(p)) return ownersSeen.get(p);
+    const filter = { types: ["feature_article", "reference_material"], file_keys: [p] };
+    const total = store.count(filter);
+    const rows = total === 0 ? [] : store.query({ ...filter, cap: total });
+    ownersSeen.set(p, rows);
+    return rows;
+  };
+  const isUnowned = (p) => !ownerRows(p).some((r) => !r.working_tree);
+  const ownerRowsNote = (p) => {
+    const rows = ownerRows(p);
+    if (!rows.length) return "none";
+    return rows.map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ""})`).join("; ");
+  };
   let unowned = paths.filter(isUnowned);
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
@@ -8533,8 +8547,10 @@ try {
     }
     if (articleDemand) {
       const capList = (arr) => arr.length > 5 ? `${arr.slice(0, 5).join(", ")} +${arr.length - 5} more` : arr.join(", ");
+      const ownerEvidence = unowned.slice(0, 5).map((p) => `${p} \u2192 owners seen: ${ownerRowsNote(p)}`);
       parts.push(
-        `\u2022 articles: article demand \u2014 ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} new)` : ""}: ${capList(unowned)} \u2192 knowledge_create type feature_article (reference_material kind doc for a governing document)`
+        `\u2022 articles: article demand \u2014 ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} new)` : ""}: ${capList(unowned)} \u2192 knowledge_create type feature_article (reference_material kind doc for a governing document)
+  ownership join (uncapped, types feature_article+reference_material, excluding records that declare a working_tree): ${ownerEvidence.join(" | ")}${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ""}`
       );
     }
     if (pressure.level === "soft" || pressure.level === "hard") {

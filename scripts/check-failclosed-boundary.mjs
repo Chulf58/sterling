@@ -252,8 +252,22 @@ const EXEMPTIONS = {
     // H24's ONE verdict (h24-gate-exit-lint.mjs:214), under the same
     // whole-flattened-statement identity the baseline uses. Measured by running
     // this check, never hand-typed.
+    //
+    // RE-MINTED TWICE 2026-09-05 (#95f20af2 -> #afd2dbc0 -> #0871571a): the
+    // SECOND move is the security review's LOW finding — the first wording said
+    // a subagent's Bash "is separately confined by H14", but H14 rides agent
+    // FRONTMATTER while H24 is registered GLOBALLY, so a Bash-bearing agent
+    // spawned OUTSIDE the roster was being told it had a confinement it does
+    // not have. The text now names the population (coder/debugger) and
+    // disclaims the rest. Still text-only, still one deny.
+    // FIRST move: slice 3 appended the
+    // conductor-scoped remedy paragraph to this same deny's message (the '&&'
+    // remedy is addressed to the conductor; a subagent's Bash is confined by
+    // H14 and its only remedy is one command on its own line). SAME single
+    // verdict — no new denial entered the file, so the exemption still covers
+    // exactly one named deny.
     denials: [
-      "deny( `H24: gate invocation masked — '${gate}' is followed at top level by '${sep}', which swallows … #95f20af2",
+      "deny( `H24: gate invocation masked — '${gate}' is followed at top level by '${sep}', which swallows … #0871571a",
     ],
   },
 };
@@ -373,6 +387,14 @@ const BASELINE = {
     // whether the change FEELS structural, only whether it is inside. Verify by
     // running the check, never by reasoning about the edit's shape.
     //
+    // ROTATED A NINTH TIME 2026-09-05 (#bcb43f69 -> #87887b36): slice 3 of
+    // dome-farmer-issues-2026-09-05 replaced the cap: 25 ownership join inside
+    // this founding try with the uncapped count()-then-query() form plus the
+    // owner-rows evidence helper, so the flattened statement's text moved.
+    // RE-EXAMINED: the catch still calls warnNonBlocking, the new helpers are
+    // declared inside this same try, no new unguarded top-level statement —
+    // one entry in, one stale entry out, total unmoved at 102. Verified by
+    // RUNNING the check. Prior:
     // ROTATED AN EIGHTH TIME 2026-09-01 (#97fb9c75 -> #bcb43f69): the
     // consumer-feedback branch's shared-lib recompiles shifted this statement's
     // bundled text. RE-EXAMINED: the catch still calls warnNonBlocking, no new
@@ -400,7 +422,7 @@ const BASELINE = {
     // top-level statement, so this stays exactly ONE entry and
     // FOUNDING_BASELINE_TOTAL stays 107. What moved is the SIZE of the region
     // that can reach the catch, and it shrank. Verified by RUNNING the check.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #bcb43f69" },
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #87887b36" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },
@@ -429,11 +451,25 @@ const BASELINE = {
     // PARKED (finding cc35e43c: the clone-provenance check binds the SPELLING, not
     // the file bash executes — an executed symlink bypass). The digests below are
     // the HEAD 0e01c42 originals; if that lane is unparked, swap them back to
-    // #1b7829a6 / #729c93fa in the same change. Nothing about their fail-closed status moved and no statement
+    // #1b7829a6 / #729c93fa in the same change. THAT INSTRUCTION IS SPENT (marked
+    // 2026-09-05): the lane WAS unparked by the H15 provenance REBUILD recorded in
+    // the rung below (decisions 5b82e94f / 95c2c109, board 891284a9), which re-minted
+    // both digests from the rebuilt text rather than restoring the parked pair — so
+    // #1b7829a6 / #729c93fa are two generations dead and must NOT be swapped back;
+    // the live identities are whatever the newest rung above names. Kept in place
+    // because the rung is history, not a live directive. Nothing about their
+    // fail-closed status moved and no statement
     // entered or left the finding set, so this was a DELETE-AND-ADD of two
     // identities and FOUNDING_BASELINE_TOTAL stays 107. This is the detector
     // re-mint loop board 92f7e826 (identity schema v3) exists to address — a
     // text edit to a baselined statement looks exactly like new debt.
+    // RE-MINTED AGAIN 2026-09-05 (#8ef2002a -> #aeeb9115): slice 3 (board
+    // 31b2c872) added the unknown-verb DISCRIMINATOR clause to this denial's
+    // message — the closed-world fallback now says the verb was unrecognised
+    // rather than implying a write was detected. Same statement, same debt,
+    // nothing entered or left the finding set; the new `offendingUnknownVerb`
+    // is declared bare and assigned inside the guarded body, exactly like
+    // `offendingProvenance`, so it adds no entry. Prior:
     // RE-MINTED 2026-09-05 (#d2276435 -> #0ec06b48, #208cc889 -> #8ef2002a): the
     // H15 provenance rebuild (decisions 5b82e94f / 95c2c109, board 891284a9)
     // added the provenance line and deleted the false "only writes,
@@ -448,7 +484,7 @@ const BASELINE = {
     // moment it was about to deny — hence a finding like any other. (It is a
     // top-level statement, so it is caught by the statement rule; the deny-arg
     // entries below are the same hazard inside the CATCH handlers.)
-    { statement: "deny( 'H15: shell write access to the Sterling store is denied — the store is read and written throu … #8ef2002a" },
+    { statement: "deny( 'H15: shell write access to the Sterling store is denied — the store is read and written throu … #aeeb9115" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H15', `[stdin] hook input could not be read or parsed (${(e && e.mes … #5ae443d6" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H15', `[cwd] the hook input's cwd could not be resolved to a project … #11a2e619" },
     { statement: "deny-arg: deny( environmentDefectDenial( 'H15', `Internal error while preprocessing the command text for the s … #25d119c3" },
@@ -523,6 +559,12 @@ const BASELINE = {
     // are unchanged (the catch still never denies — H20 is advisory there).
     // ROTATED AGAIN 2026-09-05 (#3201ecdb -> #f62ba302): the four statements above
     // moved into this try, so its text (and digest) moved; catch semantics unchanged.
+    // ROTATED AGAIN 2026-09-05 (#c5e5d9cf -> #2eb60290): slice 3 (board
+    // fb7c43fb) added the re-ask delta shortfall computation inside this try —
+    // `let shortfall` and its loop body sit within the guarded region, so the
+    // flattened text moved. RE-EXAMINED: catch semantics unchanged (H20 is
+    // advisory there and the catch still never denies), one entry in, one stale
+    // entry out, total unmoved at 102. Prior:
     // ROTATED AGAIN 2026-09-05 (#f62ba302 -> #c5e5d9cf): the outside-family review's
     // one-stdout-write fix landed INSIDE this try — the success path's markDelivered/
     // writeGuard are now wrapped in a LOCAL try whose catch writes stderr only, so a
@@ -532,7 +574,7 @@ const BASELINE = {
     // OUTER try and its catch semantics are unchanged, and the edit added no new
     // unguarded top-level statement — `let emitted;` is uninitialized, like pinMemo.
     // Verified by RUNNING the check.
-    { statement: 'try { // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where // they were not … #c5e5d9cf' },
+    { statement: 'try { // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where // they were not … #2eb60290' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart

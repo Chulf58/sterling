@@ -3100,7 +3100,40 @@ export class SterlingTools {
     // (decision 68988832): the write's result carries a warning on the SAME
     // channel knowledge_update uses. same_subject (ruling types only) is
     // split off rather than left inside `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_append'));
+    // THE APPEND-JOIN CANDIDATE PATHS (board 31b2c872; rebuilt per decision
+    // [append-join-discharge-rebuilt-as-one-atomic-transition]): every
+    // normalized path THIS call supplies for an existing article's files[] —
+    // the only write shape that may close an `article_missing` resolves claim.
+    // Computed here because `entries` is the one place the paths this call
+    // ADDS are distinguishable from the ones already stored; undefined for
+    // every other field and every other record type, which is what keeps the
+    // admission narrow.
+    //
+    // THIS IS A CANDIDATE SET, NOT THE DISCHARGING SET. The NOT-NEW rule
+    // (which of these the article did not ALREADY own — re-appending an owned
+    // path establishes no ownership, it just duplicates a files[] row) is
+    // applied INSIDE dischargeAppendJoin's transaction, against a re-read of
+    // the article taken under the write lock. Filtering here as well would put
+    // the decision back on the wrong side of the transaction boundary, which
+    // is the exact cause this mechanism was rebuilt to remove.
+    const appendJoin =
+      old.type === 'feature_article' && field === 'files'
+        ? {
+            appendedPaths: entries
+              .map((e) => (e as { path?: unknown } | null)?.path)
+              .filter((p): p is string => typeof p === 'string')
+              .map((p) => normalizeRepoPath(p)),
+            // The RETENTION SINK: knowledgeUpdate fills this AFTER the discharge
+            // transaction commits, one entry per article_missing item this
+            // append only PARTIALLY covered. It rides back out as a warning
+            // below, because a partial close that reads like a full close is
+            // worse than a refusal.
+            retained: [] as { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[],
+          }
+        : undefined;
+    const { record } = this.splitSameSubject(
+      this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_append', appendJoin)
+    );
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
     // entries — never the array's pre-existing elements, which were already
     // scanned (or not) on whatever write introduced them.
@@ -3111,6 +3144,19 @@ export class SterlingTools {
         ...this.articleOversizeWarnings(record),
         ...this.citedIdWarnings(JSON.stringify(entries)),
         ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+        ...(appendJoin?.retained ?? []).map(
+          (r) =>
+            `article_missing item ${r.item_id} was PARTIALLY closed, not drained: this append established ownership for ` +
+            `${r.joined.length} of its file_keys (${r.joined.join(', ')}), so the item was REWRITTEN IN PLACE — same id, same ` +
+            `article_missing lane — and still names ${r.keys.length} path(s) nothing owns: ${r.keys.join(', ')}. ` +
+            `Those need an owning article too; the item stays open until they have one.` +
+            // A key discharged because some OTHER project record already owned it
+            // was never paid by this append — say so rather than letting the
+            // shrunken file_keys read as if this write covered it.
+            (r.already_owned.length
+              ? ` (A further ${r.already_owned.length} of its keys were dropped as already owned by another project record, not by this append: ${r.already_owned.join(', ')}.)`
+              : '')
+        ),
       ],
     };
   }
@@ -5069,6 +5115,20 @@ export class SterlingTools {
    * feature_link, and needs its own design. USER-RULED 2026-08-25: only these
    * three tranches were selected — knowledge_create and knowledge_retire were
    * NOT.
+   *
+   * article_missing IS NOW ADMITTED, but only in ONE SHAPE (board 31b2c872,
+   * issues log 2026-09-05) — hence a separate constant rather than membership
+   * in the set above. The 2026-08-25 exclusion assumed the lane always closes
+   * by knowledge_create ("no article owns this file" → write the article), and
+   * that assumption did not cover the other real discharge: JOINING the file to
+   * an EXISTING article, which is a knowledge_append to files[] and mints no
+   * record at all — so the demand was genuinely paid while the only route to
+   * close it was a bare maintenance_remove with no artifact behind it. The
+   * admitted shape is exactly that write and nothing wider: knowledge_append,
+   * field `files`, on a feature_article, where at least one APPENDED entry's
+   * normalized path is one of the item's file_keys. Every other write naming an
+   * article_missing item still refuses (knowledge_create's own discharge path is
+   * untouched — it has no resolves parameter and never consulted these lanes).
    */
   private static readonly UPDATE_RESOLVABLE_LANES = new Set([
     'reconcile_needed',
@@ -5078,7 +5138,119 @@ export class SterlingTools {
     'state_review',
   ]);
 
-  private validateResolveClaim(id: string, chain: Set<string>, options?: { splitMarker: string }): DurableRecord {
+  /** The one lane closeable ONLY by the files[]-append join described above. */
+  private static readonly APPEND_JOIN_RESOLVABLE_LANE = 'article_missing';
+
+  /**
+   * H10's OWNERSHIP PREDICATE, mirrored — AND RESTRICTED TO THE PROJECT STORE
+   * (decision [append-join-discharge-rebuilt-as-one-atomic-transition],
+   * requirement B; the project-local posture itself was already ruled in
+   * decision 8c65937e).
+   *
+   * The append-join admission and the hook that MINTS the items it closes must
+   * never be able to disagree about what "owned" means, so this asks the same
+   * question of the same two types with the same working_tree exclusion
+   * (h10-direct-capture.mjs, `isUnowned = (p) => !ownerRows(p).some((r) =>
+   * !r.working_tree)`), and counts first so the read is never a window (the
+   * false-demand hazard H10 documents at its own join).
+   *
+   * HOW THE PROJECT-LOCAL RESTRICTION IS OBTAINED — BY ASKING THE STORAGE
+   * LAYER, NEVER BY READING `scope` (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]; outside-model review,
+   * 2026-09-05). H10 opens ONLY the project database (scripts/hooks/lib/
+   * common.mjs), while the MCP `query` / `count` surface FANS across every
+   * mounted store (packages/store/src/mounted.ts), so the fanned result must be
+   * narrowed to the rows that live in the same file H10 reads. Unfiltered, a
+   * key owned only by a DOMAIN record would be treated as discharged here while
+   * H10 went on raising it forever — the two sides of one mechanism disagreeing
+   * about ownership.
+   *
+   * THE NARROWING USED TO BE `scope === 'project'`, AND THAT WAS FALSE. `scope`
+   * decides where a record is CREATED (MountedStores.storeFor); every write
+   * after that routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not among the refused server-owned fields and is
+   * merged straight into the new body); and the store's in-place update pins
+   * id/type/created_at but never the row's mount. So a DOMAIN-HELD record
+   * labelled 'project' passed as a project-local owner H10 cannot see —
+   * reopening the very debt-loss finding this predicate exists to close — while
+   * a PROJECT-HELD record labelled 'domain:x' was wrongly excluded. The
+   * membership question now goes to store.projectStoreHolds, the one component
+   * that can answer it; the body's `scope` is not consulted here at all.
+   *
+   * FAIL DIRECTION, DELIBERATE: a row the project store does not hold counts as
+   * NOT an owner — and so does a legacy row whose `scope` is UNDEFINED, which is
+   * now simply irrelevant rather than special-cased — so the key stays in the
+   * item's remainder. That fails toward RETAINING the debt (a stale nag a later
+   * drain can look at) rather than LOSING it (an H10 demand with no item behind
+   * it), which is the safe direction of the two.
+   *
+   * The cross-mount `count` is used only as an upper bound for `cap` — it can
+   * over-estimate (it counts domain rows too) without ever narrowing the window.
+   */
+  private pathHasProjectOwner(path: string): boolean {
+    const filter = { types: ['feature_article', 'reference_material'], file_keys: [normalizeRepoPath(path)] };
+    const total = this.store.count(filter);
+    if (total === 0) return false;
+    return this.store.query({ ...filter, cap: total }).some((r) => {
+      const owner = r as unknown as { id: string; working_tree?: unknown };
+      return this.store.projectStoreHolds(owner.id) && !owner.working_tree;
+    });
+  }
+
+  /**
+   * The item keys THIS append newly joins to the target article — the ONE
+   * definition, called by the admission (validateResolveClaim) and by the
+   * in-transaction classifier (dischargeAppendJoin), so a refusal and a
+   * retention can never disagree about what was joined. `newPaths` is always
+   * the NOT-NEW-filtered set: a path the article already owned is not a join.
+   */
+  private static appendJoinedKeys(itemKeys: string[], newPaths: string[]): string[] {
+    return [...new Set(itemKeys.map((k) => normalizeRepoPath(k)))].filter((k) => newPaths.includes(k));
+  }
+
+  /**
+   * "Can a resolves claim ride a write to THIS record?" — the ONE definition of
+   * the target-mount test, shared by the append-join discharge's in-transaction
+   * guard and knowledgeUpdate's ordinary-path guard, so the two can never
+   * disagree about what a legal target is. Returns the human-readable FAULT
+   * when the record is not a legal target, `undefined` when it is.
+   *
+   * A maintenance item is PROJECT-LOCAL (§3.3), so a claim can only be closed
+   * atomically beside a write to a record the PROJECT store holds. BOTH halves
+   * are required and neither implies the other: the LABEL must say 'project'
+   * (fail closed — a missing/legacy scope is not implicitly project, P5), and
+   * the STORAGE LAYER must confirm the mount, because `scope` is caller-
+   * writable and is not the routing key for anything after creation
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   */
+  private static targetMountFault(scope: unknown, projectHeld: boolean): string | undefined {
+    if (scope === undefined) return `carries no scope at all (a legacy body) — the target must BE scope='project'`;
+    if (scope !== 'project') return `has scope='${String(scope)}'`;
+    if (!projectHeld) {
+      return (
+        `is labelled scope='project' but the PROJECT store does not hold it — the record physically lives in a domain mount, ` +
+        `and its body's scope says nothing about that`
+      );
+    }
+    return undefined;
+  }
+
+  private validateResolveClaim(
+    id: string,
+    chain: Set<string>,
+    options?: {
+      splitMarker?: string;
+      appendedArticlePaths?: string[];
+      targetWorkingTree?: unknown;
+      targetScope?: unknown;
+      /** Whether the PROJECT store physically holds the target article — read
+       *  from the storage layer under the write lock by dischargeAppendJoin,
+       *  never inferred from `targetScope` (anti_pattern
+       *  [record-body-scope-is-not-physical-store-identity]). */
+      targetProjectHeld?: boolean;
+    }
+  ): DurableRecord {
     // EXACT FULL ID ONLY — no slug rung, no prefix rung (USER-RULED RETRACTION
     // 2026-08-22, partly retracting decision
     // id-ladder-extends-to-board-tools-with-collision-guard, which had wired
@@ -5130,23 +5302,124 @@ export class SterlingTools {
           `lands and a stale abbreviation could silently retarget to a different item. Nothing was written.`
       );
     }
-    const it = record as unknown as { type: string; source?: string; system_reason?: string; feature_link?: string; text?: string };
+    const it = record as unknown as {
+      type: string;
+      source?: string;
+      system_reason?: string;
+      feature_link?: string;
+      text?: string;
+      file_keys?: string[];
+    };
     if (it.type !== 'todo' || it.source !== 'system') {
       throw new Error(`resolves: names '${id}', which is not a system maintenance-queue item; nothing was written.`);
     }
-    const isSplit = options !== undefined;
+    const isSplit = options?.splitMarker !== undefined;
+    // THE APPEND-JOIN ADMISSION (board 31b2c872): an article_missing item closes
+    // when THIS write is the knowledge_append that joins one of its own
+    // file_keys to an existing article's files[]. The paths are supplied by
+    // knowledgeAppend (only the append surface knows which entries are NEW —
+    // matching against the merged files[] would let any append close the item on
+    // a path the article already owned). Both halves are required, so the
+    // admission is the SHAPE, never the lane name on its own.
+    const appendedPaths = options?.appendedArticlePaths;
+    const isAppendJoinLane = !isSplit && it.system_reason === SterlingTools.APPEND_JOIN_RESOLVABLE_LANE;
+    const joinedKeys =
+      isAppendJoinLane && appendedPaths !== undefined
+        ? SterlingTools.appendJoinedKeys(it.file_keys ?? [], appendedPaths)
+        : [];
+    // ONLY A PROJECT-HELD ARTICLE CAN DISCHARGE A PROJECT-LOCAL ITEM (decision
+    // [append-join-discharge-rebuilt-as-one-atomic-transition], requirement A).
+    // Maintenance items are project-local by definition (§3.3), while a domain
+    // article lives in a DIFFERENT physical store — and a cross-mount
+    // transaction is refused outright (runScopedTransaction,
+    // packages/store/src/mounted.ts), so the article write and the item's drain
+    // could not share one atomic boundary even in principle. Article scope is
+    // NOT enforced at creation (knowledgeCreate takes a caller-supplied
+    // `scope`), so this shape is reachable and is refused BY NAME here — naming
+    // `scope` exactly as the working_tree refusal below names `working_tree` —
+    // rather than surfacing as an opaque nested-transaction error from two
+    // layers down (or, worse, as a silent second connection committing on its
+    // own). Three corrections from the 2026-09-05 outside-model review:
+    //
+    // (i) IT FAILS CLOSED. The old test was `targetScope !== undefined &&
+    //     targetScope !== 'project'`, which let an UNDEFINED (legacy) scope
+    //     PASS. The requirement is that the target scope must BE 'project', so
+    //     every other value — missing included — is refused (P5).
+    //
+    // (ii) IT IS NO LONGER GATED ON joinedKeys. `joinedKeys` is non-empty only
+    //     for an article_missing claim, but the discharge TRANSACTION opens for
+    //     ANY knowledge_append(files) carrying a non-empty resolves
+    //     (knowledgeUpdate's isAppendJoinWrite), so a claim in a PASS-THROUGH
+    //     lane could ride a domain-targeted append into a project-store
+    //     transaction whose article write then routed to the domain mount: two
+    //     connections committing independently, which is exactly what
+    //     runScopedTransaction exists to refuse. The refusal therefore covers
+    //     EVERY claim validated inside the discharge transaction, whatever its
+    //     lane. That is the fix chosen over narrowing isAppendJoinWrite by the
+    //     claims' lanes, because narrowing would have to read those lanes
+    //     BEFORE the write lock — a second copy of the lane decision on the
+    //     wrong side of the transaction boundary, which is precisely what the
+    //     rebuild removed.
+    //
+    // (iii) SCOPE IS A LABEL, NOT A LOCATION. `scope` cannot say which physical
+    //     store holds the article (anti_pattern
+    //     [record-body-scope-is-not-physical-store-identity]): a domain-held
+    //     record can carry scope 'project'. So the guard ALSO requires the
+    //     storage layer to confirm the project mount holds the target
+    //     (targetProjectHeld, read under the write lock by dischargeAppendJoin).
+    //     Not-provably-project-held is refused, the honest fallback when a
+    //     transaction's atomicity depends on the answer.
+    const inAppendJoinTransaction = appendedPaths !== undefined;
+    const fault = inAppendJoinTransaction
+      ? SterlingTools.targetMountFault(options?.targetScope, options?.targetProjectHeld === true)
+      : undefined;
+    if (fault) {
+      throw new Error(
+        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane), but the article this append targets ${fault}. ` +
+          `Maintenance todos are project-local, so a domain-scoped append-join's transaction cannot atomically close them — the same ` +
+          `refusal knowledge_extract makes by name for a domain-scoped source. The discharge must close the item and write the ` +
+          `article in ONE project-store transaction, and a transaction cannot span two mounts, so this join can never be atomic. ` +
+          `Join the path(s) to an article the PROJECT store holds and claim the item from that write instead. Nothing was written.`
+      );
+    }
+    // FOREIGN-TREE ARTICLES CANNOT DISCHARGE ROOT OWNERSHIP DEBT (review
+    // finding, 2026-09-05). H10 mints these items from `isUnowned`, which
+    // EXCLUDES every owner row declaring a working_tree — that article owns a
+    // different tree's copy of the same-named path (decision a0fc8743), so its
+    // files[] entry never makes the ROOT's path owned. Admitting the join here
+    // would discharge the item while H10 went on demanding an article for the
+    // very same path: the debt closed without the ownership that created it
+    // ever existing. Refused BY NAME rather than by silently declining to join,
+    // because the caller's next move (own it from a root-scoped article) is not
+    // guessable from a generic lane refusal.
+    if (joinedKeys.length > 0 && options?.targetWorkingTree) {
+      throw new Error(
+        `resolves: names '${id}' (${SterlingTools.APPEND_JOIN_RESOLVABLE_LANE} lane), but the article this append targets declares ` +
+          `working_tree='${String(options?.targetWorkingTree)}' — it owns the copy of ${joinedKeys.join(', ')} in THAT tree, not this ` +
+          `repository root's path, so appending the path to it establishes no ownership here. H10 raised the item precisely because no ` +
+          `record WITHOUT a working_tree owns the path, and it would go on raising it. Join the path to a root-scoped article (one with ` +
+          `no working_tree) and claim the item from that write instead. Nothing was written.`
+      );
+    }
+    const joinsThisArticle = joinedKeys.length > 0;
     const laneAllowed = isSplit
       ? it.system_reason !== 'promotion_review'
-      : SterlingTools.UPDATE_RESOLVABLE_LANES.has(it.system_reason ?? '');
+      : SterlingTools.UPDATE_RESOLVABLE_LANES.has(it.system_reason ?? '') || joinsThisArticle;
     if (!laneAllowed) {
       throw new Error(
         `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane) — only ${[...SterlingTools.UPDATE_RESOLVABLE_LANES].join(', ')} items ` +
-          `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. Nothing was written.`
+          `close via resolves; every other lane, including promotion_review, closes only through its own mechanism. ` +
+          `The one exception is ${SterlingTools.APPEND_JOIN_RESOLVABLE_LANE}, which closes ONLY on a knowledge_append to the ` +
+          `files[] of an existing feature_article where an APPENDED entry's path is one of the item's own file_keys — any other ` +
+          `write naming it is refused here. Nothing was written.`
       );
     }
     const inChain = it.feature_link !== undefined && chain.has(it.feature_link);
-    const marksThisArticle = isSplit && (it.text ?? '').startsWith(options!.splitMarker);
-    if (!inChain && !marksThisArticle) {
+    const marksThisArticle = isSplit && (it.text ?? '').startsWith(options!.splitMarker!);
+    // joinsThisArticle IS the key for its lane: an article_missing item is raised
+    // on territory NO article owns, so it carries no feature_link to match — the
+    // appended path is the whole join.
+    if (!inChain && !marksThisArticle && !joinsThisArticle) {
       throw new Error(
         isSplit
           ? `resolves: names '${id}', whose feature_link does not match this split's parent (or its supersedes-chain ancestors), and whose text does not match the article-oversize marker for the parent's slug; nothing was written.`
@@ -5192,6 +5465,314 @@ export class SterlingTools {
   }
 
   /**
+   * The sentinel separating the REGENERATED canonical statement of an
+   * article_missing item from the item's ORIGINAL text — see
+   * appendJoinItemText. Deliberately long and structural: it must never occur
+   * by accident in operator prose, because it is the only thing this mechanism
+   * pattern-matches on, and it matches its OWN previous output rather than
+   * anybody else's writing.
+   */
+  private static readonly APPEND_JOIN_ORIGINAL_TEXT_MARKER =
+    '\n\n--- ORIGINAL ITEM TEXT (retained verbatim; superseded by the line above — any count or path list below predates this partial close) ---\n';
+
+  /**
+   * REGENERATE an article_missing item's human-facing text from the item's own
+   * structured state. It does NOT edit the old string, and it never parses it.
+   *
+   * WHY REGENERATION REPLACED PATTERN-EDITING. Four rounds of this mechanism
+   * rewrote the stored text by regex, and every round found a new shape the
+   * regex got wrong: an anchored pattern silently no-opped on any wording but
+   * H10's, and the widened non-anchored one rewrote the FIRST `N file(s)` it
+   * found whatever it described — turning a persisted operator note reading
+   * `audited 20 file(s); article missing: 3 file(s)…` into `audited 2 file(s)`,
+   * i.e. corrupting prose it had no business touching. Both failure modes come
+   * from the same root: the text was treated as a document to be amended
+   * instead of a projection of state.
+   *
+   * SO: the count and the path list in the AUTHORITATIVE head come from
+   * `remaining` — which IS the item's new file_keys — and never from the
+   * previous string. The previous string is carried through below the marker
+   * so an operator's note is not destroyed, with ONE transformation applied to
+   * it: a `N file(s)` token whose number equals `countBefore` — the number of
+   * keys this item carried GOING INTO this close — is VOIDED to
+   * `N [superseded] file(s)`.
+   *
+   * TWO PROPERTIES, AND BOTH ARE WHY THIS IS NOT THE OLD COUNT-CORRECTION.
+   * (a) IT SELECTS ON THE ITEM'S OWN STATE, NOT ON PROSE. The old code voided
+   * whichever token came FIRST, so `audited 20 file(s); article missing: 3
+   * file(s)` had its unrelated historical total rewritten. A token is this
+   * item's own total only if it states the number of files this item actually
+   * named, and that number is structured state we hold — so `20` is left alone
+   * for a reason a reader can check, not by luck of ordering.
+   * (b) IT WRITES NO NUMBER AT ALL. The old code recomputed a value INTO
+   * someone else's sentence, which is how a mismatch produced a FALSE fact.
+   * Voiding leaves the original digits visible and merely marks them as no
+   * longer current: nothing is destroyed, and nothing false is ever asserted.
+   *
+   * The two shapes that defeated the old code are therefore handled by
+   * construction — a text with NO count token has nothing to void and still
+   * gains a true count from the regenerated head, and a text with SEVERAL
+   * counts has exactly the item's own total voided, however many others sit
+   * beside it and whatever order they appear in.
+   *
+   * KNOWN AND ACCEPTED IMPRECISION: an unrelated historical count that happens
+   * to equal `countBefore` is voided too. That mislabels a sentence, which is
+   * recoverable and visible; it never states a wrong number, which is not.
+   *
+   * IDEMPOTENT ACROSS REPEATED PARTIAL CLOSES: the marker is this function's
+   * own output, so a second close extracts exactly the same original text (its
+   * tokens already voided, hence unchanged by a second voiding) and re-emits
+   * ONE freshly generated head. Clauses cannot stack, and no intermediate count
+   * from an earlier close can survive — the head is never built from the
+   * previous head, only from current state.
+   */
+  private appendJoinItemText(
+    currentText: string,
+    countBefore: number,
+    remaining: string[],
+    joined: string[],
+    alreadyOwned: string[],
+    articleSlug: string,
+    at: string
+  ): string {
+    const marker = SterlingTools.APPEND_JOIN_ORIGINAL_TEXT_MARKER;
+    const cut = currentText.indexOf(marker);
+    const original = (cut === -1 ? currentText : currentText.slice(cut + marker.length))
+      .trim()
+      // VOID, never recompute — see the contract above. `[superseded]` sits
+      // between the digits and `file(s)`, so the voided text no longer reads as
+      // a count of this item's files to any reader (human or mechanical) while
+      // the original number itself is still there to be read. Only a token
+      // stating THIS item's own pre-close total is touched.
+      .replace(/(\d+)(\s*)file\(s\)/gi, (whole, digits: string, gap: string) =>
+        Number(digits) === countBefore ? `${digits} [superseded]${gap}file(s)` : whole
+      );
+    const head =
+      `article missing: ${remaining.length} file(s) nothing owns (feature_article or repo-located reference doc) — ` +
+      `create the owning article(s) (§6 H10 / §12 accretion). ` +
+      `AUTHORITATIVE REMAINDER (equals this item's file_keys): ${remaining.join(', ')}. ` +
+      `Partially closed at ${at}: ${joined.length} path(s) joined to article '${articleSlug}'` +
+      (joined.length ? ` (${joined.join(', ')})` : '') +
+      (alreadyOwned.length ? `; ${alreadyOwned.length} path(s) already owned by another project record (${alreadyOwned.join(', ')})` : '') +
+      `.`;
+    return original ? `${head}${marker}${original}` : head;
+  }
+
+  /**
+   * ========================================================================
+   * THE APPEND-JOIN DISCHARGE — ONE ATOMIC STATE TRANSITION
+   * ========================================================================
+   * Decision [append-join-discharge-rebuilt-as-one-atomic-transition]
+   * (knowledge_get 26e8f8ac-e0c7-4206-b0ee-640583eb9e87). This block was
+   * REBUILT FROM BLANK against frozen pins rather than patched a fifth time
+   * ([rebuild-over-patch-third-round-rebuilds-against-frozen-pins]): four fix
+   * rounds and two independent review passes produced six defects, every one
+   * of them in the partial-close path and every one BETWEEN the guards rather
+   * than in them. THE CAUSE, in one sentence: the lane decided what to
+   * discharge from evidence read OUTSIDE the transaction that discharged it,
+   * and edited human-facing item text by pattern-matching rather than owning
+   * it. Adding a fifth round of handlers would have left that cause untouched.
+   *
+   * THE INVARIANT. A discharge is ONE ATOMIC STATE TRANSITION. Inside a single
+   * project-store transaction, entered AFTER the write lock is held
+   * (store.withTransaction → BEGIN IMMEDIATE):
+   *   1. re-read the target article and every claimed item;
+   *   2. revalidate everything against those fresh reads — the lane
+   *      (article_missing closes ONLY via a files[] append), the append shape,
+   *      the NOT-NEW rule (satisfying paths = appended MINUS the article's
+   *      pre-append paths), the working_tree refusal and the target refusal
+   *      (the target must BE scope='project' AND be physically held by the
+   *      project store — the mount is read from the storage layer, never
+   *      inferred from the body's `scope`);
+   *   3. classify each claimed item's keys into JOINED (in this call's new-path
+   *      set), ALREADY-OWNED-ELSEWHERE or REMAINING, using a PROJECT-LOCAL
+   *      owner lookup (pathHasProjectOwner);
+   *   4. write the article;
+   *   5. per claimed item: REMOVE it when nothing remains (via store.remove, so
+   *      the §3.2.7 drain log is preserved and maintenance_remove later answers
+   *      already_drained:true), else UPDATE it with its FRESHLY-READ
+   *      expected_version, regenerated file_keys and REGENERATED text;
+   *   6. any failure rolls the article write, the item rewrites and the drains
+   *      back TOGETHER — there is no post-commit repair step left that can fail
+   *      on its own and report a landed write as a failed one;
+   *   7. warnings are built by the caller only AFTER this returns, i.e. after
+   *      the transaction has committed.
+   *
+   * HOW ATOMICITY IS OBTAINED. SterlingStore.withTransaction is REENTRANT
+   * (`txDepth`): a nested updateRecord / updateTodo / remove JOINS the open
+   * transaction instead of opening a second one, so this composite calls the
+   * ORDINARY primitives inside one wrapper. On MountedStores, withTransaction
+   * routes to the PROJECT store, which is exactly the mount this mechanism is
+   * allowed to touch (hence the target-scope refusal in validateResolveClaim).
+   *
+   * WHAT DELIBERATELY DID NOT CHANGE: RecordWriteOptions.resolves stays
+   * DELETE-ONLY. `drainResolves` (packages/store/src/index.ts) is a generic
+   * store primitive and must not grow a conditional-rewrite special case for
+   * one mechanism, so claims in OTHER lanes still ride the article write's own
+   * `resolves` while article_missing claims are removed or rewritten
+   * explicitly here, inside the same transaction.
+   *
+   * WHAT THIS DOES NOT GUARANTEE — stated, not silently diverged from. It does
+   * NOT prune keys that have become gitignored or deleted from disk, although
+   * H10's own retention predicate DOES (`stillOwed = (p) => !prunable.has(p) &&
+   * isUnowned(p)`, scripts/hooks/h10-direct-capture.mjs:1367, where `prunable`
+   * is the gitignored-or-absent set). A partial close can therefore RETAIN a
+   * key that can never gain an owning article. That divergence is ACCEPTED —
+   * importing git-ignore knowledge into the store layer is a larger change than
+   * the defect warrants — and is recorded here so the next reader neither
+   * "fixes" it by accident nor mistakes this predicate for H10 parity.
+   */
+  private dischargeAppendJoin(args: {
+    old: DurableRecord;
+    next: Record<string, unknown>;
+    resolves: string[];
+    chain: Set<string>;
+    appendedPaths: string[];
+    expectedVersion?: number;
+    previousVersion?: number;
+    ts: string;
+    toolName: string;
+  }): { updated: DurableRecord; retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[] } {
+    const { old, next, resolves, chain, appendedPaths, expectedVersion, previousVersion, ts, toolName } = args;
+
+    // (1) RE-READ THE TARGET ARTICLE, under the write lock this transaction
+    //     already holds. `next` was merged from a read taken before the lock;
+    //     if the stored record has moved since, the merge is built on a body
+    //     this call never saw, so the discharge refuses rather than deciding
+    //     from it. (store.updateRecord's own CAS would also refuse the write,
+    //     but it would do so AFTER the classification had already been made
+    //     against stale evidence — which is the class of defect this rebuild
+    //     exists to remove.)
+    const fresh = this.store.get(old.id) as
+      | (DurableRecord & { version?: number; files?: unknown[]; working_tree?: unknown; slug?: string })
+      | undefined;
+    if (!fresh) {
+      throw new Error(`${toolName}: record '${old.id}' no longer exists — it was removed concurrently. Nothing was written.`);
+    }
+    if (fresh.version !== previousVersion) {
+      throw new Error(
+        `${toolName}: record '${old.id}' was concurrently written — this call merged from version ${previousVersion} but the store is at ` +
+          `version ${fresh.version}. The append-join discharge decides what to close from THIS read, so it refuses rather than closing ` +
+          `maintenance debt against a body it never saw. Nothing was written; re-read the record and retry.`
+      );
+    }
+
+    // (2) THE NOT-NEW RULE, against the FRESH pre-append files[]. Re-appending
+    //     a path the article ALREADY owns establishes no ownership — it only
+    //     duplicates a files[] row — so it can never close an article_missing
+    //     item. Computing the difference here, rather than in knowledgeAppend,
+    //     is what makes the satisfying set and the write agree by construction.
+    const ownedBefore = new Set(
+      ((fresh.files ?? []) as { path?: unknown }[])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string')
+        .map((p) => normalizeRepoPath(p))
+    );
+    const newPaths = [...new Set(appendedPaths.filter((p) => !ownedBefore.has(p)))];
+
+    // Revalidation. validateResolveClaim owns EVERY message a caller reads
+    // (full-uuid addressing, open/already-drained traces, lane rules,
+    // feature_link matching, the working_tree and target-scope refusals), and
+    // it reads each item through store.get — so calling it HERE, inside the
+    // transaction, is simultaneously the revalidation and the fresh re-read of
+    // every claimed item that step 1 of the invariant requires.
+    // PHYSICAL mount membership, read under this same write lock: `fresh` came
+    // from the cross-mount fan (store.get), so it resolves a domain-held
+    // article just as happily as a project-held one, and its body's `scope`
+    // cannot tell the two apart (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]). The project store is
+    // the ONLY mount this transaction commits on, so the guard inside
+    // validateResolveClaim gets the storage layer's answer rather than a label.
+    const targetProjectHeld = this.store.projectStoreHolds(fresh.id);
+    const claims = resolves.map((rid) =>
+      this.validateResolveClaim(rid, chain, {
+        appendedArticlePaths: newPaths,
+        targetWorkingTree: fresh.working_tree,
+        targetScope: fresh.scope,
+        targetProjectHeld,
+      })
+    );
+
+    // (3) CLASSIFY, still inside the lock. THIS IS THE HIGH DEFECT'S FIX: the
+    //     owner lookup that decides a key is already discharged now happens in
+    //     the same transaction as the removal it justifies. Previously the
+    //     lookup ran before the transaction, so an article retired in between
+    //     could leave an item deleted whole while one of its paths was in fact
+    //     unowned — permanent debt loss, because H10 only re-raises TOUCHED
+    //     territory.
+    //
+    //     H10 consolidates every unowned path a Stop found into ONE item, so an
+    //     item routinely names paths belonging in DIFFERENT articles. Draining
+    //     on the first joined path would silently discard the rest; refusing
+    //     until one append covers them all would make the common case
+    //     undischargeable. Hence REWRITE-DOWN: the item keeps its id and its
+    //     article_missing lane and shrinks to what is still unowned; only full
+    //     coverage drains it.
+    const dispositions: {
+      item: DurableRecord & { version?: number; text?: string; file_keys?: string[] };
+      countBefore: number;
+      joined: string[];
+      alreadyOwned: string[];
+      remaining: string[];
+    }[] = [];
+    // Claims in the OTHER resolvable lanes are not this mechanism's business:
+    // they ride the article write's own `resolves` drain exactly as they do on
+    // every non-append write, inside this same transaction.
+    const passThrough: string[] = [];
+    for (const claim of claims) {
+      const item = claim as DurableRecord & { system_reason?: string; version?: number; text?: string; file_keys?: string[] };
+      if (item.system_reason !== SterlingTools.APPEND_JOIN_RESOLVABLE_LANE) {
+        passThrough.push(item.id);
+        continue;
+      }
+      const keys = [...new Set((item.file_keys ?? []).map((k) => normalizeRepoPath(k)))];
+      const joined = SterlingTools.appendJoinedKeys(keys, newPaths);
+      const rest = keys.filter((k) => !joined.includes(k));
+      const alreadyOwned = rest.filter((k) => this.pathHasProjectOwner(k));
+      const remaining = rest.filter((k) => !alreadyOwned.includes(k));
+      dispositions.push({ item, countBefore: keys.length, joined, alreadyOwned, remaining });
+    }
+
+    // (4) WRITE THE ARTICLE.
+    const cas = expectedVersion ?? previousVersion;
+    const updated = this.store.updateRecord(old.id, next, {
+      ...(cas !== undefined ? { expected_version: cas } : {}),
+      ...(passThrough.length ? { resolves: passThrough } : {}),
+    });
+
+    // (5) ACT ON EACH CLAIMED ITEM — remove or rewrite, never both, never
+    //     neither. A throw anywhere in this loop unwinds step 4 with it.
+    const articleSlug = (fresh.slug ?? fresh.id) as string;
+    const retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[] = [];
+    for (const d of dispositions) {
+      if (d.remaining.length === 0) {
+        // Fully covered: the debt is PAID, so the item leaves through the
+        // artifact-write that fulfilled it (P4), logged like every other
+        // system removal.
+        this.store.remove(d.item.id, ts);
+        continue;
+      }
+      // Partially covered: rewrite in place, CAS-GUARDED on the version this
+      // transaction just read. Without the token a concurrent H10 heal that
+      // ADDED newly-unowned keys would be silently clobbered by our shrunken
+      // list — a lost-update in the same file that explains at length why
+      // every in-place write must be CAS-guarded.
+      this.store.updateTodo(
+        d.item.id,
+        {
+          ...(d.item as unknown as Record<string, unknown>),
+          file_keys: d.remaining,
+          text: this.appendJoinItemText(String(d.item.text ?? ''), d.countBefore, d.remaining, d.joined, d.alreadyOwned, articleSlug, ts),
+          updated_at: ts,
+        },
+        d.item.version !== undefined ? { expected_version: d.item.version } : {}
+      );
+      retained.push({ item_id: d.item.id, keys: d.remaining, joined: d.joined, already_owned: d.alreadyOwned });
+    }
+    return { updated, retained };
+  }
+
+  /**
    * Versioned change (§10) — IN PLACE since S3 ([stable-identity-design-v2]):
    * the record's id NEVER changes, the server-owned `version` counter bumps by
    * one, and the full prior body is archived in record_versions (readable via
@@ -5228,7 +5809,25 @@ export class SterlingTools {
     body: Record<string, unknown>,
     resolves?: string[],
     expectedVersion?: number,
-    toolName = 'knowledge_update'
+    toolName = 'knowledge_update',
+    /**
+     * Set ONLY by knowledgeAppend, and only for an append to a feature_article's
+     * files[]. `appendedPaths` are every normalized path this call supplies —
+     * the CANDIDATE set; the not-new filter, the target article's working_tree
+     * and its scope are all derived inside dischargeAppendJoin from a re-read
+     * taken under the write lock, never passed in from a pre-transaction read.
+     * Its presence is what admits a resolves claim on an `article_missing` item
+     * (the append-join admission, board 31b2c872, rebuilt by decision
+     * [append-join-discharge-rebuilt-as-one-atomic-transition]); it never
+     * affects what is written to the article itself.
+     * `retained` is an OUT parameter, filled AFTER the discharge transaction
+     * commits: one entry per item this append only partially covered, so
+     * knowledgeAppend can say so on the receipt.
+     */
+    appendJoin?: {
+      appendedPaths: string[];
+      retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[];
+    }
   ): DurableRecord & { same_subject?: SameSubjectEntry[]; previous_version?: number; identity_moved?: { previous_id: string; note: string } } {
     const old = this.resolveRecordId(id, toolName);
     this.refuseStaleAddress(old, id, toolName);
@@ -5267,7 +5866,40 @@ export class SterlingTools {
     }
     // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision 68988832): a
     // write that does not validate is a write that must not land.
-    const claims = (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
+    //
+    // THE APPEND-JOIN PATH VALIDATES INSIDE ITS TRANSACTION INSTEAD, and
+    // deliberately does not pre-validate here as well: its whole invariant is
+    // that the evidence a discharge acts on is read under the same write lock
+    // that performs it, and a second copy of the decision on this side of the
+    // boundary is exactly what the rebuild removed. See dischargeAppendJoin.
+    const isAppendJoinWrite = appendJoin !== undefined && (resolves?.length ?? 0) > 0;
+    // A CLAIM CAN ONLY RIDE A WRITE THE PROJECT STORE WILL RECEIVE (mount-
+    // boundary review, 2026-09-06). The append-join path makes this decision
+    // ONCE, inside its transaction, from a re-read under the write lock — so
+    // this pre-write copy is deliberately NOT applied to it (a second copy of
+    // the same decision on the other side of the lock is exactly what the
+    // rebuild removed). The ORDINARY path had no such guard at all: a claim
+    // against a DOMAIN-held record sent the drain to that domain store's
+    // connection, where a project-local item does not exist, and the caller got
+    // the store's "names no open item" message — which reads as "your item id
+    // is wrong" when the truth is "this target is in the wrong mount". Refused
+    // here by name instead, wording mirroring knowledge_extract's identical
+    // refusal for a domain-scoped source.
+    if (!isAppendJoinWrite && (resolves?.length ?? 0) > 0) {
+      const fault = SterlingTools.targetMountFault(
+        (old as unknown as { scope?: unknown }).scope,
+        this.store.projectStoreHolds(old.id)
+      );
+      if (fault) {
+        throw new Error(
+          `${toolName}: 'resolves' names ${resolves!.length} maintenance item(s), but the record this write targets ('${old.id}') ${fault}. ` +
+            `Maintenance todos are project-local, so a domain-scoped write's transaction cannot atomically close them — the same refusal ` +
+            `knowledge_extract makes by name for a domain-scoped source. Retry without resolves and close those items separately, or ` +
+            `claim them from a write to a record the PROJECT store holds. Nothing was written.`
+        );
+      }
+    }
+    const claims = isAppendJoinWrite ? [] : (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
     // ATTESTATION ONLY: a new id, a new birth clock, a retired predecessor.
     // Every other type keeps its id and its created_at — identity and birth are
     // properties of the RECORD, not of the version being written.
@@ -5347,6 +5979,30 @@ export class SterlingTools {
         for (const claim of claims) {
           this.store.remove(claim.id, ts);
         }
+      } else if (isAppendJoinWrite) {
+        // THE ATOMIC APPEND-JOIN DISCHARGE. Everything — the fresh reads, the
+        // revalidation, the classification, the article write, and each claimed
+        // item's removal or rewrite — happens inside ONE project-store
+        // transaction, so a failure anywhere unwinds all of it together and
+        // there is no post-commit repair step that can report a landed write as
+        // a failed one. See dischargeAppendJoin for the full invariant.
+        const outcome = this.store.withTransaction(() =>
+          this.dischargeAppendJoin({
+            old,
+            next,
+            resolves: resolves ?? [],
+            chain,
+            appendedPaths: appendJoin!.appendedPaths,
+            expectedVersion,
+            previousVersion,
+            ts,
+            toolName,
+          })
+        );
+        updated = outcome.updated;
+        // Filled only now, after COMMIT: the receipt describes a transition
+        // that actually happened (invariant step 7).
+        appendJoin!.retained.push(...outcome.retained);
       } else {
         // EVERY in-place write is CAS-GUARDED, not only the ones that passed a
         // token (review finding): this tool layer is a READ-MODIFY-WRITE — `next`
@@ -5374,6 +6030,13 @@ export class SterlingTools {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, old.type, toolName);
       throw err;
     }
+    // NOTE FOR THE NEXT READER: there is deliberately NO post-write repair step
+    // here. The partial-close rewrite used to live at this point, outside the
+    // article write's transaction, and that placement was the cause of three of
+    // the six defects this mechanism was rebuilt to remove (a lost-debt race, a
+    // post-commit throw reported as "nothing was written", and an unguarded
+    // read-modify-write). It now happens inside dischargeAppendJoin's own
+    // transaction; re-introducing anything here would re-open exactly that gap.
     this.repointPromotionReview(chain, updated.id, ts);
     // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
     // types — other types' update responses stay byte-identical. Excludes
@@ -6970,7 +7633,15 @@ export class SterlingTools {
         `cap reached — showing ${records.length} of ${matching.length} matching items${cursorMode ? '' : ` (offset ${offset})`}; ` +
           (cursorMode ? cursorAdvice : `${cursorAdvice}, ${offsetAdvice}`) +
           `, or raise cap to see more per page (a drain that stops at the cap leaves the tail behind)` +
-          (projection === 'full' ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)` : '')
+          // PROJECTION HINT PER RUNG, not full-only (board fb7c43fb): a capped
+          // DIGEST page is still paying per-item text it can shed, so it gets
+          // the next rung down; only `headline` — the smallest rung there is —
+          // has nothing left to offer and stays hint-free.
+          (projection === 'full'
+            ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)`
+            : projection === 'digest'
+              ? `, or re-run with projection:"headline" for the smallest per-item line (id, priority, system_reason, first 80 chars)`
+              : '')
       );
     }
     if (scanTruncated) {
