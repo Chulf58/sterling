@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h15-store-guard.mjs
-import { existsSync as existsSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync2, realpathSync as realpathSync2, statSync as statSync2 } from "node:fs";
+import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5520,6 +5520,148 @@ try {
       // failure mode it forecloses is a silently voided blocking gate.
       { agentId: input?.agent_id }
     )
+  );
+}
+function structuredWriteDestinationField(toolName) {
+  switch (toolName) {
+    case "Edit":
+    case "Write":
+    case "MultiEdit":
+      return "file_path";
+    case "NotebookEdit":
+      return "notebook_path";
+    default:
+      return null;
+  }
+}
+function isCommandChannelTool(toolName) {
+  return toolName === "Bash" || toolName === "PowerShell";
+}
+function namesStoreComponent(normalizedAbs) {
+  const components = normalizedAbs.split(sep2 === "\\" ? /[\\/]+/ : /\/+/);
+  return components.some((component) => component.toLowerCase() === ".sterling");
+}
+function pathIsInside(parentAbs, childAbs) {
+  const rel = relative2(parentAbs, childAbs);
+  if (rel === "") return true;
+  if (isAbsolute2(rel)) return false;
+  return rel !== ".." && !rel.startsWith(".." + sep2);
+}
+function pathIsInsideEitherCase(parentAbs, childAbs) {
+  if (pathIsInside(parentAbs, childAbs)) return true;
+  return pathIsInside(parentAbs.toLowerCase(), childAbs.toLowerCase());
+}
+function ancestorExists(p) {
+  try {
+    statSync2(p);
+    return true;
+  } catch (e) {
+    const code = e && e.code || "UNKNOWN";
+    if (code === "ENOENT" || code === "ENOTDIR") return false;
+    throw new Error(
+      `[canonical-layer] the path component ${p} could not be examined (${code}); an unreadable component is not an absent one \u2014 a same-user writer may still traverse it (Windows ACLs, some SMB/drop-box shares), so walking past it could resolve the wrong ancestor and miss a symlink into the store`
+    );
+  }
+}
+function canonicalViaNearestAncestor(absPath) {
+  let anchor = absPath;
+  while (!ancestorExists(anchor)) {
+    const parent = dirname2(anchor);
+    if (parent === anchor) return null;
+    anchor = parent;
+  }
+  const suffix = relative2(anchor, absPath);
+  const real = realpathSync2(anchor);
+  return suffix === "" ? real : join3(real, suffix);
+}
+function storeDestinationDenial(toolName, field, submitted, evidence) {
+  return `H15: this ${toolName} call targets a Sterling store and is denied \u2014 a store is read and written through the \xA710 MCP tool surface ONLY, never by a direct file edit.
+Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${evidence}.
+THE DESTINATION DECIDES, NOT THE CALLER'S CWD: every \`.sterling\` directory this call can name is protected, whichever project owns it. A session launched in another project (or with any other cwd) could otherwise write a different checkout's review-ledger.json \u2014 the file the merge gate reads to refuse unreviewed commits \u2014 its enforcement-baseline.json, or its config.json. That was a CONFIRMED bypass, reproduced by execution 2026-09-06.
+PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination's path COMPONENTS (case-folded), never by a per-file allowlist and never by a string prefix.
+NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.
+Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
+WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only \u2014 a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project's store is not covered, deliberately.
+If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`;
+}
+function unusableDestinationDenial(toolName, field, submitted) {
+  const seen = submitted === void 0 ? "absent" : submitted === null ? "null" : typeof submitted === "string" ? "an empty/whitespace-only string" : Array.isArray(submitted) ? "a value of type 'array'" : `a value of type '${typeof submitted}'`;
+  return `H15: this ${toolName} call carries no usable destination path, so it is denied.
+Required field: tool_input.${field} \u2014 received: ${seen}.
+The TYPE is checked before any path helper on purpose: a String() coercion would launder an array or an object into a plausible-looking path, and this gate would then decide containment on the laundered value.
+Without a destination H15 cannot establish that the Sterling store (.sterling/) is untouched, and a gate that cannot decide fails CLOSED (P5).
+Re-issue the call with an explicit path. If the tool genuinely sends its destination under another field, that is a platform change and it must be added to this gate \u2014 never worked around.`;
+}
+function undecidableDestinationDenial(toolName, field, submitted, reason) {
+  return `H15: the destination of this ${toolName} call could not be resolved, so it is denied.
+Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${reason}.
+A containment question this gate cannot answer is answered CLOSED (P5): H15 cannot establish that the Sterling store (.sterling/) is untouched, and answering "outside" on an unresolvable path is how a guard is walked past.`;
+}
+function unrecognizedToolDenial(toolName) {
+  return `H15: this call names a tool H15 does not recognize (${JSON.stringify(toolName)}), so it is denied.
+H15 judges exactly two channels: the shell channel (Bash, PowerShell), whose destination lives in the command text, and the structured-write channel (Edit, Write, MultiEdit, NotebookEdit), whose destination is an explicit tool_input field. A tool outside both has no known destination field, so this gate cannot establish that the Sterling store (.sterling/) is untouched \u2014 and a gate that cannot decide fails CLOSED (P5).
+No such call is agent-reachable today \u2014 hooks/hooks.json routes only those six names here \u2014 so this branch is DEFENCE IN DEPTH against a platform RENAME silently retiring the whole arm, not a demonstrated exploit.
+If a platform change renamed or added a writing tool, ADD IT TO THIS GATE (structuredWriteDestinationField, or isCommandChannelTool for a new shell) \u2014 never route the write around the gate, and never widen hooks/hooks.json without widening this file.`;
+}
+try {
+  const destinationField = structuredWriteDestinationField(input.tool_name);
+  if (destinationField === null) {
+    if (!isCommandChannelTool(input.tool_name)) deny(unrecognizedToolDenial(input.tool_name));
+  } else {
+    const submitted = input.tool_input?.[destinationField];
+    if (typeof submitted !== "string" || submitted.trim() === "") {
+      deny(unusableDestinationDenial(input.tool_name, destinationField, submitted));
+    }
+    const base2 = typeof input.cwd === "string" ? input.cwd : "";
+    if (!isAbsolute2(submitted) && base2 === "") {
+      deny(
+        undecidableDestinationDenial(
+          input.tool_name,
+          destinationField,
+          submitted,
+          "it is a relative path and this call carries no usable cwd to resolve it against"
+        )
+      );
+    }
+    const destination = isAbsolute2(submitted) ? resolve2(submitted) : resolve2(base2, submitted);
+    if (namesStoreComponent(destination)) {
+      deny(
+        storeDestinationDenial(
+          input.tool_name,
+          destinationField,
+          submitted,
+          `it resolves to ${destination}, which carries a '.sterling' directory component (compared case-folded)`
+        )
+      );
+    }
+    if (inSterlingProject && pathIsInsideEitherCase(base2, destination)) {
+      const canonical = canonicalViaNearestAncestor(destination);
+      if (canonical === null) {
+        deny(
+          undecidableDestinationDenial(
+            input.tool_name,
+            destinationField,
+            submitted,
+            `no existing ancestor of ${destination} could be resolved, so a symlink leading into the store cannot be ruled out`
+          )
+        );
+      }
+      if (namesStoreComponent(canonical)) {
+        deny(
+          storeDestinationDenial(
+            input.tool_name,
+            destinationField,
+            submitted,
+            `it canonicalizes, via its nearest existing ancestor, to ${canonical}, which carries a '.sterling' directory component \u2014 the submitted spelling reaches the store through a symlink`
+          )
+        );
+      }
+    }
+    allow();
+  }
+} catch (e) {
+  deny(
+    `\u26A0 ENVIRONMENT DEFECT (H15): this denial is about BROKEN STATE, not your conduct. [structured-write] the store-destination check for this tool call could not be completed (${e && e.message || e}); the gate fails CLOSED rather than risk a silent void (P5). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise this is broken state, and there is no conductor above you to exit \`blocked\` to \u2014 repair it (or restart the session) before proceeding.`
   );
 }
 if (!inSterlingProject) allow();

@@ -5347,7 +5347,35 @@ function open(dbPath) {
   return new SterlingStore(dbPath);
 }
 var MountedStores = class {
-  /** The project store — also the home of all run/board/transient state. */
+  /** The project store — also the home of all run/board/transient state.
+   *
+   *  STATED LIMIT OF THE CROSS-MOUNT WRITE BACKSTOP (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  This handle is a PUBLIC, FULLY MUTABLE SterlingStore, so
+   *  `stores.project.create(...)` (or any other mutator on it) reaches the
+   *  project connection DIRECTLY and never passes assertMountAffinity below.
+   *  Called inside a transaction open on a DOMAIN mount, such a write commits
+   *  on the project connection and survives the outer rollback — the exact
+   *  atomicity hole the backstop closes for every write that goes through this
+   *  class's own surface. The backstop's guarantee is therefore scoped to
+   *  MountedStores' OWN METHODS, and this field is the one documented way past
+   *  it; treat any claim of universal coverage as wrong.
+   *
+   *  IT IS NOT NARROWED, and the reason is not that narrowing is undesirable.
+   *  MEASURED 2026-09-06 (re-runnable: grep for `.project.` across
+   *  packages/{store,mcp-server,tui}/src and scripts/): NO production caller
+   *  outside this file touches the handle at all — every `.project.<mutator>`
+   *  call in the repo is in a TEST (packages/store/src/tests/
+   *  stable-identity-hardening.test.ts and packages/mcp-server/src/tests/
+   *  resolves-append-join.test.ts seed forged rows through it; mounted.test.ts
+   *  also drives createRun). Those suites are frozen, and a read-only type on
+   *  this field would fail their compile, so the exposure is retained
+   *  deliberately and disclosed here rather than closed by editing pins. The
+   *  real containment today is that production has no such caller — a
+   *  PROPERTY OF THE CALLERS, not a guarantee of this class. If a production
+   *  mutation through this handle is ever wanted, route it through the guarded
+   *  surface instead of widening the exception.
+   */
   project;
   domains = /* @__PURE__ */ new Map();
   /** Opening a store creates its file + schema (§2.3 lazy creation): a domain
@@ -5378,7 +5406,9 @@ var MountedStores = class {
     const normalized = SterlingStore.normalizeIdentityEnvelope(input2);
     const record = validateRecord(normalized);
     assertNoFieldLoss("create", normalized, record);
-    return this.storeFor(record.scope).create(record);
+    const target = this.storeFor(record.scope);
+    this.assertMountAffinity("create", target, `record '${record.id}' (scope '${record.scope}')`);
+    return target.create(record);
   }
   /** Scope-routed exactly as create() is. A maintenance item is project-LOCAL
    *  state and never shared, so this resolves to the project store in practice —
@@ -5387,7 +5417,9 @@ var MountedStores = class {
    *  cross-store key would let one project's item suppress another's. */
   enqueueSystemTodo(input2) {
     const record = validateRecord(SterlingStore.normalizeIdentityEnvelope(input2));
-    return this.storeFor(record.scope).enqueueSystemTodo(record);
+    const target = this.storeFor(record.scope);
+    this.assertMountAffinity("enqueueSystemTodo", target, `todo '${record.id}' (scope '${record.scope}')`);
+    return target.enqueueSystemTodo(record);
   }
   storeFor(scope) {
     if (scope === "project")
@@ -5563,19 +5595,41 @@ var MountedStores = class {
   // by the caller. (knowledge_update gets the record first, so supersede always
   // finds it; remove routes on its id the same way. addLink routes on the SOURCE
   // id — the edge lives with its source — and validates the TARGET mount-wide.)
-  /** Versioned change in the holding store (a domain record supersedes in its domain store). */
+  /** Versioned change in the holding store (a domain record supersedes in its
+   *  domain store) — and the replacement's `scope` is pinned from THAT MOUNT.
+   *
+   *  THE LAYERING (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  SterlingStore.supersede pins the replacement's scope from the old row's
+   *  `scope` COLUMN, which is correct for a BARE store: with no mounts there is
+   *  nothing the column can contradict. Through THIS surface the column is not
+   *  the strongest fact — the MOUNT is. In the one drift class a
+   *  column-authoritative read cannot see (a row physically held by a domain
+   *  store whose column says 'project'), inheriting the column would mint a
+   *  brand-new row carrying the same lie, inside the very database that
+   *  disproves it. So the mount is passed down as the authoritative scope and
+   *  the column is not consulted.
+   *
+   *  WHY IT IS DERIVED FROM THE STORE THIS WRITE IS ROUTED TO, and not from a
+   *  second lookup: `store` here IS the destination — the same resolution
+   *  scopeOfHolder performs (mountNameOf ∘ storeHolding), reused rather than
+   *  repeated. The label and the physical destination are therefore ONE fact,
+   *  and cannot drift apart at this site by construction. Any third argument a
+   *  caller supplies is deliberately ignored for the same reason: an
+   *  authoritative scope is not something a caller can be trusted to know. */
   supersede(...args) {
-    return this.storeHolding(args[0]).supersede(...args);
+    const store = this.mutatingStoreHolding("supersede", args[0]);
+    return store.supersede(args[0], args[1], this.mountNameOf(store));
   }
   /** Promotion tombstone: retire the original in its (project) store, pointing at
    *  the cross-store replacement. The replacement already lives in another store
    *  (the promoted domain copy), so only the original's holding store is touched. */
   retireInFavorOf(...args) {
-    return this.storeHolding(args[0]).retireInFavorOf(...args);
+    return this.mutatingStoreHolding("retireInFavorOf", args[0]).retireInFavorOf(...args);
   }
   /** Hard delete (+ §3.2.7 drain log for system todos) in the holding store. */
   remove(...args) {
-    return this.storeHolding(args[0]).remove(...args);
+    return this.mutatingStoreHolding("remove", args[0]).remove(...args);
   }
   // -- the generalized IN-PLACE write triad (stable-identity S2, decision
   // [stable-identity-design-v2]) — same holding-store routing as supersede:
@@ -5583,15 +5637,15 @@ var MountedStores = class {
   // version counter it bumps is that store's.
   /** knowledge_update-shaped in-place write in the holding store. */
   updateRecord(...args) {
-    return this.storeHolding(args[0]).updateRecord(...args);
+    return this.mutatingStoreHolding("updateRecord", args[0]).updateRecord(...args);
   }
   /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
   editRecordField(...args) {
-    return this.storeHolding(args[0]).editRecordField(...args);
+    return this.mutatingStoreHolding("editRecordField", args[0]).editRecordField(...args);
   }
   /** knowledge_append-shaped array growth in the holding store. */
   appendRecordField(...args) {
-    return this.storeHolding(args[0]).appendRecordField(...args);
+    return this.mutatingStoreHolding("appendRecordField", args[0]).appendRecordField(...args);
   }
   /** An archived (record_id, version) snapshot from whichever store holds the
    *  record. Version history is store-local, exactly like the record itself. */
@@ -5602,7 +5656,7 @@ var MountedStores = class {
    *  project-scoped (§3.3), so this always resolves to the project store, but it
    *  routes the same way as supersede/remove for consistency rather than assuming. */
   updateTodo(...args) {
-    return this.storeHolding(args[0]).updateTodo(...args);
+    return this.mutatingStoreHolding("updateTodo", args[0]).updateTodo(...args);
   }
   /** Typed link edge, added on the source record in its holding store. The TARGET
    *  is resolved across ALL mounted stores (cross-store get, like get()) before
@@ -5613,13 +5667,90 @@ var MountedStores = class {
   addLink(sourceId, rel, targetId) {
     if (!this.get(targetId))
       throw new Error(`addLink: no target record '${targetId}' in the project store or any mounted domain`);
-    return this.storeHolding(sourceId).addLink(sourceId, rel, targetId, true);
+    return this.mutatingStoreHolding("addLink", sourceId).addLink(sourceId, rel, targetId, true);
+  }
+  /** EVERY mounted store physically holding `id`, project-first. Ordinarily
+   *  exactly one — a record lives in one store — which is precisely why the
+   *  cardinality is returned rather than assumed away by a first-hit scan. */
+  holdersOf(id) {
+    return this.all().filter((s2) => s2.get(id) !== void 0);
   }
   storeHolding(id) {
-    for (const s2 of this.all())
-      if (s2.get(id))
-        return s2;
-    throw new Error(`no record '${id}' in the project store or any mounted domain`);
+    const holders = this.holdersOf(id);
+    if (holders.length === 0)
+      throw new Error(`no record '${id}' in the project store or any mounted domain`);
+    if (holders.length > 1) {
+      throw new Error(`ambiguous holder: record '${id}' is held by ${holders.length} mounts \u2014 ${holders.map((s2) => `'${this.mountNameOf(s2)}'`).join(", ")}. One id must name one row: every routing decision here (which store a write lands in, which mount a transaction opens on, what scope a derived record inherits) assumes a single holder, so the ambiguity is refused rather than resolved project-first. Resolve the duplicate (scripts/domain-doctor.mjs show --id '${id}' on each store) before retrying.`);
+    }
+    return holders[0];
+  }
+  /** MountedStores' override of the storage-layer scope accessor — 'project' or
+   *  'domain:<name>', derived from the MOUNT that physically holds the record
+   *  and from nothing else. See SterlingStore.scopeOfHolder for the contract
+   *  this satisfies; the two differ only in what "physical" can mean at each
+   *  layer, and here it means the strongest available fact. Deliberately NOT
+   *  the row's `scope` column: the column is authoritative over the BODY, but
+   *  the MOUNT is authoritative over the column — a record seeded into the
+   *  wrong store carries a truthful-looking column and a false location, and
+   *  that is the one drift class a column-authoritative read cannot see.
+   *  Inherits storeHolding's two refusals: no holder, and multiple holders. */
+  scopeOfHolder(id) {
+    return this.mountNameOf(this.storeHolding(id));
+  }
+  /** storeHolding for a WRITE: resolve the holder, then hold it against the
+   *  active transaction's mount (the C2 backstop). Reads keep using
+   *  storeHolding/all() directly — a cross-store READ is legitimate. */
+  mutatingStoreHolding(op, id) {
+    const store = this.storeHolding(id);
+    this.assertMountAffinity(op, store, `record '${id}'`);
+    return store;
+  }
+  /** The project store for a PROJECT-LOCAL write (runs, board, handoffs, the
+   *  drain log), held against the active transaction's mount the same way. These
+   *  forward straight to this.project, so inside a DOMAIN transaction they are
+   *  the second cross-mount shape: a write that commits on the project
+   *  connection while the open BEGIN belongs to a domain mount. */
+  mutatingProject(op) {
+    this.assertMountAffinity(op, this.project, "project-local run/board state");
+    return this.project;
+  }
+  /** The mount name for a physical store — 'project', or the domain's manifest
+   *  name. Used only in refusal text: the point of the guard is that a MOUNT is
+   *  a physical thing, so it is named by where it actually is. */
+  mountNameOf(store) {
+    if (store === this.project)
+      return "project";
+    for (const [name, s2] of this.domains)
+      if (s2 === store)
+        return `domain:${name}`;
+    return "unknown mount";
+  }
+  /**
+   * THE CROSS-MOUNT WRITE BACKSTOP (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * Each mount is a separate SQLite connection, so a write routed to a store
+   * OTHER than the one holding the open transaction commits independently and
+   * survives an outer rollback — the atomicity hole a correct `scope` label
+   * cannot close on its own. Every mutation ROUTED THROUGH THIS CLASS'S OWN
+   * SURFACE therefore compares its RESOLVED target store against the ACTIVE
+   * TRANSACTION'S STORE IDENTITY (not a label string: a label is exactly the
+   * thing that may be lying) and refuses, naming the record, the mount the
+   * transaction holds, and the mount the target actually lives in. Outside a
+   * transaction there is nothing to violate, so this is a no-op. Cross-store
+   * READS are never affected.
+   *
+   * THAT QUALIFIER IS LOAD-BEARING, not throat-clearing: the public `project`
+   * handle (see its own note above) is a mutable SterlingStore a caller can
+   * write through without ever reaching this method. "Every mutation is
+   * guarded" would be false while that escape hatch is public, so the claim is
+   * scoped to what this class actually mediates.
+   */
+  assertMountAffinity(op, target, subject) {
+    const active = this.activeTransactionStore;
+    if (active === void 0 || active === target)
+      return;
+    throw new Error(`${op}: refused \u2014 cross-mount write while a transaction is open on the '${this.mountNameOf(active)}' mount, but ${subject} is held by the '${this.mountNameOf(target)}' mount. Each mount is a separate SQLite connection, so this write would commit independently and survive a rollback of the open transaction \u2014 it is refused rather than silently split across two connections. Route the transaction to the record's own mount (withTransactionForRecord), or perform this write outside the transaction.`);
   }
   // -- run/board/transient state: PROJECT-LOCAL, never a domain ----------------
   // Runs (§7.5 one active run), the board/maintenance queue (§3.2.7), handoffs and
@@ -5627,51 +5758,51 @@ var MountedStores = class {
   // store, so MountedStores forwards them straight through. Knowledge fans across
   // mounts; run state does not. Signatures mirror SterlingStore exactly.
   createRun(...args) {
-    return this.project.createRun(...args);
+    return this.mutatingProject("createRun").createRun(...args);
   }
   getRun(...args) {
     return this.project.getRun(...args);
   }
   casTransition(...args) {
-    return this.project.casTransition(...args);
+    return this.mutatingProject("casTransition").casTransition(...args);
   }
   casTransitionMerge(...args) {
-    return this.project.casTransitionMerge(...args);
+    return this.mutatingProject("casTransitionMerge").casTransitionMerge(...args);
   }
   recordPendingExit(...args) {
-    return this.project.recordPendingExit(...args);
+    return this.mutatingProject("recordPendingExit").recordPendingExit(...args);
   }
   getPendingExit(...args) {
     return this.project.getPendingExit(...args);
   }
   appendRunEscalation(...args) {
-    return this.project.appendRunEscalation(...args);
+    return this.mutatingProject("appendRunEscalation").appendRunEscalation(...args);
   }
   appendRunReconcileNeeded(...args) {
-    return this.project.appendRunReconcileNeeded(...args);
+    return this.mutatingProject("appendRunReconcileNeeded").appendRunReconcileNeeded(...args);
   }
   recordCheckSkipped(...args) {
-    return this.project.recordCheckSkipped(...args);
+    return this.mutatingProject("recordCheckSkipped").recordCheckSkipped(...args);
   }
   writeHandoff(...args) {
-    return this.project.writeHandoff(...args);
+    return this.mutatingProject("writeHandoff").writeHandoff(...args);
   }
   /** The drain log is project-local (§3.2.7) — forwarded like every run/board surface. */
   drainLogEntry(...args) {
-    return this.project.drainLogEntry(...args);
+    return this.mutatingProject("drainLogEntry").drainLogEntry(...args);
   }
   readHandoffs(...args) {
     return this.project.readHandoffs(...args);
   }
   setRunReviewMandatory(...args) {
-    return this.project.setRunReviewMandatory(...args);
+    return this.mutatingProject("setRunReviewMandatory").setRunReviewMandatory(...args);
   }
   /** knowledge_split's multi-record write (decision
    *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
    *  only — feature_article is always project-scoped (§3.3), so the split's
    *  children-plus-parent transaction never needs to span a domain mount. */
   withTransaction(fn) {
-    return this.runScopedTransaction("project", this.project, fn);
+    return this.runScopedTransaction(this.project, fn);
   }
   /** Per-mount transaction boundary (board d47a9e2d): routes to the SterlingStore
    *  holding `scope` (project → the project store; domain:<name> → that domain
@@ -5683,30 +5814,47 @@ var MountedStores = class {
    *  nesting the same way withTransaction is (see runScopedTransaction) —
    *  same-store nesting still joins via the physical store's own txDepth. */
   withTransactionForScope(scope, fn) {
-    return this.runScopedTransaction(scope, this.storeFor(scope), fn);
+    return this.runScopedTransaction(this.storeFor(scope), fn);
   }
-  /** Tracks which scope's transaction is currently open across THIS
+  /** PER-RECORD transaction boundary — the affinity fix (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *  Routes by `storeHolding(id)`, the SAME physical resolution every record
+   *  mutation uses, so the transaction and the writes inside it can never open
+   *  on different mounts. The label-routed sibling above resolves by
+   *  storeFor(scope), and a record's body `scope` is caller-writable and not
+   *  the routing key for anything after creation (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]) — so a drifted label
+   *  put the transaction on the wrong database while the write went to the
+   *  right one. A record that no record exists for throws loudly BEFORE any
+   *  transaction opens, exactly as an unmounted scope does. */
+  withTransactionForRecord(id, fn) {
+    return this.runScopedTransaction(this.storeHolding(id), fn);
+  }
+  /** The PHYSICAL STORE whose transaction is currently open across THIS
    *  MountedStores instance (not per-physical-store — a physical store's own
-   *  txDepth only knows about ITSELF) and refuses a NESTED call that targets a
-   *  DIFFERENT scope: opening a second BEGIN IMMEDIATE on a different SQLite
-   *  connection while the outer transaction is still open would let the inner
-   *  one commit independently, so a later failure in the outer transaction
-   *  could no longer roll the inner write back — silently breaking atomicity.
-   *  A nested call to the SAME scope still joins cleanly, because it reaches
-   *  the same physical store's reentrant `tx()` (txDepth). */
-  activeTransactionScope;
-  runScopedTransaction(scope, store, fn) {
-    if (this.activeTransactionScope !== void 0 && this.activeTransactionScope !== scope) {
-      throw new Error(`nested transaction: cannot open a transaction for scope '${scope}' while a transaction for scope '${this.activeTransactionScope}' is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
+   *  txDepth only knows about ITSELF). Two jobs, both keyed on store IDENTITY
+   *  rather than on a scope label (which is exactly the value that can lie):
+   *  it refuses a NESTED call that targets a DIFFERENT mount, and it is the
+   *  reference every mutation's cross-mount backstop compares against (see
+   *  assertMountAffinity). Opening a second BEGIN IMMEDIATE on a different
+   *  SQLite connection while the outer transaction is still open would let the
+   *  inner one commit independently, so a later failure in the outer
+   *  transaction could no longer roll the inner write back — silently breaking
+   *  atomicity. A nested call to the SAME mount still joins cleanly, because it
+   *  reaches that store's reentrant `tx()` (txDepth). */
+  activeTransactionStore;
+  runScopedTransaction(store, fn) {
+    if (this.activeTransactionStore !== void 0 && this.activeTransactionStore !== store) {
+      throw new Error(`nested transaction: cannot open a transaction on the '${this.mountNameOf(store)}' mount while a transaction on the '${this.mountNameOf(this.activeTransactionStore)}' mount is still open on this MountedStores \u2014 cross-mount transaction nesting is not supported (each mount is a separate SQLite connection; an inner commit could survive an outer rollback).`);
     }
-    const isOutermost = this.activeTransactionScope === void 0;
+    const isOutermost = this.activeTransactionStore === void 0;
     if (isOutermost)
-      this.activeTransactionScope = scope;
+      this.activeTransactionStore = store;
     try {
       return store.withTransaction(fn);
     } finally {
       if (isOutermost)
-        this.activeTransactionScope = void 0;
+        this.activeTransactionStore = void 0;
     }
   }
   /** Per-store snapshot (§2.3): each store snapshots independently; the caller
@@ -6365,17 +6513,81 @@ var SterlingStore = class _SterlingStore {
       };
     });
   }
-  /** The server-owned identity columns of a live row — the CAS + lifecycle source. */
+  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
+   *
+   *  `scope` joins them (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
+   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
+   *  routing decision that chose this physical store — while the JSON body's own
+   *  `scope` is caller-writable and can drift away from it (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
+   *  supersession below pins the candidate's scope FROM HERE, so the field is
+   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
   identityOf(id) {
-    const row = this.db.prepare("SELECT version, lifecycle, freshness, body FROM records WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?").get(id);
     if (!row)
       return void 0;
     return {
       version: row.version,
       lifecycle: row.lifecycle === "retired" ? "retired" : "live",
       freshness: row.freshness === "flagged_stale" ? "flagged_stale" : "fresh",
+      scope: row.scope,
       body: row.body
     };
+  }
+  /**
+   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
+   * `records` row becomes a DurableRecord (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
+   *
+   * Every live materializing read selects `body, scope` and comes through here,
+   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
+   * before any caller sees it. Body/column disagreement is therefore
+   * unrepresentable on read: column authoritative on disk, and now on read too
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
+   * read path added later is hard to write wrongly because there is no other
+   * body→record parse to copy.
+   *
+   * TOTAL by construction — both drifted shapes normalize to the column with no
+   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
+   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
+   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
+   * visible, and it read zero of either across all four stores before this
+   * activated.
+   *
+   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
+   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
+   * every write funnels through via validateRecord, together with insertRecord
+   * writing the column from that validated record.scope: no store write can
+   * produce an empty or whitespace column. `records.scope` being NOT NULL is
+   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
+   * comment previously said it was (corrected 2026-09-06 on independent
+   * review; a comment that misattributes its own guarantee is how the real one
+   * gets removed later by someone who reads only the comment). If an empty or
+   * non-string column is nonetheless read, refuse loudly naming the row rather
+   * than inventing 'project' — a default here would re-create exactly the
+   * guess this decoder exists to delete.
+   *
+   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
+   * from identityOf's column in applyInPlace/supersede (part 3) — except that
+   * supersede takes an optional `authoritativeScope` from the layer that knows
+   * about MOUNTS (MountedStores), because the column is authoritative over the
+   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
+   * must be labelled for the mount it is physically inserted into.
+   *
+   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   */
+  static decodeLiveRecord(op, row) {
+    const record = JSON.parse(row.body);
+    if (typeof row.scope !== "string" || row.scope.length === 0) {
+      throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+    }
+    record.scope = row.scope;
+    return record;
+  }
+  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
+  static decodeLiveRecords(op, rows) {
+    return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
   }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
   insertRelation(sourceId, rel, targetId, at) {
@@ -6552,6 +6764,7 @@ var SterlingStore = class _SterlingStore {
       candidate.id = id;
       candidate.type = current.type;
       candidate.created_at = current.created_at;
+      candidate.scope = identity.scope;
       const freshness = candidate.freshness === "fresh" || candidate.freshness === "flagged_stale" ? candidate.freshness : candidate.status === "flagged_stale" ? "flagged_stale" : identity.freshness;
       const supersededBy = identity.lifecycle === "retired" ? current.superseded_by ?? null : null;
       const nextVersion = identity.version + 1;
@@ -6681,9 +6894,9 @@ var SterlingStore = class _SterlingStore {
     let existing;
     let textUpdated = false;
     this.tx(() => {
-      const rows = this.db.prepare("SELECT body FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
       for (const r of rows) {
-        const t = JSON.parse(r.body);
+        const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
         if (t.source !== "system")
           continue;
         if (keyOf(t) !== wantKey)
@@ -6716,10 +6929,10 @@ var SterlingStore = class _SterlingStore {
     };
   }
   get(id) {
-    const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
     if (!row)
       return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body)])[0]);
+    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
   }
   /**
    * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
@@ -6742,6 +6955,51 @@ var SterlingStore = class _SterlingStore {
    */
   projectStoreHolds(id) {
     return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
+  }
+  /**
+   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
+   * projectStoreHolds (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
+   * all an atomicity or an H10-parity question needs. A caller that has to
+   * SUPPLY a scope — the replacement minted by a supersession, the new record an
+   * extraction creates — needs the mount NAMED, and until this existed there was
+   * no way to get one: both call sites reconstructed it as
+   * `heldByProject ? 'project' : record.scope`, which is physically derived for
+   * the project case and straight back to the body for every DOMAIN case. In a
+   * design whose whole thesis is that the body is not the routing key, that is
+   * the trap itself (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]).
+   *
+   * CONTRACT (both implementations):
+   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
+   *  - an id NO store holds THROWS, naming the id. It never falls back to
+   *    'project': "probably project" is exactly the fail-open the anti-pattern
+   *    forbids, and a caller that cannot locate its own record must not go on to
+   *    label a new one;
+   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
+   *    storeHolding there): one id names one row, and every routing guarantee in
+   *    this design assumes a single holder.
+   *
+   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
+   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
+   * decision that chose this store, and never touched by an in-place update
+   * (see identityOf). It is the same value column-authoritative reads already
+   * serve, so a bare-store caller sees no behaviour change; what changes is that
+   * the value now arrives from the column BY CONSTRUCTION rather than by a body
+   * parse that happens to have been corrected. MountedStores overrides this with
+   * the MOUNT the record actually lives in, which is strictly stronger: the
+   * column can still contradict the mount (the third drift class
+   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
+   * is the physical fact and the column is a label.
+   */
+  scopeOfHolder(id) {
+    const identity = this.identityOf(id);
+    if (!identity) {
+      throw new Error(`scopeOfHolder: no record '${id}' in this store \u2014 the scope of a record's holder cannot be derived from a record that is not held. Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`);
+    }
+    return identity.scope;
   }
   /**
    * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
@@ -6781,6 +7039,10 @@ var SterlingStore = class _SterlingStore {
    * Every active feature_article's slug + relies_on, in ONE scan — shared by
    * withDerivedReliedBy across a whole query() result so a capped list of N
    * articles costs one table scan, not N.
+   *
+   * NOT a materializing read, so it does not go through decodeLiveRecord: it
+   * projects two fields out of each body and never yields a DurableRecord to a
+   * caller. Nothing here reads or reports `scope`.
    */
   activeArticleRelations() {
     const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
@@ -6834,10 +7096,10 @@ var SterlingStore = class _SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(rows.map((r) => JSON.parse(r.body)));
+    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
     if (!records.length)
       return records;
     const relations = this.activeArticleRelations();
@@ -6854,10 +7116,10 @@ var SterlingStore = class _SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
@@ -6870,10 +7132,10 @@ var SterlingStore = class _SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC, rowid DESC`).all(slug);
-    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
    * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
@@ -7015,11 +7277,11 @@ var SterlingStore = class _SterlingStore {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
         const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
+        const sql2 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(rows2.map((x) => JSON.parse(x.body)));
+        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
       }
     }
     const orderBy = [];
@@ -7029,10 +7291,10 @@ var SterlingStore = class _SterlingStore {
       overlapParams.push(...fileKeys);
     }
     orderBy.push("r.updated_at DESC", "r.id DESC");
-    const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -7049,13 +7311,15 @@ var SterlingStore = class _SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId, newInput) {
+  supersede(oldId, newInput, authoritativeScope) {
     this.assertWritable("supersede");
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
     const oldIdentity = this.identityOf(oldId);
-    if (oldIdentity?.lifecycle === "retired" || oldRecord.status === "superseded") {
+    if (!oldIdentity)
+      throw new Error(`supersede: no record '${oldId}'`);
+    if (oldIdentity.lifecycle === "retired" || oldRecord.status === "superseded") {
       throw new Error(`supersede: record '${oldId}' is already superseded (retired) \u2014 one successor maximum`);
     }
     const candidate = { ...newInput };
@@ -7067,6 +7331,7 @@ var SterlingStore = class _SterlingStore {
       links.push({ rel: "supersedes", target_id: oldId });
     }
     candidate.links = links;
+    candidate.scope = authoritativeScope ?? oldIdentity.scope;
     const prepared = _SterlingStore.resolveIdentity(candidate, { lifecycle: "live", freshness: "fresh", version: 1 });
     const newRecord = validateRecord(prepared.input);
     if (newRecord.type !== oldRecord.type) {
@@ -7767,6 +8032,20 @@ var SterlingStore = class _SterlingStore {
    * actually route by scope and to guard against cross-mount nesting.
    */
   withTransactionForScope(_scope, fn) {
+    return this.withTransaction(fn);
+  }
+  /**
+   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
+   * PHYSICAL IDENTITY rather than by a label (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
+   * label-routed transaction opens on the store the label NAMES while every
+   * record mutation independently opens on the store that HOLDS the id, so a
+   * drifted label put the transaction on the wrong database; routing by the
+   * holder makes the two agree by construction. On a plain SterlingStore there
+   * is only ONE physical store, so this is a straight alias for withTransaction
+   * — MountedStores overrides it to resolve the holding mount.
+   */
+  withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);
   }
 };

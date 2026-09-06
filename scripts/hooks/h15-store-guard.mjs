@@ -1,4 +1,5 @@
-// H15 — store write-path guard (spec §6 H15). PreToolUse Bash|PowerShell,
+// H15 — store write-path guard (spec §6 H15). PreToolUse
+// Bash|PowerShell AND Edit|Write|MultiEdit|NotebookEdit,
 // BLOCKING. The store is written through the §10 MCP tool surface ONLY; the
 // deny message teaches the right path. Patterns grow incident-by-incident via
 // config, never speculatively (adjudicated 2026-06-12 after a live conductor
@@ -70,8 +71,34 @@
 // spot the fixes above do not cover. Named here rather than silently
 // carried, per the same "disclose limitations, don't bury them" rule that
 // produced d53fc7ba for H14.
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+//
+// ── THE STRUCTURED-WRITE ARM (2026-09-06) ───────────────────────────────────
+// Everything above judges a SHELL COMMAND. Until this arm landed, that was the
+// ONLY channel H15 guarded, and hooks.json registered it on Bash|PowerShell
+// alone — so an `Edit`/`Write`/`MultiEdit`/`NotebookEdit` straight into
+// `.sterling/` was denied by NO hook at all. Of the hooks that DO fire on
+// Edit/Write, h3 never denies store writes, h7/h13 only record the path, and
+// h19 allows `.sterling/` through BY DESIGN. Measured in a consuming project:
+// an identical in-place edit denied via Bash SUCCEEDED via the Edit tool,
+// which put `.sterling/review-ledger.json` — the file the merge gate reads to
+// refuse unreviewed commits — inside every writing agent's reach.
+//
+// This arm is the SAME BOUNDARY through additional tool channels, not a new
+// enforcement program, and it does not reopen decision ccc44a8e: that ruling
+// is terminal for the BASH-CHANNEL DENY METHOD (it rejects resolve-then-
+// classify redesigns of the command-text classifier), not for which tool names
+// H15 is registered against. The command-text classifier below is untouched.
+//
+// THE ARM ITSELF — its invariant, its four numbered steps, its non-guarantees,
+// and the measurements behind them — is documented AT THE CODE, below the cwd
+// probe and above the not-in-project allow. That placement is deliberate and it
+// is the round-3 lesson: this file previously carried the arm's rationale HERE
+// and its logic in three separate containment systems up to 300 lines apart, so
+// a reader needed the git history to tell which paragraph governed which check
+// (decision `h15-structured-write-arm-rebuilt-from-blank-third-round-trigger`).
+// ONE arm, ONE place, ONE invariant — do not re-document it here.
+import { existsSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { readStdin, deny, allow, loadConfig, environmentDefectDenial } from './lib/common.mjs';
 import { parseConfig } from '@sterling/schemas';
 // THE shipped sanctioned list, imported rather than copied — decision 77c5b85a
@@ -160,6 +187,409 @@ try {
       // failure mode it forecloses is a silently voided blocking gate.
       { agentId: input?.agent_id }
     )
+  );
+}
+// ── STRUCTURED-WRITE ARM ─────────────────────────────────────────────────────
+// THE INVARIANT, in one paragraph, and this arm answers to nothing else
+// (decision `h15-structured-write-arm-rebuilt-from-blank-third-round-trigger`;
+// the frozen pins are scripts/tests/h15-structured-write.test.mjs). For a tool
+// call that writes a file through the platform's STRUCTURED surface — Edit,
+// Write, MultiEdit, NotebookEdit — H15 DENIES when the call's RESOLVED
+// destination lies inside any `.sterling` directory, and ALLOWS otherwise.
+// RESOLVED means normalized per the applicable path grammar BEFORE any verdict
+// is reached: `..` collapsed, separators canonical FOR THE HOST, and case
+// compared so that a case-insensitive filesystem cannot alias a differing
+// spelling past the check. THE DESTINATION DECIDES, NEVER THE CALLER'S CWD — a
+// call launched anywhere may not write any Sterling store. Anything that leaves
+// the destination genuinely undecidable — an absent, empty, non-string or
+// unresolvable path, an unrecognized tool name, or a canonicalization failure
+// needed to reach a verdict — DENIES (P5).
+//
+// THE ORDER, which is the mechanism and not a style choice:
+//   1. EXTRACT the destination per tool_name — Edit/Write/MultiEdit ->
+//      tool_input.file_path, NotebookEdit -> tool_input.notebook_path.
+//      MultiEdit's `edits[]` carries MUTATIONS, never additional destinations,
+//      so the single top-level file_path is the whole write set. The table is
+//      written out rather than copied from a neighbouring hook on purpose:
+//      h3/h7/h13/h19 all read `file_path` and NONE of them knows about
+//      NotebookEdit, so copying any of them would inherit that blind spot into
+//      a blocking gate. Bash/PowerShell carry their destination in the command
+//      TEXT and fall through to the classifier below; any OTHER tool name is a
+//      destination this arm cannot locate, and that denies, naming the tool.
+//   2. NORMALIZE, then decide — never on the submitted spelling. This is the
+//      round-3 repair: the previous version compared the SUBMITTED components,
+//      so it denied `<anywhere>/.sterling/../ordinary.txt` although that
+//      destination is `<anywhere>/ordinary.txt` and is in no store at all — a
+//      machine-wide FALSE DENIAL of ordinary work, reproduced by an
+//      outside-family review against both this source and the shipped bundle.
+//      `path.resolve` collapses `..`, `.` and doubled separators under the
+//      HOST's grammar, which is also why a literal backslash stays an ordinary
+//      filename character on POSIX and IS a separator on win32.
+//   3. LEXICAL COMPONENT RULE, cwd-independent: a destination carrying a path
+//      COMPONENT spelled `.sterling` (case-folded) is inside a store, whosever
+//      store it is. WHOLE COMPONENT, never a prefix and never a substring —
+//      `.sterlingish`, `.sterling.bak` and `STERLING-notes.md` are not stores.
+//      Deliberately LEXICAL, with no realpath: this rule runs for EVERY
+//      structured write on the machine, and calling realpath on all of them
+//      would let one unreadable or pathological path wedge unrelated projects
+//      (the alternative the decision rejects, on an outside review's reasoning).
+//   4. CANONICAL LAYER, scoped to the caller's own project: a symlink sitting
+//      outside the store but pointing into it is lexically invisible. Walk up to
+//      the nearest EXISTING ancestor — a Write may create several missing
+//      components at once and a symlink can sit above all of them, so resolving
+//      only the immediate parent is not enough — realpath THAT, re-append the
+//      unresolved suffix, and apply the SAME component rule to the result.
+//      "EXISTING" is decided by a stat that REPORTS ITS ERROR: only a genuine
+//      absence (ENOENT/ENOTDIR) is walked past, because that is the ordinary
+//      not-yet-created case; a component that cannot be EXAMINED at all
+//      (EACCES/EPERM/…) DENIES, since unreadable is not absent — a same-user
+//      writer may traverse a path this process cannot stat (Windows ACLs, some
+//      SMB/drop-box shares), and walking past it would retreat above the very
+//      symlink this layer exists to resolve. It
+//      runs only when the destination lies within the caller's project root, so
+//      the realpath cost and the wedge risk stay inside the project that asked
+//      for it, which is exactly what makes step 3 safe to run everywhere.
+//
+// WHAT THIS ARM DOES NOT GUARANTEE — stated flat, because a guard that
+// overstates its reach is its own defect and this file has shipped that mistake:
+//   (a) IT GATES THE AGENT/CONDUCTOR TOOL CHANNEL ONLY. It is NOT filesystem
+//       integrity enforcement. An allowlisted script, the TUI, the MCP server,
+//       an external editor, another terminal, a cron job or any same-user
+//       process writes `.sterling/review-ledger.json` with this arm fully green
+//       and completely unaware.
+//   (b) HARD LINKS ARE INVISIBLE. Every test here reasons about NAMES: realpath
+//       resolves symlinks but cannot reveal a second name for the same INODE, so
+//       a pre-existing hard link outside the store to a store file is "outside"
+//       by every test this arm can perform. Whether that reaches the store's
+//       bytes depends on the writing tool's truncate-vs-rename semantics. Not
+//       closed deliberately — detecting it needs a whole-filesystem inode scan.
+//   (c) TOCTOU. The check and the write are two SEPARATE resolutions of the same
+//       string: a symlink swapped into any component AFTER this verdict reroutes
+//       the write, and a PreToolUse hook cannot be descriptor-bound.
+//   (d) A SYMLINK INTO ANOTHER PROJECT'S STORE IS NOT COVERED. That is a RULED
+//       design choice, not a gap to close: step 3 is lexical on purpose (see the
+//       rejected alternative above) and step 4 is scoped to the caller's own
+//       project.
+//   (e) THE CASE FOLD IS A SIMPLE FOLD, not the filesystem's table. `toLowerCase`
+//       is not NTFS's or APFS's case table; U+017F LATIN SMALL LETTER LONG S is
+//       the known residual shape, MEASURED NOT to alias to the store directory on
+//       this machine's /mnt/c mount. The fold is UNIONED with the exact
+//       comparison, so it can only ever ADD denials, never permit one — and the
+//       cost of that direction is stated rather than hidden: on a genuinely
+//       case-SENSITIVE filesystem a real, distinct `.STERLING/` directory would
+//       be refused although it is not a store. No Sterling checkout has one, and
+//       refusing it is the safe direction. Runtime DETECTION of the destination
+//       filesystem's case-sensitivity was REJECTED as the alternative: it cannot
+//       be answered without writing a probe file (the one thing a PreToolUse gate
+//       must not do), it is a second thing that can fail, and a failed detection
+//       would have to assume case-INSENSITIVE to stay safe — which is what the
+//       union already does, with none of the moving parts.
+// The fold exists because the exact comparison is BYPASSABLE, not because it is
+// untidy: measured on /mnt/c under WSL, writing `.Foo/f.json` OVERWROTE
+// `.foo/f.json`, realpathSync PRESERVED the submitted casing (it does not
+// case-correct) and path.relative therefore reported OUTSIDE — so
+// `.STERLING/config.json` reached the review ledger at exit 0 on both source and
+// bundle (research_finding
+// `mnt-c-case-insensitive-defeats-case-sensitive-path-containment`). Note the
+// parity inversion: on native win32 path.relative compares case-INSENSITIVELY,
+// so WSL-on-/mnt/c is the WEAK surface, not Windows.
+//
+// THERE IS NO SANCTIONED-SCRIPT EXEMPTION ON THIS ARM, and that is not an
+// oversight: `store_guard.allow_scripts` authenticates an EXECUTABLE by resolved
+// file identity, and a structured edit call has no executable provenance to
+// authenticate. The writers it protects are unaffected — the TUI writeback
+// (packages/tui/src/config-writeback.ts) and the review-ledger CLI
+// (scripts/review-ledger.mjs) are direct PROCESS writes, never Edit-tool calls.
+//
+// POSITION IS PART OF THE MECHANISM, twice over. The arm sits ABOVE the
+// `if (!inSterlingProject) allow();` below, because the DESTINATION decides and
+// not the caller's project — `{"cwd":"/tmp","file_path":"<checkout>/.sterling/
+// enforcement-baseline.json"}` walked straight through that early allow, a
+// CONFIRMED bypass reproduced by execution 2026-09-06. And it sits above the
+// `command` handling further down, because a structured call carries no command
+// text: below that point every Edit reads as an EMPTY Bash command, mentions no
+// store path, and exits ALLOWED.
+//
+// The `if (!inSterlingProject) allow();` statement below is left BYTE-IDENTICAL
+// on purpose: it carries a fail-closed-boundary baseline identity keyed by its
+// own text (scripts/check-failclosed-boundary.mjs), so folding this arm into it
+// would re-mint that entry for no behavioural gain.
+//
+// The helpers are function DECLARATIONS so they sit in the fail-closed checker's
+// safe list and the verdict below can stay ONE guarded island.
+
+/**
+ * The tool_input FIELD carrying this tool's write destination, or null when the
+ * tool is not a structured writer.
+ */
+function structuredWriteDestinationField(toolName) {
+  switch (toolName) {
+    case 'Edit':
+    case 'Write':
+    case 'MultiEdit': // one top-level file_path; `edits[]` are mutations, not destinations
+      return 'file_path';
+    case 'NotebookEdit':
+      return 'notebook_path';
+    default:
+      return null;
+  }
+}
+
+/**
+ * The shell channel. Kept separate from the null above so that "I know this tool
+ * and its destination lives in the command text" and "I have never heard of this
+ * tool" are DIFFERENT verdicts — the second one fails closed.
+ */
+function isCommandChannelTool(toolName) {
+  return toolName === 'Bash' || toolName === 'PowerShell';
+}
+
+/**
+ * Does an ALREADY-NORMALIZED absolute path carry a component spelled `.sterling`?
+ * Case-folded, in EVERY position and not only the last; a WHOLE component, never
+ * a prefix. Separators are the HOST's: on POSIX a backslash is an ordinary
+ * filename character, so `notes\.sterling\x.txt` is ONE component and is not a
+ * store path — on win32 that same string is three components and is one.
+ */
+function namesStoreComponent(normalizedAbs) {
+  const components = normalizedAbs.split(sep === '\\' ? /[\\/]+/ : /\/+/);
+  return components.some((component) => component.toLowerCase() === '.sterling');
+}
+
+/**
+ * Is `childAbs` the directory `parentAbs` ITSELF, or something beneath it?
+ * path.relative, never a string prefix: '/x/.sterlingish' shares nine characters
+ * with '/x/.sterling' and is emphatically not inside it. An absolute result means
+ * a different root/drive (win32); '..' means the child climbs out.
+ */
+function pathIsInside(parentAbs, childAbs) {
+  const rel = relative(parentAbs, childAbs);
+  if (rel === '') return true;
+  if (isAbsolute(rel)) return false;
+  return rel !== '..' && !rel.startsWith('..' + sep);
+}
+
+/**
+ * The same question under the DESTINATION FILESYSTEM's case rules rather than
+ * this process's POSIX string semantics: inside if EITHER the exact OR the
+ * case-folded comparison says so. Both sides fold identically, so component
+ * structure is untouched and '/x/.sterlingish' still relativizes OUT of
+ * '/x/.sterling'. Used only to SCOPE the canonical layer, and being a union it
+ * can only ever widen that scope — the fail-closed direction.
+ */
+function pathIsInsideEitherCase(parentAbs, childAbs) {
+  if (pathIsInside(parentAbs, childAbs)) return true;
+  return pathIsInside(parentAbs.toLowerCase(), childAbs.toLowerCase());
+}
+
+/**
+ * Is `p` GENUINELY ABSENT, or merely UNEXAMINABLE? `existsSync` cannot tell the
+ * two apart — it collapses every stat failure into `false` — and the walk below
+ * needs the distinction, so this reports it.
+ *
+ *   ENOENT / ENOTDIR -> the component genuinely is not there (`false`). That is
+ *                       the ordinary case the walk exists to serve: a Write may
+ *                       create several missing components at once, and denying
+ *                       "not created yet" would be a machine-wide false denial
+ *                       of ordinary work (pins S3/S4).
+ *   anything else     -> THROWS, naming the component and the errno. A metadata
+ *                       failure is NOT proof of absence: Windows ACLs and some
+ *                       SMB/drop-box configurations permit opening or CREATING a
+ *                       known path while DENYING metadata lookup or listing, so
+ *                       a same-user writer can traverse a component this process
+ *                       cannot stat. Walking PAST such a component and
+ *                       re-appending the suffix lexically would retreat ABOVE a
+ *                       symlink and resolve the wrong ancestor — the canonical
+ *                       layer's whole purpose — and ALLOW. Canonicalization
+ *                       needed to reach a verdict failed, so the verdict is
+ *                       CLOSED (P5; contract pin C5). Same ENOENT-vs-EACCES
+ *                       distinction, for the same reason, as `storePresence` in
+ *                       scripts/domain-doctor.mjs: a read that could not happen
+ *                       is not an absence.
+ *
+ * `statSync`, not `lstatSync`, so a DANGLING symlink still reports ENOENT and is
+ * walked past exactly as before — nothing can be written through it either.
+ */
+function ancestorExists(p) {
+  try {
+    statSync(p);
+    return true;
+  } catch (e) {
+    const code = (e && e.code) || 'UNKNOWN';
+    if (code === 'ENOENT' || code === 'ENOTDIR') return false;
+    throw new Error(
+      `[canonical-layer] the path component ${p} could not be examined (${code}); an unreadable component is not an absent one — a same-user writer may still traverse it (Windows ACLs, some SMB/drop-box shares), so walking past it could resolve the wrong ancestor and miss a symlink into the store`
+    );
+  }
+}
+
+/**
+ * The canonical form of `absPath` when part of it does not exist yet: walk UP to
+ * the nearest ancestor that EXISTS, realpath THAT, and re-append the unresolved
+ * suffix lexically.
+ *
+ * Returns null when no ancestor is usable, and THROWS when a component cannot be
+ * EXAMINED (see ancestorExists) or when realpath fails on an ancestor the walk
+ * accepted (EACCES, ELOOP, …). The caller treats all three as INCONCLUSIVE and
+ * denies: a containment question that cannot be answered must not be answered
+ * with "outside".
+ */
+function canonicalViaNearestAncestor(absPath) {
+  let anchor = absPath;
+  while (!ancestorExists(anchor)) {
+    const parent = dirname(anchor);
+    if (parent === anchor) return null; // reached the filesystem root, nothing resolved
+    anchor = parent;
+  }
+  const suffix = relative(anchor, absPath);
+  const real = realpathSync(anchor);
+  return suffix === '' ? real : join(real, suffix);
+}
+
+/** The denial for a destination that RESOLVES inside a `.sterling` directory. */
+function storeDestinationDenial(toolName, field, submitted, evidence) {
+  return (
+    `H15: this ${toolName} call targets a Sterling store and is denied — a store is read and written through the §10 MCP tool surface ONLY, never by a direct file edit.\n` +
+    `Submitted tool_input.${field}: ${JSON.stringify(submitted)} — ${evidence}.\n` +
+    'THE DESTINATION DECIDES, NOT THE CALLER\'S CWD: every `.sterling` directory this call can name is protected, whichever project owns it. A session launched in another project (or with any other cwd) could otherwise write a different checkout\'s review-ledger.json — the file the merge gate reads to refuse unreviewed commits — its enforcement-baseline.json, or its config.json. That was a CONFIRMED bypass, reproduced by execution 2026-09-06.\n' +
+    'PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination\'s path COMPONENTS (case-folded), never by a per-file allowlist and never by a string prefix.\n' +
+    'NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.\n' +
+    'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
+    'WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only — a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project\'s store is not covered, deliberately.\n' +
+    'If the running MCP server predates the current code, RESTART THE SESSION — never write around the surface.'
+  );
+}
+
+/** The denial for a destination this arm cannot even locate (fail-closed). */
+function unusableDestinationDenial(toolName, field, submitted) {
+  const seen =
+    submitted === undefined
+      ? 'absent'
+      : submitted === null
+        ? 'null'
+        : typeof submitted === 'string'
+          ? 'an empty/whitespace-only string'
+          : Array.isArray(submitted)
+            ? "a value of type 'array'"
+            : `a value of type '${typeof submitted}'`;
+  return (
+    `H15: this ${toolName} call carries no usable destination path, so it is denied.\n` +
+    `Required field: tool_input.${field} — received: ${seen}.\n` +
+    'The TYPE is checked before any path helper on purpose: a String() coercion would launder an array or an object into a plausible-looking path, and this gate would then decide containment on the laundered value.\n' +
+    'Without a destination H15 cannot establish that the Sterling store (.sterling/) is untouched, and a gate that cannot decide fails CLOSED (P5).\n' +
+    'Re-issue the call with an explicit path. If the tool genuinely sends its destination under another field, that is a platform change and it must be added to this gate — never worked around.'
+  );
+}
+
+/** The denial for a destination whose containment could not be decided at all. */
+function undecidableDestinationDenial(toolName, field, submitted, reason) {
+  return (
+    `H15: the destination of this ${toolName} call could not be resolved, so it is denied.\n` +
+    `Submitted tool_input.${field}: ${JSON.stringify(submitted)} — ${reason}.\n` +
+    'A containment question this gate cannot answer is answered CLOSED (P5): H15 cannot establish that the Sterling store (.sterling/) is untouched, and answering "outside" on an unresolvable path is how a guard is walked past.'
+  );
+}
+
+/** The denial for a tool whose destination field this arm does not know. */
+function unrecognizedToolDenial(toolName) {
+  return (
+    `H15: this call names a tool H15 does not recognize (${JSON.stringify(toolName)}), so it is denied.\n` +
+    'H15 judges exactly two channels: the shell channel (Bash, PowerShell), whose destination lives in the command text, and the structured-write channel (Edit, Write, MultiEdit, NotebookEdit), whose destination is an explicit tool_input field. A tool outside both has no known destination field, so this gate cannot establish that the Sterling store (.sterling/) is untouched — and a gate that cannot decide fails CLOSED (P5).\n' +
+    'No such call is agent-reachable today — hooks/hooks.json routes only those six names here — so this branch is DEFENCE IN DEPTH against a platform RENAME silently retiring the whole arm, not a demonstrated exploit.\n' +
+    'If a platform change renamed or added a writing tool, ADD IT TO THIS GATE (structuredWriteDestinationField, or isCommandChannelTool for a new shell) — never route the write around the gate, and never widen hooks/hooks.json without widening this file.'
+  );
+}
+
+// The whole arm is ONE fail-closed island: an unexpected throw here would exit
+// non-2, which the hook runner reads as NON-BLOCKING (the F5 voided-gate class,
+// anti_pattern e13f0fb5).
+try {
+  const destinationField = structuredWriteDestinationField(input.tool_name);
+  if (destinationField === null) {
+    // Bash/PowerShell fall through to the command classifier below. Anything
+    // else is a destination this arm cannot locate, and that fails closed.
+    if (!isCommandChannelTool(input.tool_name)) deny(unrecognizedToolDenial(input.tool_name));
+  } else {
+    const submitted = input.tool_input?.[destinationField];
+    // TYPE FIRST, and deliberately not through repoRel(): that helper coerces a
+    // truthy non-string with String(), which would hand this gate a laundered
+    // value and let it decide containment on the laundering.
+    if (typeof submitted !== 'string' || submitted.trim() === '') {
+      deny(unusableDestinationDenial(input.tool_name, destinationField, submitted));
+    }
+
+    // STEP 2 — NORMALIZE BEFORE ANY VERDICT. A relative destination needs a cwd
+    // to resolve at all; without one the destination is undecidable, and
+    // undecidable denies rather than guessing.
+    const base = typeof input.cwd === 'string' ? input.cwd : '';
+    if (!isAbsolute(submitted) && base === '') {
+      deny(
+        undecidableDestinationDenial(
+          input.tool_name,
+          destinationField,
+          submitted,
+          'it is a relative path and this call carries no usable cwd to resolve it against'
+        )
+      );
+    }
+    const destination = isAbsolute(submitted) ? resolve(submitted) : resolve(base, submitted);
+
+    // STEP 3 — the lexical component rule, for every project on the machine.
+    if (namesStoreComponent(destination)) {
+      deny(
+        storeDestinationDenial(
+          input.tool_name,
+          destinationField,
+          submitted,
+          `it resolves to ${destination}, which carries a '.sterling' directory component (compared case-folded)`
+        )
+      );
+    }
+
+    // STEP 4 — the canonical layer, scoped to the caller's OWN project so that
+    // no realpath is ever performed on behalf of a destination elsewhere on the
+    // machine. A throw from either call is caught below and DENIES.
+    if (inSterlingProject && pathIsInsideEitherCase(base, destination)) {
+      const canonical = canonicalViaNearestAncestor(destination);
+      if (canonical === null) {
+        deny(
+          undecidableDestinationDenial(
+            input.tool_name,
+            destinationField,
+            submitted,
+            `no existing ancestor of ${destination} could be resolved, so a symlink leading into the store cannot be ruled out`
+          )
+        );
+      }
+      if (namesStoreComponent(canonical)) {
+        deny(
+          storeDestinationDenial(
+            input.tool_name,
+            destinationField,
+            submitted,
+            `it canonicalizes, via its nearest existing ancestor, to ${canonical}, which carries a '.sterling' directory component — the submitted spelling reaches the store through a symlink`
+          )
+        );
+      }
+    }
+
+    // Outside every store this arm can see: no further business of H15 on this
+    // channel. Exiting 0 says only "this hook does not block"; every other hook
+    // on this matcher renders its own verdict independently.
+    allow();
+  }
+} catch (e) {
+  // Same F5 rule as every other island in this file — and the message is built
+  // from literals plus a guarded read of the error, so the HANDLER itself cannot
+  // throw on the way to exit 2. Audience is unknowable here (this hook is
+  // globally registered), so both resolutions are stated, as the [stdin] catch
+  // above does.
+  deny(
+    '⚠ ENVIRONMENT DEFECT (H15): this denial is about BROKEN STATE, not your conduct. ' +
+      `[structured-write] the store-destination check for this tool call could not be completed (${(e && e.message) || e}); ` +
+      'the gate fails CLOSED rather than risk a silent void (P5). ' +
+      'IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself — exit `blocked`, citing this message VERBATIM. ' +
+      'Otherwise this is broken state, and there is no conductor above you to exit `blocked` to — repair it (or restart the session) before proceeding.'
   );
 }
 if (!inSterlingProject) allow(); // not a Sterling project — no ceremony (P1)
