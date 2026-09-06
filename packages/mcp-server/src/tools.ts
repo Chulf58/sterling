@@ -7030,6 +7030,73 @@ export class SterlingTools {
     return { pending: detail, at };
   }
 
+  // -- enforcement taint clearer front door (board 09f05fca half 2) ------------
+
+  /**
+   * enforcement_reconcile (§10): the MCP front door onto
+   * scripts/enforcement-reconcile.mjs, the only sanctioned removal path for
+   * H17's (B) surface taint latch (article `enforcement-taint-clearer`,
+   * decision `b-baseline-hash-list-concrete-design` D5).
+   *
+   * IT IS A FRONT DOOR, NOT AN AUTHORITY BOUNDARY, and that wording is the
+   * ruling (fe861066's honesty clause; board 09f05fca half 2's non-negotiable
+   * requirement). This server has NO authenticated caller identity — every
+   * tools/call arrives over one stdio transport with no principal attached — an
+   * agent whose frontmatter OMITS `tools:` receives all mounted tools
+   * (h25-dispatch-capability.mjs), and the module itself documents that any
+   * caller able to run Node under this UID can import it and self-assert
+   * `callerRole`. AC-R11 (scripts/tests/enforcement-reconcile.test.mjs) pins
+   * that no agent TEMPLATE grants this tool, which is DISTRIBUTION POLICY and
+   * nothing stronger. So "only the conductor can clear" is never claimed here as
+   * a mechanical property: what this call removes is the measured cost of the
+   * alternative — a raw `node --input-type=module -e "import(...)"`, the exact
+   * shape H15 denies.
+   *
+   * `callerRole`/`callerAgentId` are supplied HERE and are deliberately absent
+   * from the served input schema (article `enforcement-taint-clearer`: "callerRole/
+   * callerAgentId must never appear in a public tool schema") — a caller that
+   * could name its own role would make the module's identity gate a caller-
+   * chosen string on the wire, which is worse than an honest front door.
+   *
+   * THE RESULT IS RETURNED VERBATIM. `{cleared, reason}` is the module's own
+   * discriminated verdict; re-wording it here would put a second, drifting
+   * description of an enforcement outcome in front of the reader.
+   */
+  async enforcementReconcile(adopt = false): Promise<{ cleared: boolean; reason: string }> {
+    if (!this.repoRoot) {
+      throw new Error(
+        'enforcement_reconcile: no project root is known to this server, so the enforcement surface cannot be resolved — the clearer refuses a missing cwd for the same reason.'
+      );
+    }
+    // WHY A DYNAMIC IMPORT WITH A NON-LITERAL SPECIFIER, documented because
+    // there is no existing pattern for this in tools.ts. The clearer is a
+    // standalone `.mjs` in scripts/: it carries no type declarations and sits
+    // OUTSIDE this package's rootDir ("src"), so a static import would fail the
+    // build twice over (no declaration file; a rootDir escape). The only
+    // precedent for reaching scripts/ from here — the ORIGIN_IDS constants
+    // above — DUPLICATES rather than imports, which is not available for a
+    // ~2600-line security module whose single-definition property is the point.
+    // The specifier is relative to THIS module and resolves identically from
+    // src/ and dist/ (both sit exactly three levels below the repo root), and it
+    // is held in a variable so tsc does not attempt to type-resolve it.
+    const specifier = '../../../scripts/enforcement-reconcile.mjs';
+    const mod = (await import(specifier)) as {
+      reconcileEnforcementTaint: (options: {
+        cwd: string;
+        callerRole: string;
+        callerAgentId: undefined;
+        adopt: boolean;
+      }) => Promise<{ cleared: boolean; reason: string }>;
+    };
+    const { cleared, reason } = await mod.reconcileEnforcementTaint({
+      cwd: this.repoRoot,
+      callerRole: 'conductor',
+      callerAgentId: undefined,
+      adopt,
+    });
+    return { cleared, reason };
+  }
+
   // -- board (§3.2.7) ----------------------------------------------------------
 
   /**

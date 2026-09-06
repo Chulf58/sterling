@@ -575,6 +575,16 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'enforcement_reconcile',
+    {
+      description:
+        "Run the enforcement taint clearer (scripts/enforcement-reconcile.mjs) — the only sanctioned removal path for H17's (B) surface taint latch, and the only way to mint the persistent (B) baseline list (decision b-baseline-hash-list-concrete-design, D2/D5). Default (adopt:false) is VERIFY: it clears the latch only on an exact match against the existing baseline list PLUS a clean tracked (A) enforcement surface, and refuses — latch intact — on any delta, any (A) dirt, a missing list, or any abnormal shape. adopt:true is the explicit human-acceptance operation: it re-mints the baseline from the current surface (the sanctioned discharge after a legitimate (B) change — a TUI config edit, sync-agents, init) and names (A) dirt loudly. Run it with agents QUIESCED; the returned {cleared, reason} is the module's own verdict, verbatim. THIS IS A FRONT DOOR, NOT AN AUTHORITY BOUNDARY, and the distinction is the ruling (fe861066's honesty clause): this server has no authenticated caller identity, an agent whose frontmatter omits `tools:` receives all mounted tools, and any caller able to run Node under this UID can import the module and self-assert callerRole. That no agent template grants this tool (pinned by AC-R11) is DISTRIBUTION POLICY only. 'Only the conductor can clear' is NOT claimed as a mechanical property — what this tool removes is the friction of the alternative (a raw `node -e \"import(...)\"`, the exact shape H15 denies), not an attacker's capability. DISCLOSED CHANNEL CHANGE (roster security review, 2026-09-06): H17's latch is registered on BASH in agent frontmatter and does not gate an agent's MCP, Edit, Write or Task calls, so the predecessor route sat INSIDE the latch's own denial perimeter — an agent that tripped the latch had its clearing route denied by the very latch it tripped — while this tool does not. No shipped agent template grants it, and the two Bash-bearing roster agents have Bash denied while the latch stands; the reachable case is a caller outside the roster (an all-tools dispatch whose frontmatter omits `tools:`, or direct Node import). Since adopt:true re-mints from the current surface in one pass with no diff against the prior list, that caller's tamper-then-clear is a single call. This is disclosure, not a claim of containment.",
+      inputSchema: strict({ adopt: z.boolean().default(false) }),
+    },
+    async ({ adopt }) => json(await tools.enforcementReconcile(adopt))
+  );
+
+  server.registerTool(
     'concept_designed',
     {
       description:

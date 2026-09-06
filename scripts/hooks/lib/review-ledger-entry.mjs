@@ -390,7 +390,20 @@ export function dischargeMarkerClass(normalized) {
 function isContentfulDisposition(d) {
   if (!isEvidenceObject(d)) return false;
   const reasonOk = typeof d.reason === 'string' && d.reason.trim() !== '';
-  const classOk = d.class === 'foreign-session' || d.class === 'foreign-branch' || d.class === 'no-live-territory';
+  const classOk =
+    d.class === 'foreign-session' ||
+    d.class === 'foreign-branch' ||
+    d.class === 'no-live-territory' ||
+    // Board 1d6d01bd added these two to review-ledger.mjs's RECOGNIZED_CLASSES.
+    // THIS LIST MUST MIRROR THAT ONE, as the docblock above says: a class the
+    // verb ACCEPTS but this predicate omits makes the discharge a NO-OP at every
+    // reading surface — the marker classes 'unauthenticated', H1 keeps reporting
+    // the receipt and commit-reviewed keeps disclosing it, while the verb reports
+    // success. That is exactly the failure the legacy-handle branch above was
+    // written to avoid. Parity is pinned mechanically (see the review-ledger
+    // suite) precisely because this duplication is the drift-prone seam.
+    d.class === 'unattributable' ||
+    d.class === 'superseded';
   return reasonOk && classOk;
 }
 

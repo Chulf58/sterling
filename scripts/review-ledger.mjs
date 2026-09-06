@@ -6,8 +6,11 @@
 //   node scripts/review-ledger.mjs discharge \
 //     (--entry-id <uuid> | --legacy-handle receipt-<32 hex>) \
 //     --digest   <sha256 hex of the EXACT current ledger bytes> \
-//     --class    <foreign-session|foreign-branch|no-live-territory> \
+//     --class    <foreign-session|foreign-branch|no-live-territory|unattributable|superseded> \
+//     [--superseded-by <entry_id | 40-hex commit sha>]   # REQUIRED for --class superseded
 //     --reason   "<single-line reason>"
+//
+//   node scripts/review-ledger.mjs digest      # prints the concurrency token
 //
 //   exit 0 = discharged (a one-line JSON report on stdout)
 //   exit 1 = refused (the reason on stderr; NOTHING written, ever)
@@ -98,6 +101,13 @@ import {
   legacyReceiptHandle,
   isLegacyEntry,
   LEGACY_HANDLE_PATTERN,
+  // THE SUPERSEDED CLASS READS A SECOND RECEIPT'S CONTENT EVIDENCE, and it does
+  // so through the SAME two helpers commit-reviewed's reviewed-bytes verdict
+  // uses — one definition of "is this a usable recorded blob" and one of "which
+  // paths did this receipt bind", for both schema versions. A second local copy
+  // would be a second answer to a question the ledger already answers once.
+  isUsableBlobSha,
+  receiptBlobEvidence,
 } from './hooks/lib/review-ledger-entry.mjs';
 
 const target = process.cwd();
@@ -111,11 +121,35 @@ const argv = process.argv.slice(2);
 // had been decided under rev 2.
 const CLASSIFIER_VERSION = 1;
 
-// §3's three recognized unspendable classes, kebab-cased. CLOSED SET: an
-// unrecognized class is REFUSED (P5 — unknown signals halt), because a verb
-// that accepts any class string is a delete-anything-I-do-not-want-to-see verb
-// wearing a flag.
-const RECOGNIZED_CLASSES = ['foreign-session', 'foreign-branch', 'no-live-territory'];
+// §3's three recognized unspendable classes, kebab-cased, PLUS the two added by
+// board 1d6d01bd. CLOSED SET: an unrecognized class is REFUSED (P5 — unknown
+// signals halt), because a verb that accepts any class string is a
+// delete-anything-I-do-not-want-to-see verb wearing a flag.
+//
+// THE TWO NEW CLASSES CLOSE A MEASURED DEAD END (board 1d6d01bd, 2026-09-05):
+// eight roster receipts sat active in this repo's own ledger that could neither
+// be SPENT nor DISCHARGED — six carrying territory.source 'unattributable' from
+// same-type batch dispatches (which commit-reviewed will never stamp by
+// construction), plus every stale-bytes receipt whose reviewer's work was later
+// re-done by a fresh, alone-dispatched reviewer. None of them is foreign-session,
+// foreign-branch or no-live-territory, so the honest operator had NO route and
+// commit-reviewed re-printed their disclosures on every commit forever. The
+// sanctioned dispositions until now were three HAND REMOVALS with the evidence
+// preserved in a decision record (decisions df1b7c41, d7f9237e, ad259700) —
+// i.e. exactly the "delete it by hand" §3 exists to abolish, performed three
+// times because the verb had no class for the shape. These two classes are that
+// precedent, mechanized: same judgement, but VERIFIED before it is recorded and
+// PRESERVING the entry instead of destroying it (§3: discharge preserves
+// evidence).
+//
+// EACH ONE VERIFIES ITS OWN FACT — neither is an assertion the CLI merely
+// records. 'unattributable' is proved by the receipt's OWN territory.source
+// (H22 wrote it there; a receipt that does not say so is contradicted).
+// 'superseded' is proved against a NAMED survivor — a newer active receipt or a
+// review-stamped commit that demonstrably covers this receipt's trustworthy
+// territory — because "something else covered it" with nothing named is not a
+// class, it is a wish.
+const RECOGNIZED_CLASSES = ['foreign-session', 'foreign-branch', 'no-live-territory', 'unattributable', 'superseded'];
 
 const REASON_MAX = 500; // same bound as commit-reviewed's --waive-bytes reason (decision 57984926 §2)
 
@@ -196,19 +230,37 @@ function flagAll(name) {
 const USAGE_DISCHARGE =
   "usage: node scripts/review-ledger.mjs discharge (--entry-id <uuid> | --legacy-handle receipt-<32 hex>) " +
   '--digest <sha256-hex-of-the-exact-current-ledger-bytes> ' +
-  `--class <${RECOGNIZED_CLASSES.join('|')}> --reason "<single-line reason>"`;
+  `--class <${RECOGNIZED_CLASSES.join('|')}> --reason "<single-line reason>" ` +
+  '[--superseded-by <entry_id | 40-hex commit sha>  REQUIRED for --class superseded]';
 const USAGE_RECORD_EXTERNAL =
   'usage: node scripts/review-ledger.mjs record-external --file <repo-relative path> [--file <path> …] --provider <id> [--model <id>] ' +
   '--thread-id <id> --round <n> [--note "<single-line note>"]';
-const USAGE = `${USAGE_DISCHARGE}\n${USAGE_RECORD_EXTERNAL}`;
+const USAGE_DIGEST = 'usage: node scripts/review-ledger.mjs digest   (no flags — prints the sha256 of the exact current ledger bytes, and nothing else)';
+// THE `superseded` ENTRY FORM IS NOT USABLE ON TODAY'S RECEIPTS, and the usage
+// text says so rather than letting a conductor discover it from a refusal. The
+// entry arm requires the superseder's `observed_reads` — the reads-only half of
+// the observed-evidence upgrade — which NO ledger entry carries yet: H22 records
+// only the merged `observed_files` (reads ∪ writes) today, and the split field
+// arrives in a later slice. Until then the COMMIT form (--superseded-by <40-hex
+// sha>) is the working half, and an entry-form attempt refuses by naming exactly
+// this gap ([refusal: superseder-predates-observed-reads]) instead of silently
+// falling back to observed_files — a writes-inclusive fallback would let a
+// receipt be superseded by an agent that WROTE the files rather than REVIEWED
+// them, which is the opposite of review evidence.
+const USAGE_SUPERSEDED_CONSEQUENCE =
+  "note: --class superseded's ENTRY form (--superseded-by <entry_id>) requires the named receipt to carry `observed_reads`, a field no ledger entry records " +
+  'yet (H22 writes only the merged observed_files today; the split lands in a later slice). Until then use the COMMIT form: --superseded-by <40-hex sha> of a ' +
+  'commit carrying a Reviewed-By-Agent trailer whose files cover this receipt.';
+const USAGE = `${USAGE_DISCHARGE}\n${USAGE_RECORD_EXTERNAL}\n${USAGE_DIGEST}`;
 
 // ===========================================================================
-// VERBS. Exactly two: 'discharge' (§3) and 'record-external' (§4). An unknown
-// verb REFUSES rather than falling through to a default, and the message says
-// so explicitly for the resurrection family — a conductor reaching for
-// `restore` must learn that the absence is deliberate, not a missing feature.
+// VERBS. Three: 'discharge' (§3), 'record-external' (§4) and 'digest' (board
+// 1d6d01bd). An unknown verb REFUSES rather than falling through to a default,
+// and the message says so explicitly for the resurrection family — a conductor
+// reaching for `restore` must learn that the absence is deliberate, not a
+// missing feature.
 // ===========================================================================
-const KNOWN_VERBS = ['discharge', 'record-external'];
+const KNOWN_VERBS = ['discharge', 'record-external', 'digest'];
 const verb = argv[0];
 if (verb === undefined || verb.startsWith('-')) {
   fail(`review-ledger: missing subcommand. ${USAGE}`);
@@ -237,6 +289,37 @@ if (!existsSync(join(target, '.sterling'))) {
 // ===========================================================================
 if (verb === 'record-external') {
   recordExternal();
+}
+
+// ===========================================================================
+// DIGEST (board 1d6d01bd) — dispatched HERE for the SAME reason record-external
+// is, and it NEVER RETURNS: everything below this point is discharge's own
+// argument validation, which would refuse a well-formed `digest` invocation for
+// a selector, class, reason and digest it does not take.
+//
+// WHAT IT IS FOR. `discharge` requires --digest, the sha256 of the EXACT ledger
+// bytes, as its concurrency token (§3; mtime was rejected). Every route to that
+// number ran outside this CLI — `shasum -a 256 .sterling/review-ledger.json` in
+// a shell, which is precisely the `.sterling/` path H15's store guard seals off
+// from the shell. So the sanctioned command's REQUIRED argument was obtainable
+// only through a denied route: the same unreachable-remedy shape decision
+// 1434cd54 Ruling 2 records, one flag deeper. This verb makes the token
+// obtainable from the same sanctioned script that demands it.
+//
+// IT IS A CONCURRENCY TOKEN, NEVER AUTHORIZATION. Printing the digest grants
+// nothing and proves nothing about whether any entry may be discharged: it says
+// only "these are the bytes I read". Every class verification still runs, inside
+// the lock, against the bytes on disk at that moment.
+//
+// ZERO FLAGS, AND EXACTLY ONE LINE OF STDOUT. A caller substitutes this straight
+// into `--digest "$(…)"`, so any second line, banner or trailing note would be
+// carried into the token. Flags are REFUSED rather than ignored (P5): a caller
+// passing `digest --entry-id X` has misunderstood what this verb does, and
+// silently printing the whole-ledger digest anyway would answer a question they
+// did not ask.
+// ===========================================================================
+if (verb === 'digest') {
+  digestVerb();
 }
 
 // ===========================================================================
@@ -354,6 +437,59 @@ if (legacyHandle !== null && dischargeClass === 'no-live-territory') {
       `'foreign-branch' if either holds, or judge it another way. Nothing written.`
   );
 }
+
+// --superseded-by: THE SURVIVOR THIS RECEIPT IS BEING RETIRED IN FAVOUR OF
+// (board 1d6d01bd). REQUIRED for --class superseded and REFUSED for every other
+// class — the two directions are separate defects and get separate refusals.
+//
+// WHY IT IS MANDATORY. "Superseded" is the only recognized class that is not a
+// fact about the receipt itself: foreign-session/foreign-branch compare two
+// identities the entry already carries, 'unattributable' reads the entry's own
+// territory.source, and no-live-territory measures the working tree. Supersession
+// is a claim about a DIFFERENT artifact, so with nothing named there is nothing
+// to verify and the class would degrade into "I believe someone re-reviewed this"
+// — an unverifiable assertion on a verb that makes reviewer evidence invisible.
+// Naming the survivor is what turns it back into a checkable fact, and it is
+// recorded in the disposition so a later reader can re-check it.
+//
+// A REPEATED FLAG REFUSES, NEVER FIRST-WINS — same reasoning as the selectors
+// above (Codex review MED-2): two values for one piece of evidence means the
+// caller does not know which survivor they named, and this evidence decides
+// whether real review evidence is retired.
+const supersededByGiven = flagGiven('--superseded-by');
+{
+  const occurrences = flagAll('--superseded-by');
+  if (occurrences.length > 1) {
+    fail(
+      `review-ledger discharge: --superseded-by is given ${occurrences.length} times (${occurrences.map((v) => JSON.stringify(v)).join(', ')}) — the survivor ` +
+        `is the EVIDENCE this class is verified against, and two values is two different claims about what covered this receipt. This verb never silently takes ` +
+        `the first. Re-run with exactly one. Nothing written. ${USAGE_DISCHARGE}`
+    );
+  }
+}
+if (supersededByGiven && dischargeClass !== 'superseded') {
+  fail(
+    `review-ledger discharge: --superseded-by was given with --class ${JSON.stringify(dischargeClass)}, which does not take it — only 'superseded' is verified ` +
+      `against a named survivor. It is REFUSED rather than ignored: an argument silently dropped reads to the caller as an argument that was honoured, and the ` +
+      `recorded disposition would then carry no trace of the survivor they meant to name. Nothing written. ${USAGE_DISCHARGE}`
+  );
+}
+const supersededByRaw = flag('--superseded-by');
+if (dischargeClass === 'superseded') {
+  if (!supersededByGiven || typeof supersededByRaw !== 'string' || supersededByRaw.trim() === '') {
+    fail(
+      `review-ledger discharge: --class 'superseded' REQUIRES --superseded-by <entry_id | 40-hex commit sha> — supersession is a claim about a DIFFERENT ` +
+        `artifact, so a discharge that names no survivor has nothing this verb can verify and would record an unverifiable assertion about real reviewer ` +
+        `evidence. Name the receipt or the review-stamped commit that actually covered this territory. Nothing written. ${USAGE_DISCHARGE}\n${USAGE_SUPERSEDED_CONSEQUENCE}`
+    );
+  }
+  if (/[\r\n]/.test(supersededByRaw)) {
+    fail(
+      `review-ledger discharge: --superseded-by must be a SINGLE LINE (${safeLabel(supersededByRaw)}) — refused, never flattened. Nothing written.`
+    );
+  }
+}
+const supersededBy = dischargeClass === 'superseded' ? supersededByRaw.trim() : null;
 
 // A discharge with no reason is not an accountability record at all — it is the
 // silent auto-discharge §3 explicitly rejected, wearing a flag. PRESENCE is
@@ -767,6 +903,427 @@ function verifyNoLiveTerritory(norm) {
 }
 
 // ===========================================================================
+// THE TWO CLASSES ADDED BY BOARD 1d6d01bd — 'unattributable' AND 'superseded'.
+//
+// EVERY REFUSAL BELOW CARRIES A UNIQUE TOKEN, printed as `[refusal: <token>]` at
+// the end of its message. The older refusals in this file are told apart by
+// their prose, which works while there are four of them and stops working at
+// fifteen: the superseded class alone has a dozen distinct ways to fail, several
+// of them one word apart in plain English ("the named entry is not newer" vs
+// "the named entry is not active"), and a caller — or a test — that has to
+// distinguish them by wording is distinguishing them by accident. The token is
+// the refusal's IDENTITY: it appears exactly once per cause, it is what the
+// facts object records as `refusal_class`, and it is stable across any rewording
+// of the sentence around it. Existing refusal messages are deliberately
+// UNTOUCHED (pin L9 and several sibling suites assert on their exact prose).
+// ===========================================================================
+
+/** Append a refusal's identity token. One helper, so a new refusal cannot be
+ *  added without one — a refusal with no token is indistinguishable from its
+ *  neighbours at the only surface anyone reads. */
+function withToken(token, message) {
+  return `${message} [refusal: ${token}]`;
+}
+function classRefusal(token, message, facts = {}) {
+  return { ok: false, refusal_class: token, facts: { refusal_class: token, ...facts }, message: withToken(token, message) };
+}
+
+/** UNATTRIBUTABLE (board 1d6d01bd) — THE RECEIPT'S OWN RECORD IS THE PROOF.
+ *
+ *  H22 marks a reviewer receipt `territory.source: 'unattributable'` when the
+ *  dispatch could not be bound to a block by position: SubagentStart carries no
+ *  tool_use_id (research_finding ffa6219c), so with two same-type reviewers
+ *  dispatched in one message the territory attributed to a receipt may belong to
+ *  the OTHER one. commit-reviewed then refuses to stamp or consume it, BY
+ *  CONSTRUCTION and forever — which is what makes it unspendable in exactly the
+ *  sense §3 means, and what left six of them stranded in this repo's ledger.
+ *
+ *  THE VERIFICATION IS THE FIELD ITSELF, and that is not a weaker check than the
+ *  other classes but a stronger one: foreign-session compares the entry against
+ *  the outside world, no-live-territory compares it against the working tree,
+ *  while here the entry's own producer already recorded the verdict. So there is
+ *  nothing to re-derive — only the possibility that the conductor asserted the
+ *  class about a receipt that never carried it, which is exactly what the
+ *  refusal below catches. A receipt whose source is 'review-territory' is
+ *  properly attributed and SPENDABLE; discharging it as unattributable would
+ *  retire live review evidence on a claim its own record contradicts.
+ *
+ *  BOTH SPELLINGS ARE READ. `norm.files_source` is the adapter's flat view
+ *  (v2's territory.source, or decision 8f137474's flat field on a v1 entry), and
+ *  the raw `territory.source` is read beside it so a legacy entry carrying a
+ *  nested territory object is judged on what it actually says rather than on
+ *  which shape it happens to be. */
+function verifyUnattributable(norm, raw) {
+  const flatSource = norm && typeof norm === 'object' ? norm.files_source : undefined;
+  const rawTerritory = raw && typeof raw === 'object' && raw.territory && typeof raw.territory === 'object' && !Array.isArray(raw.territory) ? raw.territory : null;
+  const nestedSource = rawTerritory ? rawTerritory.source : undefined;
+  if (flatSource === 'unattributable' || nestedSource === 'unattributable') {
+    return {
+      ok: true,
+      facts: {
+        files_source: 'unattributable',
+        recorded_at: flatSource === 'unattributable' ? 'territory.source (normalized)' : 'territory.source (raw)',
+        declared_paths: Array.isArray(norm.files) ? norm.files.filter((f) => typeof f === 'string' && f).map(normalizePath) : [],
+        verified: true,
+      },
+    };
+  }
+  return classRefusal(
+    'class-contradicted-by-receipt',
+    `review-ledger discharge: the class 'unattributable' is CONTRADICTED by the entry itself — it records territory.source ${safeLabel(flatSource ?? nestedSource)}, ` +
+      `not 'unattributable'. THE RECEIPT'S OWN RECORD IS THE PROOF for this class: H22 writes 'unattributable' when a reviewer dispatch could not be bound to a ` +
+      `dispatch block by position, and scripts/commit-reviewed.mjs then never stamps or consumes it — which is precisely what makes such a receipt unspendable. ` +
+      `A receipt that does NOT carry that mark is properly attributed and still spendable, so discharging it here would retire live reviewer evidence on a claim ` +
+      `its own record denies. The receipt stays ACTIVE; nothing written.`,
+    { recorded_files_source: typeof flatSource === 'string' ? flatSource : (typeof nestedSource === 'string' ? nestedSource : null) }
+  );
+}
+
+// A COMMIT SHA IS THE FULL 40, NEVER AN ABBREVIATION (anti-pattern
+// no-bounded-trail-guard-for-destructive-addressing). An abbreviated sha is
+// resolved by git against whatever the repository holds TODAY and can become
+// ambiguous as history grows, on evidence that decides whether real review
+// evidence is retired. Case folds because hex case is an encoding detail, not an
+// address: 40 hex characters name exactly one object in either spelling, so
+// accepting both cannot retarget anything — unlike a prefix, which can.
+const COMMIT_SHA_PATTERN = /^[0-9a-f]{40}$/i;
+
+/** THE TRUSTWORTHY TERRITORY OF THE RECEIPT BEING DISCHARGED — what a superseder
+ *  must cover.
+ *
+ *  `observed_files` WINS WHEN PRESENT (decision review-territory-observed-evidence,
+ *  9500cce1): it is read from the departing agent's OWN transcript at Stop, so it
+ *  is bound to THIS dispatch, while the declared `files` came from a prompt block
+ *  that positional attribution may have mis-assigned — the very defect the
+ *  'unattributable' class above exists for. Superseding on declared territory
+ *  when observed territory exists would check coverage of files this reviewer may
+ *  never have looked at.
+ *
+ *  AN EMPTY TERRITORY IS NOT A COVERED ONE. With no paths, the superset test
+ *  below is vacuously satisfied by ANY survivor, and 'superseded' would become a
+ *  free discharge for any receipt whose territory failed to record. That refuses
+ *  (P5), the same way no-live-territory refuses an empty declared territory. */
+function trustworthyTerritory(raw, norm) {
+  const rawObserved = raw && typeof raw === 'object' ? raw.observed_files : undefined;
+  if (Array.isArray(rawObserved)) {
+    return { source: 'observed_files', paths: [...new Set(rawObserved.filter((f) => typeof f === 'string' && f !== '').map(normalizePath))] };
+  }
+  const declared = Array.isArray(norm && norm.files) ? norm.files : [];
+  return { source: 'files (declared — this receipt records no observed_files)', paths: [...new Set(declared.filter((f) => typeof f === 'string' && f !== '').map(normalizePath))] };
+}
+
+/** The instant a receipt finished, for the strictly-newer test. `finished_at` is
+ *  §1's field and the one the age advisory prefers; `started_at`/`at` are the
+ *  fallbacks a v1 entry (and a v2 entry promoted before finished_at existed)
+ *  leaves. Returns null when nothing parses — which REFUSES rather than
+ *  defaulting, because "we could not tell which came first" is not "the survivor
+ *  came second". */
+function receiptInstant(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  for (const v of [raw.finished_at, raw.started_at, raw.at]) {
+    if (typeof v !== 'string' || v.trim() === '') continue;
+    const t = Date.parse(v);
+    if (Number.isFinite(t)) return { iso: v, ms: t };
+  }
+  return null;
+}
+
+/** SUPERSEDED (board 1d6d01bd) — VERIFIED AGAINST A NAMED SURVIVOR, IN TWO FORMS.
+ *
+ *  THE SHAPE THIS CLASS EXISTS FOR, measured three times before it existed
+ *  (decisions df1b7c41, d7f9237e, ad259700): a reviewer reviews the bytes as
+ *  they were, the code then changes, a FRESH reviewer reviews the final bytes,
+ *  and the first receipt is left permanently unspendable — its recorded blobs
+ *  will never match the staged bytes again — while still being a stamp candidate
+ *  that REFUSES the very commit its successor authorizes. All three were
+ *  disposed of by hand-deleting the entry and preserving its evidence in a
+ *  decision record. This class does the same judgement mechanically, and keeps
+ *  the entry.
+ *
+ *  WHAT "SUPERSEDED" HAS TO MEAN TO BE SAFE: not "a later receipt exists" but
+ *  "a later review DEMONSTRABLY COVERED this receipt's territory". Otherwise the
+ *  class launders any inconvenient receipt behind any newer one, and the review
+ *  floor becomes a formality. So the survivor must be:
+ *
+ *    ENTRY FORM — a DIFFERENT, ACTIVE, strictly NEWER receipt from the SAME
+ *    session and branch, whose non-truncated `observed_reads` is a SUPERSET of
+ *    this receipt's trustworthy territory, with a usable recorded blob sha for
+ *    every covered path. Same-session/same-branch because a receipt from
+ *    elsewhere is evidence about other work (and if THAT is the fact, the
+ *    foreign-* classes are the ones that apply). observed_reads rather than the
+ *    declared territory because the declaration is exactly what may be
+ *    mis-attributed. NEVER a fallback to observed_files: that set is reads ∪
+ *    WRITES, so a coder's own writes would count as having "reviewed" the file.
+ *
+ *    COMMIT FORM — a full 40-hex commit that exists here, carries a
+ *    Reviewed-By-Agent trailer, and whose changed files cover the territory. A
+ *    stamped commit is the strongest survivor available: the trailer means the
+ *    merge gate already accepted a review for those bytes.
+ *
+ *  A CYCLE IS REFUSED. Two receipts that name each other as their superseder
+ *  retire both while nothing ever reviewed anything — the laundering route this
+ *  class most obviously invites. The check is explicit rather than resting on
+ *  the active test, so the refusal names what actually happened. */
+function verifySuperseded({ norm, rawEntry, index, entries }) {
+  const covered = trustworthyTerritory(rawEntry, norm);
+  if (covered.paths.length === 0) {
+    return classRefusal(
+      'no-trustworthy-territory-to-cover',
+      `review-ledger discharge: 'superseded' cannot be established — this receipt records NO usable territory (neither observed_files nor declared files), so ` +
+        `"the survivor covered it" is satisfied by every possible survivor and by none. An empty territory is the STRONGEST form of cannot-verify, never a free ` +
+        `discharge. The receipt stays ACTIVE; nothing written.`
+    );
+  }
+  return COMMIT_SHA_PATTERN.test(supersededBy)
+    ? verifySupersededByCommit(covered)
+    : verifySupersededByEntry({ norm, rawEntry, index, entries, covered });
+}
+
+function verifySupersededByEntry({ norm, rawEntry, index, entries, covered }) {
+  // CANDIDATES ARE v2 ENTRIES ONLY, the same schema-disjoint rule the --entry-id
+  // selector applies: `entry_id` is meaningful only inside the v2 envelope, and a
+  // stray copy on a v1 entry is an unowned field anything can write.
+  const matches = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    if (isLegacyEntry(e)) continue;
+    if (e && typeof e === 'object' && typeof e.entry_id === 'string' && e.entry_id === supersededBy) matches.push(i);
+  }
+  if (matches.length === 0) {
+    return classRefusal(
+      'superseder-not-found',
+      `review-ledger discharge: 'superseded' names ${JSON.stringify(supersededBy)} as the survivor, but NO schema_version 2 entry in this ledger has that ` +
+        `entry_id (${entries.length} checked). The survivor is the evidence this class is verified against, so an unknown one is a refusal, never a discharge on ` +
+        `trust. If you meant a COMMIT, give its full 40-hex sha. The receipt stays ACTIVE; nothing written.`
+    );
+  }
+  if (matches.length > 1) {
+    return classRefusal(
+      'superseder-ambiguous',
+      `review-ledger discharge: ${matches.length} schema_version 2 entries share entry_id ${JSON.stringify(supersededBy)}, so the named survivor is AMBIGUOUS ` +
+        `and this verb will not pick one. Repair the duplicate ids first. Nothing written.`
+    );
+  }
+  const j = matches[0];
+  if (j === index) {
+    return classRefusal(
+      'superseder-is-the-discharged-entry',
+      `review-ledger discharge: the named survivor IS the entry being discharged (${JSON.stringify(supersededBy)}) — a receipt cannot supersede itself, and ` +
+        `recording that it did would put a self-referencing justification on the record. Nothing written.`
+    );
+  }
+  const rawSup = entries[j];
+  const normSup = normalizeLedgerEntry(rawSup);
+
+  // CYCLE, CHECKED EXPLICITLY AND FIRST. A ↔ B mutual supersession retires two
+  // receipts on the strength of each other, with no review anywhere in the loop.
+  const supDisposition = rawSup.disposition && typeof rawSup.disposition === 'object' && !Array.isArray(rawSup.disposition) ? rawSup.disposition : null;
+  const supSupersededBy = supDisposition && typeof supDisposition.superseded_by === 'string' ? supDisposition.superseded_by : null;
+  const thisEntryIds = [typeof rawEntry.entry_id === 'string' ? rawEntry.entry_id : null, isLegacyEntry(rawEntry) ? legacyReceiptHandle(rawEntry) : null].filter(Boolean);
+  if (supSupersededBy !== null && thisEntryIds.includes(supSupersededBy)) {
+    return classRefusal(
+      'supersession-cycle',
+      `review-ledger discharge: SUPERSESSION CYCLE — the named survivor ${JSON.stringify(supersededBy)} was itself discharged as superseded BY THIS ENTRY ` +
+        `(${JSON.stringify(supSupersededBy)}). Each would then be retired on the authority of the other and nothing would have reviewed anything. Nothing written.`,
+      { superseder_superseded_by: supSupersededBy }
+    );
+  }
+
+  // ACTIVE. A discharged (or otherwise non-active) survivor is evidence that has
+  // ALREADY been ruled unspendable; retiring a second receipt behind it spends
+  // authority nobody has.
+  const supStatus = rawSup.status;
+  if (supStatus !== undefined && supStatus !== 'active') {
+    return classRefusal(
+      'superseder-not-active',
+      `review-ledger discharge: the named survivor ${JSON.stringify(supersededBy)} is not ACTIVE — its status is ${safeLabel(supStatus)}` +
+        (dischargeMarkerClass(normSup) === 'authenticated' ? ` (an authenticated discharge, class ${safeLabel(supDisposition && supDisposition.class)})` : '') +
+        `. A receipt that has itself been ruled unspendable cannot carry the review this discharge would retire. Nothing written.`
+    );
+  }
+
+  // SAME SESSION AND BRANCH, both sides KNOWN. Fail-closed in the same direction
+  // the foreign-* classes fail: an unknown identity is not a match, because
+  // recording supersession across an unverifiable identity boundary retires real
+  // evidence on an absence.
+  const mine = { session: normIdentity(norm.session_id), branch: normIdentity(norm.branch) };
+  const theirs = { session: normIdentity(normSup.session_id), branch: normIdentity(normSup.branch) };
+  if (mine.session === null || theirs.session === null || mine.session !== theirs.session || mine.branch === null || theirs.branch === null || mine.branch !== theirs.branch) {
+    return classRefusal(
+      'superseder-identity-mismatch',
+      `review-ledger discharge: the named survivor does not share this receipt's identity — this receipt records session ${safeLabel(mine.session)} / branch ` +
+        `${safeLabel(mine.branch)}, the survivor records session ${safeLabel(theirs.session)} / branch ${safeLabel(theirs.branch)}. Both must be KNOWN and EQUAL: ` +
+        `a receipt from another session or branch is evidence about other work, and an unknown identity on either side is not a match but an absence. If the ` +
+        `receipt is unspendable because it belongs elsewhere, that is what 'foreign-session'/'foreign-branch' are for. Nothing written.`,
+      { entry_identity: mine, superseder_identity: theirs }
+    );
+  }
+
+  // STRICTLY NEWER. A survivor that finished first cannot have re-reviewed work
+  // this receipt covered; equal instants are refused too — two receipts minted in
+  // the same millisecond establish no order at all.
+  const mineAt = receiptInstant(rawEntry);
+  const theirsAt = receiptInstant(rawSup);
+  if (mineAt === null || theirsAt === null || !(theirsAt.ms > mineAt.ms)) {
+    return classRefusal(
+      'superseder-not-newer',
+      `review-ledger discharge: the named survivor is not strictly NEWER than this receipt — this receipt finished ${safeLabel(mineAt && mineAt.iso)}, the ` +
+        `survivor ${safeLabel(theirsAt && theirsAt.iso)}. Supersession is an ordering claim: a review that finished first (or at the same instant, or at a time ` +
+        `neither entry records readably) cannot have re-reviewed what this one covered. Nothing written.`,
+      { entry_finished_at: mineAt && mineAt.iso, superseder_finished_at: theirsAt && theirsAt.iso }
+    );
+  }
+
+  // OBSERVED_READS, OR NOTHING. See the class docblock: observed_files is reads ∪
+  // writes, so falling back to it would accept an agent's own WRITES as evidence
+  // it reviewed the file. The field does not exist in any ledger yet, which is
+  // why this refusal names the gap instead of failing obscurely.
+  if (rawSup.observed_reads === undefined) {
+    return classRefusal(
+      'superseder-predates-observed-reads',
+      `review-ledger discharge: the named survivor records NO observed_reads, so there is no evidence of what it actually READ and the coverage this class ` +
+        `requires cannot be established. THERE IS DELIBERATELY NO FALLBACK to observed_files: that field is reads UNION WRITES, so accepting it would let an ` +
+        `agent's own writes count as having reviewed the file — the opposite of review evidence. NOTE: no ledger entry carries observed_reads yet (H22 records ` +
+        `only the merged observed_files today; the split field lands in a later slice), so the ENTRY form of --superseded-by is usable only for receipts minted ` +
+        `after that. ${USAGE_SUPERSEDED_CONSEQUENCE} Nothing written.`
+    );
+  }
+  if (!Array.isArray(rawSup.observed_reads)) {
+    return classRefusal(
+      'superseder-observed-reads-malformed',
+      `review-ledger discharge: the named survivor's observed_reads is ${safeLabel(rawSup.observed_reads)}, not a list of paths — present but unusable evidence ` +
+        `is refused, never read as absent (decision 57984926 §2's INCONSISTENT-vs-ABSENT distinction). Nothing written.`
+    );
+  }
+  if (rawSup.observed_truncated === true) {
+    return classRefusal(
+      'superseder-observed-reads-truncated',
+      `review-ledger discharge: the named survivor's observed evidence is TRUNCATED (observed_truncated: true) — its transcript window did not cover the whole ` +
+        `dispatch, so "this path is absent from observed_reads" and "this path fell outside the window" are indistinguishable. A superset test over a truncated ` +
+        `set proves nothing. Nothing written.`
+    );
+  }
+  const readSet = new Set(rawSup.observed_reads.filter((f) => typeof f === 'string' && f !== '').map(normalizePath));
+  const uncovered = covered.paths.filter((p) => !readSet.has(p));
+  if (uncovered.length > 0) {
+    return classRefusal(
+      'superseder-observed-reads-incomplete',
+      `review-ledger discharge: the named survivor did not read ${uncovered.length} of the ${covered.paths.length} path(s) this receipt covers — ` +
+        `${uncovered.join(', ')} (this receipt's territory comes from ${covered.source}). The survivor's observed_reads must be a SUPERSET: superseding on ` +
+        `PARTIAL coverage retires review evidence for the paths nobody looked at again, which is the same hole a per-path stamp exists to close. Nothing written.`,
+      { uncovered_paths: uncovered, territory_source: covered.source }
+    );
+  }
+
+  // A USABLE RECORDED BLOB PER COVERED PATH. observed_reads says the survivor
+  // LOOKED at the path; the blob sha says WHICH BYTES it looked at. Without the
+  // second half the discharge rests on evidence commit-reviewed's own byte gate
+  // would refuse to spend.
+  const { map: supBlobs, collisions: supCollisions } = receiptBlobEvidence(normSup);
+  const unbound = covered.paths.filter((p) => supCollisions.has(p) || !isUsableBlobSha(supBlobs.get(p)));
+  if (unbound.length > 0) {
+    return classRefusal(
+      'superseder-content-evidence-incomplete',
+      `review-ledger discharge: the named survivor records no usable content evidence for ${unbound.length} of the ${covered.paths.length} covered path(s) — ` +
+        `${unbound.map((p) => `${p} (${supCollisions.has(p) ? 'contradictory recorded shas' : safeLabel(supBlobs.get(p))})`).join(', ')}. observed_reads says the ` +
+        `survivor LOOKED at a path; a recorded 40-hex blob sha says WHICH BYTES it looked at, and a supersession resting on the first alone would retire this ` +
+        `receipt behind evidence the reviewed-bytes gate itself could not spend. Nothing written.`,
+      { unbound_paths: unbound }
+    );
+  }
+
+  return {
+    ok: true,
+    facts: {
+      form: 'entry',
+      superseded_by: supersededBy,
+      superseder_entry_id: rawSup.entry_id,
+      superseder_agent_type: typeof normSup.agent_type === 'string' ? normSup.agent_type : null,
+      superseder_finished_at: theirsAt.iso,
+      entry_finished_at: mineAt.iso,
+      identity: mine,
+      territory_source: covered.source,
+      covered_paths: covered.paths,
+      superseder_blobs: Object.fromEntries(covered.paths.map((p) => [p, supBlobs.get(p)])),
+      verified: true,
+    },
+  };
+}
+
+function verifySupersededByCommit(covered) {
+  const sha = supersededBy.toLowerCase();
+  const resolved = gitRun(['rev-parse', '--verify', '--quiet', `${sha}^{commit}`]);
+  if (resolved.status !== 0 || !(resolved.stdout ?? '').trim()) {
+    return classRefusal(
+      'superseder-commit-unresolvable',
+      `review-ledger discharge: the named survivor commit ${sha} does not resolve to a commit in this repository, so neither its review trailer nor its files ` +
+        `can be read and nothing about it can be verified. Nothing written.`
+    );
+  }
+  const resolvedSha = resolved.stdout.trim();
+  const body = gitRun(['show', '-s', '--format=%B', resolvedSha]);
+  if (body.error || body.status !== 0) {
+    return classRefusal(
+      'superseder-commit-unreadable',
+      `review-ledger discharge: git could not read the message of the survivor commit ${resolvedSha.slice(0, 8)} ` +
+        `(${(body.stderr || (body.error && body.error.message) || 'unknown error').trim()}). "We could not check" is not "it was reviewed". Nothing written.`
+    );
+  }
+  // THE TRAILER IS THE POINT. A commit sha alone says work landed, not that it
+  // was reviewed — and this class retires reviewer evidence, so only a commit the
+  // merge gate would itself accept as reviewed can stand in for it.
+  if (!/^Reviewed-By-Agent:[ \t]*\S/m.test(body.stdout ?? '')) {
+    return classRefusal(
+      'superseder-commit-lacks-review-trailer',
+      `review-ledger discharge: the survivor commit ${resolvedSha.slice(0, 8)} carries NO 'Reviewed-By-Agent' trailer, so it is not evidence that anything ` +
+        `reviewed these bytes — it is only evidence that they landed. A commit with no review attestation cannot retire a review receipt; that would let ` +
+        `committing the work discharge the requirement to review it. Nothing written.`
+    );
+  }
+  // core.quotePath=false so a non-ASCII path arrives as itself rather than as an
+  // octal-escaped quoted string, which would read as an uncovered path and refuse
+  // a legitimate supersession.
+  const names = gitRun(['-c', 'core.quotePath=false', 'show', '--name-only', '--pretty=format:', resolvedSha]);
+  if (names.error || names.status !== 0) {
+    return classRefusal(
+      'superseder-commit-files-unreadable',
+      `review-ledger discharge: git could not list the files of the survivor commit ${resolvedSha.slice(0, 8)} ` +
+        `(${(names.stderr || (names.error && names.error.message) || 'unknown error').trim()}). Nothing written.`
+    );
+  }
+  const commitPaths = new Set(
+    (names.stdout ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l !== '')
+      .map(normalizePath)
+  );
+  const uncovered = covered.paths.filter((p) => !commitPaths.has(p));
+  if (uncovered.length > 0) {
+    return classRefusal(
+      'superseder-commit-territory-incomplete',
+      `review-ledger discharge: the survivor commit ${resolvedSha.slice(0, 8)} does not touch ${uncovered.length} of the ${covered.paths.length} path(s) this ` +
+        `receipt covers — ${uncovered.join(', ')} (this receipt's territory comes from ${covered.source}). The commit's files must be a SUPERSET: a commit that ` +
+        `never touched a path cannot have superseded the review of it. Nothing written.`,
+      { uncovered_paths: uncovered, commit_paths: [...commitPaths], territory_source: covered.source }
+    );
+  }
+  return {
+    ok: true,
+    facts: {
+      form: 'commit',
+      superseded_by: resolvedSha,
+      superseder_commit: resolvedSha,
+      reviewed_by_agent_trailer: true,
+      territory_source: covered.source,
+      covered_paths: covered.paths,
+      commit_paths: [...commitPaths],
+      verified: true,
+    },
+  };
+}
+
+// ===========================================================================
 // THE LOCK — the same mkdirSync-as-atomic-primitive shape scripts/commit-
 // reviewed.mjs and scripts/hooks/h22-dispatch-register.mjs both carry, with the
 // SAME 10s stale-steal convention (deliberately unchanged: a genuinely dead
@@ -1161,7 +1718,11 @@ function dischargeUnderLock() {
       ? verifyNoLiveTerritory(norm)
       : dischargeClass === 'foreign-session'
         ? verifyForeignSession(norm)
-        : verifyForeignBranch(norm);
+        : dischargeClass === 'foreign-branch'
+          ? verifyForeignBranch(norm)
+          : dischargeClass === 'unattributable'
+            ? verifyUnattributable(norm, rawEntry)
+            : verifySuperseded({ norm, rawEntry, index, entries });
   if (!verdict.ok) refuse(verdict.message);
 
   const headResult = gitRun(['rev-parse', 'HEAD']);
@@ -1191,6 +1752,16 @@ function dischargeUnderLock() {
       head_sha: headSha,
       classifier_version: CLASSIFIER_VERSION,
       class: dischargeClass,
+      // THE NAMED SURVIVOR, ON THE MARKER ITSELF (board 1d6d01bd) — not only
+      // inside `facts`. A 'superseded' disposition whose survivor a reader has to
+      // dig for is a claim with the evidence filed elsewhere, and the survivor is
+      // the ONE thing that makes this class re-checkable later. It is also what
+      // the cycle guard in verifySupersededByEntry reads back, so its home has to
+      // be somewhere stable rather than inside a per-class facts blob. Written
+      // for the superseded class ONLY (null elsewhere, never omitted: a key whose
+      // PRESENCE varies by class cannot be read by a consumer that does not
+      // already know the class).
+      superseded_by: supersededBy,
       // §3's "underlying facts": what the classifier actually observed, so a
       // later reader can re-check the verdict instead of trusting the label.
       facts: verdict.facts,
@@ -1242,6 +1813,7 @@ function dischargeUnderLock() {
     schema_version: rawEntry.schema_version === 2 ? 2 : 1,
     agent_type: typeof norm.agent_type === 'string' ? norm.agent_type : null,
     class: dischargeClass,
+    superseded_by: supersededBy,
     reason,
     at: dischargedEntry.disposition.at,
     head_sha: headSha,
@@ -1490,6 +2062,79 @@ function requiredSingleLineFlag(name, why) {
     fail(`review-ledger record-external: ${name} must be a SINGLE LINE (${safeLabel(raw)}) — refused, never flattened. Nothing written.`);
   }
   return raw.trim();
+}
+
+// ===========================================================================
+// DIGEST (board 1d6d01bd) — see the dispatch note near the top of this file for
+// what it is FOR. This is the whole implementation; it never returns.
+//
+// NO LOCK, DELIBERATELY. This is a pure read, and the ledger is replaced by
+// rename (here, in commit-reviewed and in h22), so a reader either sees the old
+// file or the new one — never a torn one. Taking the write lock to read would
+// also invert the token's meaning: the number describes the bytes AT THE MOMENT
+// OF THE READ, and the discharge that consumes it re-verifies it inside its own
+// lock against the bytes on disk then. That re-verification is the guarantee;
+// this is only how the caller obtains a number to be checked.
+//
+// THE THREE REFUSALS ARE NOT DEFENSIVE PADDING. A missing ledger, a directory or
+// device where the ledger should be, and a file that is not a JSON array are
+// each a state in which the printed digest would be a perfectly valid sha256 of
+// something that is not a ledger — and the caller would carry it straight into a
+// --digest argument, where it would either mismatch confusingly or (on the empty
+// -file case) match a file no discharge should ever be run against. Refusing
+// names the real problem at the point it is discoverable.
+// ===========================================================================
+function digestVerb() {
+  const extra = argv.slice(1);
+  if (extra.length > 0) {
+    fail(
+      `review-ledger digest: this verb takes NO arguments, but ${extra.length} were given (${extra.map((v) => JSON.stringify(v)).join(' ')}). It prints ONE ` +
+        `thing — the sha256 of the exact current ledger bytes — and a caller substitutes that straight into 'discharge --digest', so an argument it does not ` +
+        `understand is REFUSED rather than ignored: silently printing the whole-ledger digest anyway would answer a question you did not ask. ${USAGE_DIGEST}`
+    );
+  }
+  const p = join(target, '.sterling', 'review-ledger.json');
+  let st = null;
+  try {
+    st = statSync(p);
+  } catch {
+    st = null;
+  }
+  if (st === null) {
+    fail(`review-ledger digest: no review ledger at ${p} — there is nothing to digest, and a digest of nothing is not a concurrency token for anything.`);
+  }
+  if (!st.isFile()) {
+    fail(`review-ledger digest: ${p} is not a regular file (it is a directory or another special file), so its "exact bytes" are not defined. Refusing.`);
+  }
+  let bytes;
+  try {
+    bytes = readFileSync(p);
+  } catch (e) {
+    fail(`review-ledger digest: could not read ${p} (${e && e.message ? e.message : e}).`);
+  }
+  let parsed = null;
+  let parseError = null;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8'));
+  } catch (e) {
+    parseError = e;
+  }
+  if (parseError !== null) {
+    fail(
+      `review-ledger digest: ${p} is not valid JSON (${parseError && parseError.message ? parseError.message : parseError}) — refusing to hand back a ` +
+        `concurrency token for a file no ledger reader can parse. Every consumer of this token (discharge, and the surfaces it protects) would refuse on the ` +
+        `same file, so the honest answer is here rather than one command later.`
+    );
+  }
+  if (!Array.isArray(parsed)) {
+    fail(`review-ledger digest: ${p} does not hold a JSON array (got ${typeof parsed}) — that is not a review ledger. Refusing.`);
+  }
+  // EXACTLY ONE LINE ON STDOUT, and nothing else on it: 64 lowercase hex plus a
+  // newline. console.log would do the same today, but process.stdout.write states
+  // the contract in the code — the newline is part of the output, and there is no
+  // second thing to print.
+  process.stdout.write(`${createHash('sha256').update(bytes).digest('hex')}\n`);
+  process.exit(0);
 }
 
 /** The APPEND, run under the ledger lock: re-read the ledger, check the

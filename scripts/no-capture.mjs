@@ -17,14 +17,31 @@
 // earlier research duty, dropping the research_owed enqueue and losing the
 // knowledge with no trace. An unrecognized value is REFUSED, never coerced:
 // a discharge must be no broader than the claim the human actually made.
-//   node scripts/no-capture.mjs --reason "<why>" [--lane research|capture|all] [--target <dir>]
+//   node scripts/no-capture.mjs --reason "<why>" [--lane research|capture|all]
+//
+// `--target` was REMOVED (board scripts-no-capture-mjs-target-dir-has-no-
+// project-containment-check): it took an arbitrary directory with no
+// project-containment check, and now that no-capture.mjs is a
+// SANCTIONED_SCRIPTS entry (H15 sanctions the SCRIPT, not its arguments) that
+// let any Bash-bearing agent write a no_capture discharge event into a
+// SIBLING project's .sterling/transient/session-events.json — a
+// cross-project capture-duty forgery H15's project-scoped seal does not
+// cover. H10's printed remedy only ever used the bare form, so nothing
+// documented relied on it. The event is written to the invoking project only.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { arg, fail } from './lib/project.mjs';
 import { NO_CAPTURE_LANES } from '@sterling/schemas';
 
 const reason = arg('--reason');
-const target = arg('--target') ?? process.cwd();
+// Presence in EITHER word form: `--target <dir>` and `--target=<dir>`. The old
+// parser (arg(), lib/project.mjs) only ever recognized the split form, so the
+// equals form never redirected anything — but an exact-token check would let it
+// pass SILENTLY, and a silent accept is the outcome this refusal exists to
+// prevent (board 5e36fae1 asked for a loud refusal, not merely a safe one).
+if (process.argv.slice(2).some((a) => a === '--target' || a.startsWith('--target='))) {
+  fail('no-capture: --target was removed: the event is written to the invoking project only.');
+}
 if (!reason || !reason.trim()) {
   fail('no-capture: --reason "<why>" is required (a false declaration is drift, so say why there is nothing durable)');
 }
@@ -45,7 +62,7 @@ if (laneGiven && (laneArg === undefined || !NO_CAPTURE_LANES.includes(laneArg)))
 }
 const lane = laneGiven ? laneArg : undefined;
 
-const eventsPath = join(target, '.sterling', 'transient', 'session-events.json');
+const eventsPath = join(process.cwd(), '.sterling', 'transient', 'session-events.json');
 mkdirSync(dirname(eventsPath), { recursive: true });
 const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
 const at = new Date().toISOString();

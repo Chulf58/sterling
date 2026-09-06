@@ -6435,6 +6435,28 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body)])[0]);
   }
   /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id) {
+    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
+  }
+  /**
    * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
    * 9641e01b, the conductor's option (b)) from the union of every OTHER active
    * feature_article's relies_on naming this article's slug — not the stored
@@ -7732,7 +7754,15 @@ function dischargeMarkerClass(normalized) {
 function isContentfulDisposition(d) {
   if (!isEvidenceObject(d)) return false;
   const reasonOk = typeof d.reason === "string" && d.reason.trim() !== "";
-  const classOk = d.class === "foreign-session" || d.class === "foreign-branch" || d.class === "no-live-territory";
+  const classOk = d.class === "foreign-session" || d.class === "foreign-branch" || d.class === "no-live-territory" || // Board 1d6d01bd added these two to review-ledger.mjs's RECOGNIZED_CLASSES.
+  // THIS LIST MUST MIRROR THAT ONE, as the docblock above says: a class the
+  // verb ACCEPTS but this predicate omits makes the discharge a NO-OP at every
+  // reading surface — the marker classes 'unauthenticated', H1 keeps reporting
+  // the receipt and commit-reviewed keeps disclosing it, while the verb reports
+  // success. That is exactly the failure the legacy-handle branch above was
+  // written to avoid. Parity is pinned mechanically (see the review-ledger
+  // suite) precisely because this duplication is the drift-prone seam.
+  d.class === "unattributable" || d.class === "superseded";
   return reasonOk && classOk;
 }
 function isAuthenticatedDischarge(normalized) {

@@ -6372,6 +6372,28 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body)])[0]);
   }
   /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id) {
+    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
+  }
+  /**
    * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
    * 9641e01b, the conductor's option (b)) from the union of every OTHER active
    * feature_article's relies_on naming this article's slug — not the stored
@@ -8274,7 +8296,7 @@ function denyIfTainted(cwd2, agentId) {
     );
   }
   deny(
-    `H17: THE ENFORCEMENT SURFACE IS TAINTED \u2014 this tool call is DENIED BEFORE EXECUTION, and so is every spawned-agent BASH call that H17 gates (it is registered on Bash in agent frontmatter, not globally in hooks/hooks.json, so it does not gate an agent's Edit, Write or Task calls), until the taint is cleared by a conductor. ${verdict.reason}. One of the following was OBSERVED and left unresolved: the protected (B) enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) was changed inside an audited command's window; the persistent (B) baseline list (\`.sterling/enforcement-baseline.json\`) contradicted that surface or was malformed; or a write landed in tracked enforcement territory (an (A) audit incident, v6.0) \u2014 and in every case the bytes were deliberately LEFT ON DISK. Without this latch the very next PreToolUse would re-collect those tampered bytes as its own legitimate baseline and allow them forever \u2014 one denial would buy a permanent edit to the agent GRANT DEFINITIONS. PRESENCE OF THE LATCH IS THE VERDICT: no field inside it can reduce enforcement, and H17 never clears it. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE \u2014 exit \`blocked\`, citing this message VERBATIM. A CONDUCTOR clears it with a deliberate reconciliation that re-verifies the current enforcement surface, and only then removes '${P.rel}'. Re-running the command will not help; routing around it is never sanctioned.`
+    `H17: THE ENFORCEMENT SURFACE IS TAINTED \u2014 this tool call is DENIED BEFORE EXECUTION, and so is every spawned-agent BASH call that H17 gates (it is registered on Bash in agent frontmatter, not globally in hooks/hooks.json, so it does not gate an agent's Edit, Write or Task calls), until the taint is cleared by a conductor. ${verdict.reason}. One of the following was OBSERVED and left unresolved: the protected (B) enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) was changed inside an audited command's window; the persistent (B) baseline list (\`.sterling/enforcement-baseline.json\`) contradicted that surface or was malformed; or a write landed in tracked enforcement territory (an (A) audit incident, v6.0) \u2014 and in every case the bytes were deliberately LEFT ON DISK. Without this latch the very next PreToolUse would re-collect those tampered bytes as its own legitimate baseline and allow them forever \u2014 one denial would buy a permanent edit to the agent GRANT DEFINITIONS. PRESENCE OF THE LATCH IS THE VERDICT: no field inside it can reduce enforcement, and H17 never clears it. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE \u2014 exit \`blocked\`, citing this message VERBATIM. A CONDUCTOR clears it with the MCP tool \`enforcement_reconcile\` (agents quiesced): the default VERIFY run re-verifies the current enforcement surface and only then removes '${P.rel}', while \`adopt:true\` is the explicit acceptance operation for a SANCTIONED change to that surface (a TUI config edit, sync-agents, init), re-minting the baseline instead of proving it unchanged. Re-running the command will not help; routing around it is never sanctioned.`
   );
 }
 function readBaselineList(cwd2) {
@@ -8613,7 +8635,7 @@ try {
     } else {
       try {
         process.stderr.write(
-          `H17: NO PERSISTENT (B) BASELINE LIST \u2014 '${baselineListPaths().rel}' is ABSENT, so cross-call (B) coverage is DISABLED for this call: H17 can compare the gitignored enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) only against THIS call's own Pre image, and cannot see a change made BETWEEN Bash calls or between sessions. This is the documented bootstrap weakness (decision b-baseline-hash-list-concrete-design, D4), not a defect, and it is disclosed rather than denied so a fresh project is not bricked from init until a conductor run. Stated flatly: H17 cannot tell "never enrolled" from "the evidence was taken off disk", and taking the file off disk is easier than forging it. A CONDUCTOR mints the list with the clearer (scripts/enforcement-reconcile.mjs --adopt), agents quiesced. No verdict was changed by this notice.
+          `H17: NO PERSISTENT (B) BASELINE LIST \u2014 '${baselineListPaths().rel}' is ABSENT, so cross-call (B) coverage is DISABLED for this call: H17 can compare the gitignored enforcement surface (\`.claude/agents/**\`, \`.claude/settings*.json\`, \`.sterling/config.json\`) only against THIS call's own Pre image, and cannot see a change made BETWEEN Bash calls or between sessions. This is the documented bootstrap weakness (decision b-baseline-hash-list-concrete-design, D4), not a defect, and it is disclosed rather than denied so a fresh project is not bricked from init until a conductor run. Stated flatly: H17 cannot tell "never enrolled" from "the evidence was taken off disk", and taking the file off disk is easier than forging it. A CONDUCTOR mints the list with the clearer \u2014 the \`enforcement_reconcile\` MCP tool, \`adopt:true\` for a sanctioned change \u2014 with agents quiesced. No verdict was changed by this notice.
 `
         );
       } catch {
@@ -8979,7 +9001,7 @@ ${latchNote}` : "";
     }
     if (listDenied.length) {
       parts.push(
-        `H17: THE PERSISTENT (B) BASELINE LIST (${baselineListPaths().rel}) CONTRADICTS THE LIVE (B) SURFACE \u2014 DENIED, AND NOTHING WAS WRITTEN OR TAKEN OFF DISK: ${listDenied.join("; ")}. \u2014 exit contract-violated, never route around. The list is compared against the WHOLE current (B) set on EVERY gated call, not only when this window changed something (decision b-baseline-hash-list-concrete-design, D3): a listed path missing or hash-different denies, a live (B) path absent from the list denies, a malformed list denies, and an exact match simply produces no finding \u2014 it never allows anything and never suppresses another finding in this same result. THIS IS THE CROSS-CALL ARM, and it is why the contradiction may have nothing to do with your command: unlike every other check here it is NOT bounded to one Bash window, NOT suspended by a broken store, and NOT reset at SessionStart, so it can be reporting a (B) edit made between calls or between sessions. THE INCIDENT IS LATCHED, deliberately: a denial with no cross-call consequence would let the contradiction be resolved by taking the list off disk, after which the next call sees no list, skips this check, and adopts whatever is on the surface as legitimate. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE \u2014 exit \`blocked\`, citing this message. A CONDUCTOR inspects the surface and re-mints the list deliberately through the clearer (scripts/enforcement-reconcile.mjs), with agents quiesced; the agent must not write, repair or delete the list.`
+        `H17: THE PERSISTENT (B) BASELINE LIST (${baselineListPaths().rel}) CONTRADICTS THE LIVE (B) SURFACE \u2014 DENIED, AND NOTHING WAS WRITTEN OR TAKEN OFF DISK: ${listDenied.join("; ")}. \u2014 exit contract-violated, never route around. The list is compared against the WHOLE current (B) set on EVERY gated call, not only when this window changed something (decision b-baseline-hash-list-concrete-design, D3): a listed path missing or hash-different denies, a live (B) path absent from the list denies, a malformed list denies, and an exact match simply produces no finding \u2014 it never allows anything and never suppresses another finding in this same result. THIS IS THE CROSS-CALL ARM, and it is why the contradiction may have nothing to do with your command: unlike every other check here it is NOT bounded to one Bash window, NOT suspended by a broken store, and NOT reset at SessionStart, so it can be reporting a (B) edit made between calls or between sessions. THE INCIDENT IS LATCHED, deliberately: a denial with no cross-call consequence would let the contradiction be resolved by taking the list off disk, after which the next call sees no list, skips this check, and adopts whatever is on the surface as legitimate. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE \u2014 exit \`blocked\`, citing this message. A CONDUCTOR inspects the surface and re-mints the list deliberately through the MCP tool \`enforcement_reconcile\` with \`adopt:true\` (the explicit acceptance operation for a sanctioned (B) change; the default VERIFY run instead proves the surface unchanged and clears), with agents quiesced; the agent must not write, repair or delete the list.`
       );
     }
     if (baselineShared && baselineViolations.length) {

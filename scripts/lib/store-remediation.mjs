@@ -48,6 +48,7 @@
 // zero valid entries. H15 sanctions the invocation; the review-receipt ledger is
 // what stops it being abused. If that refusal is ever relaxed, this entry becomes
 // a real hole — so the two must be reviewed together, not independently.
+// scripts/test-repair.mjs (also sanctioned, below) is safe for a different reason: H5's frozen-tests wall does not consult session-events.json, so the two must be reviewed together if H5 ever gains an event-based exemption.
 //
 // CLOSED 2026-09-05 — the free-name hole this block used to disclose is FIXED
 // (decision 5b82e94f). It read: "H15's isSanctionedScript compares a BARE

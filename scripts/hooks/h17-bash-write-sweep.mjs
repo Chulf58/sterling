@@ -2455,8 +2455,10 @@ function denyIfTainted(cwd, agentId) {
       `bytes were deliberately LEFT ON DISK. Without this latch the very next PreToolUse would re-collect those tampered bytes as its own legitimate ` +
       `baseline and allow them forever — one denial would buy a permanent edit to the agent GRANT DEFINITIONS. PRESENCE OF THE LATCH IS THE VERDICT: no ` +
       `field inside it can reduce enforcement, and H17 never clears it. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE — exit \`blocked\`, citing this ` +
-      `message VERBATIM. A CONDUCTOR clears it with a deliberate reconciliation that re-verifies the current enforcement surface, ` +
-      `and only then removes '${P.rel}'. Re-running the command will not help; routing around it is never sanctioned.`
+      `message VERBATIM. A CONDUCTOR clears it with the MCP tool \`enforcement_reconcile\` (agents quiesced): the default VERIFY run re-verifies the current ` +
+      `enforcement surface and only then removes '${P.rel}', while \`adopt:true\` is the explicit acceptance operation for a SANCTIONED change to that surface ` +
+      `(a TUI config edit, sync-agents, init), re-minting the baseline instead of proving it unchanged. Re-running the command will not help; routing around ` +
+      `it is never sanctioned.`
   );
 }
 
@@ -3649,7 +3651,8 @@ try {
             `call's own Pre image, and cannot see a change made BETWEEN Bash calls or between sessions. This is the documented bootstrap weakness ` +
             `(decision b-baseline-hash-list-concrete-design, D4), not a defect, and it is disclosed rather than denied so a fresh project is not bricked ` +
             `from init until a conductor run. Stated flatly: H17 cannot tell "never enrolled" from "the evidence was taken off disk", and taking the file ` +
-            `off disk is easier than forging it. A CONDUCTOR mints the list with the clearer (scripts/enforcement-reconcile.mjs --adopt), agents quiesced. ` +
+            `off disk is easier than forging it. A CONDUCTOR mints the list with the clearer — the \`enforcement_reconcile\` MCP tool, \`adopt:true\` for a ` +
+            `sanctioned change — with agents quiesced. ` +
             `No verdict was changed by this notice.\n`
         );
       } catch {
@@ -4750,8 +4753,9 @@ try {
           `NOT reset at SessionStart, so it can be reporting a (B) edit made between calls or between sessions. THE INCIDENT IS LATCHED, deliberately: a ` +
           `denial with no cross-call consequence would let the contradiction be resolved by taking the list off disk, after which the next call sees no ` +
           `list, skips this check, and adopts whatever is on the surface as legitimate. IT IS NOT YOURS TO CLEAR AND NOT YOURS TO DIAGNOSE — exit ` +
-          `\`blocked\`, citing this message. A CONDUCTOR inspects the surface and re-mints the list deliberately through the clearer ` +
-          `(scripts/enforcement-reconcile.mjs), with agents quiesced; the agent must not write, repair or delete the list.`
+          `\`blocked\`, citing this message. A CONDUCTOR inspects the surface and re-mints the list deliberately through the MCP tool ` +
+          `\`enforcement_reconcile\` with \`adopt:true\` (the explicit acceptance operation for a sanctioned (B) change; the default VERIFY run instead proves ` +
+          `the surface unchanged and clears), with agents quiesced; the agent must not write, repair or delete the list.`
       );
     }
     // DEGRADED-LOUD ON THE (B) SIDE (board 11609d1f), the mirror of

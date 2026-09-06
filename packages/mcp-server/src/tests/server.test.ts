@@ -76,6 +76,11 @@ const SERVED_TOOLS = [
   'run_escalate',
   'agent_exit',
   'run_signal',
+  // enforcement-taint front door: clears the taint latch (or, with the
+  // default adopt:false, reports why there is nothing to discharge). A FRONT
+  // DOOR, not an authority boundary — the MCP server has no authenticated
+  // caller identity (see enforcement-reconcile-tool.test.ts).
+  'enforcement_reconcile',
   // maintenance_enqueue deliberately unregistered — decision 6269b714:
   // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
