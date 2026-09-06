@@ -282,16 +282,29 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   // refresh pattern as a model swap, so the row reflects the new value and
   // (for the toggle) the unchanged codexWired probe.
   const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
-  const sparringToggles = result.effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
-  for (const e of sparringToggles) applySparringToggle(e, notice, configPath);
   const sparringModels = result.effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
   for (const e of sparringModels) applySparringModel(e);
-  // tdd/mutation_verification toggle writes (decision 752caf98) — same
-  // activation-refresh pattern as the sparring-partner toggle.
+  // sparring/tdd/mutation_verification toggle writes (board a0714d0b, decision
+  // 752caf98): run all three appliers, then compose ONE notice from their
+  // {ok} outcomes — a failure wins over a success (review fix, board
+  // 09f05fca half 2), so a later success in this same batch can never
+  // clobber an earlier failure via last-write-wins on the shared notice sink.
+  const sparringToggles = result.effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
   const tddToggles = result.effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
-  for (const e of tddToggles) applyTddToggle(e, notice, configPath);
   const mutationToggles = result.effects.filter((e): e is MutationToggleEffect => e.type === 'mutation_toggle');
-  for (const e of mutationToggles) applyMutationToggle(e, notice, configPath);
+  let toggleWrote = false;
+  let toggleFailure: string | undefined;
+  const collectFailure = (msg: string) => { toggleFailure = msg; };
+  for (const e of sparringToggles) { if (applySparringToggle(e, collectFailure, configPath)) toggleWrote = true; }
+  for (const e of tddToggles) { if (applyTddToggle(e, collectFailure, configPath)) toggleWrote = true; }
+  for (const e of mutationToggles) { if (applyMutationToggle(e, collectFailure, configPath)) toggleWrote = true; }
+  if (toggleFailure !== undefined) {
+    notice(toggleFailure);
+  } else if (toggleWrote) {
+    notice(
+      'this changed the enforcement (B) surface; run enforcement_reconcile {adopt:true} from the MCP surface before the next agent Bash call (H17 latch).'
+    );
+  }
   if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || mutationToggles.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
     restoreTerminal();

@@ -96,11 +96,9 @@ before(async () => {
 
 // --------------------------- harness (h1-accuracy.test.mjs shape) ---------------------------
 
-function runHook(script, input, cwd, env = {}) {
-  // Spawn the seam-built bundle, never scripts/hooks/<script> — see the H1_SEAM
-  // comment above. `script` is retained as a parameter only to keep this
-  // harness's shape aligned with its siblings; every call in this file passes
-  // 'h1-session-start.mjs'.
+function runHook(input, cwd, env = {}) {
+  // Spawn the seam-built bundle, never scripts/hooks/h1-session-start.mjs
+  // directly — see the H1_SEAM comment above.
   const r = spawnSync(process.execPath, [H1_SEAM.hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
@@ -133,7 +131,7 @@ function makeProject(configOverride = {}) {
 }
 
 function h1(dir, pluginRoot, envOverride = {}) {
-  const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart', source: 'startup' }), dir, {
+  const r = runHook(hookInput(dir, { hook_event_name: 'SessionStart', source: 'startup' }), dir, {
     NO_COLOR: '1',
     STERLING_NO_BANNER: '1',
     STERLING_PLUGIN_ROOT: pluginRoot,

@@ -304,7 +304,7 @@ async function makeCurrencyEnabledWalkUpFixture(base) {
   return fixtureRoot;
 }
 
-test('C1-shim-control (CONTROL, NON-VACUITY, expect GREEN today and after): the git-invocation shim logs a directly-invoked git call\'s exact cwd', () => {
+test('C1-shim-control (CONTROL, NON-VACUITY, expect GREEN today and after): the git-invocation shim logs a directly-invoked git call\'s exact cwd', { skip: process.platform === 'win32' && 'git-shim harness is POSIX-only (shebang script); C1 needs a Windows-native shim to port' }, () => {
   const shim = makeGitShimWorld();
   const probeDir = mkdtempSync(join(tmpdir(), 'sterling-h1-shimprobe-'));
   try {
@@ -324,7 +324,7 @@ test('C1-shim-control (CONTROL, NON-VACUITY, expect GREEN today and after): the 
 // about H1. If this is ever red, neither C1-probe-engaged-control nor C1 below
 // proves anything, and the finding is about the SHIM, not the hook.
 
-test('C1-probe-engaged-control (CONTROL, NON-VACUITY, expect GREEN today and after): H1\'s currency probe, spawned from a non-authoring walk-up root, invokes at least one git command', async () => {
+test('C1-probe-engaged-control (CONTROL, NON-VACUITY, expect GREEN today and after): H1\'s currency probe, spawned from a non-authoring walk-up root, invokes at least one git command', { skip: process.platform === 'win32' && 'git-shim harness is POSIX-only (shebang script); C1 needs a Windows-native shim to port' }, async () => {
   const shim = makeGitShimWorld();
   const base = mkdtempSync(join(tmpdir(), 'sterling-h1-currencyworld-'));
   const { dir: project, cleanup: cleanupProject } = makeH1Project();
@@ -348,7 +348,7 @@ test('C1-probe-engaged-control (CONTROL, NON-VACUITY, expect GREEN today and aft
 // non-authoring walk-up fixture makes the currency probe ENGAGE at all; C1 is
 // the pin that isolates WHICH cwd the engaged probe's git calls used.
 
-test('C1 (board fb7c43fb N-3, THE SECURITY CORE, expect RED today): the currency probe never spawns git with cwd inside a STERLING_PLUGIN_ROOT-named planted tree', async () => {
+test('C1 (board fb7c43fb N-3, THE SECURITY CORE, expect RED today): the currency probe never spawns git with cwd inside a STERLING_PLUGIN_ROOT-named planted tree', { skip: process.platform === 'win32' && 'git-shim harness is POSIX-only (shebang script); C1 needs a Windows-native shim to port' }, async () => {
   const shim = makeGitShimWorld();
   const base = mkdtempSync(join(tmpdir(), 'sterling-h1-currencyworld-'));
   const planted = makePlantedMarkerRoot(base, 'planted-attacker-root');

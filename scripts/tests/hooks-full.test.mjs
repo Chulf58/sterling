@@ -294,6 +294,36 @@ test('H1 machine role (todo cabbc10f, decision a9b98b7d): stated only on a Sterl
   }
 });
 
+test('H1 machine role (isolates the notAClone arm at :290-291): a fixture root with NO .claude-plugin marker at all never renders a MACHINE ROLE line', () => {
+  // Isolates the notAClone arm above (:290-291) as its own standalone pin —
+  // it does NOT cover board fb7c43fb (b)'s separately-named "root resolves
+  // but differs from cwd" branch, which needs a DIFFERENT, marker-carrying
+  // fixture root (see RW-5 in h1-receipt-remedy-wording.test.mjs for that
+  // shape) and remains unexercised here. makeProject()'s dir carries no
+  // .claude-plugin marker of any kind, and H1_SEAM.hookPath is a bundle
+  // built into a marker-free temp dir (decision 95c2c109 F2) — so both the
+  // project cwd's walk-up AND the hook's own walk-up find no plugin tree,
+  // with no STERLING_PLUGIN_ROOT override to name a differing root either:
+  // this is the unresolvable-root path only.
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    // NON-VACUITY, checked before the absence claim is trusted: without this,
+    // `/MACHINE ROLE/.test(undefined)` tests the literal string "undefined"
+    // and passes vacuously even if H1 crashed or returned garbage instead of
+    // real additionalContext.
+    assert.equal(typeof ctx, 'string', 'additionalContext must be a real string, not absent/undefined');
+    assert.match(ctx, /Anti-speculation/, 'H1 produced its normal conventions block — proof the hook actually ran and rendered content, not that it crashed silently');
+    assert.ok(!/MACHINE ROLE/.test(ctx), 'no role line off the plugin\'s own clone');
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage: render a MACHINE ROLE line (of any state — UNDECLARED,
+// AUTHORING, or CONSUMER) when pluginRoot() resolves to null instead of
+// suppressing the line entirely — this test goes red.
+
 test('H1 machine role: a malformed config on the plugin\'s own clone costs only the role line\'s specificity, never a crash', () => {
   const { dir, cleanup } = makeProject();
   try {

@@ -102,33 +102,47 @@ function writeH1Ledger(dir, entries) {
 }
 
 function h1(dir, source = 'startup') {
-  const r = spawnSync(process.execPath, [join(HOOKS, H1_HOOK)], {
-    input: JSON.stringify({
-      session_id: 's1',
-      transcript_path: join(dir, 't', 's1.jsonl'),
-      cwd: dir,
-      permission_mode: 'default',
-      hook_event_name: 'SessionStart',
-      source,
-    }),
-    encoding: 'utf8',
-    cwd: dir,
-    timeout: 60_000,
-    env: {
-      ...process.env,
-      STERLING_CURRENCY_DISABLE: '1',
-      NO_COLOR: '1',
-      STERLING_NO_BANNER: '1',
-      STERLING_PLUGIN_ROOT: root,
-    },
-  });
-  let out = null;
+  // board 17a4d20b: point H1's OWN os.tmpdir() resolution at a DEDICATED
+  // sibling root (mkdtempSync'd fresh per call, never the project `dir`
+  // itself and never the real SHARED os.tmpdir()) — same shape
+  // h1-tmpdir-janitor.test.mjs uses — so H1's tmpdir janitor sweeping
+  // concurrently in a sibling suite can never see, and race against,
+  // anything this test does. Removed in `finally` so it never litters.
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'sterling-h1remedy-tmp-'));
   try {
-    out = JSON.parse(r.stdout);
-  } catch {
-    // caller asserts
+    const r = spawnSync(process.execPath, [join(HOOKS, H1_HOOK)], {
+      input: JSON.stringify({
+        session_id: 's1',
+        transcript_path: join(dir, 't', 's1.jsonl'),
+        cwd: dir,
+        permission_mode: 'default',
+        hook_event_name: 'SessionStart',
+        source,
+      }),
+      encoding: 'utf8',
+      cwd: dir,
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        STERLING_CURRENCY_DISABLE: '1',
+        NO_COLOR: '1',
+        STERLING_NO_BANNER: '1',
+        STERLING_PLUGIN_ROOT: root,
+        TMPDIR: tmpRoot,
+        TMP: tmpRoot,
+        TEMP: tmpRoot,
+      },
+    });
+    let out = null;
+    try {
+      out = JSON.parse(r.stdout);
+    } catch {
+      // caller asserts
+    }
+    return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', out };
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', out };
 }
 
 function additionalContext(res) {
@@ -476,33 +490,45 @@ function makeMarkerRoot() {
 // override it to a DIFFERENT root while every other invocation shape (stdin
 // payload, cwd, currency-disable, NO_COLOR) stays byte-identical to h1().
 function h1WithEnvSeam(dir, envSeamRoot, source = 'startup') {
-  const r = spawnSync(process.execPath, [join(HOOKS, H1_HOOK)], {
-    input: JSON.stringify({
-      session_id: 's1',
-      transcript_path: join(dir, 't', 's1.jsonl'),
-      cwd: dir,
-      permission_mode: 'default',
-      hook_event_name: 'SessionStart',
-      source,
-    }),
-    encoding: 'utf8',
-    cwd: dir,
-    timeout: 60_000,
-    env: {
-      ...process.env,
-      STERLING_CURRENCY_DISABLE: '1',
-      NO_COLOR: '1',
-      STERLING_NO_BANNER: '1',
-      STERLING_PLUGIN_ROOT: envSeamRoot,
-    },
-  });
-  let out = null;
+  // board 17a4d20b: same isolation as h1() above — a DEDICATED sibling root,
+  // fresh per call and removed in `finally`, never the project `dir` and
+  // never the real shared os.tmpdir(), regardless of which root
+  // STERLING_PLUGIN_ROOT names.
+  const tmpRoot = mkdtempSync(join(tmpdir(), 'sterling-h1remedy-tmp-'));
   try {
-    out = JSON.parse(r.stdout);
-  } catch {
-    // caller asserts
+    const r = spawnSync(process.execPath, [join(HOOKS, H1_HOOK)], {
+      input: JSON.stringify({
+        session_id: 's1',
+        transcript_path: join(dir, 't', 's1.jsonl'),
+        cwd: dir,
+        permission_mode: 'default',
+        hook_event_name: 'SessionStart',
+        source,
+      }),
+      encoding: 'utf8',
+      cwd: dir,
+      timeout: 60_000,
+      env: {
+        ...process.env,
+        STERLING_CURRENCY_DISABLE: '1',
+        NO_COLOR: '1',
+        STERLING_NO_BANNER: '1',
+        STERLING_PLUGIN_ROOT: envSeamRoot,
+        TMPDIR: tmpRoot,
+        TMP: tmpRoot,
+        TEMP: tmpRoot,
+      },
+    });
+    let out = null;
+    try {
+      out = JSON.parse(r.stdout);
+    } catch {
+      // caller asserts
+    }
+    return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', out };
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', out };
 }
 
 // A fresh no-ledger baseline captured under envSeamRoot — NOT the module-level

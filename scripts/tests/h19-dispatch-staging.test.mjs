@@ -820,7 +820,15 @@ test('GAP: config JSON-legal but NOT AN OBJECT ([]) for a CODER dispatch -> no c
 // `undefined`, and the `?? true` default renders a confident ON/ON; this
 // test goes red.
 
-test('GAP (positive half, FLAGGED FOR TIGHTENING): an UNPARSEABLE config for a CODER dispatch either renders the UNKNOWN line H1 uses, or omits the posture line entirely — never a confident reading', () => {
+// Copied VERBATIM from scripts/tests/h1-tdd-posture-line.test.mjs:298, which
+// already pins H1's exact line for this same unusable-config case — H19 is
+// deliberately matching H1's wording (see the disclosure note above), so the
+// two suites assert the identical full sentence rather than each trusting a
+// looser prefix-only match of the other.
+const UNKNOWN_POSTURE_LINE =
+  'TDD posture: UNKNOWN — the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.';
+
+test('GAP (positive half, TIGHTENED): an UNPARSEABLE config for a CODER dispatch renders the TDD posture: UNKNOWN line H1 uses', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
@@ -829,26 +837,19 @@ test('GAP (positive half, FLAGGED FOR TIGHTENING): an UNPARSEABLE config for a C
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    const hasUnknownLine = /TDD posture: UNKNOWN/.test(ctx);
-    const hasNoPostureLineAtAll = !/TDD posture:/.test(ctx);
     assert.ok(
-      hasUnknownLine || hasNoPostureLineAtAll,
-      `expected either the UNKNOWN posture line or no posture line at all (never a confident ON/OFF); got: ${ctx}`
+      ctx.includes(UNKNOWN_POSTURE_LINE),
+      `expected the FULL UNKNOWN posture sentence including its remedy clause (matching H1) for an unparseable config; got: ${ctx}`
     );
-    // FLAGGED, NOT GUESSED: once the coder's actual choice (render UNKNOWN vs.
-    // suppress) is confirmed and its H1-divergence disclosure is recorded,
-    // tighten this to a single assert.ok/assert.doesNotMatch — mirroring how
-    // P1/P2 in scripts/tests/delivery-oracle.test.mjs were tightened to
-    // assert.equal(..., 'no_tool_response') once that name was known.
   } finally {
     cleanup();
   }
 });
-// Named sabotage: render ANY posture line that is neither the UNKNOWN text
-// nor absent (e.g. a confident ON/ON, or a differently-worded silent
-// fallback) for an unreadable config — this test goes red.
+// Named sabotage: change the unusable-config branch to omit the posture line
+// entirely, render any confident ON/OFF, or render a truncated/reworded
+// UNKNOWN line missing the remedy clause — this test goes red.
 
-test('GAP (positive half, FLAGGED FOR TIGHTENING): a NON-OBJECT ([]) config for a CODER dispatch either renders the UNKNOWN line H1 uses, or omits the posture line entirely — never a confident reading', () => {
+test('GAP (positive half, TIGHTENED): a NON-OBJECT ([]) config for a CODER dispatch renders the TDD posture: UNKNOWN line H1 uses', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
@@ -857,15 +858,15 @@ test('GAP (positive half, FLAGGED FOR TIGHTENING): a NON-OBJECT ([]) config for 
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    const hasUnknownLine = /TDD posture: UNKNOWN/.test(ctx);
-    const hasNoPostureLineAtAll = !/TDD posture:/.test(ctx);
     assert.ok(
-      hasUnknownLine || hasNoPostureLineAtAll,
-      `expected either the UNKNOWN posture line or no posture line at all (never a confident ON/OFF); got: ${ctx}`
+      ctx.includes(UNKNOWN_POSTURE_LINE),
+      `expected the FULL UNKNOWN posture sentence including its remedy clause (matching H1) for a non-object config; got: ${ctx}`
     );
-    // FLAGGED, NOT GUESSED: same tightening note as the unparseable-config arm above.
   } finally {
     cleanup();
   }
 });
-// Named sabotage: same as the unparseable-config positive-half arm above.
+// Named sabotage: same as the unparseable-config positive-half arm above —
+// change the non-object-config branch to omit the posture line entirely,
+// render any confident ON/OFF, or render a truncated/reworded UNKNOWN line
+// missing the remedy clause.

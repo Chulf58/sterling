@@ -772,3 +772,82 @@ node -e "const c=require('crypto'),f=require('fs');console.log(c.createHash('sha
 **What happened, verbatim (as reported):** "knowledge_append's `resolves` parameter refused the article_missing lane outright ('only reconcile_needed/refresh_reference/stale_research/wire_in_dormant/state_review close via resolves'); items were closed with direct `maintenance_remove` after the owning writes."
 
 **Cost:** the one lane whose closing artifact IS a knowledge write (registering a file under an article) cannot bind that write to the item. Near-miss shape: a librarian that stops after the refusal leaves the item open although the debt is paid, and the deep-queue banner keeps counting it.
+
+---
+
+# Addendum received 2026-09-06 (eleven entries; consumer measured against clone `0.13.2`, HEAD `834daf4`)
+
+Triage by the authoring session of 2026-09-06 (plan `cryptic-greeting-starlight`): entries 2, 4 and 11 are FIXED on branch `fix/issues-log-2026-09-05` (`de9cd5e` discharge classes + `digest` verb; `5a9fe39` sanctioned `review-ledger.mjs`/`rotation-note.mjs`) and reach consumers at the next merge + `/sterling:update`; entry 7 is behaviour by ruling (research_finding `0bf26666`); entries 1, 3, 5, 8, 9, 10 are built in that branch's close-out (H10 ownership pin, drain re-mint disclosure + board R9, H30/H25 advisory precision, coder template rule); entry 6 is boarded standalone with a verify-at-build question.
+
+## 2026-09-05 — FRICTION — H10 reports a file as having "no owner" although a live feature_article lists it in `files[]`, apparently because that entry carries `unverified: true`; the Stop feedback names a duty that is already paid
+
+**Severity: FRICTION.** Nothing was done differently: the conductor re-read the owning articles' `files` arrays (knowledge_get field:"files") and found the paths present, then ignored the duty. Cost: two article reads and one wasted knowledge_append attempt per Stop, repeated across three Stops in one session.
+
+**What was attempted, verbatim:** Stop (end of turn) with a dirty tree; H10 fired: "articles: article demand — 3 touched file(s) no owner (feature_article or repo-located reference doc): game/spike/structure_construction_scene_probe.gd, game/spike/equipment_contact_sheet_probe.gd, game/ui/mill_panel.gd → knowledge_create type feature_article".
+
+**What happened, verbatim (checked with knowledge_get id field:"files"):** `equipment-contact-sheet-probe` (254b309d, v4) lists `game/spike/equipment_contact_sheet_probe.gd` with `unverified: false`; `mill-standing-orders` (4edb0793, v3) lists `game/ui/mill_panel.gd` with `unverified: true`. Both files are owned; H10 still named both as unowned on the next Stop too. The third path (structure_construction_scene_probe.gd) was genuinely missing from `probes-breach-building` until appended (v6→v7), so that third of the report was right.
+
+**Cost:** a duty that cannot be discharged by the action it prescribes (creating a second article for an owned file would collide on file ownership). Unknown cause; the `unverified: true` flag is the one visible difference between the owned entry H10 accepts and the one it does not, and is offered as an observation, not a diagnosis.
+
+## 2026-09-05 — FRICTION — H1 says four expired review receipts must be "removed by hand"; H15 denies every shell write into `.sterling/`, and no MCP tool removes a receipt, so the instruction cannot be followed and the receipts persist across sessions
+
+**Severity: FRICTION.** Nothing was done differently; the receipts stay in the ledger and the banner repeats the same four lines every session (this is at least the third session, first seen about 58 hours before this entry).
+
+**What was attempted, verbatim:** the H1 banner said: "SURVIVING REVIEW RECEIPTS (H1): 4 un-consumed review receipt(s) sit in .sterling/review-ledger.json ... A receipt from an earlier session or another branch is NO LONGER SPENDABLE ... Judge each one and remove it by hand, or re-dispatch a reviewer for the work it covered." The conductor ran a read-only `node -e` that parsed `.sterling/review-ledger.json` and printed receipt ids.
+
+**What happened, verbatim:** "H15: shell write access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY. Denied fragment: node -e ..." (the fragment only read the file; the classifier denies unrecognised verbs by design). `grep` on the same file was allowed. `scripts/commit-reviewed.mjs` has no flag that prunes an expired receipt (grep for remove/prune/expire in that script finds only the "remove them by hand" messages at lines 1858 and 2706).
+
+**Cost:** four dead receipts that cannot be spent, cannot be removed through any sanctioned surface, and re-appear in every session banner; a reader must re-judge them each session. Re-dispatching a reviewer for work committed days ago would earn receipts that also cannot be stamped, so that branch of the instruction does not close the loop either.
+
+## 2026-09-05 — FRICTION — reconcile_needed items closed by a drain WITHOUT a knowledge_update are re-minted by the next commit hook, because the article baseline still differs; the drain rule and the re-mint rule disagree
+
+**Severity: FRICTION.** Nothing was done differently yet; the items were drained a second time by re-baselining. Cost: five items drained twice in one session, and a rule that cannot be followed as written.
+
+**What was attempted, verbatim:** a librarian drained the `reconcile_needed` lane (90 items) following the CLAUDE.md template rule "an already-paid item closes with board_remove and NO knowledge_update, because a version bump claiming a reconcile that added nothing is itself drift". `maintenance_query(system_reason:"reconcile_needed")` then returned `matched_filter: 0`.
+
+**What happened, verbatim:** after the next `commit-reviewed` commit (66006e7b, which touched none of these files), `maintenance_query(system_reason:"reconcile_needed")` returned 6 items: one legitimate (probes-mech-rig, eye_height_sweep_probe.gd changed in that commit) and five re-minted for files the commit did not touch — "reconcile article 'structure-assembler' — owned file game/farm/build_placer.gd", "reconcile article 'toon-farm-pack-probes' — owned file game/spike/sheet_cell_pix…", "reconcile article 'crop-kinds' — owned file game/world/field_visuals.gd", "reconcile article 'crop-kinds' — owned file game/run/field_plots.gd", "reconcile article 'harvest-cargo-props' — owned file game/run/worker_crew.gd". Each of those articles carried `baseline_drift` in knowledge_query output before the drain.
+
+**Cost:** an item closed without a write leaves the article's `file_baselines` behind HEAD, so the detector re-mints it on the next commit; following the no-update rule guarantees the re-mint, and following the re-baseline path violates the rule as written. The rule needs a sanctioned re-baseline that is not a content claim, or the detector needs to accept a drain-log close as paid. Cause is inferred from the pattern, not verified in the hook source.
+
+## 2026-09-06 — BLOCKED — the sanctioned receipt-discharge verb exists (`scripts/review-ledger.mjs discharge`) but cannot be run: it demands a sha256 of the ledger bytes, and H15 denies `sha256sum .sterling/review-ledger.json`; the script itself is also absent from H15's sanctioned list
+
+**Severity: BLOCKED.** Follow-up to the 2026-09-05 receipt entry. The four expired receipts were NOT discharged; the cleanup was abandoned for this session.
+
+**What was attempted, verbatim:** `node ~/sterling-main/scripts/review-ledger.mjs discharge --entry-id <id> --digest $(sha256sum .sterling/review-ledger.json | cut -d' ' -f1) --class foreign-session --reason "..."` in a loop over the four entry ids; then, separately, `grep -o '"entry_id":"[^"]*"' .sterling/review-ledger.json; sha256sum .sterling/review-ledger.json`.
+
+**What happened, verbatim:** first call: "H15: shell write access to the Sterling store is denied ... Denied fragment: for id in $(grep -o '"entry_id":"[^"]*"' .sterling/review-ledger.json". Second call: "H15: ... Denied fragment: sha256sum .sterling/review-ledger.json". The script's own header (review-ledger.mjs lines 6-10) requires `--digest <sha256 hex of the EXACT current ledger bytes>`, and H15's printed sanctioned list names commit-reviewed.mjs but not review-ledger.mjs.
+
+**Cost:** the discharge verb built for exactly this case (decision 57984926 §3) is unreachable from a conductor session: the digest it requires cannot be computed under H15, so the receipts persist and H1 repeats them every session. About ten minutes of conductor time this session.
+
+## 2026-09-06 — FRICTION — H30 flagged a decision id as unglossed although its human-readable name stood beside it in the question
+- Severity: FRICTION (nothing was done differently; the answer stood).
+- Attempted, verbatim: AskUserQuestion with question text beginning: A wrecked vehicle: what does it leave behind? The ruling "a vehicle caught in a breach is left where it stands and can be destroyed" (decision e5f33078) says in its own text that this part is not settled.
+- Happened, verbatim: PreToolUse:AskUserQuestion hook additional context: H30 BARE-ID LEGIBILITY ADVISORY — POST-ANSWER, NOT A GATE ... You put a choice to the user naming identifier(s) the reader has no way to recognise: - 'e5f33078' in the question text — a decision in this store, shown with no human-readable name beside it DO NOT TREAT THIS ANSWER AS A RULING. RE-ASK WITH READABLE NAMES
+- Cost: a re-ask would have spent the user's attention twice on a question they had already read with the name present; the conductor treated the answer as valid and noted the flag in the decision record. The advisory's name-beside-id test appears to key on the "name (id8)" shape only and misses a quoted title before "(decision id8)".
+
+## 2026-09-06 — FRICTION — H14 allowlist refused a probe's --log-file argument pointing at the session scratchpad
+- Severity: FRICTION (the lane wrote the log under the repo's gitignored tools/blender/out instead; no work lost).
+- Attempted, verbatim (a coder lane): Godot_v4.6.3-stable_win64_console.exe --path game --display-driver windows --rendering-driver vulkan -s res://spike/barrel_vs_crosshair_probe.gd --log-file "<scratchpad path>/run_s40.log" -- --only=machine_gun,laser,cannon,heat_seeker
+- Happened, as reported by the lane: H14's escape check denied an argument resolving outside the project root, so the scratchpad path (which the system prompt names as the place for temporary files) was refused; the same command with a path inside the repo ran.
+- Cost: one extra windowed run and a log landing beside tracked-adjacent output; the scratchpad directory the harness itself designates is unusable as a Godot output target under the allowlist.
+
+## 2026-09-06 — FRICTION — H15 denied the sanctioned rotation-note.mjs because the NOTE TEXT mentioned a store path
+- Severity: FRICTION (re-run with the phrase removed).
+- Attempted: node ~/sterling-main/scripts/rotation-note.mjs --next-slice "..." --risks "1. Four FOREIGN review receipts ... sit in the review ledger file under the store directory and cannot be discharged ..." (the risks text named that ledger file by its path).
+- Happened, verbatim: H15: shell write access to the Sterling store is denied — the store is read and written through the §10 MCP tool surface ONLY. Denied fragment: node ~/sterling-main/scripts/rotation-note.mjs --next-slice ...
+- Cost: one denied call; the classifier matched a store path inside a quoted argument of a sanctioned script rather than the command's own target.
+
+## 2026-09-06 — FRICTION — the `explorer` agent has no Write tool and runs at low effort, so a board-verification scout dispatched at 12-25 items returned 3-6 verified items and could not write its table
+- Attempted, verbatim: four `explorer` dispatches (model sonnet) told to board_get every item under a set of objectives, grep each cited file:line at HEAD, and "Use the Write tool to save the full table to <scratchpad path>".
+- Observed, verbatim: "No Write tool is available to me in this session (only Read/Grep/Glob/ToolSearch + Sterling board tools) — I cannot produce scout_mech.md"; "Given the effort budget, I'm stopping verification here"; "3 of 52 items fully board_get'd + grepped".
+- Cost: four scout dispatches (~85k tokens each) were re-issued as ten `general-purpose` sonnet dispatches, which then verified every id. Nothing was done differently in the product; the re-dispatch cost roughly 20 minutes.
+
+## 2026-09-06 — FRICTION — H25 test-authoring advisory fires on a coder brief that only TELLS the coder it may not edit tests and asks it to LIST the pins a test-writer should add
+- Attempted, verbatim (in the brief): "No test files (game/test/** is hook-denied; note the tests a test-writer should add)" and "Make sure kind/status/held_back stay byte-identical ... MPL26 pins this row as socket_carrier (game/test/mech/mech_part_library_sockets_test.gd:55-58, 469-479)".
+- Observed, verbatim: "H25 TEST-AUTHORING ADVISORY — ... the brief appears to instruct test authoring, inferred from verbs/paths in the prompt text".
+- Cost: none; warn-only and ignored. Logged because a prohibition and an instruction read identically to the scan, so the advisory carries no signal on a brief that names a test path.
+
+## 2026-09-06 — FRICTION — a `coder` subagent ended its turn with "I'll wait for the background probe runs to complete before continuing" and reported nothing; the conductor had to message it to resume
+- Attempted: the coder started two headless Godot probe runs with run_in_background and then stopped.
+- Observed, verbatim (its whole final message): "I'll wait for the background probe runs to complete before continuing."
+- Cost: one extra conductor message and an unknown wait; the lane's result was delayed until nudged. Not verified whether the background-task notification reaches a subagent at all.
