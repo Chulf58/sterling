@@ -2047,14 +2047,31 @@ export class SterlingTools {
   private computeBaselineDrift(records: DurableRecord[]): { status: string; annotations: Map<string, BaselineDrift> } {
     const annotations = new Map<string, BaselineDrift>();
     if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
+    // BASELINE-CAPABLE TYPES ONLY (the two computeBaselines mints for): over a
+    // window of decisions there is nothing to compare and never will be, so they
+    // stay OUT of `eligible` and the envelope keeps saying 'unavailable:no_baselines'
+    // rather than annotating every file_key as undetermined.
+    const ownedPaths = (r: Record<string, unknown>): string[] => {
+      const type = r.type as string;
+      if (type !== 'feature_article' && type !== 'reference_material') return [];
+      return RECORD_TYPES[type].fileKeys(r);
+    };
     const eligible = (records as unknown as Record<string, unknown>[]).filter((r) => {
       const baselines = r.file_baselines as Record<string, string> | undefined;
-      return baselines !== undefined && Object.keys(baselines).length > 0;
+      const baselined = baselines !== undefined && Object.keys(baselines).length > 0;
+      // board edf13edf: a record that OWNS files but has NO baseline for any of
+      // them (absent at create, or written before baselines existed) used to be
+      // dropped here — so the very disclosure `unverifiable[]` exists for was
+      // unreachable, and the read stayed silent about paths it never checked.
+      return baselined || ownedPaths(r).length > 0;
     });
     if (eligible.length === 0) return { status: 'unavailable:no_baselines', annotations };
     for (const rec of eligible) {
-      const baselines = rec.file_baselines as Record<string, string>;
-      const paths = Object.keys(baselines).sort();
+      const baselines = (rec.file_baselines as Record<string, string> | undefined) ?? {};
+      // The iterated set is the UNION of what was baselined and what the record
+      // OWNS — iterating the baseline map alone could only ever re-check paths
+      // that already had something to compare against (board edf13edf).
+      const paths = [...new Set([...Object.keys(baselines), ...ownedPaths(rec)])].sort();
       const changed: string[] = [];
       const unverifiable: string[] = [];
       // Detached-working-tree resolution, same as every other baseline consumer:
@@ -2065,9 +2082,17 @@ export class SterlingTools {
         unverifiable.push(...paths);
       } else {
         for (const rel of paths) {
+          const baseline = baselines[rel];
+          // An owned path with NOTHING to compare against is UNDETERMINED, never
+          // drift: reporting it as changed would be a positive claim the record
+          // cannot support (board edf13edf).
+          if (baseline === undefined) {
+            unverifiable.push(rel);
+            continue;
+          }
           const current = this.hashFile(rel, tree.root);
           if (current === undefined) unverifiable.push(rel);
-          else if (current !== baselines[rel]) changed.push(rel);
+          else if (current !== baseline) changed.push(rel);
         }
       }
       if (!changed.length && !unverifiable.length) continue; // unmoved: say nothing (P1)
@@ -3188,6 +3213,44 @@ export class SterlingTools {
    * 68988832 — never an implicit auto-drain), coherence warnings — so an edit
    * is a normal supersession and not a back door around any of it.
    */
+  /**
+   * Occurrences of `find` in `current`, counting OVERLAPPING matches — the
+   * count the exactly-once contract needs. `current.split(find).length - 1`
+   * counts only NON-OVERLAPPING matches: 'aaa' with find 'aa' counted ONE, so
+   * a genuinely ambiguous edit passed the uniqueness check and spliced the
+   * first of two real match sites. Each step advances by ONE character, so a
+   * match starting inside the previous one is seen.
+   *
+   * SABOTAGE that must turn the ambiguity pins red: restore
+   * `current.split(find).length - 1` — 'aaa'/'aa' is then admitted as unique.
+   */
+  private static countOccurrences(current: string, find: string): number {
+    // Every caller refuses an empty `find` before reaching here; this keeps the
+    // loop terminating rather than trusting that to stay true, and returns what
+    // the previous split-based expression did for that input.
+    if (find.length === 0) return current.length + 1;
+    let count = 0;
+    for (let at = current.indexOf(find); at !== -1; at = current.indexOf(find, at + 1)) count++;
+    return count;
+  }
+
+  /**
+   * Replace the SINGLE located occurrence of `find` LITERALLY. Never
+   * String.prototype.replace: its string replacement interprets `$&`,
+   * '$' + backtick, "$'" and `$$` as substitution patterns inside
+   * CALLER-SUPPLIED text, silently corrupting it — replace text
+   * "cost $5 and $& and $$" was stored as "cost $5 and <the matched text>
+   * and $". Callers refuse a zero- or multi-occurrence `find` first
+   * (countOccurrences), so `indexOf` addresses exactly the validated site.
+   *
+   * SABOTAGE that must turn the literal-replace pins red: restore
+   * `current.replace(find, replace)`.
+   */
+  private static spliceOnce(current: string, find: string, replace: string): string {
+    const at = current.indexOf(find);
+    return current.slice(0, at) + replace + current.slice(at + find.length);
+  }
+
   knowledgeEdit(
     id: string,
     field: string,
@@ -3244,7 +3307,7 @@ export class SterlingTools {
           `knowledge_edit: '${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not a string — edit replaces text inside a string`
         );
       }
-      const occ = cur.split(find).length - 1;
+      const occ = SterlingTools.countOccurrences(cur, find);
       if (occ === 0) {
         throw new Error(
           `knowledge_edit: 'find' does not appear in the selected element's '${sub}' (${cur.length} chars) — nothing was written. Confirm the exact text (including whitespace and punctuation) before retrying.`
@@ -3255,7 +3318,7 @@ export class SterlingTools {
           `knowledge_edit: 'find' appears ${occ} times in the selected element's '${sub}' — refused as ambiguous, nothing was written. Extend 'find' with surrounding text until it identifies exactly one site.`
         );
       }
-      const nextEl = { ...el, [sub]: cur.replace(find, replace) };
+      const nextEl = { ...el, [sub]: SterlingTools.spliceOnce(cur, find, replace) };
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
@@ -3283,9 +3346,10 @@ export class SterlingTools {
           `edit replaces text inside a string field. Arrays extend with knowledge_append; anything else sets with knowledge_update.`
       );
     }
-    // split().length - 1 counts occurrences without a regex, so `find` needs no
-    // escaping — it is treated as the literal text the caller saw.
-    const occurrences = current.split(find).length - 1;
+    // Counted without a regex, so `find` needs no escaping — it is the literal
+    // text the caller saw — and OVERLAP-AWARE, so 'aa' in 'aaa' is ambiguous
+    // rather than silently unique (see countOccurrences).
+    const occurrences = SterlingTools.countOccurrences(current, find);
     if (occurrences === 0) {
       throw new Error(
         `knowledge_edit: 'find' does not appear in ${old.type}.${field} — nothing was written. ` +
@@ -3298,7 +3362,7 @@ export class SterlingTools {
           `Extend 'find' with surrounding text until it identifies exactly one site.`
       );
     }
-    const next = current.replace(find, replace);
+    const next = SterlingTools.spliceOnce(current, find, replace);
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
     const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
@@ -5236,6 +5300,24 @@ export class SterlingTools {
     return undefined;
   }
 
+  /**
+   * The ONE explanation-and-remedy every targetMountFault refusal carries (board
+   * e9095562). It states WHAT WAS CHECKED — the body's scope label and the
+   * physical holder, both required, neither implying the other — instead of
+   * asserting that the write is domain-scoped. That assertion is FALSE for the
+   * legacy shape (a body carrying no scope on a row the PROJECT store does
+   * hold), and it made the old tail's remedy — "claim them from a write to a
+   * record the PROJECT store holds" — unactionable for exactly that shape,
+   * since the project store already held it. One wording, no branch: it is
+   * accurate for all three refused shapes (absent scope, domain label,
+   * project label on a domain-held row).
+   */
+  private static readonly TARGET_MOUNT_FAULT_TAIL =
+    `Maintenance todos are project-local, so a claim can only ride a write whose target is PROVABLY project-held — which is what was checked: ` +
+    `the body must carry scope='project' AND the project store must physically hold the record. A body label is not a mount, so neither half ` +
+    `implies the other (anti_pattern [record-body-scope-is-not-physical-store-identity]). Close those items separately with maintenance_remove, ` +
+    `or claim them from a write to a record that passes BOTH checks.`;
+
   private validateResolveClaim(
     id: string,
     chain: Set<string>,
@@ -5376,10 +5458,8 @@ export class SterlingTools {
     if (fault) {
       throw new Error(
         `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane), but the article this append targets ${fault}. ` +
-          `Maintenance todos are project-local, so a domain-scoped append-join's transaction cannot atomically close them — the same ` +
-          `refusal knowledge_extract makes by name for a domain-scoped source. The discharge must close the item and write the ` +
-          `article in ONE project-store transaction, and a transaction cannot span two mounts, so this join can never be atomic. ` +
-          `Join the path(s) to an article the PROJECT store holds and claim the item from that write instead. Nothing was written.`
+          `The discharge must close the item and write the article in ONE project-store transaction, and a transaction cannot span ` +
+          `two mounts, so this join can never be atomic. ${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
       );
     }
     // FOREIGN-TREE ARTICLES CANNOT DISCHARGE ROOT OWNERSHIP DEBT (review
@@ -5893,9 +5973,7 @@ export class SterlingTools {
       if (fault) {
         throw new Error(
           `${toolName}: 'resolves' names ${resolves!.length} maintenance item(s), but the record this write targets ('${old.id}') ${fault}. ` +
-            `Maintenance todos are project-local, so a domain-scoped write's transaction cannot atomically close them — the same refusal ` +
-            `knowledge_extract makes by name for a domain-scoped source. Retry without resolves and close those items separately, or ` +
-            `claim them from a write to a record the PROJECT store holds. Nothing was written.`
+            `${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
         );
       }
     }
@@ -6384,8 +6462,8 @@ export class SterlingTools {
    *
    * EXCISION IS PASSAGE-SCOPED, not field-scoped (Q1): the removed text is a
    * (field, find) substring under the SAME exactly-once contract knowledge_edit
-   * enforces (occurrences = field.split(find).length - 1; 0 refused with the char
-   * count, >1 refused as ambiguous). The post-removal value is NEVER taken from
+   * enforces (occurrences counted OVERLAP-AWARE by countOccurrences; 0 refused
+   * with the char count, >1 refused as ambiguous). The post-removal value is NEVER taken from
    * the caller (Q2) — the single occurrence located by the exactly-once check is
    * spliced in LITERALLY (never String.replace, which would interpret
    * $&/$`/$'/$$ in caller-supplied `replace` text as substitution patterns),
@@ -6508,9 +6586,9 @@ export class SterlingTools {
         `knowledge_extract: '${field}' on ${original.type} is ${current === undefined ? 'absent' : typeof current}, not a string — extract lifts a passage out of a STRING field. Nothing was written.`
       );
     }
-    // split().length - 1 counts occurrences without a regex, so `find` is the
-    // literal text the caller saw — the SAME mechanism knowledge_edit uses.
-    const occurrences = current.split(find).length - 1;
+    // Counted without a regex, so `find` is the literal text the caller saw —
+    // the SAME overlap-aware mechanism knowledge_edit uses (countOccurrences).
+    const occurrences = SterlingTools.countOccurrences(current, find);
     if (occurrences === 0) {
       throw new Error(
         `knowledge_extract: 'find' appears 0 times in ${original.type}.${field} (${current.length} chars) — nothing was written. ` +
@@ -6529,8 +6607,9 @@ export class SterlingTools {
     // String.replace(find, replace) — String.replace interprets $&/$`/$'/$$
     // as substitution patterns in caller-supplied `replace` text (e.g.
     // replace:'$&' would leave the passage in place instead of excising it).
-    const matchIndex = current.indexOf(find);
-    const splicedValue = current.slice(0, matchIndex) + replace + current.slice(matchIndex + find.length);
+    // The splice itself now lives in spliceOnce, shared with knowledge_edit's
+    // two paths, which had the String.replace defect this site avoided.
+    const splicedValue = SterlingTools.spliceOnce(current, find, replace);
 
     // resolves: validated BEFORE any write (P5) — plain lane, file_keys overlap
     // with the source. Duplicate ids refused loudly, exactly like knowledgeUpdate.
@@ -8019,7 +8098,12 @@ export class SterlingTools {
     if (typeof current !== 'string') {
       throw new Error(`board_edit: '${id}' has no 'text' field to edit`);
     }
-    const occurrences = current.split(find).length - 1;
+    // Same two corrections as knowledge_edit's sibling paths, from the ONE
+    // definition, because this method's own contract is documented as "the same
+    // contract knowledge_edit already holds callers to": the count is
+    // OVERLAP-AWARE (countOccurrences), and the write is a literal splice
+    // (spliceOnce), never String.replace's pattern-interpreting replacement.
+    const occurrences = SterlingTools.countOccurrences(current, find);
     if (occurrences === 0) {
       throw new Error(
         `board_edit: 'find' does not appear in the item's text — nothing was written. ` +
@@ -8032,7 +8116,7 @@ export class SterlingTools {
           `Extend 'find' with surrounding text until it identifies exactly one site.`
       );
     }
-    const next = current.replace(find, replace);
+    const next = SterlingTools.spliceOnce(current, find, replace);
     const record = this.boardUpdate(old.id, { text: next });
     return { record, replaced: { chars_before: current.length, chars_after: next.length } };
   }

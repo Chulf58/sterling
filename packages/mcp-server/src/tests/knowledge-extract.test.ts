@@ -563,6 +563,81 @@ test('invariant 2 + invariant 3 (find-ambiguous arm): find matching TWICE in the
 });
 
 // ===========================================================================
+// OVERLAPPING-MATCH COUNTING (board-less side finding, fixed by the tools.ts
+// lane). knowledge_extract's exactly-once occurrence count is now the SAME
+// shared char-by-char-advancing scan used by knowledge_edit and board_edit
+// (tools.ts ~:6594) — no longer `current.split(find).length - 1`, which
+// UNDERCOUNTS OVERLAPPING matches: 'aaa'.split('aa') = ['', 'a'], length-1 =
+// 1, missing the second occurrence at offset 1. This is an INDEPENDENT guard
+// at its own call site — see knowledge-edit-selector.test.ts for the same
+// shape pinned at the two knowledge_edit sites, and board-api-gaps.test.ts
+// for board_edit's.
+// ===========================================================================
+
+test('CONTROL (knowledge_extract, first): find "aa" in field "aab" (one match, no overlap) still extracts successfully', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const source = tools.knowledgeCreate('decision', {
+      title: 'extract overlap-counting control',
+      statement: 'aab',
+      alternatives_rejected: [],
+      rationale: 'fixture for the occurrence-counting control',
+      file_keys: [],
+    }).record as unknown as Loose;
+
+    const raw = runExtract(tools, {
+      id: source.id,
+      field: 'statement',
+      find: 'aa',
+      new_record: { type: 'decision', fields: decisionNewRecordFields() },
+    });
+    assert.ok(raw, 'the one non-overlapping match extracts successfully');
+    const after = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    assert.equal((after.statement as string).includes('aa'), false, 'the matched passage is gone from the source field');
+  } finally {
+    cleanup();
+  }
+});
+
+// Sabotage: restore `current.split(find).length - 1` as the occurrence count
+// at the knowledge_extract site (tools.ts ~:6594) — 'aaa'.split('aa') =
+// ['', 'a'], length-1 = 1, so the overlapping second match at offset 1 is
+// missed and this call wrongly succeeds instead of refusing — this test's
+// `assert.throws` goes red ("Missing expected exception") while the CONTROL
+// above and the knowledge_edit / board_edit overlap pins in their own files
+// stay green (each site is an independent guard).
+test('AMBIGUITY (knowledge_extract): find "aa" in field "aaa" (overlapping matches at offset 0 and 1) is refused, naming the count; source unchanged', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const source = tools.knowledgeCreate('decision', {
+      title: 'extract overlap-counting ambiguity',
+      statement: 'aaa',
+      alternatives_rejected: [],
+      rationale: 'fixture for the occurrence-counting ambiguity pin',
+      file_keys: [],
+    }).record as unknown as Loose;
+    const before = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    const before_count = decisionCount(tools);
+
+    assert.throws(
+      () =>
+        runExtract(tools, {
+          id: source.id,
+          field: 'statement',
+          find: 'aa',
+          new_record: { type: 'decision', fields: decisionNewRecordFields() },
+        }),
+      /appears 2 times/,
+      'the overlapping-match count (2) is named, not silently 1'
+    );
+    assert.deepEqual(tools.knowledgeGet(source.id as string), before, 'source is byte-identical after the refused extract');
+    assert.equal(decisionCount(tools), before_count, 'no orphan new record created');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
 // Invariant 3 — ATOMICITY. Each sabotage arm paired with a control placed
 // first (the find-ambiguous arm is already covered by the test immediately
 // above, with its own control immediately above that).
