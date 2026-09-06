@@ -5228,6 +5228,21 @@ function deliveryDir(cwd) {
 function pendingPath(cwd) {
   return join2(deliveryDir(cwd), "pending.json");
 }
+var CITATION_BOILERPLATE_WORDS = [
+  "knowledge_get",
+  "anti_pattern",
+  "decisions",
+  "decision",
+  "rulings",
+  "ruling",
+  "overriding",
+  "overrides",
+  "override",
+  "ids",
+  "id"
+];
+var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
+var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 

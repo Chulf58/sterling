@@ -25,6 +25,7 @@ export {
   AXIS_MIN_TERM_LEN,
   AXIS_MIN_HITS,
   extractAxisTerms,
+  extractAxisTermsUncapped,
   axisNarrowText,
   axisHits,
   GENERIC_DEV_TERMS,
@@ -226,14 +227,67 @@ export const STRICT_MIN_HITS = 3;
 
 /** How many newly-introduced axis terms a retry must add over the FIRST
  *  denied attempt (same intent key) before its citation counts as stating an
- *  "unresolved delta" rather than a bare re-ask with an id pasted in. Set
- *  well above the ~2 incidental new words a bare citation itself contributes
- *  ("override(ing)", "decision") — a real stated delta (what is unresolved,
- *  and why) reads as substantially more new vocabulary than the citation
- *  phrasing alone, so the gap between "id pasted in" and "id + explanation"
- *  is wide enough that this floor does not need to be exact, only clearly
- *  above the citation's own incidental contribution. */
+ *  "unresolved delta" rather than a bare re-ask with an id pasted in.
+ *
+ *  THE OLD JUSTIFICATION HERE WAS FALSE, AND MEASURED SO (board 98ce3925,
+ *  2026-09-05, twice and independently). It read: "set well above the ~2
+ *  incidental new words a bare citation itself contributes ('override(ing)',
+ *  'decision')". A bare citation contributed FOUR OR FIVE terms, not two:
+ *  extractAxisTerms splits on non-alphanumerics and keeps every token >= 4
+ *  chars, so a v4 uuid decomposes into its hex groups and each one counts as
+ *  novel vocabulary (Codex, over 1,000 random uuids: 975 yielded 4 terms, and
+ *  adding just TWO nonsense tokens reached 5 in 981 cases). The floor of 5 was
+ *  therefore ~1 above the citation's own contribution, not well above it, and
+ *  the gate could be cleared by the mandatory citation plus filler.
+ *
+ *  THE NUMBER IS UNCHANGED; WHAT IT COUNTS IS NOT (decision
+ *  h20-novelty-counted-over-citation-stripped-uncapped-terms). Novelty is now
+ *  measured over CITATION-STRIPPED (stripCitations below) and UNCAPPED
+ *  (extractAxisTermsUncapped) term sets on both sides, so a citation
+ *  contributes ZERO by construction and the count is monotone in what the user
+ *  actually added — which is what the printed remedy ("add >= 5 new terms")
+ *  promises. 5 stays a heuristic evidence-of-explanation bar, deliberately not
+ *  coupled to store vocabulary.
+ *
+ *  RESIDUAL, ACCEPTED AND STATED: five unique nonsense tokens of >= 4 chars
+ *  still clear this floor. Extraction recognises lexical novelty, not
+ *  sincerity; this is a deny-ONCE rung with a post-answer audit behind it, not
+ *  a hard gate. */
 export const DELTA_MIN_NEW_TERMS = 5;
+
+/** WHICH REPRESENTATION a deny-ledger entry's `terms` are in. Version 1 is the
+ *  implicit pre-2026-09-06 shape: CAPPED at MAX_RANK_TERMS and NOT
+ *  citation-stripped. Version 2 is uncapped + stripped (deltaTermsFor in
+ *  h20-mechanism-axis.mjs).
+ *
+ *  WHY IT EXISTS (Codex review, 2026-09-06): the ledger is SESSION-scoped
+ *  transient state, but the hook can be upgraded WHILE a session holds entries —
+ *  a first attempt denied before the upgrade leaves v1 terms that a post-upgrade
+ *  re-ask would diff against v2 terms. Comparing unlike sides is exactly the
+ *  defect this whole change removes, and here it would fail in the DANGEROUS
+ *  direction: the v1 side carries at most 16 terms and still holds the
+ *  citation's hex fragments, so a bare re-ask can show a large spurious novelty
+ *  count and be waved through as an override. An entry below this version is
+ *  therefore RE-SEEDED from the current attempt and its override check is
+ *  skipped for that attempt — the question is denied once more, and the next
+ *  re-ask is measured against a comparable side.
+ *
+ *  RESIDUAL, ACCEPTED AND NOT CHASED (Codex round 3, conductor-ruled): for a
+ *  GENUINE v1 entry the original attempt's terms beyond the old 16-slot cap were
+ *  never recorded and are unrecoverable, so the union re-seed cannot restore
+ *  them and an attempt after the re-seed can reintroduce up to five of those
+ *  lost words as "new". Exposure is bounded to the single session that spans a
+ *  hook upgrade — the deny ledger is session-transient, cleared at SessionStart
+ *  — and every entry seeded at v2 carries its full uncapped baseline, so the
+ *  path is closed going forward; chasing the historical remainder would cost
+ *  more machinery than the one-session window is worth. Related and likewise
+ *  accepted: a HAND-FRAGMENTED citation — the 8-char prefix plus the id's
+ *  remaining hex groups written loose — still satisfies idCitedIn on the prefix
+ *  while the loose groups survive stripCitations (they are neither a canonical
+ *  full uuid nor a known prefix), contributing roughly three terms; that is
+ *  strictly weaker than, and subsumed by, the five-nonsense-tokens residual
+ *  named on DELTA_MIN_NEW_TERMS above. */
+export const DELTA_TERMS_VERSION = 2;
 
 /** The text one AskUserQuestion sub-question contributes — mirrors
  *  outgoingProposalText's questions[] branch, but for exactly one entry, so
@@ -257,13 +311,59 @@ function emptyDenyLedger() {
   return { entries: {}, overrides: [] };
 }
 
+/** One ledger entry's REQUIRED shape. Anything else is not "an entry with an
+ *  odd field" — it is a value the deny rung would dereference. */
+function isWellFormedDenyEntry(entry) {
+  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return false;
+  if (!Array.isArray(entry.recordIds) || !entry.recordIds.every((id) => typeof id === 'string' && id)) return false;
+  if (!Array.isArray(entry.terms) || !entry.terms.every((t) => typeof t === 'string')) return false;
+  if (entry.terms_version !== undefined && !Number.isFinite(entry.terms_version)) return false;
+  return true;
+}
+
 /** Self-healing like readGuard: a torn ledger resets to empty (worst case one
  *  re-denied question) instead of wedging the pre-step for the rest of the
- *  session. */
+ *  session.
+ *
+ *  SHAPE VALIDATION, NOT ONLY PARSE VALIDATION (reviewer-security S2). The old
+ *  form self-healed a JSON PARSE failure and nothing else, so a file that parsed
+ *  but held a malformed ENTRY — `entries: {k: null}`, `entries` as a string,
+ *  `terms` as a number — threw at the consumer's `entry.recordIds.some(...)` or
+ *  `entry.terms.includes(...)`. In H20 that throw lands in the outer catch,
+ *  which calls warnNonBlocking and exits 1; the runner reads any non-2 exit as
+ *  NON-BLOCKING, so the question is ALLOWED. That is fail-OPEN on the one rung
+ *  that blocks a user's question, reached by writing a two-character value into
+ *  a file that lives in agent-writable `.sterling/transient/`. Every
+ *  non-conforming entry is therefore DROPPED here — at the boundary, where the
+ *  data is still inert — with a stderr disclosure naming the keys, exactly as
+ *  the parse arm discloses its own reset. Dropping an entry costs at most one
+ *  re-denied question (the same worst case the parse arm accepts); keeping it
+ *  costs the gate. */
 export function readDenyLedger(path) {
   try {
     if (!existsSync(path)) return emptyDenyLedger();
-    return { ...emptyDenyLedger(), ...JSON.parse(readFileSync(path, 'utf8')) };
+    const raw = JSON.parse(readFileSync(path, 'utf8'));
+    const ledger = emptyDenyLedger();
+    const rawEntries = raw?.entries;
+    if (rawEntries && typeof rawEntries === 'object' && !Array.isArray(rawEntries)) {
+      const dropped = [];
+      for (const [key, entry] of Object.entries(rawEntries)) {
+        if (isWellFormedDenyEntry(entry)) ledger.entries[key] = entry;
+        else dropped.push(key);
+      }
+      if (dropped.length) {
+        process.stderr.write(
+          `H20: dropped ${dropped.length} malformed deny-once ledger entry(ies) at ${path} — ${dropped.join(', ')}\n`
+        );
+      }
+    } else if (rawEntries !== undefined) {
+      process.stderr.write(`H20: deny-once ledger at ${path} has a non-object 'entries' — treated as empty\n`);
+    }
+    if (Array.isArray(raw?.overrides)) ledger.overrides = raw.overrides;
+    else if (raw?.overrides !== undefined) {
+      process.stderr.write(`H20: deny-once ledger at ${path} has a non-array 'overrides' — treated as empty\n`);
+    }
+    return ledger;
   } catch {
     process.stderr.write(`H20: corrupt deny-once ledger at ${path} — reset to empty\n`);
     return emptyDenyLedger();
@@ -299,22 +399,98 @@ function escapeForRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** THE ONE CITATION MATCHER, factored out so DETECTION (idCitedIn) and
+ *  STRIPPING (stripCitations) cannot drift — a term the detector counts as a
+ *  citation but the stripper leaves behind is precisely the free novelty board
+ *  98ce3925 measured (decision
+ *  h20-novelty-counted-over-citation-stripped-uncapped-terms, ruling 1).
+ *  WORD-BOUNDARIED on ALPHANUMERICS, not \b: an 8-char prefix embedded inside a
+ *  LARGER token (a longer id, or an unrelated alphanumeric string that merely
+ *  contains those 8 characters) is not a citation, while a `-` or `(` beside it
+ *  is an ordinary boundary. */
+function citationPattern(needle) {
+  return `(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`;
+}
+
 /** Whether `text` cites `id` — the full id, or its unambiguous 8-char prefix
  *  (the same prefix convention the id-resolution ladder already resolves
- *  through elsewhere in the store), case-insensitively, WORD-BOUNDARIED
- *  (post-commit follow-up review): a bare substring test let an 8-char prefix
- *  embedded inside a LARGER token count as a citation (e.g. a longer id or an
- *  unrelated alphanumeric string that merely happens to contain those 8
- *  characters) — the match must not be immediately preceded or followed by
- *  another alphanumeric character. */
+ *  through elsewhere in the store), case-insensitively, WORD-BOUNDARIED via the
+ *  shared matcher above. */
 export function idCitedIn(text, id) {
   if (!id) return false;
   const hay = String(text ?? '').toLowerCase();
   const full = String(id).toLowerCase();
-  const boundaried = (needle) => new RegExp(`(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`, 'i').test(hay);
+  const boundaried = (needle) => new RegExp(citationPattern(needle), 'i').test(hay);
   if (boundaried(full)) return true;
   const prefix = full.split('-')[0];
   return prefix.length >= 8 && boundaried(prefix);
+}
+
+/** A CANONICAL full uuid, 8-4-4-4-12 hex, under the same alphanumeric boundary
+ *  rule as citationPattern. Deliberately the canonical SHAPE and nothing looser:
+ *  stripping any 8-hex token generically was rejected because it would eat real
+ *  words like "deadbeef" out of the novelty count. */
+const FULL_UUID_PATTERN = '(?<![a-z0-9])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![a-z0-9])';
+
+/** THE CITATION BOILERPLATE — a small EXPLICIT list, never a broad regex, and
+ *  stripped ONLY where it sits immediately beside a removed id (separated by
+ *  nothing but whitespace or the punctuation below). These are the words H20's
+ *  own override contract instructs a user to write around the id ("Cite <id> +
+ *  the unresolved delta"), so they are supplied by the MECHANISM and cannot be
+ *  evidence that the user explained anything. Most of what a citation says is
+ *  already inert — 'per'/'id' are under AXIS_MIN_TERM_LEN, 'cite'/'citing'/
+ *  'knowledge_get' are AXIS_STOPWORDS — so this list is the short remainder
+ *  that would otherwise count as novel vocabulary. Anything NOT on it survives:
+ *  a word next to an id is stripped because it is boilerplate, never because it
+ *  is next to an id. */
+const CITATION_BOILERPLATE_WORDS = [
+  'knowledge_get',
+  'anti_pattern',
+  'decisions',
+  'decision',
+  'rulings',
+  'ruling',
+  'overriding',
+  'overrides',
+  'override',
+  'ids',
+  'id',
+];
+
+/** Separators allowed BETWEEN a boilerplate word and the id it decorates —
+ *  whitespace and the punctuation that ordinarily wraps a citation. */
+const CITATION_SEP = '[\\s(),.:;\\[\\]]*';
+const CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join('|')})\\b${CITATION_SEP})*`;
+
+/** One id-shaped needle plus any adjacent boilerplate run on either side. The
+ *  needle is MANDATORY in the middle, so this can never match (and erase) a
+ *  bare "decision" that is not decorating an id. */
+function citationStripRegex(needlePattern) {
+  return new RegExp(`${CITATION_BOILERPLATE_RUN}${needlePattern}${CITATION_SEP}${CITATION_BOILERPLATE_RUN}`, 'gi');
+}
+
+/** Remove every CITATION from `text` before novelty is measured over it
+ *  (decision h20-novelty-counted-over-citation-stripped-uncapped-terms).
+ *  Removes, in order:
+ *    1. every canonical full uuid in the text — not merely the cited record's
+ *       own id. Stripping only the cited id recreates the exploit at zero cost:
+ *       cite the required id, append ONE unrelated uuid, collect its four or
+ *       five hex fragments as "new vocabulary";
+ *    2. the KNOWN 8-char prefixes of `recordIds` and nothing else — an
+ *       arbitrary 8-hex token is a word until some record answers to it;
+ *    3. the narrowly listed boilerplate immediately adjacent to either.
+ *  Each removal leaves a space, so stripping can never fuse two neighbouring
+ *  words into a token that was never written. */
+export function stripCitations(text, recordIds = []) {
+  let out = String(text ?? '');
+  out = out.replace(citationStripRegex(FULL_UUID_PATTERN), ' ');
+  for (const id of recordIds ?? []) {
+    if (!id) continue;
+    const prefix = String(id).toLowerCase().split('-')[0];
+    if (prefix.length < 8) continue;
+    out = out.replace(citationStripRegex(citationPattern(prefix)), ' ');
+  }
+  return out;
 }
 
 /** The denial payload, COMPACTED per decision 80d0ab62 (deny-once-message-
@@ -1222,6 +1398,73 @@ export function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { rem
 
 /** How many decision pointers render before the rest are disclosed as dropped. */
 export const DECISION_POINTER_CAP = 8;
+
+/** AUTHORITY RUNGS for pointer ranking, most authoritative first. An ABSENT or
+ *  UNRECOGNISED authority sits on the same rung as an explicitly unstated one:
+ *  a value this code does not know is not evidence that the decision carries
+ *  LESS weight, so it must never be demoted below a self-declared
+ *  `session_scoped`/`one_off`. Ordering only — nothing here reads a rung for
+ *  any other purpose. */
+const DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
+const DECISION_AUTHORITY_UNSTATED = 1;
+
+/** RANK the decisions a FILE TOUCH matched, before DECISION_POINTER_CAP cuts
+ *  them (measured 2026-09-06 by the delivery oracle's golden layer).
+ *
+ *  THE DEFECT: the store returns a file_keys join ordered by overlap count, then
+ *  updated_at DESC, then id DESC (packages/store/src/index.ts:2371). With ONE
+ *  path every row has overlap 1, so the tiebreak IS the order — H19 was purely
+ *  newest-first. On a file carrying more decisions than the cap (CLAUDE.md: 32;
+ *  packages/mcp-server/src/server.ts: 22) that silently drops the older fixes,
+ *  which are exactly the ones a toucher is most likely to re-break: an incident
+ *  ruling earns its keep by being OLD and still true.
+ *
+ *  THE ORDER, and why each rung is where it is:
+ *   1. AUTHORITY — a `standing` ruling governs until superseded, so it outranks
+ *      a newer note that only ever spoke for one session. This is the rung that
+ *      does the real work; the rest are deterministic tiebreaks.
+ *   2. FEWER file_keys FIRST — a decision naming two files is ABOUT those two
+ *      files, while one naming thirty is background that will surface on many
+ *      other touches anyway. The narrow record has fewer chances to be
+ *      delivered, so it gets the slot here.
+ *   3. updated_at DESC, then 4. id DESC — the store's own remaining tiebreaks,
+ *      kept so ranking never introduces nondeterminism the caller must absorb.
+ *
+ *  NOT H20 CENTRALITY, and this was measured rather than assumed: on those two
+ *  files the target decisions rank 17th and 14th by centrality. Centrality
+ *  scores a record against an OUTGOING PROMPT's vocabulary, and a file touch has
+ *  no prompt — the reader is opening a file, not asking a question.
+ *
+ *  PURE and NON-MUTATING (returns a new array): the caller ranks ONCE and uses
+ *  the SAME array for the session guard, the render recipe and the renderer, or
+ *  the guard marks one set delivered while the payload shows another. */
+export function rankFileDecisionPointers(decisions) {
+  // Object.hasOwn, NEVER `in` (Codex round 2, item 3): `in` sees INHERITED
+  // properties, so authority 'toString' / '__proto__' / 'constructor' resolves
+  // to a function or object, the subtraction below becomes NaN, the comparator
+  // silently reports "equal" for that pair, and the rung is discarded without a
+  // sound. An unrecognised string must land on the unstated rung exactly as this
+  // function documents — own-property lookup is what makes the documentation
+  // true rather than true-for-most-inputs.
+  const authority = (d) => {
+    const a = typeof d?.authority === 'string' ? d.authority : '';
+    return Object.hasOwn(DECISION_AUTHORITY_RANK, a) ? DECISION_AUTHORITY_RANK[a] : DECISION_AUTHORITY_UNSTATED;
+  };
+  const breadth = (d) => (Array.isArray(d?.file_keys) ? d.file_keys.length : 0);
+  // An unparseable updated_at sorts OLDEST rather than throwing off the
+  // comparator — a malformed timestamp must cost a slot, never determinism.
+  const updated = (d) => {
+    const t = Date.parse(d?.updated_at ?? '');
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  return [...(decisions ?? [])].sort(
+    (a, b) =>
+      authority(a) - authority(b) ||
+      breadth(a) - breadth(b) ||
+      updated(b) - updated(a) ||
+      (String(b?.id ?? '') < String(a?.id ?? '') ? -1 : String(b?.id ?? '') > String(a?.id ?? '') ? 1 : 0)
+  );
+}
 
 /** Per-pointer clip budgets (decision 6a3b1a46). The statement ORIENTS — what was
  *  decided; the rejected options STOP — what you may be about to propose. */

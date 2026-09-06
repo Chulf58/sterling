@@ -5477,6 +5477,9 @@ var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
 var AXIS_MIN_TERM_LEN = 4;
 var AXIS_MIN_HITS = 2;
 function extractAxisTerms(text, maxTerms) {
+  return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
+}
+function rankedAxisTerms(text) {
   const counts = /* @__PURE__ */ new Map();
   for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
     if (raw.length < AXIS_MIN_TERM_LEN)
@@ -5487,7 +5490,7 @@ function extractAxisTerms(text, maxTerms) {
       continue;
     counts.set(raw, (counts.get(raw) ?? 0) + 1);
   }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
 }
 function axisNarrowText(record) {
   if (!record || typeof record !== "object")
@@ -7747,6 +7750,21 @@ function writeGuard(path, guard) {
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
+var CITATION_BOILERPLATE_WORDS = [
+  "knowledge_get",
+  "anti_pattern",
+  "decisions",
+  "decision",
+  "rulings",
+  "ruling",
+  "overriding",
+  "overrides",
+  "override",
+  "ids",
+  "id"
+];
+var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
+var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;

@@ -7471,6 +7471,21 @@ function writeGuard(path, guard) {
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
+var CITATION_BOILERPLATE_WORDS = [
+  "knowledge_get",
+  "anti_pattern",
+  "decisions",
+  "decision",
+  "rulings",
+  "ruling",
+  "overriding",
+  "overrides",
+  "override",
+  "ids",
+  "id"
+];
+var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
+var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
   const scope = record?.scope ?? "unknown";

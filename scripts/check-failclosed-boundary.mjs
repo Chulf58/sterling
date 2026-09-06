@@ -387,6 +387,21 @@ const BASELINE = {
     // whether the change FEELS structural, only whether it is inside. Verify by
     // running the check, never by reasoning about the edit's shape.
     //
+    // ROTATED A TENTH TIME 2026-09-06 (#87887b36 -> #3c8cfec4 -> #d6a74451, one
+    // change in two steps — the second step is the same-session Codex review
+    // narrowing the helper's CONTRACT: gitEverTracked -> gitKnowsNow plus the
+    // comment stating that history is deliberately not consulted. Comment and
+    // identifier text only; behaviour, catch semantics and entry count all
+    // unchanged): board 97ddfcc6 —
+    // the article_missing mint gained a VANISHED-PROBE guard (a mint-time
+    // existence + ever-tracked re-check on the demand keys, plus the
+    // gitEverTracked helper it calls), all declared inside this same founding
+    // try, so the flattened statement's text moved. RE-EXAMINED: the catch still
+    // calls warnNonBlocking (the underlying debt is unchanged), the new helper and
+    // its call site are both INSIDE this try, no new unguarded top-level statement
+    // — one entry in, one stale entry out, total unmoved at 102. Verified by
+    // RUNNING the check (via scripts/tests/check-failclosed-boundary.test.mjs
+    // AC7). Prior:
     // ROTATED A NINTH TIME 2026-09-05 (#bcb43f69 -> #87887b36): slice 3 of
     // dome-farmer-issues-2026-09-05 replaced the cap: 25 ownership join inside
     // this founding try with the uncapped count()-then-query() form plus the
@@ -422,7 +437,7 @@ const BASELINE = {
     // top-level statement, so this stays exactly ONE entry and
     // FOUNDING_BASELINE_TOTAL stays 107. What moved is the SIZE of the region
     // that can reach the catch, and it shrank. Verified by RUNNING the check.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #87887b36" },
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #d6a74451" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },
@@ -574,7 +589,49 @@ const BASELINE = {
     // OUTER try and its catch semantics are unchanged, and the edit added no new
     // unguarded top-level statement — `let emitted;` is uninitialized, like pinMemo.
     // Verified by RUNNING the check.
-    { statement: 'try { // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where // they were not … #2eb60290' },
+    // ROTATED AGAIN 2026-09-06 (#2eb60290 -> #1f61bd8f -> #22df2dec -> #9ae3d918
+    // -> #5cc617c4 -> #11759a8c, one change in five steps; the FIFTH step is the
+    // reviewer-security pass: the forced-denial branch now resolves a cited
+    // ruling through the STORE (wrapped, falling back to a bare-id row) instead
+    // of only this attempt's retrieval pool, so a drifted re-ask can no longer
+    // produce a bodiless denial. RE-EXAMINED: the added store read is INSIDE this
+    // same try AND carries its own try/catch, so a corrupt/locked db cannot reach
+    // the outer catch from it; still one entry, catch semantics unchanged, no new
+    // top-level statement. Prior steps:
+    // the FOURTH step is Codex round 3:
+    // a re-seed now outranks an override (a stale entry repaired on the same pass
+    // as a different entry's override no longer lets the sub-question through),
+    // and the forced-denial branch generalized from re-seeds to EVERY cited
+    // eligible entry that fell short — citing a previously-denied ruling IS the
+    // claim of a re-ask, so strict matching can no longer release it. RE-EXAMINED:
+    // still one entry, still the same single try, catch semantics unchanged, no
+    // new top-level statement. Prior steps:
+    // the THIRD step is Codex round 2 hardening the
+    // re-seed added by the second: the stale-entry baseline became the UNION of
+    // the entry's old (re-stripped) terms and the current attempt's — replacing
+    // laundered novelty, since a word the ORIGINAL denial contained but this
+    // attempt omits would otherwise become "new" again on a third attempt — and a
+    // re-seed now FORCES the sub-question into `unresolved`, closing a path where
+    // a citing re-ask that had drifted below the strict floor was re-seeded and
+    // then silently ALLOWED. RE-EXAMINED: still one entry, still inside the same
+    // single try, catch semantics unchanged (H20 is advisory there and the catch
+    // still never denies), no new top-level statement of any kind. Prior steps:
+    // the second step is the same-session Codex review adding the
+    // DELTA_TERMS_VERSION stale-representation re-seed inside this same try, so a
+    // v1 ledger entry surviving a mid-session hook upgrade can no longer be diffed
+    // against v2 terms and waved through as an override. RE-EXAMINED: still one
+    // entry, catch semantics unchanged, the added import is static and safe-listed):
+    // board 98ce3925 (decision
+    // h20-novelty-counted-over-citation-stripped-uncapped-terms) moved the re-ask
+    // novelty computation onto citation-stripped, UNCAPPED terms — `deltaTermsFor`
+    // and the two call sites that consume it (the shortfall loop and the ledger
+    // seed) all sit INSIDE this same try, so its flattened text moved. RE-EXAMINED:
+    // catch semantics unchanged (H20 is advisory there and the catch still never
+    // denies), no new unguarded top-level statement (the edit added only the two
+    // static imports extractAxisTermsUncapped/stripCitations, which are safe-listed),
+    // one entry in, one stale entry out, total unmoved at 102. Verified by RUNNING
+    // the check (via scripts/tests/check-failclosed-boundary.test.mjs AC7).
+    { statement: 'try { // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where // they were not … #11759a8c' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart

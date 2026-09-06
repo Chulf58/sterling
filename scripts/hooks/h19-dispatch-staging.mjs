@@ -49,6 +49,7 @@ import {
   cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
+  rankFileDecisionPointers,
   renderPayload,
   extractAxisTerms,
   axisHits,
@@ -232,7 +233,19 @@ try {
 
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  // RANKED ONCE, AT THE BIRTH POINT — the SAME defect and the same repair as
+  // h19-knowledge-delivery.mjs (reviewer-correctness, 2026-09-06). This is the
+  // PATH channel: the store's file_keys join degenerates to newest-first, so
+  // capping at DECISION_POINTER_CAP below evicted the older standing rulings on
+  // any file carrying more decisions than the cap. Ranking here — not at the
+  // slice, not at the renderer — is what keeps the guard slice (:~284), the
+  // render call (:~248) and this array in ONE order; re-sorting at any of them
+  // would mark one set delivered while the payload showed another.
+  // NOT applied to the SUBJECT channel below (`subjectDecisions`): those are
+  // ordered by axis-hit strength against the dispatch prompt, which is the
+  // correct key for a subject match — this ranking answers the file-touch
+  // question ("which rulings govern this territory"), not the relevance one.
+  const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !guard.records.includes(r.id)));
   const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) finish('');
 

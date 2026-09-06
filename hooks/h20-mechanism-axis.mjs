@@ -5467,6 +5467,9 @@ var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
 var AXIS_MIN_TERM_LEN = 4;
 var AXIS_MIN_HITS = 2;
 function extractAxisTerms(text, maxTerms) {
+  return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
+}
+function rankedAxisTerms(text) {
   const counts = /* @__PURE__ */ new Map();
   for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
     if (raw.length < AXIS_MIN_TERM_LEN)
@@ -5477,7 +5480,10 @@ function extractAxisTerms(text, maxTerms) {
       continue;
     counts.set(raw, (counts.get(raw) ?? 0) + 1);
   }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
+}
+function extractAxisTermsUncapped(text) {
+  return rankedAxisTerms(text);
 }
 function axisNarrowText(record) {
   if (!record || typeof record !== "object")
@@ -7772,6 +7778,7 @@ function writeGuard(path, guard) {
 var DENY_RULING_TYPES = ["decision", "anti_pattern"];
 var STRICT_MIN_HITS = 3;
 var DELTA_MIN_NEW_TERMS = 5;
+var DELTA_TERMS_VERSION = 2;
 function subQuestionText(q) {
   return [
     q?.question,
@@ -7785,10 +7792,41 @@ function denyLedgerPath(cwd, agentId) {
 function emptyDenyLedger() {
   return { entries: {}, overrides: [] };
 }
+function isWellFormedDenyEntry(entry) {
+  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+  if (!Array.isArray(entry.recordIds) || !entry.recordIds.every((id) => typeof id === "string" && id)) return false;
+  if (!Array.isArray(entry.terms) || !entry.terms.every((t) => typeof t === "string")) return false;
+  if (entry.terms_version !== void 0 && !Number.isFinite(entry.terms_version)) return false;
+  return true;
+}
 function readDenyLedger(path) {
   try {
     if (!existsSync4(path)) return emptyDenyLedger();
-    return { ...emptyDenyLedger(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    const raw = JSON.parse(readFileSync3(path, "utf8"));
+    const ledger = emptyDenyLedger();
+    const rawEntries = raw?.entries;
+    if (rawEntries && typeof rawEntries === "object" && !Array.isArray(rawEntries)) {
+      const dropped = [];
+      for (const [key, entry] of Object.entries(rawEntries)) {
+        if (isWellFormedDenyEntry(entry)) ledger.entries[key] = entry;
+        else dropped.push(key);
+      }
+      if (dropped.length) {
+        process.stderr.write(
+          `H20: dropped ${dropped.length} malformed deny-once ledger entry(ies) at ${path} \u2014 ${dropped.join(", ")}
+`
+        );
+      }
+    } else if (rawEntries !== void 0) {
+      process.stderr.write(`H20: deny-once ledger at ${path} has a non-object 'entries' \u2014 treated as empty
+`);
+    }
+    if (Array.isArray(raw?.overrides)) ledger.overrides = raw.overrides;
+    else if (raw?.overrides !== void 0) {
+      process.stderr.write(`H20: deny-once ledger at ${path} has a non-array 'overrides' \u2014 treated as empty
+`);
+    }
+    return ledger;
   } catch {
     process.stderr.write(`H20: corrupt deny-once ledger at ${path} \u2014 reset to empty
 `);
@@ -7807,14 +7845,47 @@ function denyIntentKey(recordIds) {
 function escapeForRegex(s2) {
   return String(s2).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+function citationPattern(needle) {
+  return `(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`;
+}
 function idCitedIn(text, id) {
   if (!id) return false;
   const hay = String(text ?? "").toLowerCase();
   const full = String(id).toLowerCase();
-  const boundaried = (needle) => new RegExp(`(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`, "i").test(hay);
+  const boundaried = (needle) => new RegExp(citationPattern(needle), "i").test(hay);
   if (boundaried(full)) return true;
   const prefix = full.split("-")[0];
   return prefix.length >= 8 && boundaried(prefix);
+}
+var FULL_UUID_PATTERN = "(?<![a-z0-9])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![a-z0-9])";
+var CITATION_BOILERPLATE_WORDS = [
+  "knowledge_get",
+  "anti_pattern",
+  "decisions",
+  "decision",
+  "rulings",
+  "ruling",
+  "overriding",
+  "overrides",
+  "override",
+  "ids",
+  "id"
+];
+var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
+var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
+function citationStripRegex(needlePattern) {
+  return new RegExp(`${CITATION_BOILERPLATE_RUN}${needlePattern}${CITATION_SEP}${CITATION_BOILERPLATE_RUN}`, "gi");
+}
+function stripCitations(text, recordIds = []) {
+  let out = String(text ?? "");
+  out = out.replace(citationStripRegex(FULL_UUID_PATTERN), " ");
+  for (const id of recordIds ?? []) {
+    if (!id) continue;
+    const prefix = String(id).toLowerCase().split("-")[0];
+    if (prefix.length < 8) continue;
+    out = out.replace(citationStripRegex(citationPattern(prefix)), " ");
+  }
+  return out;
 }
 function substanceFor(d) {
   if (d.type === "anti_pattern") {
@@ -8118,14 +8189,27 @@ try {
     const ledger = readDenyLedger(ledgerPath);
     const unresolved = [];
     const openIndexes = /* @__PURE__ */ new Set();
+    const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
     for (const p of perQuestion) {
       const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
       let overridden = null;
       let shortfall = null;
+      let reseeded = false;
+      const citedUnresolvedIds = /* @__PURE__ */ new Set();
       for (const [key2, entry] of Object.entries(ledger.entries)) {
         if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
         if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
-        const newTerms = p.subTerms.filter((t) => !entry.terms.includes(t));
+        if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
+          const carried = extractAxisTermsUncapped(
+            stripCitations(Array.isArray(entry.terms) ? entry.terms.join(" ") : "", entry.recordIds)
+          );
+          entry.terms = [.../* @__PURE__ */ new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
+          entry.terms_version = DELTA_TERMS_VERSION;
+          reseeded = true;
+          for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
+          continue;
+        }
+        const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
         if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
           overridden = { key: key2, recordIds: entry.recordIds };
           break;
@@ -8133,8 +8217,23 @@ try {
         if (shortfall === null || newTerms.length > shortfall.new_terms) {
           shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
         }
+        for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
       }
-      if (overridden) {
+      if ((reseeded || shortfall !== null) && p.strict.length === 0) {
+        const byId = new Map(candidates.map((r) => [r.id, r]));
+        const records = [...citedUnresolvedIds].map((id) => {
+          const pooled = byId.get(id);
+          if (pooled) return pooled;
+          try {
+            return store.get(id) ?? { id };
+          } catch {
+            return { id };
+          }
+        });
+        unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
+        continue;
+      }
+      if (!reseeded && overridden) {
         ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: (/* @__PURE__ */ new Date()).toISOString() });
         openIndexes.add(p.index);
         continue;
@@ -8145,7 +8244,8 @@ try {
       }
       const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
       const key = denyIntentKey(recordIds);
-      if (!ledger.entries[key]) ledger.entries[key] = { terms: p.subTerms, recordIds };
+      if (!ledger.entries[key])
+        ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
       unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
     }
     writeDenyLedger(ledgerPath, ledger);

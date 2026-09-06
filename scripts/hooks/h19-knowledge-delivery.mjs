@@ -32,6 +32,7 @@ import {
   cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
+  rankFileDecisionPointers,
   lineSuspectBlock,
   joinSuspectBlock,
   renderPayload,
@@ -107,7 +108,17 @@ try {
   // ledger — their ids are ids like any other.
   const freshOwners = owners.filter((r) => !isDelivered(guard, r));
   const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
-  const freshDecisions = decisions.filter((r) => !isDelivered(guard, r));
+  // RANKED ONCE, HERE, AND NOWHERE ELSE (board: H19 file-touch decision cap,
+  // measured 2026-09-06). The store's file_keys join degenerates to newest-first
+  // on a single path, so on a file carrying more decisions than
+  // DECISION_POINTER_CAP the older standing rulings were dropped — see
+  // rankFileDecisionPointers for the order and why centrality is not it. Ranking
+  // at the single point where the array is BORN is what keeps the guard slice
+  // (below), the render recipe and the renderer call all reading the SAME order:
+  // re-sorting at any one of those three sites would mark one set delivered
+  // while the payload showed another, which is the silent-loss shape the
+  // "guard only what was actually rendered" note below exists to prevent.
+  const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDelivered(guard, r)));
   // The frontier signal stays once per file per session (grill answer: solve,
   // not accept), but it is now the payload HEADER rather than a separate
   // emission that returned early. That early return was why a hazard in UNOWNED

@@ -67,6 +67,14 @@ export interface AxisRecord {
  *  real ceiling is MAX_RANK_TERMS, and writing 16 in a second place is the
  *  exact drift decision b47889b7 removed. */
 export function extractAxisTerms(text: unknown, maxTerms: number): string[] {
+  return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
+}
+
+/** THE ONE TOKENIZER + RANKER, shared by the capped and uncapped extractors so
+ *  the two can never disagree about what a TERM is — only about how many of
+ *  them a caller wants. Private: callers pick a named extractor, which is what
+ *  keeps "ranking" and "novelty measurement" visibly different jobs. */
+function rankedAxisTerms(text: unknown): string[] {
   const counts = new Map<string, number>();
   for (const raw of String(text ?? '').toLowerCase().split(/[^a-z0-9_]+/)) {
     if (raw.length < AXIS_MIN_TERM_LEN) continue;
@@ -76,8 +84,25 @@ export function extractAxisTerms(text: unknown, maxTerms: number): string[] {
   }
   return [...counts.entries()]
     .sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1))
-    .slice(0, Math.max(0, maxTerms))
     .map(([term]) => term);
+}
+
+/** EVERY extractable term, in the same deterministic rank order, with NO cap —
+ *  the NOVELTY surface, distinct from the RANKING surface above (decision
+ *  h20-novelty-counted-over-citation-stripped-uncapped-terms).
+ *
+ *  WHY A NAMED FUNCTION RATHER THAN extractAxisTerms(text, Infinity): the cap
+ *  argument on extractAxisTerms means "how many rank_terms does this QUERY
+ *  want", and MAX_RANK_TERMS is its real ceiling. Measuring how much NEW
+ *  vocabulary a re-ask added is a different question, and answering it through
+ *  the ranking cap made the answer non-monotone in what the user actually
+ *  wrote: once a question's own text saturates the 16-slot window, added
+ *  novelty DISPLACES existing terms instead of accumulating, so +0, +1 and +3
+ *  novel words all measured the same and a TERSE re-ask cleared H20's override
+ *  floor more easily than a verbose one (board 98ce3925, measured twice
+ *  2026-09-05). Two jobs, two names. */
+export function extractAxisTermsUncapped(text: unknown): string[] {
+  return rankedAxisTerms(text);
 }
 
 /** The NARROW fields a mechanism match is allowed to consider — deliberately

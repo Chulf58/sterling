@@ -1147,6 +1147,46 @@ try {
       .map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ''})`)
       .join('; ');
   };
+  /** Which of `list` git KNOWS RIGHT NOW — present in the INDEX (ls-files) or
+   *  in HEAD (ls-tree). Two probes because either one alone answers a narrower
+   *  question: a working-tree delete leaves the path in the index, while a
+   *  `git rm` (staged or committed) leaves it only in HEAD, and either one means
+   *  the path is still live territory.
+   *
+   *  THE CONTRACT IS "KNOWN NOW", NOT "EVER TRACKED" — HISTORY IS DELIBERATELY
+   *  NOT CONSULTED (Codex review, 2026-09-06). A file tracked in an earlier
+   *  commit, deleted, and that deletion COMMITTED mid-session is absent from
+   *  disk, from the index and from HEAD, so this reports it as unknown and the
+   *  caller drops it. That is the RIGHT outcome and the reason the cheaper probe
+   *  is correct: the article_missing lane's remedy is "create the owning
+   *  article", and an article owning a path that exists nowhere in the current
+   *  tree is drift by construction — exactly the duplicate-article failure the
+   *  live recompute above exists to prevent. Reaching for `git log --` or
+   *  `rev-list` would answer "was this ever real", which is a question this lane
+   *  has no use for; do not widen it to that without a ruling.
+   *
+   *  Returns null when EITHER probe fails, so the caller degrades toward
+   *  signaling rather than silently treating an unanswerable path as unknown —
+   *  the same contract gitIgnored has. NOTE a repo with no commits has no HEAD,
+   *  so ls-tree fails and this returns null: a fixture without an initial commit
+   *  keeps every name rather than exercising the guard. Shape mirrors the
+   *  `newUnowned` ls-tree probe below (batched, one spawn per ref surface, 30s
+   *  timeout); it is only ever called for paths already gone from disk, which is
+   *  normally the empty set. */
+  const gitKnowsNow = (list, cwd) => {
+    const clean = (list ?? []).filter(Boolean);
+    if (!clean.length) return new Set();
+    const seen = new Set();
+    for (const argv of [
+      ['ls-files', '-z', '--', ...clean],
+      ['ls-tree', '-r', '-z', 'HEAD', '--name-only', '--', ...clean],
+    ]) {
+      const res = spawnSync('git', argv, { cwd, encoding: 'utf8', timeout: 30_000 });
+      if (res.status !== 0) return null;
+      for (const p of (res.stdout || '').split('\0').filter(Boolean)) seen.add(p);
+    }
+    return seen;
+  };
   let unowned = paths.filter(isUnowned);
   // A gitignored path is never governed territory (board 1de3653b) — it cannot
   // be owned, so demanding an article for it is a false demand. A failed ignore
@@ -1899,23 +1939,69 @@ try {
     // ONE list drives both the count in the text and the persisted keys, so the
     // item can never say "4 file(s)" while naming 7 — which it could once the
     // healed union (⊇ this session's unowned set) started backing file_keys.
-    const demandKeys = overlapping ? overlapping.file_keys ?? [] : unowned;
-    store.enqueueSystemTodo({
-      id: randomUUID(),
-      type: 'todo',
-      created_at: now,
-      updated_at: now,
-      author: 'system',
-      status: 'active',
-      superseded_by: null,
-      links: [],
-      scope: 'project',
-      stack_tags: [],
-      text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
-      source: 'system',
-      system_reason: 'article_missing',
-      file_keys: demandKeys,
-    });
+    const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
+    // VANISHED-PROBE GUARD, AT MINT TIME (board 97ddfcc6, measured twice —
+    // 2026-09-05 and 2026-09-06). Two open items name throwaway in-repo probe
+    // scripts (scripts/zz-*.mjs) that no longer exist and were NEVER tracked:
+    // a coder dispatch created one at a non-test path, executed it, removed it
+    // with scripts/fs-remove.mjs. Such an item is PERMANENTLY UNCLOSABLE by
+    // design — the append-join admission closes article_missing ONLY on a
+    // knowledge_append to an existing feature_article's files[] naming one of
+    // the item's own keys, so paying it would require an article to OWN a file
+    // that does not exist, which is drift by construction; maintenance_remove
+    // is then the only disposition and it needs a human to notice.
+    //
+    // The demand fires on the TOUCH and nothing re-asked at the MINT, so the
+    // window between the existence filter that builds `touchedExisting` and
+    // this write was unguarded — including the route where the live recompute
+    // above degraded and `overlapping` therefore still carries an unpruned key.
+    //
+    // ABSENT FROM DISK IS NOT THE WHOLE TEST. A path git still knows STILL
+    // MINTS: a working-tree delete leaves it in the index and a `git rm` leaves
+    // it in HEAD, so either way it is live governed territory and a real removal
+    // is a different case the board names explicitly. The skip therefore demands
+    // BOTH "gone from disk" AND "gone from index and HEAD".
+    //
+    // THE TEST IS "GIT KNOWS IT NOW", NOT "GIT EVER KNEW IT", and the difference
+    // is deliberate (Codex review, 2026-09-06): a path tracked in an earlier
+    // commit whose DELETION was also committed this session is gone from all
+    // three surfaces and is dropped here. That is intended — an article owning a
+    // path that exists nowhere in the current tree is drift by construction, and
+    // minting a demand whose only remedy is that article is the duplicate-article
+    // failure the live recompute above exists to prevent. History is not
+    // consulted; see gitKnowsNow's contract note above before widening this.
+    //
+    // A failed git probe KEEPS the name (toward signaling, recorded loudly) —
+    // the same degradation direction the demand's own gitignore probe takes.
+    const vanished = demandKeysRaw.filter((p) => !existsSync(join(input.cwd, p)));
+    let demandKeys = demandKeysRaw;
+    if (vanished.length) {
+      const known = gitKnowsNow(vanished, input.cwd);
+      if (known === null) skipRow('article-demand-vanished-tracked', 'no_git');
+      else demandKeys = demandKeysRaw.filter((p) => !vanished.includes(p) || known.has(p));
+    }
+    // Every named path vanished untracked: nothing demandable is left, so no
+    // item is minted. Deliberately NOT an item with an empty file_keys list —
+    // that is undrainable debt H1 counts forever (the same reasoning the live
+    // recompute above gives for REMOVING an item it heals to empty).
+    if (demandKeys.length) {
+      store.enqueueSystemTodo({
+        id: randomUUID(),
+        type: 'todo',
+        created_at: now,
+        updated_at: now,
+        author: 'system',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
+        source: 'system',
+        system_reason: 'article_missing',
+        file_keys: demandKeys,
+      });
+    }
   }
   if (!conceptSatisfied) {
     // One item PER family. No feature_link/file_keys on this item, so

@@ -5477,6 +5477,9 @@ var AXIS_STOPWORDS = /* @__PURE__ */ new Set([
 var AXIS_MIN_TERM_LEN = 4;
 var AXIS_MIN_HITS = 2;
 function extractAxisTerms(text, maxTerms) {
+  return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
+}
+function rankedAxisTerms(text) {
   const counts = /* @__PURE__ */ new Map();
   for (const raw of String(text ?? "").toLowerCase().split(/[^a-z0-9_]+/)) {
     if (raw.length < AXIS_MIN_TERM_LEN)
@@ -5487,7 +5490,7 @@ function extractAxisTerms(text, maxTerms) {
       continue;
     counts.set(raw, (counts.get(raw) ?? 0) + 1);
   }
-  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, maxTerms)).map(([term]) => term);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
 }
 function axisNarrowText(record) {
   if (!record || typeof record !== "object")
@@ -7781,6 +7784,21 @@ function writeGuard(path, guard) {
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
+var CITATION_BOILERPLATE_WORDS = [
+  "knowledge_get",
+  "anti_pattern",
+  "decisions",
+  "decision",
+  "rulings",
+  "ruling",
+  "overriding",
+  "overrides",
+  "override",
+  "ids",
+  "id"
+];
+var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
+var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
   const scope = record?.scope ?? "unknown";
@@ -7916,6 +7934,22 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   return blocks;
 }
 var DECISION_POINTER_CAP = 8;
+var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
+var DECISION_AUTHORITY_UNSTATED = 1;
+function rankFileDecisionPointers(decisions) {
+  const authority = (d) => {
+    const a = typeof d?.authority === "string" ? d.authority : "";
+    return Object.hasOwn(DECISION_AUTHORITY_RANK, a) ? DECISION_AUTHORITY_RANK[a] : DECISION_AUTHORITY_UNSTATED;
+  };
+  const breadth = (d) => Array.isArray(d?.file_keys) ? d.file_keys.length : 0;
+  const updated = (d) => {
+    const t = Date.parse(d?.updated_at ?? "");
+    return Number.isFinite(t) ? t : -Infinity;
+  };
+  return [...decisions ?? []].sort(
+    (a, b) => authority(a) - authority(b) || breadth(a) - breadth(b) || updated(b) - updated(a) || (String(b?.id ?? "") < String(a?.id ?? "") ? -1 : String(b?.id ?? "") > String(a?.id ?? "") ? 1 : 0)
+  );
+}
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
 function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
@@ -8030,7 +8064,7 @@ try {
   const guard = readGuard(gPath);
   const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
   const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = decisions.filter((r) => !guard.records.includes(r.id));
+  const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !guard.records.includes(r.id)));
   const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
   if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) finish("");
   const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;

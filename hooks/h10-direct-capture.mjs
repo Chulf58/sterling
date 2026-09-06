@@ -8346,6 +8346,20 @@ try {
     if (!rows.length) return "none";
     return rows.map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ""})`).join("; ");
   };
+  const gitKnowsNow = (list, cwd) => {
+    const clean = (list ?? []).filter(Boolean);
+    if (!clean.length) return /* @__PURE__ */ new Set();
+    const seen = /* @__PURE__ */ new Set();
+    for (const argv of [
+      ["ls-files", "-z", "--", ...clean],
+      ["ls-tree", "-r", "-z", "HEAD", "--name-only", "--", ...clean]
+    ]) {
+      const res = spawnSync4("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
+      if (res.status !== 0) return null;
+      for (const p of (res.stdout || "").split("\0").filter(Boolean)) seen.add(p);
+    }
+    return seen;
+  };
   let unowned = paths.filter(isUnowned);
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
@@ -8610,23 +8624,32 @@ ${parts.join("\n\n")}`);
   }
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
-    const demandKeys = overlapping ? overlapping.file_keys ?? [] : unowned;
-    store.enqueueSystemTodo({
-      id: randomUUID4(),
-      type: "todo",
-      created_at: now,
-      updated_at: now,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
-      source: "system",
-      system_reason: "article_missing",
-      file_keys: demandKeys
-    });
+    const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
+    const vanished = demandKeysRaw.filter((p) => !existsSync4(join5(input.cwd, p)));
+    let demandKeys = demandKeysRaw;
+    if (vanished.length) {
+      const known = gitKnowsNow(vanished, input.cwd);
+      if (known === null) skipRow("article-demand-vanished-tracked", "no_git");
+      else demandKeys = demandKeysRaw.filter((p) => !vanished.includes(p) || known.has(p));
+    }
+    if (demandKeys.length) {
+      store.enqueueSystemTodo({
+        id: randomUUID4(),
+        type: "todo",
+        created_at: now,
+        updated_at: now,
+        author: "system",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
+        source: "system",
+        system_reason: "article_missing",
+        file_keys: demandKeys
+      });
+    }
   }
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {

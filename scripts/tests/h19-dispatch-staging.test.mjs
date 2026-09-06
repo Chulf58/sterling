@@ -870,3 +870,54 @@ test('GAP (positive half, TIGHTENED): a NON-OBJECT ([]) config for a CODER dispa
 // change the non-object-config branch to omit the posture line entirely,
 // render any confident ON/OFF, or render a truncated/reworded UNKNOWN line
 // missing the remedy clause.
+
+// ---------------------------------------------------------------------------
+// RANKED DECISION POINTERS IN DISPATCH STAGING (conductor follow-up, mirrors
+// scripts/tests/h19-delivery.test.mjs "H19 (rank PIN 1)"). Staging a coder
+// dispatch's governed-file pointers must rank candidate decisions the SAME
+// way file-touch delivery does — h19-dispatch-staging.mjs:248 is expected to
+// call the SAME rankFileDecisionPointers used at the birth point in
+// h19-knowledge-delivery.mjs, not re-derive its own order.
+// ---------------------------------------------------------------------------
+
+function decisionRecord(statement, paths, extra = {}) {
+  return {
+    ...envelope('decision'),
+    title: statement,
+    statement,
+    alternatives_rejected: [],
+    rationale: `${statement} rationale`,
+    file_keys: paths,
+    ...extra,
+  };
+}
+
+test('rank: a standing-authority decision stages among a coder dispatch\'s pointers ahead of ten same-recency unstated decisions (mirrors h19-delivery rank PIN 1)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const RECENT = '2026-09-05T12:00:00.000Z';
+    for (let i = 0; i < 10; i += 1) {
+      store.create(decisionRecord(`recent choice ${i}`, ['src/a.mjs'], { updated_at: RECENT }));
+    }
+    // No authority field at all -> rung 1 (unstated), dated far NEWER than
+    // the standing ruling below — a recency-only staging order would evict it.
+    store.create(decisionRecord('the old standing ruling', ['src/a.mjs'], { authority: 'standing', updated_at: '2026-01-01T00:00:00.000Z' }));
+
+    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Go read src/a.mjs and fix the bug there.')])]);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(
+      ctx,
+      /the old standing ruling/,
+      'the standing ruling — despite being dated over eight months OLDER than every rival — must be staged among the dispatch\'s pointers, matching h19-delivery rank PIN 1'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: dropping rankFileDecisionPointers at h19-dispatch-staging.mjs:248
+// (staging its own unranked/differently-ordered decision list instead of the
+// shared ranking function) evicts the standing ruling from the capped staged
+// set — the `/the old standing ruling/` match above goes red.

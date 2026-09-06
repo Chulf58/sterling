@@ -63,6 +63,8 @@ import {
   readGuard,
   writeGuard,
   extractAxisTerms,
+  extractAxisTermsUncapped,
+  stripCitations,
   axisHits,
   outgoingProposalText,
   renderHazards,
@@ -80,6 +82,7 @@ import {
   STRICT_MIN_HITS,
   hasFullNarrowCentralityCoverage,
   DELTA_MIN_NEW_TERMS,
+  DELTA_TERMS_VERSION,
   subQuestionText,
   denyLedgerPath,
   readDenyLedger,
@@ -434,6 +437,23 @@ try {
     const unresolved = [];
     const openIndexes = new Set();
 
+    // THE NOVELTY SURFACE, SEPARATE FROM THE RETRIEVAL SURFACE (decision
+    // h20-novelty-counted-over-citation-stripped-uncapped-terms). `p.subTerms`
+    // above stays CAPPED at MAX_RANK_TERMS — that is what the store query and
+    // the strict axisHits matching want, and nothing here changes it. Measuring
+    // how much a re-ask ADDED is a different question and gets its own terms:
+    //   - CITATION-STRIPPED, because citing the denied ruling's id is MANDATORY
+    //     for an override, so it cannot also be evidence of explanation. A raw
+    //     uuid decomposes into 4-5 hex fragments that all read as novel words;
+    //   - UNCAPPED, because past a saturated 16-slot window added novelty
+    //     DISPLACES existing terms instead of accumulating, which made the
+    //     printed remedy ("add >= 5 new terms") unreachable — a user could
+    //     follow it exactly and watch the number stand still.
+    // Computed per ledger entry rather than once per sub-question: the known
+    // 8-char prefixes that may be stripped are the CITED ENTRY's record ids,
+    // and only those (an arbitrary 8-hex token is a word).
+    const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
+
     for (const p of perQuestion) {
       // OVERRIDE CHECK FIRST, independent of whether THIS attempt still
       // strict-matches anything on its own (decision 68332e4b, amendment 1).
@@ -461,10 +481,52 @@ try {
       // entries; stays null for a first attempt, which cited nothing and has no
       // delta to report.
       let shortfall = null;
+      // CITED-BUT-UNRESOLVED BOOKKEEPING. `reseeded` marks that a stale-
+      // representation repair happened on this pass (Codex round 2, item 2);
+      // `citedUnresolvedIds` collects the ruling ids of EVERY cited eligible
+      // entry that did not grant an override — re-seeded or merely short. Both
+      // feed the forced-denial block below the loop; see it for why citing at
+      // all is what makes strict matching irrelevant.
+      let reseeded = false;
+      const citedUnresolvedIds = new Set();
       for (const [key, entry] of Object.entries(ledger.entries)) {
         if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
         if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
-        const newTerms = p.subTerms.filter((t) => !entry.terms.includes(t));
+        // STALE-REPRESENTATION RE-SEED (Codex review, 2026-09-06). The ledger is
+        // session-transient but the hook can be upgraded mid-session, leaving an
+        // entry whose `terms` are the v1 representation (capped at
+        // MAX_RANK_TERMS, citation NOT stripped). Diffing v2 terms against that
+        // compares unlike sides, and it fails OPEN: the v1 side is bounded at 16
+        // and still contains the citation's own hex fragments, so a bare re-ask
+        // can post a large spurious novelty count and be waved through as an
+        // override. So an under-versioned entry is re-seeded from THIS attempt
+        // and its override check is skipped — the question is denied once more
+        // (no delta line, because there is no comparable prior side to report a
+        // shortfall against) and the NEXT re-ask is measured like against like.
+        //
+        // UNION, NEVER REPLACE (Codex round 2, item 1). Re-seeding with ONLY the
+        // current attempt's terms LAUNDERS NOVELTY: every word the ORIGINAL
+        // denied question contained but this attempt happens to omit falls out
+        // of the baseline, so a THIRD attempt can reintroduce those same words
+        // and have them counted as new. The re-seeded baseline is therefore the
+        // UNION of the entry's existing terms and this attempt's — and the old
+        // side is itself pushed back through stripCitations/extraction, because
+        // a v1 entry's terms still contain the citation's own hex fragments and
+        // boilerplate, which must not survive into the v2 baseline as words a
+        // later attempt could "re-add". Any legacy term the union keeps that a
+        // v2 extraction would not have produced fails CLOSED: an extra baseline
+        // term can only make the floor harder to clear, never easier.
+        if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
+          const carried = extractAxisTermsUncapped(
+            stripCitations(Array.isArray(entry.terms) ? entry.terms.join(' ') : '', entry.recordIds)
+          );
+          entry.terms = [...new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
+          entry.terms_version = DELTA_TERMS_VERSION;
+          reseeded = true;
+          for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
+          continue;
+        }
+        const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
         if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
           overridden = { key, recordIds: entry.recordIds };
           break;
@@ -472,8 +534,73 @@ try {
         if (shortfall === null || newTerms.length > shortfall.new_terms) {
           shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
         }
+        for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
       }
-      if (overridden) {
+      // A RE-SEED OUTRANKS AN OVERRIDE (Codex round 3, item 1). This branch sits
+      // ABOVE the `overridden` handling deliberately. A sub-question can cite
+      // SEVERAL eligible ledger entries; with the order reversed, one stale v1
+      // entry could be re-seeded while a different, current-version entry
+      // satisfied the override on the same pass — and the sub-question was then
+      // ALLOWED, with the re-seed's whole purpose (deny once, then measure
+      // like-for-like) skipped. So if ANY cited entry was re-seeded on this
+      // attempt, the sub-question is forced unresolved regardless of
+      // `overridden`, and NO override is logged: an override adjudicated in the
+      // same breath as a representation repair is not an override anyone can
+      // trust. When this attempt still strict-matches, the ordinary path below
+      // already denies it, so only the strict-empty case is materialized here.
+      // NAMED RESIDUAL: the loop still `break`s on the first satisfying override,
+      // so a cited stale entry sitting AFTER that one is not visited and not
+      // re-seeded on this pass. That is bounded and self-correcting — the entry
+      // stays v1 and is re-seeded the next time it is cited — and the override
+      // that won was itself measured against a current-version entry.
+      //
+      // AND THE SAME HOLE EXISTS FOR AN ORDINARY SHORTFALL — CITING *IS* THE
+      // CLAIM OF A RE-ASK. A sub-question that cites an eligible entry, fails the
+      // floor (newTerms < DELTA_MIN_NEW_TERMS) and no longer strict-matches used
+      // to fall through to the "never matched anything" release below and be
+      // ALLOWED. That is the deny-once gate opened by paraphrase: a re-ask that
+      // states its delta drifts off the ruling's own vocabulary BY DESIGN, which
+      // is precisely why the override check does not re-run the strict floor —
+      // so the release was reachable on the ordinary honest path, not only an
+      // adversarial one. Strict matching decides whether a FIRST attempt is
+      // ruled; once an attempt CITES a previously-denied ruling it has declared
+      // itself a re-ask, and the only question left is whether it cleared the
+      // floor. It did not, so it is denied and told by how much.
+      if ((reseeded || shortfall !== null) && p.strict.length === 0) {
+        // A BODILESS DENIAL IS NOT A DENIAL (reviewer-security S1). `candidates`
+        // is THIS attempt's retrieval pool, and this branch exists precisely for
+        // an attempt that has DRIFTED off the ruling's vocabulary — so the pool
+        // is exactly where the ruling is most likely to be missing. Resolving
+        // only from it produced an empty `decisions` array, and
+        // renderDenyOnceMessage then emitted a header, a "settled by the store
+        // below" line with nothing below it, and an id-less override fallback:
+        // a denial the reader cannot act on and cannot even cite to override.
+        // So: pool first (free), then the STORE by id (the same read stage 1
+        // uses), and finally a BARE-ID stub — never a dropped row. The stub
+        // renders through the existing no-substance marker path, so the reader
+        // still gets `decision [<id>]` plus a knowledge_get target.
+        // The store read is wrapped: openStore THROWS on a corrupt/locked db
+        // (anti-pattern e13f0fb5), and an escape here reaches the outer catch →
+        // warnNonBlocking → exit 1 → the runner reads non-2 as NON-BLOCKING and
+        // the question is ALLOWED. Failing to name a ruling must never become
+        // failing to deny it.
+        const byId = new Map(candidates.map((r) => [r.id, r]));
+        const records = [...citedUnresolvedIds].map((id) => {
+          const pooled = byId.get(id);
+          if (pooled) return pooled;
+          try {
+            return store.get(id) ?? { id };
+          } catch {
+            return { id };
+          }
+        });
+        // delta stays null on a re-seed pass: the baseline was just repaired, so
+        // there is no comparable prior side to report a shortfall against.
+        unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
+        continue;
+      }
+
+      if (!reseeded && overridden) {
         // OVERRIDES LOGGED (amendment 3) — written to the SAME ledger file,
         // BEFORE writeDenyLedger below runs and BEFORE any allow/deny exit, so
         // a crash after this point fails toward an extra log line, never an
@@ -484,7 +611,9 @@ try {
       }
 
       if (p.strict.length === 0) {
-        openIndexes.add(p.index); // never matched anything this attempt
+        // Reached only when this attempt cited NOTHING eligible — a genuine
+        // first look at a question no ledger entry speaks for.
+        openIndexes.add(p.index);
         continue;
       }
 
@@ -499,7 +628,16 @@ try {
       // First attempt under this key (or a retry that never validly cited
       // it): (re)seed the ledger entry so a LATER retry can be measured
       // against THIS attempt's terms, never silently overwritten.
-      if (!ledger.entries[key]) ledger.entries[key] = { terms: p.subTerms, recordIds };
+      // BOTH SIDES OF THE COMPARISON ARE SEEDED THE SAME WAY (decision
+      // h20-novelty-counted-over-citation-stripped-uncapped-terms, ruling 2):
+      // uncapped and citation-stripped, so `newTerms` above is a difference
+      // between two comparable sets rather than between a capped snapshot and
+      // an uncapped one.
+      // terms_version STAMPS THE REPRESENTATION, so an entry written by an older
+      // hook is recognisable rather than silently mis-compared (see
+      // DELTA_TERMS_VERSION in lib/delivery.mjs and the re-seed above).
+      if (!ledger.entries[key])
+        ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
       unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
     }
 
