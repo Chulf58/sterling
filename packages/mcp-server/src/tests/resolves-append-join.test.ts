@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, MountedStores } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
+import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-harness.js';
 
 // APPEND-JOIN ADMISSION for `article_missing` — a new resolvable lane on top
 // of the resolves-claim contract already pinned in resolves-claim.test.ts /
@@ -1063,9 +1064,10 @@ test('target scope refusal: an append-join whose target article has scope other 
 // genuine "which physical store holds this row" check, because there is no
 // second store here to physically disagree with the label. The real
 // mount-boundary version of this refusal (built on a REAL MountedStores) is
-// PART D's "target scope refusal (legacy/undefined)" and "a DOMAIN-scoped
-// target cannot enter a resolves transaction AT ALL" tests, further down
-// this file — read those for the physical-location-decides pin.
+// PART D's "target scope refusal (label contradicts holder)" (renamed and
+// re-based 2026-09-06, was "(legacy/undefined)") and "a DOMAIN-scoped target
+// cannot enter a resolves transaction AT ALL" tests, further down this file —
+// read those for the physical-location-decides pin.
 
 // ==========================================================================
 // PART C — MOUNT-BOUNDARY REBUILD (two independent reviews, 2026-09-06): the
@@ -1093,17 +1095,20 @@ test('target scope refusal: an append-join whose target article has scope other 
  *  other arm in this file. Used ONLY where the pin is about the PHYSICAL
  *  project/domain store boundary — the plain harness() above stays the
  *  right tool everywhere that boundary is not the point. */
+// CONSOLIDATED 2026-09-06 (board R4; decision scope-drift-closed-by-column-
+// authoritative-reads-not-format-change): this body moved VERBATIM into
+// ./test-helpers/mounted-harness.ts, now shared with knowledge-extract.test.ts
+// and domain-routing.test.ts, so mount-boundary pins land on ONE real
+// two-store fixture instead of three copies that had already drifted apart.
+// BEHAVIOUR-NEUTRAL: same mkdtemp prefix, same NOW clock, same randomUUID,
+// same mount layout, same return shape. This file's call sites already pass
+// ['node'] explicitly, so nothing inherits a default from anywhere.
+// Conductor hand-edit: H5 freezes test paths against pipeline agents, and a
+// behaviour-neutral harness re-point matches neither evidence contract of
+// scripts/test-repair.mjs (anti_pattern 985e1266, whose right_way is exactly
+// this route) — counts verified independently after the change.
 function harnessMounted(domains: string[] = ['node']) {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-append-join-mounted-'));
-  const mounts = domains.map((name) => ({ name, dbPath: join(dir, 'domains', name, 'sterling.db') }));
-  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), mounts);
-  const config = parseConfig({ stack_tags: domains });
-  const tools = new SterlingTools({ store, config, now: () => NOW, newId: randomUUID });
-  const domainDbPath = (name: string) => join(dir, 'domains', name, 'sterling.db');
-  return {
-    dir, store, tools, domainDbPath,
-    cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); },
-  };
+  return harnessMountedShared(domains, { now: NOW, prefix: 'sterling-append-join-mounted-' });
 }
 
 /** A raw feature_article ENVELOPE for the direct-store seeding technique —
@@ -1382,8 +1387,11 @@ test('documented divergence: a retained key that is absent from disk stays retai
 // is pruned to [] and the item drains outright instead of surviving).
 
 // ==========================================================================
-// PART D — MOUNT-BOUNDARY REBUILD, CONTINUED: target-scope fails closed for
-// a genuinely scope-less (legacy) record, and the domain-scoped-target
+// PART D — MOUNT-BOUNDARY REBUILD, CONTINUED: target-scope fails closed for a
+// target whose LABEL disagrees with its PHYSICAL HOLDER — a project-labelled row
+// that the project database does not hold (RE-BASED 2026-09-06 off the
+// scope-less/legacy shape, which no read can reach any more; the arm below
+// carries the full note) — and the domain-scoped-target
 // refusal generalised to ANY resolves lane (not just article_missing),
 // proven on a REAL MountedStores with a real second physical connection —
 // arm 14 above ("target scope refusal") runs on the plain single-store
@@ -1396,140 +1404,167 @@ test('documented divergence: a retained key that is absent from disk stays retai
 // sibling atomicity arms (16) above.
 // ==========================================================================
 
-/**
- * Strips the `scope` key from a record's JSON BODY column ONLY, on the
- * store's OWN connection (no separate physical handle needed — `.db` is
- * the store's real better-sqlite3 connection, so a write through it is
- * visible to every subsequent read through the same store instance).
+/* TOMBSTONE — `stripScopeFromStoredRow` lived here until 2026-09-06 and has been
+ * DELETED deliberately. It rewrote a row's JSON BODY column to remove the `scope`
+ * key while leaving the NOT NULL `scope` COLUMN intact, which used to make a
+ * record READ BACK with no scope at all — the "legacy/undefined scope" shape the
+ * arm below was originally built on.
  *
- * MEASURED (conductor, this dispatch, twice): (1) `scope` is a REQUIRED
- * schema field — `store.create()` refuses a scope-less envelope with
- * `ZodError: scope Required` before a row is ever written. (2) The
- * dedicated `scope` SQL COLUMN is itself NOT NULL — a direct
- * `UPDATE ... SET scope = NULL` fails with `NOT NULL constraint failed:
- * records.scope`. So a genuinely scope-less ROW is impossible at EVERY
- * level, including hand-written SQL — the column can never be cleared.
+ * WHY IT IS GONE. Its whole premise was the asymmetry "column-authoritative on
+ * disk, body-authoritative on read". Part 4 of decision
+ * `scope-drift-closed-by-column-authoritative-reads-not-format-change`
+ * (knowledge_get 74b67d0f-be6e-4bbb-8d4a-95f67f842190) has since SHIPPED: one
+ * central live-record decoder overwrites the parsed body's `scope` with the row's
+ * `scope` COLUMN on every live materializing read. The strip still succeeds on
+ * disk and NO READ WILL EVER SHOW YOU THE RESULT, so the precondition
+ * `assert.ok(!knowledgeGet(id).scope)` is permanently false. That is the decoder
+ * working as designed — body-vs-column disagreement is unrepresentable on read.
  *
- * What IS reachable, and what the append-join's target-scope guard actually
- * defends against: a row whose `scope` COLUMN stays set (on disk,
- * authoritative for storage/routing) while the JSON BODY column omits the
- * `scope` key (on read, authoritative for what knowledge_get returns,
- * because reads parse the body and never restore `scope` from the column).
- * That column-authoritative-on-disk / body-authoritative-on-read asymmetry
- * is the same trap class anti_pattern `record-body-scope-is-not-physical-
- * store-identity` (a61cbdf3) already names for the mount-boundary checks
- * elsewhere in this file — here it is the SOURCE of the legacy shape rather
- * than the boundary being guarded. This helper therefore rewrites ONLY the
- * body column and leaves the dedicated `scope` column untouched — the same
- * raw-row idiom stable-identity-tools.test.ts already uses via
- * `store.db.prepare()` for record_aliases/record_relations, generalised
- * here to whichever column actually carries the JSON body. The table and
- * column are discovered at RUNTIME via SQLite introspection (sqlite_master
- * / PRAGMA table_info) rather than hardcoded, since this agent cannot read
- * the store's implementation to name them directly (H4).
+ * DO NOT RESURRECT IT. The one drift class still reachable is COLUMN CONTRADICTS
+ * MOUNT: a row PHYSICALLY held by one store whose `scope` column names another.
+ * Forge it with `rawArticleEnvelope` + a raw `.create()` on the store you want to
+ * hold it (the idiom the two mount-boundary arms above already use), which is
+ * exactly what the re-based arm below now does.
  */
-function stripScopeFromStoredRow(store: SterlingStore, id: string): void {
-  const s = store as unknown as {
-    db: { prepare: (sql: string) => { all: (...a: unknown[]) => unknown[]; run: (...a: unknown[]) => unknown } };
-  };
-  const tables = s.db
-    .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-    .all() as { name: string }[];
-  let stripped = false;
-  for (const { name } of tables) {
-    const cols = s.db.prepare(`PRAGMA table_info("${name}")`).all() as { name: string }[];
-    if (!cols.some((c) => c.name === 'id')) continue;
-    const rows = s.db.prepare(`SELECT * FROM "${name}" WHERE id = ?`).all(id) as Record<string, unknown>[];
-    if (rows.length === 0) continue;
-    const row = rows[0];
-    for (const col of cols) {
-      // The dedicated `scope` column (if present) is NOT NULL and left
-      // completely untouched — it can never be cleared, and clearing it is
-      // not what the reachable legacy shape looks like anyway.
-      if (col.name === 'scope') continue;
-      const val = row[col.name];
-      if (typeof val === 'string') {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(val);
-        } catch {
-          continue;
-        }
-        if (parsed && typeof parsed === 'object' && 'scope' in (parsed as Record<string, unknown>)) {
-          delete (parsed as Record<string, unknown>).scope;
-          s.db.prepare(`UPDATE "${name}" SET "${col.name}" = ? WHERE id = ?`).run(JSON.stringify(parsed), id);
-          stripped = true;
-        }
-      }
-    }
-  }
-  if (!stripped) {
-    throw new Error(
-      `stripScopeFromStoredRow: found no column carrying a scope for id ${id} across ${tables.length} tables — the raw-row technique found nothing to strip (fixture defect, not the guard under test)`
-    );
-  }
-}
 
-test('target scope refusal (legacy/undefined): an append-join whose target article carries NO scope field at all is REFUSED, naming scope — an absent/legacy scope is not implicitly project (control: arm 14\'s CONTROL above, "an article explicitly scoped project drains normally")', () => {
+test("CONTROL (forgery baseline, placed first): the SAME raw-forged, scope:'project' article seeded into the PROJECT store is admitted and drains its item normally", () => {
   const { tools, store, cleanup } = harnessMounted(['node']);
   try {
-    // RESHAPED (was impossible as first written): `scope` is a REQUIRED
-    // schema field, so an undefined scope is NOT reachable through the
-    // public write surface AT ALL — store.create() refuses a scope-less
-    // envelope with a ZodError before any row lands. This guard is
-    // therefore defence against a LEGACY or HAND-WRITTEN row, never against
-    // an API caller; no conductor/tool-surface path can produce this shape.
-    // That is exactly why the fixture must seed BELOW the API: create the
-    // article VALIDLY first (scope:'project', satisfying the schema), then
-    // rewrite the persisted row directly to strip `scope` back out — a pin
-    // seeded through create() would be impossible to construct, not merely
-    // wrong.
-    const legacy = mkArticleScoped(tools, 'legacy-shaped', ['src/thing.ts'], 'project');
-    stripScopeFromStoredRow(store.project, legacy.id);
+    // REQUIRED CONTROL, added 2026-09-06 with the re-base below. That arm's
+    // verdict is "the call was refused", and a refusal has MORE THAN ONE
+    // possible cause: the target being raw-forged rather than tool-created is
+    // itself a candidate (a forged envelope skips knowledge_create entirely).
+    // This arm forges the IDENTICAL envelope and changes exactly ONE thing —
+    // which physical database holds it — and must PASS FOR THE OPPOSITE REASON.
+    // Without it a green below could be a green about forgery, not about
+    // holders.
+    const forgedId = randomUUID();
+    store.project.create(rawArticleEnvelope(forgedId, ['src/thing.ts'], 'project') as never);
+    assert.equal(
+      (tools.knowledgeGet(forgedId) as unknown as { scope?: string }).scope,
+      'project',
+      "precondition: the forged record reads as scope:'project'"
+    );
+    assert.ok(store.project.get(forgedId), 'precondition: AND the PROJECT database physically holds it — label and holder agree');
+
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'article_missing',
+      text: 'forged article does not yet own src/x.ts',
+      file_keys: ['src/x.ts'],
+      feature_link: forgedId,
+    });
+
+    widen(tools).knowledgeAppend(forgedId, 'files', [{ path: 'src/x.ts', role: 'impl' }], [item.id]);
+
     assert.ok(
-      !(tools.knowledgeGet(legacy.id) as unknown as { scope?: string }).scope,
-      'precondition: the seeded record truly carries no (falsy) scope value after the direct row rewrite'
+      !openIds(tools).includes(item.id),
+      'a raw-forged but PROJECT-HELD target is admitted and its item drains — so the refusal below is about the HOLDER, not about the forgery'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// EXPECTED SHAPE: GREEN. SABOTAGE: refuse any append-join whose target was not
+// created through knowledge_create (e.g. gate on a create-time marker) -> this
+// control goes red while the re-based arm below stays green, which is exactly
+// the discrimination it exists to provide.
+
+test("target scope refusal (label contradicts holder): an append-join whose target article is physically held by the DOMAIN store while its scope says 'project' is REFUSED, naming scope — a project LABEL is not project MEMBERSHIP (control: the forgery baseline directly above, plus arm 14's CONTROL)", () => {
+  const { tools, store, domainDbPath, cleanup } = harnessMounted(['node']);
+  try {
+    // RE-BASED 2026-09-06 — READ BEFORE "SIMPLIFYING" THIS FIXTURE. This arm was
+    // originally "target article carries NO scope field at all", built by
+    // creating the article validly and then stripping `scope` out of the stored
+    // JSON body. THAT SHAPE IS ABOLISHED: part 4 of decision
+    // `scope-drift-closed-by-column-authoritative-reads-not-format-change` has
+    // shipped a column-authoritative decoder that refills the parsed body's scope
+    // from the NOT NULL `scope` COLUMN on every live read, so a scope-less READ is
+    // unreachable and the old precondition was permanently false. (The arm was
+    // already RED at HEAD for exactly this reason.) Do NOT restore the body-level
+    // strip — it produces a permanently-red precondition that reads like a code
+    // defect and is not one.
+    //
+    // WHAT THE PIN IS FOR IS UNCHANGED: a target whose scope LABEL disagrees with
+    // the store that PHYSICALLY holds it must be refused, not admitted on the
+    // strength of the label. That is re-based onto the one surviving drift class,
+    // COLUMN CONTRADICTS MOUNT (governing decision: the five label-only gates must
+    // require physical membership via projectStoreHolds, "not the label alone"),
+    // using the same raw-seed idiom as the two mount-boundary arms above.
+    const mislabelledId = randomUUID();
+    const domainHandle = new SterlingStore(domainDbPath('node'));
+    try {
+      domainHandle.create(rawArticleEnvelope(mislabelledId, ['src/thing.ts'], 'project') as never);
+    } finally {
+      domainHandle.close();
+    }
+    assert.equal(
+      (tools.knowledgeGet(mislabelledId) as unknown as { scope?: string }).scope,
+      'project',
+      "precondition: the target READS as scope:'project' — the label a label-only gate would admit on"
+    );
+    assert.equal(
+      store.project.get(mislabelledId),
+      undefined,
+      'precondition: while the PROJECT database does not hold it at all — it physically lives in the mounted node store'
     );
 
     const { record: item } = tools.maintenanceEnqueue({
       reason: 'article_missing',
-      text: 'legacy article does not yet own src/x.ts',
+      text: 'mislabelled article does not yet own src/x.ts',
       file_keys: ['src/x.ts'],
-      feature_link: legacy.id,
+      feature_link: mislabelledId,
     });
-    const before = tools.knowledgeGet(legacy.id) as unknown as { version: number };
+    const before = tools.knowledgeGet(mislabelledId) as unknown as { version: number };
 
     assert.throws(
-      () => widen(tools).knowledgeAppend(legacy.id, 'files', [{ path: 'src/x.ts', role: 'impl' }], [item.id]),
+      () => widen(tools).knowledgeAppend(mislabelledId, 'files', [{ path: 'src/x.ts', role: 'impl' }], [item.id]),
       (err: Error) => {
-        assert.match(err.message, /scope/i, 'the refusal names scope — an absent/legacy scope is not treated as implicitly project');
+        assert.match(
+          err.message,
+          /scope/i,
+          "the refusal names scope — a project LABEL over a domain-held row is not project membership, and the caller must be able to tell which of the two disagreeing values decided it"
+        );
         return true;
       },
-      'a target article carrying no scope field at all must be refused, not silently treated as project'
+      'a target the project database does not physically hold must be refused, however plainly its label says project'
     );
-    const after = tools.knowledgeGet(legacy.id) as unknown as { version: number };
+    const after = tools.knowledgeGet(mislabelledId) as unknown as { version: number };
     assert.equal(after.version, before.version, 'no version minted by the refused call');
     assert.ok(openIds(tools).includes(item.id), 'the item is untouched — still open');
   } finally {
     cleanup();
   }
 });
-// SABOTAGE: treat an absent/undefined scope field as equivalent to
-// scope:'project' for the target-scope admission guard (the CURRENT,
-// pre-fix behaviour named in the brief) — this test goes red (the throw
-// never fires; the undefined-scope target is admitted and the append drains
-// the item, same outcome as arm 14's CONTROL — which is exactly why that
-// control matters: without it, "drains" would look correct here too).
+// EXPECTED SHAPE: GREEN if the admission gate requires physical project
+// membership (the governing decision's evidence_basis records the append-join
+// path's four label-class gates as ALREADY FIXED). RED-BECAUSE-WRONG if the gate
+// still admits on the label alone: the throw never fires, the append lands, the
+// item drains, and the failure is "Missing expected exception".
 //
-// TWO THINGS THIS PIN MEANS, STATED EXPLICITLY:
-// (1) An undefined scope is NOT reachable through the public write surface —
-//     the schema REFUSES it (measured: ZodError: scope Required from
-//     store.create()). This guard defends against a LEGACY or HAND-WRITTEN
-//     row, never against an API caller — do not go hunting for a create-time
-//     code path that produces this shape; there isn't one.
-// (2) That is precisely why the fixture seeds BELOW the API (a validated
-//     create, then a direct row rewrite) rather than through it — seeding
-//     through create() for this shape is impossible, not merely wrong.
+// ONE WORDING RISK, DISCLOSED RATHER THAN PRE-LOOSENED: the `/scope/i` regex is
+// carried over UNCHANGED from the arm this replaces, and it is the one assertion
+// here that pins message text. If the physical-membership branch refuses with a
+// message that names only the holder ("not held by the project store") and never
+// the word scope, this goes red on the regex while the throw itself is correct.
+// That is an ADJUDICATION for the conductor — either the message should name the
+// scope it rejected (the actionability the original pin bought) or this regex
+// should widen — NOT something to silently loosen, and not evidence the guard is
+// missing. Verify which by reading the thrown message before touching either side.
+//
+// SABOTAGE: make the target-scope admission guard accept any target whose scope
+// FIELD reads 'project' without checking that the project database actually holds
+// the row (the label-only shape the governing decision names) — this test goes
+// red (the throw never fires; the domain-held target is admitted and the item
+// drains, the same outcome as the forgery-baseline CONTROL above, which is
+// exactly why that control is required: without it, "drains" would look correct
+// here too).
+// LOAD-BEARING NOTE, HONEST: this arm and the "mount-boundary" owner-lookup arm
+// earlier in this file both die under a "trust the scope field instead of the
+// physical holder" mutation — but at DIFFERENT call sites (this one at TARGET
+// admission, that one at OWNER lookup). If the implementation shares one
+// predicate, a single mutation reddens both and neither is redundant defence in
+// depth; if it does not, only one reddens, and that difference is itself the
+// finding.
 
 test('CONTROL: a resolves claim naming a reconcile_needed item, targeting a PROJECT-scoped article via knowledge_update, succeeds and drains it — the baseline the domain-scoped refusal below must differ from', () => {
   const { tools, cleanup } = harnessMounted(['node']);

@@ -986,6 +986,19 @@ export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 
 export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
 
 /**
+ * Fields refused on a MUTATION but legitimate at CREATE — deliberately a
+ * SECOND list rather than an addition to WRITE_REFUSED_FIELDS above (decision
+ * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3,
+ * which names that merge as a rejected alternative). WRITE_REFUSED_FIELDS is
+ * consumed by knowledge_create — both through refuseServerOwnedFields and
+ * through server.ts's typed create variants, which STRIP exactly that set from
+ * every per-type input schema — and `scope` is legitimate CREATION routing
+ * input there (it is in CREATE_DEFAULTED_FIELDS immediately above). So the
+ * refusal is operation-aware: creation-only input, immutable afterwards.
+ */
+const MUTATION_REFUSED_FIELDS: readonly string[] = ['scope'];
+
+/**
  * elementOwnsScalar — the ONE ownership predicate shared by every
  * `arr[key=value]` selector match: knowledge_edit's array-element addressing
  * AND knowledge_array_remove's element selection (board c61c9a3a). Both used
@@ -2181,7 +2194,12 @@ export class SterlingTools {
     op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede' | 'knowledge_array_remove'
   ): void {
     const attempted = SterlingTools.WRITE_REFUSED_FIELDS.filter((k) => k in fields);
-    if (attempted.length === 0) return;
+    if (attempted.length === 0) {
+      // MUTATION-ONLY refusals run after the server-owned set, so a call
+      // carrying both still gets the older, more specific message first.
+      this.refuseMutationOnlyFields(fields, op);
+      return;
+    }
     const retiring = attempted.includes('status') || attempted.includes('superseded_by');
     throw new Error(
       `${op}: ${attempted.map((k) => `'${k}'`).join(', ')} ${attempted.length === 1 ? 'is' : 'are'} SERVER-OWNED and cannot be assigned by a caller — ` +
@@ -2192,6 +2210,34 @@ export class SterlingTools {
             `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
             `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
           : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile.`)
+    );
+  }
+
+  /**
+   * `scope` IS CREATION-ONLY (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3).
+   * It routes a record to its physical store at CREATE time
+   * (MountedStores.storeFor) and is never consulted again: every later write
+   * routes by the store PHYSICALLY HOLDING the id. A mutation that changes it
+   * therefore cannot move the record — it only makes the body disagree with the
+   * mount, which is the whole defect (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]). Refused by name here,
+   * and pinned from the row's own `scope` COLUMN one layer down in the store, so
+   * a direct or internal caller cannot walk around this refusal.
+   */
+  private refuseMutationOnlyFields(
+    fields: Record<string, unknown>,
+    op: 'knowledge_create' | 'knowledge_update' | 'knowledge_append' | 'knowledge_supersede' | 'knowledge_array_remove'
+  ): void {
+    if (op === 'knowledge_create') return;
+    const attempted = MUTATION_REFUSED_FIELDS.filter((k) => k in fields);
+    if (attempted.length === 0) return;
+    throw new Error(
+      `${op}: ${attempted.map((k) => `'${k}'`).join(', ')} ${attempted.length === 1 ? 'is' : 'are'} CREATION-ONLY and cannot be changed by a later write — ` +
+        `the value would have been discarded and the write reported success. \`scope\` chooses which physical store holds a record AT CREATE TIME and is ` +
+        `never consulted again (every later write routes by the store that already holds the id), so changing it moves nothing — it only makes the ` +
+        `record's body disagree with the mount it actually lives in. To move a record between stores use knowledge_promote (an explicit copy-and-retire ` +
+        `across mounts); knowledge_create still accepts \`scope\` as routing input.`
     );
   }
 
@@ -6534,19 +6580,58 @@ export class SterlingTools {
       );
     }
 
-    // PER-MOUNT TRANSACTION ROUTING (board d47a9e2d): a domain-scoped source's
-    // create + source-trim + both addLinks now commit atomically on the ONE
-    // mount that owns the source, via store.withTransactionForScope(original.scope, ...)
-    // below — see mounted.ts's storeFor/withTransactionForScope. The one
+    // PHYSICAL MOUNT MEMBERSHIP, asked of the STORAGE LAYER — the ONE routing
+    // input for every mount decision in this method (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change],
+    // part C4). `original` came out of the cross-mount fan, so its body's
+    // `scope` resolves a domain-held record and a project-held one exactly
+    // alike and cannot tell them apart (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]). The project store is
+    // the only mount a project-local maintenance item lives in, and the mount
+    // that HOLDS the source is the only one its transaction can commit on — so
+    // both questions are answered here, physically, once.
+    const sourceProjectHeld = this.store.projectStoreHolds(original.id);
+    // THE SCOPE THE NEW RECORD INHERITS — the scope of the MOUNT that
+    // physically holds the source, asked of the storage layer (scopeOfHolder),
+    // never reconstructed here.
+    //
+    // WHAT THIS REPLACED: `sourceProjectHeld ? 'project' : original.scope`. Its
+    // project half was right; its DOMAIN half — the only half that actually has
+    // to NAME a mount — fell straight back to the body label, in the one method
+    // whose transaction is already routed physically two lines below. The two
+    // then disagreed for exactly the records the routing exists to handle. A
+    // domain-held source whose label is wrong (or, for a legacy body, absent)
+    // sent `scope` into knowledgeCreate, which routes by storeFor(scope): a
+    // 'project' label targeted the PROJECT store while the transaction was open
+    // on the domain mount, so assertMountAffinity refused and the whole extract
+    // rolled back; a label naming a DIFFERENT mounted domain landed in the wrong
+    // store and was refused the same way; a label naming an UNMOUNTED domain
+    // made storeFor throw mid-transaction. Every one of those turns a valid
+    // extraction into a refusal — the precise outcome the governing decision
+    // REJECTED as its alternative 5 ("the backstop then refuses — turning a
+    // valid extraction into a refusal rather than making it work"). The
+    // transaction half of that fix landed; this line was the residue.
+    //
+    // Deriving both answers from the same physical question also removes the
+    // possibility of them disagreeing: scopeOfHolder names the mount, and
+    // projectStoreHolds (retained above) answers the ATOMICITY question — which
+    // mount this transaction can commit on, and therefore whether project-local
+    // `resolves` items and the check_skipped audit row can ride inside it.
+    const sourceScope = this.store.scopeOfHolder(original.id);
+
+    // PER-MOUNT TRANSACTION ROUTING (board d47a9e2d): a domain-held source's
+    // create + source-trim + both addLinks commit atomically on the ONE mount
+    // that owns the source, via store.withTransactionForRecord(original.id, ...)
+    // below — see mounted.ts's storeHolding/withTransactionForRecord. The one
     // remaining hazard is `resolves`: maintenance todos are always
     // project-local (mounted.ts, §3.3), and extract removes each claimed item
-    // INSIDE the transaction (below) — a domain-scoped transaction cannot
+    // INSIDE the transaction (below) — a domain-mount transaction cannot
     // atomically delete a project-store row, so a non-empty `resolves` is
-    // refused loudly for a domain-scoped source rather than silently split
-    // across two connections.
-    if (original.scope !== 'project' && resolves && resolves.length > 0) {
+    // refused loudly for a source the project store does not hold, rather than
+    // silently split across two connections.
+    if (!sourceProjectHeld && resolves && resolves.length > 0) {
       throw new Error(
-        `knowledge_extract: source '${original.id}' is domain-scoped (${original.scope}) and 'resolves' names ${resolves.length} item(s) — maintenance todos are project-local, so a domain-scoped extract's transaction cannot atomically close them. Retry without resolves, or close those items separately. Nothing was written.`
+        `knowledge_extract: source '${original.id}' is held by the '${sourceScope}' mount, not the PROJECT store, and 'resolves' names ${resolves.length} item(s) — maintenance todos are project-local, so a domain-mount extract's transaction cannot atomically close them. Retry without resolves, or close those items separately. Nothing was written.`
       );
     }
 
@@ -6568,9 +6653,18 @@ export class SterlingTools {
     // extract NEVER crosses scope (decision knowledge-extract-design Q5); an
     // explicit mismatching scope is refused, naming both values. An identical
     // explicit scope is harmless and passes.
-    if (Object.prototype.hasOwnProperty.call(new_record.fields, 'scope') && new_record.fields.scope !== original.scope) {
+    // Compared against the scope the new record will actually INHERIT — the
+    // scope of the mount that PHYSICALLY holds the source — not against the
+    // source's body label, so the check and the create can never disagree.
+    // MISMATCH-ONLY, deliberately: an unconditional refusal of any explicit
+    // new_record.fields.scope was proposed and WITHDRAWN as too broad
+    // (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change],
+    // corrected 2026-09-06). new_record.fields is CREATION-shaped, `scope` is
+    // legitimate creation input there, and a frozen pin requires an explicitly
+    // supplied scope IDENTICAL to the source's to SUCCEED.
+    if (Object.prototype.hasOwnProperty.call(new_record.fields, 'scope') && new_record.fields.scope !== sourceScope) {
       throw new Error(
-        `knowledge_extract: new_record.fields.scope '${String(new_record.fields.scope)}' differs from the source's scope '${original.scope}' — extract never crosses scope (decision knowledge-extract-design Q5); nothing was written.`
+        `knowledge_extract: new_record.fields.scope '${String(new_record.fields.scope)}' differs from the source's scope '${sourceScope}' — the scope of the mount that physically holds source '${original.id}'. Extract never crosses scope (decision knowledge-extract-design Q5); nothing was written.`
       );
     }
 
@@ -6636,18 +6730,18 @@ export class SterlingTools {
     let sourceVersion!: number;
     let deferredSkips: SkippedCheck[] = [];
     // FIXER-MODE (converging review finding, project-scope regression): only a
-    // DOMAIN-scoped source needs the defer-then-flush dance below — its
+    // DOMAIN-HELD source needs the defer-then-flush dance below — its
     // transaction opens on the domain mount, while recordCheckSkipped always
     // routes to the PROJECT mount (see the comment above), so an inline audit
-    // write there would commit independently of the domain BEGIN. A
-    // project-scoped source's transaction already IS the project mount, so
+    // write there would commit independently of the domain BEGIN — and, since
+    // the affinity backstop landed, be REFUSED as a cross-mount write. A
+    // project-held source's transaction already IS the project mount, so
     // its audit row was atomic inline before board d47a9e2d and stays that way
     // here — deferring it would instead turn a committed project extract into
     // a window where a post-commit flush failure errors after the records are
-    // already durable. original.scope is 'project' or 'domain:<name>' (see the
-    // PER-MOUNT TRANSACTION ROUTING comment above / the !== 'project' checks
-    // elsewhere in this method), so the same test used there decides here.
-    const isDomainScope = original.scope !== 'project';
+    // already durable. The test is PHYSICAL membership, the same question the
+    // transaction below routes on — a body label cannot answer it.
+    const isDomainScope = !sourceProjectHeld;
     // ONE transaction on the source's OWNING mount (board d47a9e2d): create the
     // new record, trim the source, write BOTH provenance edges, drain resolves.
     // The knowledge RECORDS and their provenance links commit atomically on the
@@ -6660,16 +6754,21 @@ export class SterlingTools {
     // therefore leaves NO audit row, a committed one still records them (P5). Note
     // the SEAM (deliberately narrow, not the atomicity guarantee the records get):
     // an audit-row write that itself failed after a successful record commit would
-    // lose the audit row, not corrupt the records. original.scope is the SOLE
-    // routing input here (id/alias/slug/prefix resolution above already ran across
-    // every mount; once `original` is resolved, only its own scope decides where
-    // this transaction opens).
-    this.store.withTransactionForScope(original.scope, () => {
-      // scope inherited from the source (Q5); an explicit new_record.fields.scope
-      // that DIFFERS from the source's scope was already refused above, so the
-      // spread here can only ever carry the same scope back (or none at all) —
-      // it can no longer override it.
-      const created = this.knowledgeCreate(newType, { scope: original.scope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
+    // lose the audit row, not corrupt the records. THE SOURCE'S PHYSICAL HOLDER is
+    // the SOLE routing input here (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change], part
+    // C3): id/alias/slug/prefix resolution above already ran across every mount,
+    // and once `original` is resolved the store that HOLDS it decides where this
+    // transaction opens. Routing on its body's `scope` instead — as this line did
+    // — opened the transaction on the mount the LABEL named while every write
+    // inside it independently resolved to the mount that actually holds the id,
+    // so a drifted label put the BEGIN on the wrong database.
+    this.store.withTransactionForRecord(original.id, () => {
+      // scope inherited from the source (Q5) — from its physical mount, not its
+      // body label. An explicit new_record.fields.scope that DIFFERS was already
+      // refused above, so the spread here can only ever carry the same scope back
+      // (or none at all) — it can no longer override it.
+      const created = this.knowledgeCreate(newType, { scope: sourceScope, ...new_record.fields }, { deferCheckSkipped: isDomainScope });
       // created.check_skipped is populated either way (knowledgeCreate always
       // returns what it skipped) — but for a project-scoped source it was
       // ALREADY persisted inline above (deferCheckSkipped: false), so only a
@@ -6874,7 +6973,24 @@ export class SterlingTools {
     // record by a handle the store cannot resolve.
     const originalId = original.id;
     if (original.status !== 'active') throw new Error(`knowledge_promote: record '${originalId}' is not active (status ${original.status})`);
+    // BOTH HALVES, neither implying the other (decision
+    // [scope-drift-closed-by-column-authoritative-reads-not-format-change], part
+    // C4): the body must SAY 'project', and the PROJECT store must physically
+    // hold the record. Promotion copies into a domain store and then tombstones
+    // the original in its own store, so a project-LABELLED record that actually
+    // lives in a domain mount would be "promoted" out of one domain store into
+    // another — a shape §3.3 does not define. `scope` is not the routing key for
+    // anything after creation (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]), so the label alone
+    // cannot answer this.
     if (original.scope !== 'project') throw new Error(`knowledge_promote: record '${originalId}' is ${original.scope} — only project-scoped records promote`);
+    if (!this.store.projectStoreHolds(originalId)) {
+      throw new Error(
+        `knowledge_promote: record '${originalId}' is labelled scope='project' but the PROJECT store does not hold it — it physically lives in a ` +
+          `domain mount, and its body's scope says nothing about that. Only project-scoped records the project store actually holds promote (§3.3); ` +
+          `nothing was written.`
+      );
+    }
     const UNPROMOTABLE = ['feature_article', 'todo', 'attestation'];
     if (UNPROMOTABLE.includes(original.type)) {
       throw new Error(
@@ -8649,7 +8765,39 @@ export class SterlingTools {
       status: 'active',
       superseded_by: null,
       links: body.links ?? [],
-      scope: (body.scope as string) ?? 'project',
+      // THE REPLACEMENT INHERITS THE SCOPE OF THE MOUNT THAT PHYSICALLY HOLDS
+      // THE OLD RECORD — never a caller value (refused above by
+      // refuseMutationOnlyFields), never the old record's own body label, and
+      // never a bare 'project' default (decision
+      // [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+      // store.supersede inserts the replacement into the SAME PHYSICAL STORE as
+      // the record it retires (MountedStores.supersede routes by storeHolding),
+      // so the scope this site supplies is only ever a LABEL for a destination
+      // already chosen physically — and asking the storage layer to name that
+      // destination (scopeOfHolder) is the only way to get the two to agree.
+      //
+      // WHAT THIS REPLACED, and why the earlier shape was still wrong after it
+      // stopped being obviously wrong: `old.scope ?? 'project'` closed the
+      // domain-LABELLED branch and left two open. (1) The `?? 'project'`
+      // fallback is a fail-OPEN default on exactly the value that must fail
+      // CLOSED — "a guard on `scope` must fail closed on undefined rather than
+      // treating a missing field as 'probably project'" (anti_pattern
+      // [record-body-scope-is-not-physical-store-identity]). (2) More
+      // reachable: `old.scope` is now the old row's `scope` COLUMN (the
+      // column-authoritative decoder overwrites the parsed body on every live
+      // read), and the column can still contradict the MOUNT — a row seeded
+      // into the domain store carrying a 'project' column reads back as
+      // 'project', and this site would have minted a second project-labelled
+      // row inside that domain database, manufacturing exactly the drift the
+      // slice exists to end. The mount is the fact; the column is a label.
+      //
+      // store.supersede ALSO pins candidate.scope from the old row's column, so
+      // a wrong value here was corrected one layer down and the persisted row
+      // was never at risk — which is why this was a MEDIUM. It is fixed anyway:
+      // wrong-but-rescued is still wrong, the tool-layer echo is what the
+      // caller sees, and a comment claiming this branch was closed while it was
+      // open is the kind of false assurance a later reader stops re-checking.
+      scope: this.store.scopeOfHolder(old.id),
       stack_tags: body.stack_tags ?? [],
       ...body,
       ...(slug !== undefined ? { slug } : {}),

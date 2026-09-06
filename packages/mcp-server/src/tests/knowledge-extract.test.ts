@@ -61,6 +61,7 @@ import { join } from 'node:path';
 import { SterlingStore, MountedStores } from '@sterling/store';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingTools } from '../tools.js';
+import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-harness.js';
 
 const NOW = '2026-08-25T16:00:00.000Z';
 
@@ -84,17 +85,24 @@ function harness() {
 // domain scope (MountedStores + parseConfig({stack_tags:[name]})) — not
 // faked, the same real domain-store write path knowledge_create already
 // routes through. Used only by the scope-guard and domain-source pins below.
+// CONSOLIDATED 2026-09-06 (board R4; decision scope-drift-closed-by-column-
+// authoritative-reads-not-format-change): this body moved VERBATIM into
+// ./test-helpers/mounted-harness.ts, shared with resolves-append-join.test.ts
+// and domain-routing.test.ts. BEHAVIOUR-NEUTRAL: same prefix, same NOW clock,
+// same randomUUID, same single-mount layout; `domainDb` is still returned (no
+// call site in this file destructures it, but dropping it would be a shape
+// change rather than a re-point). The plain harness() above is UNTOUCHED —
+// it is project-only by design and is the right tool wherever the mount
+// boundary is not the point. Conductor hand-edit: H5 freezes test paths
+// against pipeline agents and test-repair.mjs has no evidence contract that
+// would be a true statement about a behaviour-neutral re-point
+// (anti_pattern 985e1266); counts verified independently afterwards.
 function domainHarness(domainName = 'genesys') {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-knowledge-extract-domain-'));
-  const domainDb = join(dir, 'domains', domainName, 'sterling.db');
-  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: domainName, dbPath: domainDb }]);
-  const config = parseConfig({ stack_tags: [domainName] });
-  const tools = new SterlingTools({ store, config, now: () => NOW, newId: randomUUID });
-  const cleanup = () => {
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  };
-  return { dir, domainDb, store, tools, cleanup };
+  const h = harnessMountedShared([domainName], {
+    now: NOW,
+    prefix: 'sterling-knowledge-extract-domain-',
+  });
+  return { dir: h.dir, domainDb: h.domainDbPath(domainName), store: h.store, tools: h.tools, cleanup: h.cleanup };
 }
 
 // The tool is not declared on SterlingTools yet — cast through `unknown` so
