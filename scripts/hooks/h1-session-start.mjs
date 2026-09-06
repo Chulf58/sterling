@@ -161,19 +161,31 @@ function paint(rows) {
 
 /** The plugin root — the dir holding .claude-plugin/plugin.json — by a bounded
  *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle).
- *  STERLING_PLUGIN_ROOT overrides for tests (mirrors STERLING_SERVER_DIST
- *  below): the real walk always resolves to the one clone the test process
- *  runs from, so a test cannot otherwise put cwd AT the plugin root without
- *  faking fixtures inside that live clone's own .sterling/. */
+ *
+ *  WALK-UP FIRST; THE ENV SEAM IS CONSULTED ONLY WHEN THE WALK-UP FINDS NO
+ *  PLUGIN TREE (decision 95c2c109 F2's shape, extended from H15 to H1 by board
+ *  fb7c43fb N-3). This ordering is the security property, not a preference:
+ *  every consumer of this root READS CODE from it (plugin.json, the agent
+ *  template registry), RESOLVES THE SERVER against it, and — sharpest —
+ *  SPAWNS GIT WITH cwd INSIDE IT, so an env-first value would let anything able
+ *  to set this process's environment redirect all three at session start, and a
+ *  planted `.git/config` in the named tree (core.fsmonitor, an `ext::` remote
+ *  url) is CODE EXECUTION on that git spawn. STERLING_PLUGIN_ROOT survives as
+ *  the TEST SEAM it was always documented to be: reachable only from a spawn
+ *  location with no plugin tree above it (the bundle-into-a-temp-dir shape of
+ *  scripts/tests/lib/seam-hook.mjs). Wherever a real plugin tree sits above the
+ *  running hook — everywhere in production — the variable is INERT. */
 function pluginRoot() {
-  if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
-  return walkUpPluginRoot();
+  const walked = walkUpPluginRoot();
+  if (walked) return walked;
+  return process.env.STERLING_PLUGIN_ROOT || null;
 }
-/** The walk-up half of pluginRoot() alone — never the env seam. Used where the
- *  root is about to be PRINTED AS A COMMAND (the receipt remedy below): an
- *  env-first value is agent-influenceable under the threat model decision
- *  95c2c109 F2 closed in H15, so the paste-ready line must come from the
- *  running hook's own location only. */
+/** The walk-up alone — never the env seam, not even as a last resort. Used
+ *  where the root is about to be PRINTED AS A COMMAND (the receipt remedy
+ *  below): an env-supplied value is agent-influenceable under the threat model
+ *  decision 95c2c109 F2 closed in H15, so the paste-ready line must come from
+ *  the running hook's own location only, and an unresolvable walk-up prints the
+ *  placeholder rather than falling back to anything. */
 function walkUpPluginRoot() {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
@@ -466,9 +478,11 @@ const receiptLines = (() => {
 // falls outside it — the disclosed parity item in sanctioned-provenance.mjs,
 // not solved here. Unresolvable root → a placeholder that SAYS it is one,
 // never a fabricated path. TWO FENCES (security review + Codex, 2026-09-05):
-// the root comes from walkUpPluginRoot(), never the env-first pluginRoot() —
-// STERLING_PLUGIN_ROOT is agent-influenceable under the threat model F2 closed
-// in H15, and a remedy pointing at a foreign tree is one H15 then refuses,
+// the root comes from walkUpPluginRoot(), never pluginRoot() — which prefers
+// the same walk-up but still falls back to the seam when no plugin tree sits
+// above this hook, and STERLING_PLUGIN_ROOT is agent-influenceable under the
+// threat model F2 closed in H15; a remedy pointing at a foreign tree is one
+// H15 then refuses,
 // which recreates the very "printed remedy cannot run" defect this fixes; and
 // a root outside H15's own sanctionable word syntax (no `;`, newline, backtick,
 // `$` or space) is never echoed into a paste-ready command — the placeholder

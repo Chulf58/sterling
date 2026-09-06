@@ -75,7 +75,7 @@ import { readTail } from './lib/transcript.mjs';
 // evidence with exactly the predicates commit-reviewed's byte gate reads it
 // with, or the two surfaces disagree about what "a recorded sha" is.
 import { normalizeLedgerEntry, isEvidenceObject, isUsableBlobSha } from './lib/review-ledger-entry.mjs';
-import { observedToolPaths } from './lib/observed-territory.mjs';
+import { observedToolPaths, observedToolPathsSince } from './lib/observed-territory.mjs';
 
 // REGISTER LOCK (decision register-writers-cooperating-lock, 1e0ba0d0, board
 // 673ca3f6) — guards the register's whole-array read-modify-write on BOTH
@@ -1452,34 +1452,32 @@ try {
           //
           // THE RULE AS IMPLEMENTED, stated at exactly the strength it holds: a
           // refresh may REBIND a path only on POSITIVE EVIDENCE that THIS AGENT
-          // READ IT AT SOME POINT IN ITS OWN TRANSCRIPT — the path appears in the
-          // read set observedToolPaths extracts from stdin.agent_transcript_path.
-          // That is a claim about the AGENT's whole observable history, NOT about
-          // this round: the extraction scans the transcript's 1MB tail with no
-          // round boundary in it, so a read recorded in round ONE is
-          // indistinguishable here from a read recorded in round two. Otherwise
-          // the PRIOR sha stands: the receipt keeps attesting the bytes it
-          // actually reviewed, so the byte gate compares the index against those
-          // and refuses, which is the outcome an unreviewed change must produce.
-          // Unchanged paths keep their sha either way (rebinding a path to the
-          // value it already has is not a rebaseline and is never reported).
+          // READ IT IN *THIS* ROUND — the path appears in the read set
+          // observedToolPathsSince extracts from stdin.agent_transcript_path,
+          // restricted to transcript entries stamped strictly AFTER the
+          // receipt's PRIOR finished_at (read below, before this refresh
+          // overwrites it) — that instant is when the PREVIOUS round ended, so
+          // an entry sharing it belongs to that round, not this one.
+          // Otherwise the PRIOR sha stands: the receipt keeps attesting the bytes
+          // it actually reviewed, so the byte gate compares the index against
+          // those and refuses, which is the outcome an unreviewed change must
+          // produce. Unchanged paths keep their sha either way (rebinding a path
+          // to the value it already has is not a rebaseline and is never
+          // reported).
           //
-          // DISCLOSED RESIDUAL — THE ROUND BOUNDARY IS NOT ENFORCED (security
-          // round 2; boarded, deliberately NOT fixed here). Because the read set
-          // carries no round boundary, one laundering route survives this guard:
-          // round one legitimately reads path P; P is edited afterwards by anyone;
-          // a NO-OP follow-up Stop then finds P in the transcript's read set and
-          // rebinds it to the edited bytes, and commit-reviewed stamps a trailer
-          // over content the reviewer never saw. The guard still closes the case
-          // the live defect produced (a path this agent NEVER read cannot be
-          // rebound at all), which is why it ships as it stands.
-          // INTENDED FIX, when the lib is opened: filter the transcript's
-          // tool_use reads to entries whose timestamp is AFTER the receipt's
-          // PRIOR finished_at, and treat an unusable/absent timestamp as NOT THIS
-          // ROUND (fail-closed — the same direction every unprovable claim takes
-          // on this path). It lives in scripts/hooks/lib/observed-territory.mjs,
-          // which is outside this slice's territory; until it lands, read every
-          // sentence about "this round" on this path as "this agent's transcript".
+          // THE ROUND BOUNDARY IS WHAT CLOSES THE LAUNDERING ROUTE (board
+          // 181d11e7; the residual the previous round disclosed here). Scoped to
+          // the whole transcript, this guard bit only when the reviewer had NEVER
+          // read the path — so the common shape survived it: round one
+          // legitimately reads P, P is edited afterwards by anyone, and a no-op
+          // follow-up Stop finds P in the transcript's read set and rebinds it to
+          // the edited bytes. With the boundary applied, that round-one read is
+          // no longer evidence about round two, and the rebind is refused.
+          // FAIL CLOSED ON AN UNUSABLE BOUNDARY: an unreadable transcript, a
+          // missing/unparseable prior finished_at, or an entry carrying no usable
+          // timestamp all yield NO round-scoped reads — never a permissive
+          // fallback to the whole-transcript set (that set is exactly the claim
+          // this fix stopped accepting).
           //
           // READS ONLY, NOT WRITES: a path the agent WROTE is a path whose bytes
           // it authored, and self-authored bytes are the one thing an independent
@@ -1505,7 +1503,16 @@ try {
           // buy a PASS through that door.
           const priorEvidence = isEvidenceObject(raw.content_evidence) ? raw.content_evidence : null;
           const priorBlobs = priorEvidence && isEvidenceObject(priorEvidence.blobs) ? priorEvidence.blobs : null;
-          const observedReadsThisRound = new Set(observed ? observed.reads : []);
+          // THE PRIOR REVIEW-END INSTANT — read HERE, before the refresh
+          // overwrites raw.finished_at below. It is the ONLY round boundary
+          // available: everything this agent recorded after it belongs to the
+          // round that is finishing now. A receipt with no usable finished_at
+          // (hand-edited, or a v2 entry truncated in the ledger) yields no
+          // boundary, so observedToolPathsSince returns null and NOTHING counts
+          // as read this round — the fail-closed direction.
+          const priorFinishedAt = typeof raw.finished_at === 'string' ? raw.finished_at : null;
+          const observedThisRound = observedToolPathsSince(input.agent_transcript_path, input.cwd, priorFinishedAt);
+          const observedReadsThisRound = new Set(observedThisRound ? observedThisRound.reads : []);
           const rebaselineRefused = [];
           const droppedUnbound = [];
           const nextEvidence = { ...refreshEvidence };
@@ -1575,17 +1582,100 @@ try {
           // only the claim that a review ENDED again just now.
           // EMPTINESS IS READ OFF THE SAME DECLARED SET the guards used, never a
           // second spelling of it.
+          // THE ZERO-READ ROUND RULE (board 181d11e7). A follow-up Stop whose
+          // ROUND-SCOPED read set is EMPTY reviewed nothing: no path in the
+          // declared territory can be shown to have been looked at between the
+          // receipt's prior finished_at and now. Such a Stop preserves the
+          // receipt EXACTLY — every prior content_evidence entry AND the prior
+          // finished_at — and records only that a resume was attempted
+          // (resume_count, observed_*, any rebaseline refusals).
+          // WHY BOTH HALVES: the per-path guard above already keeps the prior
+          // SHAS, but the rest of nextEvidence (status, absent_paths,
+          // failure_reason, truncated_of) comes from THIS Stop's fresh probe, so
+          // writing it would still restate the round-one attestation in
+          // round-two's words; and finished_at is the horizon commit-reviewed's
+          // staleness advisory measures against (12h), so advancing it would let
+          // a "thanks, done" Stop renew a receipt's freshness with nothing
+          // reviewed. That renewal is the laundering route this rule closes.
+          // EMPTY IS EMPTY WHATEVER THE CAUSE — an unobservable transcript, an
+          // unusable prior finished_at, and a genuinely idle round are all "no
+          // positive evidence", and this path never distinguishes them in the
+          // permissive direction.
+          //
+          // THE PREDICATE IS TERRITORY-SCOPED, NOT "DID THIS AGENT READ ANY FILE
+          // AT ALL" (security round 3, MEDIUM). Measured against the whole
+          // round-scoped read set, the rule was satisfiable by ANY read the
+          // reviewer happened to make: a receipt declaring ["src/pay.mjs"] whose
+          // follow-up Stop opened README.md, or its own handoff draft, counted as
+          // a round that "reviewed something" — finished_at advanced and the
+          // evidence was replaced wholesale, renewing the 12h staleness horizon
+          // on a round in which nothing in territory was looked at. That is
+          // exactly the freshness renewal the paragraph above says this rule
+          // exists to prevent, so the question it asks is the narrow one: did
+          // this round read any DECLARED path? builtFault.expected is that set —
+          // the same declared, cap-sliced territory the binding guard checked the
+          // evidence against and the droppedUnbound verdict counts against, so
+          // there is ONE spelling of "the declared territory" on this whole path.
+          // (Cap-sliced cuts the safe way: a declared path beyond the hashing cap
+          // is not in `expected`, so a read of it does not license a refresh.)
+          // The per-path rebaseline guard above is unaffected and still decides
+          // each blob individually — this predicate governs only finished_at and
+          // the wholesale evidence replacement.
+          const territoryReadThisRound = builtFault.expected.filter((p) => observedReadsThisRound.has(p));
+          const zeroReadRound = territoryReadThisRound.length === 0;
           if (builtFault.expected.length === 0) {
+            // An EMPTY declared territory makes zeroReadRound vacuously true
+            // (nothing to intersect), so this branch withholds the content
+            // evidence too — and must say so. The older wording promised
+            // "content evidence recorded as usual" on a path that has never
+            // written it since the zero-read rule landed, which is a false
+            // action claim in the one place a reader checks what happened.
             process.stderr.write(
-              `H22: NOT advancing finished_at on the review receipt for ${label} — its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing; the rest of the refresh (resume_count, observed files, content evidence) is recorded as usual.\n`
+              `H22: NOT advancing finished_at on the review receipt for ${label} — its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing. The content evidence is left exactly as it stands for the same reason; what IS recorded is the attempted resume (resume_count now ${nextResumeCount}, observed files unioned).\n`
+            );
+          } else if (zeroReadRound) {
+            process.stderr.write(
+              `H22: NOT advancing finished_at and NOT replacing the content evidence on the review receipt for ${label} — NOTHING in this round's observed reads (transcript entries stamped after the receipt's previous finish time ${priorFinishedAt ?? '<none recorded>'}) shows this reviewer read any of its ${builtFault.expected.length} DECLARED path(s), so this Stop reviewed nothing in territory — reads OUTSIDE the declared territory are not evidence of a review round and never renew this receipt. The receipt keeps the evidence and the review-end instant it earned; only the attempted resume is recorded (resume_count now ${nextResumeCount}, observed files unioned). Re-dispatch a reviewer if this round of work needs a receipt.\n`
             );
           } else {
             raw.finished_at = finishedAt;
           }
-          raw.content_evidence = nextEvidence;
+          // LOAD-BEARING AND CURRENTLY UNTESTED — do not remove it as "dead".
+          // Removing it leaves the ZERO-READ-ROUND pin green, but that is a TEST
+          // GAP, not redundancy: an earlier conductor mutation read the green as
+          // proof this guard was covered by the per-path rebaseline above, and
+          // that reading was WRONG (caught in review, 2026-09-06).
+          // WHY the per-path guard does not cover it: that loop iterates
+          // Object.entries(nextEvidence.blobs) — only the paths the FRESH probe
+          // found PRESENT. Everything else in nextEvidence is the fresh probe's,
+          // unrepaired. So when a declared path's PRESENCE changed since the last
+          // round, the per-path loop never sees it and this guard is the only
+          // thing preserving the receipt. Concretely: declared path reviewed in
+          // round 1, then DELETED by someone, then a no-op Stop fires. The fresh
+          // probe returns blobs:{} and absent_paths:[that path], status
+          // 'unavailable'. Without this guard the receipt is rewritten to attest
+          // a reviewed DELETION (the exact shape review-ledger-entry.mjs:78-88
+          // documents) and commit-reviewed's NO CONTENT EVIDENCE advisory is
+          // suppressed — a no-op Stop laundering an unreviewed deletion into a
+          // real receipt. Same shape for a path that REAPPEARS after being
+          // absent, and for a transient hash failure downgrading status.
+          // THE PIN THAT WOULD COVER THIS: zero-read round + declared path
+          // deleted -> blobs keeps the prior sha AND absent_paths does not gain
+          // the path. It does not exist yet; until it does, this line is
+          // protected by review and by this comment alone.
+          if (!zeroReadRound) raw.content_evidence = nextEvidence;
           if (observed) {
             const priorObserved = Array.isArray(raw.observed_files) ? raw.observed_files.filter((f) => typeof f === 'string' && f !== '') : [];
             raw.observed_files = [...new Set([...priorObserved, ...observed.reads, ...observed.writes])];
+            // READS-ONLY SIBLING (board 4b59e6ff / review-ledger.mjs's
+            // 'superseded' discharge class) — accumulated the same way
+            // observed_files is, and from the SAME whole-transcript observation:
+            // this field answers "what has this agent been observed to READ",
+            // which is a fact about the agent, not about one round. The
+            // round-scoped set above is the rebaseline gate's evidence and is
+            // deliberately NOT what this records.
+            const priorReads = Array.isArray(raw.observed_reads) ? raw.observed_reads.filter((f) => typeof f === 'string' && f !== '') : [];
+            raw.observed_reads = [...new Set([...priorReads, ...observed.reads])];
             raw.observed_source = 'subagent-transcript';
             // Absent-unless-true, never flipped back to false: a truncated
             // first round stays truncated evidence even if the second round's
@@ -1608,8 +1698,15 @@ try {
                 .join(', ')}. The reviewed-bytes gate will refuse a commit carrying those bytes — re-dispatch a reviewer over them rather than waiving, unless the change is genuinely outside what was reviewed.\n`
             );
           }
+          // NO FALSE ACTION CLAIM IN THE SUMMARY: the zero-read round above
+          // withholds exactly the two things this sentence names first, so it
+          // says what actually happened rather than restating the ordinary path.
+          // The ordinary wording is unchanged.
+          const refreshedWhat = zeroReadRound
+            ? 'finished_at and content evidence PRESERVED (nothing was read this round), observed files updated'
+            : 'finished_at, content evidence and observed files updated';
           process.stderr.write(
-            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate — finished_at, content evidence and observed files updated (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.\n`
+            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate — ${refreshedWhat} (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.\n`
           );
         } else if (!departingIsReviewer) {
           // RESUME PATH ONLY: the decision read above found this dispatch's
@@ -1687,9 +1784,23 @@ try {
             // the lib's own `truncated` flag says the 1MB tail window did not
             // cover the whole departing transcript — absent (never `false`)
             // otherwise, same absent-unless-true convention as observed_files.
+            // OBSERVED_READS — THE READS-ONLY HALF, its OWN field beside
+            // observed_files (board 181d11e7 / 4b59e6ff). observed_files above
+            // is reads UNION WRITES and stays byte-identical for the consumers
+            // that already read it; it cannot answer "what did this reviewer
+            // READ", because a path the agent WROTE is a path whose bytes it
+            // authored. scripts/review-ledger.mjs's 'superseded' discharge class
+            // requires exactly this split and refuses to fall back to
+            // observed_files for that reason. Same absent-when-unobserved
+            // posture as its siblings, and covered by the SAME
+            // `observed_truncated: true` marker (one transcript, one tail
+            // window, one truncation fact — review-ledger.mjs already refuses a
+            // superseded discharge on that exact key, so it is never spelled a
+            // second way here).
             ...(observed
               ? {
                   observed_files: [...new Set([...observed.reads, ...observed.writes])],
+                  observed_reads: [...new Set(observed.reads)],
                   observed_source: 'subagent-transcript',
                   ...(observed.truncated ? { observed_truncated: true } : {}),
                 }

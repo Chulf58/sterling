@@ -8170,8 +8170,9 @@ function paint(rows) {
   ).join("\n");
 }
 function pluginRoot() {
-  if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
-  return walkUpPluginRoot();
+  const walked = walkUpPluginRoot();
+  if (walked) return walked;
+  return process.env.STERLING_PLUGIN_ROOT || null;
 }
 function walkUpPluginRoot() {
   let dir = dirname5(fileURLToPath(import.meta.url));

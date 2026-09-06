@@ -527,13 +527,43 @@ function writeAgentTranscript(dir, name, blocks) {
   writeFileSync(p, blocks.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return p;
 }
-const readBlock = (absPath) => ({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: absPath } }] } });
+// timestamp is OPTIONAL and, when supplied, lands as a top-level `timestamp`
+// key on the JSONL line — the round-scoping fixture convention shared with
+// scripts/tests/h22-observed-territory.test.mjs's toolLineAt() (board
+// 181d11e7 / brief item (a)). Calls that omit it keep the exact prior
+// shape (no timestamp key at all), so every PRE-EXISTING call site below is
+// untouched by this change unless explicitly adjusted.
+const readBlock = (absPath, timestamp) => {
+  const block = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: absPath } }] } };
+  if (timestamp !== undefined) block.timestamp = timestamp;
+  return block;
+};
+const editBlock = (absPath, timestamp) => {
+  const block = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: absPath } }] } };
+  if (timestamp !== undefined) block.timestamp = timestamp;
+  return block;
+};
+function isoOffset(iso, ms) {
+  return new Date(Date.parse(iso) + ms).toISOString();
+}
 
 // SABOTAGE: recompute content_evidence unconditionally on every resume
 // regardless of transcript evidence (the OLD behavior) — RESUME-1b below
 // goes red (blobs would show the NEW sha, not the prior one; no
 // rebaseline_refused record; no REFUSED TO REBASELINE disclosure).
-test('RESUME-1a (rebaseline-on-evidence): a resumed reviewer whose OWN transcript shows a Read of the changed path this round gets a genuinely RECOMPUTED sha — no rebaseline_refused', () => {
+//
+// ADJUSTED (board 181d11e7 / brief item (a) — round-scoping): the Read
+// block now carries an explicit timestamp placed STRICTLY AFTER entry1's
+// own finished_at, so this arm proves the round-scoped case specifically
+// (a read that genuinely belongs to THIS round), not merely "a Read exists
+// somewhere in the whole transcript" — which is exactly the un-scoped
+// behavior RESUME-1a-EARLIER below shows must NOT rebaseline.
+// SABOTAGE (round-scoping specific): drop the timestamp filter and accept
+// ANY Read anywhere in the transcript as "this round" evidence — this arm
+// stays green even under that bug (a Read is present), but its sibling
+// RESUME-1a-EARLIER (Read timestamped BEFORE finished_at) goes red instead,
+// which is why the two are pinned as a pair.
+test('RESUME-1a (rebaseline-on-evidence): a resumed reviewer whose OWN transcript shows a Read of the changed path AFTER the prior finished_at gets a genuinely RECOMPUTED sha — no rebaseline_refused', () => {
   const { dir, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
@@ -546,7 +576,8 @@ test('RESUME-1a (rebaseline-on-evidence): a resumed reviewer whose OWN transcrip
     assert.ok(entry1.entry_id, 'the first promotion is v2-shaped with an entry_id');
 
     writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
-    const agentTranscript = writeAgentTranscript(dir, 'agent-a.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'))]);
+    const readAt = isoOffset(entry1.finished_at, 60_000); // strictly AFTER entry1.finished_at -> this round
+    const agentTranscript = writeAgentTranscript(dir, 'agent-a.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'), readAt)]);
 
     r = runHook(h22Input(dir, { agent_id: 'rev-resume-a', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -559,8 +590,229 @@ test('RESUME-1a (rebaseline-on-evidence): a resumed reviewer whose OWN transcrip
     assert.ok(Date.parse(entry2.finished_at) >= Date.parse(entry1.finished_at), 'finished_at moves forward');
     assert.equal(entry2.resume_count ?? 0, (entry1.resume_count ?? 0) + 1, 'resume_count increments by exactly one');
 
-    assert.notDeepEqual(entry2.content_evidence, entry1.content_evidence, "WITH real Read evidence this round, content_evidence IS recomputed against the file's current bytes");
-    assert.ok(!('rebaseline_refused' in entry2) || entry2.rebaseline_refused.length === 0, 'a genuinely observed rebaseline never accumulates a refusal record for the same path');
+    assert.notDeepEqual(entry2.content_evidence, entry1.content_evidence, "WITH real, round-scoped Read evidence, content_evidence IS recomputed against the file's current bytes");
+    assert.ok(!('rebaseline_refused' in entry2) || entry2.rebaseline_refused.length === 0, 'a genuinely observed, round-scoped rebaseline never accumulates a refusal record for the same path');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// RESUME-1a-EARLIER (board 181d11e7 / brief item (a), pin 2 — sibling arm):
+// the same Read exists in the transcript, but its timestamp is BEFORE the
+// prior finished_at — it belongs to an EARLIER round, not this one, so it
+// must NOT be accepted as this-round evidence: the prior sha stands, the
+// refusal is recorded and disclosed, exactly as RESUME-1b's "no evidence at
+// all" case.
+// SABOTAGE: accept any Read anywhere in the transcript regardless of its
+// timestamp relative to finished_at (i.e. the pre-fix, un-scoped behavior)
+// — this test goes red (content_evidence would show the NEW sha, no
+// rebaseline_refused record, no disclosure) while RESUME-1a above (a
+// genuinely AFTER-timestamped Read) stays green either way, proving the two
+// arms are each other's counter-sabotage on the round-scoping boundary.
+// ===========================================================================
+
+test('RESUME-1a-EARLIER (round-scoping): a Read of the changed path timestamped BEFORE the prior finished_at belongs to an earlier round — rebaseline refused, prior sha stands', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v1 content\n');
+
+    writeRegisterRaw(dir, [registerEntry('rev-resume-earlier', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-earlier', hook_event_name: 'SubagentStop' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const entry1 = readLedger(dir)[0];
+    const priorSha = entry1.content_evidence.blobs['src/resume.mjs'];
+    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/resume.mjs');
+
+    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
+    const earlierReadAt = isoOffset(entry1.finished_at, -60_000); // strictly BEFORE entry1.finished_at -> an earlier round
+    const agentTranscript = writeAgentTranscript(dir, 'agent-earlier.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'), earlierReadAt)]);
+
+    r = runHook(h22Input(dir, { agent_id: 'rev-resume-earlier', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const entry2 = readLedger(dir)[0];
+    assert.equal(entry2.entry_id, entry1.entry_id);
+    assert.equal(entry2.content_evidence.blobs['src/resume.mjs'], priorSha, 'a Read timestamped before finished_at is NOT this-round evidence — the prior sha stands');
+    assert.ok(Array.isArray(entry2.rebaseline_refused) && entry2.rebaseline_refused.length === 1, 'the refusal is recorded exactly once');
+    assert.equal(entry2.rebaseline_refused[0].path, 'src/resume.mjs');
+    assert.match(`${r.stdout}\n${r.stderr}`, /REFUSED TO REBASELINE/, 'the withholding is disclosed by name');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// RESUME-1a-NO-TIMESTAMP (board 181d11e7 / brief item (a), pin 3): a
+// transcript entry with NO `timestamp` at all cannot be placed in any
+// round — fail-closed, read the same as "not this round" (matching every
+// other gate's positive-evidence-only direction), never as "assume it
+// counts".
+// SABOTAGE: treat a missing timestamp as satisfying the round-scope check
+// (e.g. `!ts || ts > sinceIso` instead of `ts && ts > sinceIso`) — this
+// test alone catches it; RESUME-1a (fully timestamped, AFTER) and
+// RESUME-1a-EARLIER (fully timestamped, BEFORE) are both unaffected by this
+// specific bug either way.
+// ===========================================================================
+
+test('RESUME-1a-NO-TIMESTAMP (round-scoping, fail-closed): a Read with NO timestamp at all is never treated as this-round evidence — rebaseline refused', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v1 content\n');
+
+    writeRegisterRaw(dir, [registerEntry('rev-resume-notime', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-notime', hook_event_name: 'SubagentStop' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const entry1 = readLedger(dir)[0];
+    const priorSha = entry1.content_evidence.blobs['src/resume.mjs'];
+    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/resume.mjs');
+
+    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
+    // Deliberately NO timestamp on this block at all (readBlock's timestamp
+    // arg omitted) — an entry whose time cannot be established.
+    const agentTranscript = writeAgentTranscript(dir, 'agent-notime.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'))]);
+
+    r = runHook(h22Input(dir, { agent_id: 'rev-resume-notime', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const entry2 = readLedger(dir)[0];
+    assert.equal(entry2.content_evidence.blobs['src/resume.mjs'], priorSha, 'an untimestamped Read is never this-round evidence — the prior sha stands');
+    assert.ok(Array.isArray(entry2.rebaseline_refused) && entry2.rebaseline_refused.length === 1, 'the refusal is recorded exactly once');
+    assert.match(`${r.stdout}\n${r.stderr}`, /REFUSED TO REBASELINE/, 'the withholding is disclosed by name');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// ZERO-READ-ROUND (board 181d11e7 / brief item (b)): a follow-up Stop whose
+// round-scoped read set is genuinely EMPTY (a "thanks, done" Stop with
+// nothing read) must never renew the receipt's freshness. Today's bug:
+// finished_at advances whenever declared territory is non-empty, regardless
+// of whether anything was read this round — a laundering route by which a
+// zero-read round makes a stale receipt look fresh again.
+//
+// RE-CUT (independent review finding): the original cut of this pin left
+// the declared file BYTE-IDENTICAL across both rounds, so a wholesale
+// content_evidence recompute produced a deep-equal result anyway and passed
+// vacuously — only the finished_at half was ever load-bearing. This cut
+// genuinely MUTATES the declared file between round 1 and the zero-read
+// resume, and proves the mutation is real (via an independent
+// side-channel sha derivation, not a reimplementation of the hashing
+// algorithm) before relying on it. This closes a genuine coverage gap:
+// RESUME-1b already covers "no transcript at all + a mutated file", but no
+// prior pin covered "a real, readable transcript observing literally
+// nothing + a mutated file" together with the finished_at claim.
+//
+// TWO INDEPENDENT SABOTAGES, EACH WITH ITS OWN CATCHING ASSERTION:
+//   (A) keep advancing finished_at whenever declared territory.files is
+//       non-empty (today's behavior, ignoring the round-scoped read set
+//       entirely) -> caught by the `entry2.finished_at === entry1.finished_at`
+//       assertion.
+//   (B) wipe/recompute content_evidence on every resume regardless of
+//       round-scoped evidence -> now genuinely caught by
+//       `entry2.content_evidence.blobs['src/quiet.mjs'] === priorSha` (and
+//       the `notEqual` against shaOfV2, and the full deepEqual) because the
+//       file's bytes truly changed: a wholesale recompute would pick up the
+//       NEW sha, which the sha-difference guard has already proven differs
+//       from priorSha.
+// A fix landing only one half must still fail this pin.
+// ===========================================================================
+
+test('ZERO-READ-ROUND (board 181d11e7 item (b)): a resumed Stop with an EMPTY round-scoped read set leaves finished_at AND content_evidence completely unchanged — even when the declared file genuinely changed on disk', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    const v1 = 'v1 content, before any mutation\n';
+    const v2 = 'v2 content, mutated after round 1 — a genuine byte change\n';
+    writeFileSync(join(dir, 'src', 'quiet.mjs'), v1);
+
+    writeRegisterRaw(dir, [registerEntry('rev-zero-read', 'reviewer-correctness', ['src/quiet.mjs'], '2026-08-22T00:00:00.000Z')]);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-zero-read', hook_event_name: 'SubagentStop' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const entry1 = readLedger(dir)[0];
+    const priorSha = entry1.content_evidence.blobs['src/quiet.mjs'];
+    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/quiet.mjs');
+
+    // SHA-DIFFERENCE GUARD: derive the sha the mutated (v2) bytes WOULD hash
+    // to via a throwaway side-channel promotion of the identical content
+    // under a different path — using the hook's own hashing rather than
+    // guessing/reimplementing its algorithm, and without presupposing
+    // whether a zero-read resume takes the same code path as a per-path
+    // rebaseline refusal. A no-op "mutation" would leave shaOfV2 ===
+    // priorSha and this guard fails loudly, instead of silently making the
+    // pin vacuous a second time.
+    writeFileSync(join(dir, 'src', 'sidecheck.mjs'), v2);
+    writeRegisterRaw(dir, [registerEntry('rev-sidecheck', 'reviewer-correctness', ['src/sidecheck.mjs'], '2026-08-22T00:00:05.000Z')]);
+    r = runHook(h22Input(dir, { agent_id: 'rev-sidecheck', hook_event_name: 'SubagentStop' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const sidecheckEntry = readLedger(dir).find((e) => e.territory?.files?.includes('src/sidecheck.mjs'));
+    const shaOfV2 = sidecheckEntry?.content_evidence?.blobs?.['src/sidecheck.mjs'];
+    assert.ok(shaOfV2, 'fixture guard: the side-channel promotion recorded a real sha for the v2 content');
+    assert.notEqual(shaOfV2, priorSha, 'fixture guard: v2 content genuinely hashes differently from v1 — the mutation below is a real byte change, not a no-op');
+
+    // Now genuinely mutate the DECLARED file to that same v2 content, then
+    // run a zero-read resumed Stop against it: a genuinely readable
+    // departing transcript containing NO tool_use blocks at all —
+    // "observed and found nothing" (round-scoped read set is the empty
+    // set), not "could not observe".
+    writeFileSync(join(dir, 'src', 'quiet.mjs'), v2);
+    const agentTranscript = writeAgentTranscript(dir, 'agent-zero-read.jsonl', [
+      { type: 'assistant', timestamp: isoOffset(entry1.finished_at, 60_000), message: { content: [{ type: 'text', text: 'thanks, done' }] } },
+    ]);
+
+    r = runHook(h22Input(dir, { agent_id: 'rev-zero-read', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const entry2 = readLedger(dir).find((e) => e.entry_id === entry1.entry_id);
+    assert.ok(entry2, 'the same receipt (by entry_id) is still present, refreshed in place');
+    assert.equal(entry2.finished_at, entry1.finished_at, 'a zero-read round never renews finished_at — the receipt does not get to look fresh again for free (SABOTAGE A)');
+    assert.equal(entry2.content_evidence.blobs['src/quiet.mjs'], priorSha, 'the blob for the now-mutated-but-unread path still holds the OLD (round-1) sha — never the new, unread bytes (SABOTAGE B)');
+    assert.notEqual(entry2.content_evidence.blobs['src/quiet.mjs'], shaOfV2, 'and specifically not the sha the new bytes would hash to (SABOTAGE B)');
+    assert.deepEqual(entry2.content_evidence, entry1.content_evidence, 'content_evidence as a whole stays byte-for-byte the round-1 evidence — a zero-read round must never pick up new bytes for any declared path (SABOTAGE B)');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// OBSERVED-READS vs OBSERVED-FILES (board 181d11e7, brief item 5): the new
+// observed_reads field is READS ONLY; the pre-existing observed_files keeps
+// its EXACT current meaning (reads UNION writes). A write-only path must
+// appear in observed_files but never in observed_reads — pinned in one test
+// so the two fields cannot silently drift into meaning the same thing.
+// SABOTAGE: alias observed_reads to observed_files (or populate it from the
+// same reads+writes union) — the write-only path would then leak into
+// observed_reads, reddening both the deepEqual and the !includes assertion
+// below, while observed_files (unaffected either way) stays green.
+// ===========================================================================
+
+test('OBSERVED-READS vs OBSERVED-FILES (board 181d11e7 item 5): observed_reads excludes a write-only path while observed_files still includes it', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'read-only.mjs'), 'r\n');
+    writeFileSync(join(dir, 'src', 'write-only.mjs'), 'w\n');
+
+    writeRegisterRaw(dir, [registerEntry('rev-reads-vs-files', 'reviewer-correctness', ['src/read-only.mjs', 'src/write-only.mjs'], '2026-08-22T00:00:00.000Z')]);
+    const agentTranscript = writeAgentTranscript(dir, 'agent-reads-vs-files.jsonl', [
+      readBlock(join(dir, 'src', 'read-only.mjs')),
+      editBlock(join(dir, 'src', 'write-only.mjs')),
+    ]);
+
+    const r = runHook(h22Input(dir, { agent_id: 'rev-reads-vs-files', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const entry = readLedger(dir)[0];
+    assert.deepEqual(
+      [...entry.observed_files].sort(),
+      ['src/read-only.mjs', 'src/write-only.mjs'],
+      'observed_files keeps its EXACT current meaning — the reads-UNION-writes set, unchanged by this addition'
+    );
+    assert.deepEqual(entry.observed_reads, ['src/read-only.mjs'], 'observed_reads is READS ONLY — the write-only path is excluded');
+    assert.ok(!entry.observed_reads.includes('src/write-only.mjs'), 'the write-only path never leaks into observed_reads, whatever observed_files contains');
   } finally {
     cleanup();
   }

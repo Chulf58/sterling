@@ -566,7 +566,8 @@ for (const e of validEntries) {
   if (isUnattributableTerritoryEntry(e)) {
     unattributableDisclosures.push(
       `commit-reviewed: UNATTRIBUTABLE RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}, ${ageLabel(e.at)}) ` +
-        `records territory.source 'unattributable': H22 could not bind that reviewer dispatch to a dispatch block by position (SubagentStart carries no tool_use_id, ` +
+        `records territory.source ${safeLabel(e.files_source)}, which is not one of the attributable provenances ('review-territory', 'free-prose-fallback'): H22 ` +
+        `could not bind that reviewer dispatch to a dispatch block by position (SubagentStart carries no tool_use_id, ` +
         `research_finding ffa6219c), so the files it recorded [${usableTerritoryFiles(e).join(', ')}] may be ANOTHER dispatch's territory — the off-by-one measured in ` +
         `decision c91b351d. Stamping it would attest to a review of files nobody can show this reviewer saw, so it is never spent, on any branch. It stays in the ` +
         `ledger untouched: judge it against the receipt's observed_files (read from that agent's own transcript, the only territory evidence bound to it), then either ` +
@@ -2220,7 +2221,8 @@ function runTargetShaMode(targetShaArg) {
     if (isUnattributableTerritoryEntry(e)) {
       unattributableDisclosures.push(
         `commit-reviewed: UNATTRIBUTABLE RECEIPT — NOT STAMPED, NOT CONSUMED, NOT DELETED — ${e.agent_type}'s receipt (recorded ${safeLabel(e.at)}) records ` +
-          `territory.source 'unattributable': H22 could not bind that reviewer dispatch to a dispatch block by position (board c9f92090), so the files it recorded ` +
+          `territory.source ${safeLabel(e.files_source)}, not one of the attributable provenances ('review-territory', 'free-prose-fallback'): H22 could not bind ` +
+          `that reviewer dispatch to a dispatch block by position (board c9f92090), so the files it recorded ` +
           `[${usableTerritoryFiles(e).join(', ')}] may be ANOTHER dispatch's territory. It is never stamped onto any commit, including this amend, and it stays in ` +
           `the ledger untouched — judge it against its observed_files, then dispatch a reviewer or discharge it explicitly with 'node scripts/review-ledger.mjs discharge'.`
       );
@@ -3388,8 +3390,33 @@ function isStructuredTerritoryEntry(e) {
  *  'review-territory' and is unaffected, and no pre-existing receipt can carry
  *  'unattributable' at all (H22 never wrote that value before this board), so
  *  every legacy receipt keeps its exact prior class. */
+/** ALLOWLIST, NOT A DENYLIST-OF-ONE (board 181d11e7, reviewer-security R2 LOW).
+ *  Matching the single exact string 'unattributable' made every OTHER value the
+ *  ALWAYS-STAMP class: a hand-edited near-miss ('Unattributable', a trailing
+ *  space, a truncated write) read as an ordinary receipt on the surface whose
+ *  whole job is to withhold a stamp from territory nobody can vouch for. The
+ *  recognized provenances are the two h22-dispatch-register actually writes for
+ *  an attributable dispatch (decision 8f137474: a well-formed REVIEW-TERRITORY
+ *  declaration, or the free-prose fallback); anything else present is
+ *  unrecognized provenance and is treated as unattributable.
+ *
+ *  ABSENCE IS THE ONE EXEMPTION, and it is deliberate: a receipt with NO
+ *  files_source at all is a LEGACY entry from before decision 8f137474 shipped
+ *  the field, and the class docblock above binds this function to leave every
+ *  legacy receipt in its exact prior class. Absence is not a near-miss — there
+ *  is no value to have mistyped — so it keeps the pre-existing behavior
+ *  (judged by the ordinary rules, decision c45b6ee4 included) rather than being
+ *  retroactively stranded.
+ *
+ *  THE ALLOWLIST IS SPELLED INLINE, not lifted to a module-level const: this
+ *  function is a HOISTED declaration called from top-level code far above it
+ *  (the eligibility loop at the head of the -m flow), and a `const` declared
+ *  down here sits in its own temporal dead zone at that moment — the first
+ *  attempt threw ReferenceError on every commit path. */
 function isUnattributableTerritoryEntry(e) {
-  return !!e && e.files_source === 'unattributable';
+  if (!e) return false;
+  if (e.files_source === undefined) return false;
+  return e.files_source !== 'review-territory' && e.files_source !== 'free-prose-fallback';
 }
 
 /** Lock-guarded read-modify-write consume, shared shape with the -m flow's

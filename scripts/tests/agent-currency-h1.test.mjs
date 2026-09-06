@@ -60,7 +60,7 @@
 // executed. Run them with:
 //   node --test scripts/tests/agent-currency-h1.test.mjs
 
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
@@ -69,20 +69,39 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { installAgents } from '../lib/agent-distribution.mjs';
+import { buildSeamHook } from './lib/seam-hook.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 const T_INSTALL = '2026-01-01T00:00:00.000Z'; // safely BEFORE any real session start
 
 let SterlingStore;
+// H1's pluginRoot() resolution is now walkUpPluginRoot() || process.env.STERLING_PLUGIN_ROOT
+// (decision 95c2c109 F2): the running hook's own walk-up wins over the env
+// seam, and is consulted ONLY when that walk-up fails. Every test in this file
+// points STERLING_PLUGIN_ROOT at a synthetic clone (see h1() below) so BOTH
+// sides of the currency comparison are controlled fixtures — but
+// scripts/hooks/h1-session-start.mjs lives inside THIS repo, so spawning it
+// from its source location lets its own walk-up find this checkout and
+// silently ignore the synthetic clone entirely. Every h1() call below must
+// therefore spawn a bundle built into a marker-free temp dir (the same
+// seam-hook shape the H15 suites already use) so the walk-up genuinely fails
+// and the STERLING_PLUGIN_ROOT seam is legitimately reached.
+let H1_SEAM;
+after(() => H1_SEAM?.cleanup());
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  H1_SEAM = await buildSeamHook('h1-session-start.mjs');
 });
 
 // --------------------------- harness (h1-accuracy.test.mjs shape) ---------------------------
 
 function runHook(script, input, cwd, env = {}) {
-  const r = spawnSync(process.execPath, [join(HOOKS, script)], {
+  // Spawn the seam-built bundle, never scripts/hooks/<script> — see the H1_SEAM
+  // comment above. `script` is retained as a parameter only to keep this
+  // harness's shape aligned with its siblings; every call in this file passes
+  // 'h1-session-start.mjs'.
+  const r = spawnSync(process.execPath, [H1_SEAM.hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,

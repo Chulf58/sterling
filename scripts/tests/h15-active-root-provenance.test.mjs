@@ -89,7 +89,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync, chmodSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -172,7 +172,11 @@ function runHook(command, cwd, env = {}, from = 'seam') {
     tool_name: 'Bash',
     tool_input: { command },
   };
-  const hookPath = from === 'source' ? join(HOOKS, 'h15-store-guard.mjs') : SEAM.hookPath;
+  // A THIRD shape (board fb7c43fb pin gap, section 14 below): `from` may also
+  // be a literal hook path, for a fixture that copies the guard to a
+  // caller-chosen walk-up location. 'source' and 'seam' behave exactly as
+  // before this addition.
+  const hookPath = from === 'source' ? join(HOOKS, 'h15-store-guard.mjs') : from === 'seam' ? SEAM.hookPath : from;
   const r = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
@@ -1326,3 +1330,220 @@ test('PV-12-control-b (CONTROL, expect ALLOW when supported — REALPATH IDENTIT
 // than the realpath'd candidate — this pin goes red (allow 0 -> deny 2) while
 // PV-12 stays green, isolating "identity, not spelling or location" as its own
 // claim.
+
+// =============================================================================
+// SECTION 13 (board 8d8fc4e5) — EXACT EQUALITY MUST BE ANCHORED, NOT A SUFFIX.
+//
+// AL-9 in h15-allowlist-anchoring.test.mjs pins whole-word equality (a token
+// merely ENDING WITH a sanctioned entry must not be exempt), but under
+// provenance an absolute decoy like /tmp/scripts/init.mjs is now denied by TWO
+// independent guards at once (containment AND equality), so AL-9's own
+// endsWith sabotage no longer isolates anything there. The shape that DOES
+// isolate anchored equality under provenance is a REAL file INSIDE the
+// canonical root whose clone-relative path merely ENDS WITH a sanctioned entry
+// — containment succeeds, only equality can decide.
+// =============================================================================
+
+test('PV-13 (board 8d8fc4e5, expect RED today): a real in-clone file whose clone-relative path merely ENDS WITH a sanctioned entry is DENIED, not exempted', () => {
+  const { project, clone, cleanup } = makeWorld();
+  try {
+    mkdirSync(join(clone, 'scripts', 'vendor', 'scripts'), { recursive: true });
+    writeFileSync(
+      join(clone, 'scripts', 'vendor', 'scripts', 'init.mjs'),
+      '// fixture: same BASENAME and same TAIL SEGMENTS as the sanctioned entry, wrong full path\n'
+    );
+
+    const r = runHook(`node ${join(clone, 'scripts', 'vendor', 'scripts', 'init.mjs')} ${DB}`, project, seam(clone));
+    assert.notEqual(r.code, null, 'the gate must not crash on a suffix-matching in-clone candidate');
+    assert.equal(
+      r.code,
+      2,
+      `\`scripts/vendor/scripts/init.mjs\` ENDS WITH the sanctioned entry \`scripts/init.mjs\` as a STRING but is not EQUAL to it as a PATH — real file, real containment under the canonical root, everything correct except the comparison itself. An endsWith-based match would smuggle any file sitting under a same-named tail directory into the sanctioned set. Compare PV-C1: identical root, identical containment, and the entry's OWN exact path (\`scripts/init.mjs\`) is allowed there. stderr=${flat(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: change the entry-set comparison from exact string equality
+// (`canonicalRelative === entry`) to a suffix test
+// (`canonicalRelative.endsWith(entry)` or `.endsWith('/' + entry)`) — this pin
+// goes red (deny 2 -> allow 0) while PV-C1 and PV-C2 both stay green (PV-C1's
+// candidate is already exactly equal to the entry; PV-C2's shares no suffix
+// with any entry at all) — PV-13 is the sole pin in this file that isolates
+// anchored equality from a suffix match under provenance.
+
+// =============================================================================
+// SECTION 14 (board fb7c43fb, PIN GAP) — resolveActivePluginRoot FAILS CLOSED.
+//
+// "no arm exercises the fail-closed returns in `resolveActivePluginRoot` for an
+// unreadable marker (chmod-000 fixture, skip when uid 0) or a module-URL
+// failure — both must return root:null with source 'walk-up' and never
+// consult the seam." (board fb7c43fb, PIN GAP, verbatim)
+//
+// B2a is tested END-TO-END. REPAIR (coder-measured, 2026-09-06): a plain
+// recursive file copy of scripts/hooks/ + scripts/lib/ is NOT standalone —
+// invariant #4 ("no workspace imports at runtime") describes the BUNDLES, not
+// the SOURCES, and the copied guard dies with `Cannot find package
+// '@sterling/schemas'` (exit 1, not a wrong verdict) because the raw source
+// still imports the workspace package by specifier. The fixture below instead
+// reuses buildSeamHook() — the SAME, already-proven bundling call this file
+// uses at the top level (`SEAM = await buildSeamHook('h15-store-guard.mjs')`,
+// used by every 'seam'-shaped pin above) — to obtain a single-file, dependency
+// -free BUNDLE, and places that bundle's bytes at the SAME relative depth the
+// real repo uses (scripts/hooks/<file>.mjs, two levels under a root carrying
+// .claude-plugin/plugin.json + hooks/hooks.json), so ITS OWN walk-up discovers
+// that root — and that root's plugin.json is then made unreadable. A SEPARATE,
+// fully valid, genuinely sanctioned root is named through STERLING_PLUGIN_ROOT
+// beside it, to prove that root is never reached despite being perfectly valid.
+//
+// B2b is tested by DIRECT IMPORT; its call shape is now CONFIRMED (coder
+// measurement, not inference — see the comment at its call site).
+// =============================================================================
+
+const IS_ROOT_UID = process.getuid?.() === 0;
+
+// Places a BUILT, standalone BUNDLE of the named hook at
+// <fixtureRoot>/scripts/hooks/<hookFile> — the same depth this file already
+// uses for hookPath construction elsewhere (e.g. runHook's 'source' shape) —
+// inside a root that otherwise carries a full plugin layout. Reusing
+// buildSeamHook() (rather than a fresh, unverifiable buildHooks({only})
+// inference this author cannot confirm without reading implementation, H4)
+// keeps this fixture on an already-proven call shape.
+async function makeWalkUpFixture(base, { readableMarker = true } = {}) {
+  const fixtureRoot = join(base, 'walkup-root');
+  mkdirSync(join(fixtureRoot, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(fixtureRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture-walkup' }));
+  mkdirSync(join(fixtureRoot, 'hooks'), { recursive: true });
+  writeFileSync(join(fixtureRoot, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  mkdirSync(join(fixtureRoot, 'scripts', 'hooks'), { recursive: true });
+  const built = await buildSeamHook('h15-store-guard.mjs');
+  try {
+    cpSync(built.hookPath, join(fixtureRoot, 'scripts', 'hooks', 'h15-store-guard.mjs'));
+  } finally {
+    await built.cleanup();
+  }
+  // This root's OWN genuine sanctioned script (fixture content, never executed).
+  writeFileSync(join(fixtureRoot, 'scripts', 'init.mjs'), "// fixture: this root's OWN genuine sanctioned script\n");
+  if (!readableMarker) {
+    chmodSync(join(fixtureRoot, '.claude-plugin', 'plugin.json'), 0o000);
+  }
+  return fixtureRoot;
+}
+
+test('B2-control (CONTROL, expect GREEN when supported — proves the fixture engages): spawned from a READABLE walk-up root with NO env seam set at all, that root exempts its own genuine sanctioned script', async () => {
+  const { base, project, cleanup } = makeWorld();
+  try {
+    const fixtureRoot = await makeWalkUpFixture(base, { readableMarker: true });
+    const hookPath = join(fixtureRoot, 'scripts', 'hooks', 'h15-store-guard.mjs');
+    const r = runHook(`node ${join(fixtureRoot, 'scripts', 'init.mjs')} ${DB}`, project, {}, hookPath);
+    assert.notEqual(r.code, null, 'the gate must not crash when spawned from a copied walk-up root');
+    assert.equal(
+      r.code,
+      0,
+      `EVIDENCE for B2a: with NO env seam set at all, a copy of the guard running from inside a genuinely marker-carrying root must resolve THAT root by walk-up and exempt its own genuine sanctioned script. If this denies, B2a proves nothing — it could be failing because this copied-fixture shape never engages walk-up at all, rather than because of the unreadable marker. stderr=${flat(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: none isolates this control by itself — its purpose is proving the
+// copied-fixture SHAPE engages walk-up at all; B2a is the pin that isolates the
+// unreadable-marker fail-closed behavior specifically.
+
+test(
+  'B2a (board fb7c43fb PIN GAP, expect RED today)',
+  { skip: IS_ROOT_UID ? 'running as uid 0: chmod 000 does not deny root, so this fixture cannot be built meaningfully' : false },
+  async () => {
+    const { base, project, clone, cleanup } = makeWorld();
+    try {
+      const fixtureRoot = await makeWalkUpFixture(base, { readableMarker: false });
+      const hookPath = join(fixtureRoot, 'scripts', 'hooks', 'h15-store-guard.mjs');
+      // `clone` is a SEPARATE, fully valid, genuinely sanctioned root (built by
+      // makeWorld() itself) named through the env seam beside the broken
+      // walk-up root. If the seam were consulted despite the walk-up failure,
+      // this exact command would be exempt.
+      const r = runHook(`node ${join(clone, 'scripts', 'init.mjs')} ${DB}`, project, seam(clone), hookPath);
+      assert.notEqual(r.code, null, 'the gate must not crash on an unreadable walk-up marker');
+      assert.equal(
+        r.code,
+        2,
+        `an UNREADABLE walk-up marker fails closed — root:null — and must NEVER fall through to a validly-configured env seam (board fb7c43fb, PIN GAP). Here the seam names a PERFECTLY VALID alternate root carrying a genuinely sanctioned scripts/init.mjs; if this allows, the seam was consulted despite the walk-up failure. Compare B2-control, where the identical fixture shape with a READABLE marker allows its own script with no seam at all. stderr=${flat(r.stderr)}`
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);
+// SABOTAGE: catch the unreadable-marker (EACCES) error during layout
+// validation and fall back to consulting STERLING_PLUGIN_ROOT — this pin goes
+// red (deny 2 -> allow 0) while B2-control stays green (its marker is
+// readable, so the fallback path is never reached there).
+
+test('B2b (board fb7c43fb PIN GAP, expect RED today — CALL SHAPE CONFIRMED by coder measurement)', async () => {
+  // ---------------------------------------------------------------------
+  // REPAIR (coder-measured, 2026-09-06): the earlier `{ fromUrl }` shape here
+  // was an unverified inference and worked only by accident — it stringifies
+  // to '[object Object]', `new URL(...)` throws, and the fail-closed arm
+  // returns, which is why `deepStrictEqual` against a two-key literal
+  // happened to pass. The REAL export is
+  // `resolveActivePluginRoot(moduleUrl, env = process.env)` — a POSITIONAL
+  // STRING module-URL argument, not an options object — returning THREE keys
+  // `{ root, source, reason }`; `reason` is LOAD-BEARING
+  // (sanctionedProvenance reads `opts.pluginRoot.reason` for its denial
+  // text), so the assertions below check the SUBSET the PIN GAP actually
+  // states (root, source) plus reason's non-emptiness and subject, rather
+  // than pinning the exact prose of a string this file's author has never
+  // read (H4).
+  // ---------------------------------------------------------------------
+  let mod;
+  try {
+    mod = await import(pathToFileURL(join(root, 'scripts', 'hooks', 'lib', 'sanctioned-provenance.mjs')).href);
+  } catch (err) {
+    assert.fail(
+      `could not import scripts/hooks/lib/sanctioned-provenance.mjs (${err && err.message}) — this module and its resolveActivePluginRoot export are the subject of board fb7c43fb's pin gap`
+    );
+  }
+  assert.ok(
+    typeof mod.resolveActivePluginRoot === 'function',
+    `expected a resolveActivePluginRoot export — board fb7c43fb names it by this exact name. exports=${Object.keys(mod).join(', ')}`
+  );
+
+  const priorSeam = process.env.STERLING_PLUGIN_ROOT;
+  const { clone, cleanup } = makeWorld();
+  // A VALID, genuinely sanctioned root named through the seam — must never be
+  // reached on a module-URL resolution failure.
+  process.env.STERLING_PLUGIN_ROOT = clone;
+  try {
+    const result = mod.resolveActivePluginRoot('not a valid module url');
+    assert.equal(
+      result.root,
+      null,
+      `board fb7c43fb (PIN GAP): "both must return root:null ... and never consult the seam." A module-URL resolution failure must fail exactly like the unreadable-marker arm (B2a) — never degrading into reading STERLING_PLUGIN_ROOT, which is agent-settable. got=${JSON.stringify(result)}`
+    );
+    assert.equal(
+      result.source,
+      'walk-up',
+      `board fb7c43fb (PIN GAP): "...with source 'walk-up'." The source must report the derivation that was ATTEMPTED (walk-up), not one that never ran — this is the field that would flip to something seam-derived if the code fell through despite the resolution failure. got=${JSON.stringify(result)}`
+    );
+    assert.equal(
+      typeof result.reason,
+      'string',
+      `the real export returns {root, source, reason} — reason is LOAD-BEARING (sanctionedProvenance reads opts.pluginRoot.reason for its denial text), not an optional extra. got=${JSON.stringify(result)}`
+    );
+    assert.ok(result.reason.length > 0, `reason must be non-empty. got=${JSON.stringify(result)}`);
+    assert.match(
+      result.reason,
+      /seam|STERLING_PLUGIN_ROOT/i,
+      `reason must say the test seam was not consulted (its EXACT prose is deliberately unpinned — this author has not read the module, H4). got=${JSON.stringify(result.reason)}`
+    );
+  } finally {
+    if (priorSeam === undefined) delete process.env.STERLING_PLUGIN_ROOT;
+    else process.env.STERLING_PLUGIN_ROOT = priorSeam;
+    cleanup();
+  }
+});
+// SABOTAGE: catch the module-URL resolution failure and fall through to
+// reading process.env.STERLING_PLUGIN_ROOT — this pin goes red (result.root
+// becomes the clone path, or result.source stops reporting 'walk-up') while
+// B2a (a different code path — the unreadable-marker arm, not the module-URL
+// arm) is unaffected.

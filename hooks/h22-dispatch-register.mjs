@@ -5737,6 +5737,70 @@ function observedToolPaths(transcriptPath, cwd) {
   if (truncated) result.truncated = true;
   return result;
 }
+function observedToolPathsSince(transcriptPath, cwd, sinceIso) {
+  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
+  if (!existsSync4(transcriptPath)) return null;
+  if (typeof sinceIso !== "string" || sinceIso === "") return null;
+  const sinceMs = Date.parse(sinceIso);
+  if (!Number.isFinite(sinceMs)) return null;
+  let tail;
+  try {
+    tail = readTail(transcriptPath);
+  } catch {
+    return null;
+  }
+  if (tail === null || tail === "") return null;
+  let truncated = false;
+  try {
+    truncated = statSync3(transcriptPath).size > TAIL_BYTES2;
+  } catch {
+  }
+  const reads = /* @__PURE__ */ new Set();
+  const writes = /* @__PURE__ */ new Set();
+  const add = (set, rawPath) => {
+    if (typeof rawPath !== "string" || rawPath === "") return;
+    const rel = repoRel(rawPath, cwd);
+    if (!rel) return;
+    const lower = rel.toLowerCase();
+    if (lower === ".git" || lower.startsWith(".git/") || lower === ".sterling" || lower.startsWith(".sterling/")) return;
+    set.add(rel);
+  };
+  for (const line of tail.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (entry?.type !== "assistant") continue;
+    const stamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
+    if (!Number.isFinite(stamp) || stamp <= sinceMs) continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || block.type !== "tool_use") continue;
+      const name = block.name;
+      const input2 = block.input;
+      if (WRITE_TOOLS_FILE_PATH.has(name)) {
+        add(writes, input2?.file_path);
+      } else if (name === "NotebookEdit") {
+        add(writes, input2?.notebook_path);
+      } else if (name === "Read") {
+        add(reads, input2?.file_path);
+      } else if (name === "Grep") {
+        const p = input2?.path;
+        if (typeof p === "string" && p !== "" && hasFileExtension(p)) add(reads, p);
+      } else if (name === "Glob") {
+        add(reads, input2?.path);
+      }
+    }
+  }
+  const result = { reads: [...reads], writes: [...writes] };
+  if (truncated) result.truncated = true;
+  return result;
+}
 
 // scripts/hooks/h22-dispatch-register.mjs
 var REGISTER_RETRY_MS = 1e3;
@@ -6276,7 +6340,9 @@ try {
           const nextResumeCount = priorResumeUsable ? priorResume + 1 : 1;
           const priorEvidence = isEvidenceObject(raw.content_evidence) ? raw.content_evidence : null;
           const priorBlobs = priorEvidence && isEvidenceObject(priorEvidence.blobs) ? priorEvidence.blobs : null;
-          const observedReadsThisRound = new Set(observed ? observed.reads : []);
+          const priorFinishedAt = typeof raw.finished_at === "string" ? raw.finished_at : null;
+          const observedThisRound = observedToolPathsSince(input.agent_transcript_path, input.cwd, priorFinishedAt);
+          const observedReadsThisRound = new Set(observedThisRound ? observedThisRound.reads : []);
           const rebaselineRefused = [];
           const droppedUnbound = [];
           const nextEvidence = { ...refreshEvidence };
@@ -6302,18 +6368,27 @@ try {
             const boundCount = isEvidenceObject(nextEvidence.blobs) ? Object.keys(nextEvidence.blobs).length : 0;
             nextEvidence.status = boundCount === builtFault.expected.length ? "complete" : boundCount === 0 ? "unavailable" : "partial";
           }
+          const territoryReadThisRound = builtFault.expected.filter((p) => observedReadsThisRound.has(p));
+          const zeroReadRound = territoryReadThisRound.length === 0;
           if (builtFault.expected.length === 0) {
             process.stderr.write(
-              `H22: NOT advancing finished_at on the review receipt for ${label} \u2014 its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing; the rest of the refresh (resume_count, observed files, content evidence) is recorded as usual.
+              `H22: NOT advancing finished_at on the review receipt for ${label} \u2014 its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing. The content evidence is left exactly as it stands for the same reason; what IS recorded is the attempted resume (resume_count now ${nextResumeCount}, observed files unioned).
+`
+            );
+          } else if (zeroReadRound) {
+            process.stderr.write(
+              `H22: NOT advancing finished_at and NOT replacing the content evidence on the review receipt for ${label} \u2014 NOTHING in this round's observed reads (transcript entries stamped after the receipt's previous finish time ${priorFinishedAt ?? "<none recorded>"}) shows this reviewer read any of its ${builtFault.expected.length} DECLARED path(s), so this Stop reviewed nothing in territory \u2014 reads OUTSIDE the declared territory are not evidence of a review round and never renew this receipt. The receipt keeps the evidence and the review-end instant it earned; only the attempted resume is recorded (resume_count now ${nextResumeCount}, observed files unioned). Re-dispatch a reviewer if this round of work needs a receipt.
 `
             );
           } else {
             raw.finished_at = finishedAt;
           }
-          raw.content_evidence = nextEvidence;
+          if (!zeroReadRound) raw.content_evidence = nextEvidence;
           if (observed) {
             const priorObserved = Array.isArray(raw.observed_files) ? raw.observed_files.filter((f) => typeof f === "string" && f !== "") : [];
             raw.observed_files = [.../* @__PURE__ */ new Set([...priorObserved, ...observed.reads, ...observed.writes])];
+            const priorReads = Array.isArray(raw.observed_reads) ? raw.observed_reads.filter((f) => typeof f === "string" && f !== "") : [];
+            raw.observed_reads = [.../* @__PURE__ */ new Set([...priorReads, ...observed.reads])];
             raw.observed_source = "subagent-transcript";
             if (observed.truncated) raw.observed_truncated = true;
           }
@@ -6326,8 +6401,9 @@ try {
 `
             );
           }
+          const refreshedWhat = zeroReadRound ? "finished_at and content evidence PRESERVED (nothing was read this round), observed files updated" : "finished_at, content evidence and observed files updated";
           process.stderr.write(
-            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate \u2014 finished_at, content evidence and observed files updated (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.
+            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate \u2014 ${refreshedWhat} (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.
 `
           );
         } else if (!departingIsReviewer) {
@@ -6385,8 +6461,22 @@ try {
             // the lib's own `truncated` flag says the 1MB tail window did not
             // cover the whole departing transcript — absent (never `false`)
             // otherwise, same absent-unless-true convention as observed_files.
+            // OBSERVED_READS — THE READS-ONLY HALF, its OWN field beside
+            // observed_files (board 181d11e7 / 4b59e6ff). observed_files above
+            // is reads UNION WRITES and stays byte-identical for the consumers
+            // that already read it; it cannot answer "what did this reviewer
+            // READ", because a path the agent WROTE is a path whose bytes it
+            // authored. scripts/review-ledger.mjs's 'superseded' discharge class
+            // requires exactly this split and refuses to fall back to
+            // observed_files for that reason. Same absent-when-unobserved
+            // posture as its siblings, and covered by the SAME
+            // `observed_truncated: true` marker (one transcript, one tail
+            // window, one truncation fact — review-ledger.mjs already refuses a
+            // superseded discharge on that exact key, so it is never spelled a
+            // second way here).
             ...observed ? {
               observed_files: [.../* @__PURE__ */ new Set([...observed.reads, ...observed.writes])],
+              observed_reads: [...new Set(observed.reads)],
               observed_source: "subagent-transcript",
               ...observed.truncated ? { observed_truncated: true } : {}
             } : {},

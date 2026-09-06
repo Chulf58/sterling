@@ -443,3 +443,118 @@ test('RW-3 (expect RED today): both ledger shapes get the SAME remedy — a v1 l
 // path. If the implementation turns out to have ONE shared report path, this pin
 // is defense in depth rather than load-bearing — say so in the report rather
 // than deleting it.
+
+// =============================================================================
+// RW-5 (board fb7c43fb, F-B) — THE PRINTED PREFIX IS WALK-UP-DERIVED, NOT
+// ENV-SEAM-DERIVED.
+//
+// WHY RW-4 ALONE DOES NOT DISCRIMINATE (fb7c43fb, F-B, stated verbatim):
+// "today RW-4 is satisfied by BOTH implementations because the harness seam
+// equals the repo root, so it discriminates nothing." Every h1() call in this
+// file sets STERLING_PLUGIN_ROOT to `root` (this repo) — so an env-first
+// implementation and a walk-up-first implementation print the IDENTICAL
+// resolved path, and RW-4 cannot tell them apart. RW-5 closes that hole by
+// naming a DIFFERENT, marker-carrying fixture root through the seam: only a
+// walk-up-first implementation still prints the real repo path here.
+//
+// The fixture root carries the full plugin layout (.claude-plugin/plugin.json
+// + hooks/hooks.json) so an env-first implementation cannot be excused by "the
+// named root failed layout validation" — it must be a well-formed alternate
+// root in every respect except being the wrong one.
+// =============================================================================
+
+function makeMarkerRoot() {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-h1-envseam-'));
+  mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture-envseam' }));
+  mkdirSync(join(dir, 'hooks'), { recursive: true });
+  writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  return dir;
+}
+
+// h1() (above) always names STERLING_PLUGIN_ROOT=root; this variant lets RW-5
+// override it to a DIFFERENT root while every other invocation shape (stdin
+// payload, cwd, currency-disable, NO_COLOR) stays byte-identical to h1().
+function h1WithEnvSeam(dir, envSeamRoot, source = 'startup') {
+  const r = spawnSync(process.execPath, [join(HOOKS, H1_HOOK)], {
+    input: JSON.stringify({
+      session_id: 's1',
+      transcript_path: join(dir, 't', 's1.jsonl'),
+      cwd: dir,
+      permission_mode: 'default',
+      hook_event_name: 'SessionStart',
+      source,
+    }),
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+    env: {
+      ...process.env,
+      STERLING_CURRENCY_DISABLE: '1',
+      NO_COLOR: '1',
+      STERLING_NO_BANNER: '1',
+      STERLING_PLUGIN_ROOT: envSeamRoot,
+    },
+  });
+  let out = null;
+  try {
+    out = JSON.parse(r.stdout);
+  } catch {
+    // caller asserts
+  }
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', out };
+}
+
+// A fresh no-ledger baseline captured under envSeamRoot — NOT the module-level
+// baselineContext(), which was captured under STERLING_PLUGIN_ROOT=root and
+// would leak any env-derived lines (e.g. a version banner) as false noise.
+function captureBaselineWithEnvSeam(envSeamRoot) {
+  const { dir, cleanup } = makeH1Project();
+  try {
+    const r = h1WithEnvSeam(dir, envSeamRoot);
+    assert.equal(r.code, 0, `RW-5 baseline: H1 must run cleanly with no ledger — stderr=${flat(r.stderr)}`);
+    return normalizeCtx(additionalContext(r), dir);
+  } finally {
+    cleanup();
+  }
+}
+
+function receiptReportWithEnvSeam(makeEntry, envSeamRoot) {
+  const baseline = captureBaselineWithEnvSeam(envSeamRoot);
+  const { dir, cleanup } = makeH1Project();
+  try {
+    writeH1Ledger(dir, [makeEntry()]);
+    const r = h1WithEnvSeam(dir, envSeamRoot);
+    assert.equal(r.code, 0, `H1 must not fail the session start on a ledger it can read — stderr=${flat(r.stderr)}`);
+    const ctx = normalizeCtx(additionalContext(r), dir);
+    return { ctx, block: differential(ctx, baseline), stderr: r.stderr };
+  } finally {
+    cleanup();
+  }
+}
+
+test('RW-5 (board fb7c43fb F-B, expect RED today): pointed at a DIFFERENT marker-carrying fixture root, the printed discharge remedy still prefixes the REAL repo path', () => {
+  const envSeamRoot = makeMarkerRoot();
+  try {
+    const { block } = receiptReportWithEnvSeam(v2Receipt, envSeamRoot);
+    assert.notEqual(block.trim(), '', 'precondition: the ledger-caused block must be non-empty for this pin to mean anything');
+    const m = block.match(/node (\S+)\/scripts\/review-ledger\.mjs discharge/);
+    assert.ok(m, `the block must still name the discharge route at all (RW-2) — block=${flat(block)}`);
+    const realPrefix = String(root).split(sep).join('/').replace(/\/+$/, '');
+    const fixturePrefix = String(envSeamRoot).split(sep).join('/').replace(/\/+$/, '');
+    assert.equal(
+      m[1],
+      realPrefix,
+      `STERLING_PLUGIN_ROOT names a DIFFERENT, marker-carrying fixture root (${fixturePrefix}), yet the remedy must resolve the real clone by WALKING UP from H1's own module location — the env seam is a fallback for when that walk-up fails, never the primary source (board fb7c43fb F-B). A remedy anchored to an attacker- or misconfigured-env-settable root tells the operator a command that does not run in their actual clone. printed=${m[1]}`
+    );
+  } finally {
+    rmSync(envSeamRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+// SABOTAGE: derive the printed remedy's root from process.env.STERLING_PLUGIN_ROOT
+// (or otherwise keep consulting the env seam unconditionally) instead of walking
+// up from the hook's own module location — this pin goes red (the printed
+// prefix flips from the real repo to the fixture root, or stays the literal
+// `<clone>` placeholder if RW-4's fix never landed either) while every other RW
+// pin in this file stays green — RW-4 in particular, whose seam happens to equal
+// the real repo and so cannot tell the two implementations apart.

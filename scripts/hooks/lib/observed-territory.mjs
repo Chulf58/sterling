@@ -119,3 +119,117 @@ export function observedToolPaths(transcriptPath, cwd) {
   if (truncated) result.truncated = true;
   return result;
 }
+
+// ROUND-SCOPED OBSERVATION (board 181d11e7 — the residual h22-dispatch-register
+// disclosed at its rebaseline guard). Same extraction as observedToolPaths
+// above, restricted to entries this agent recorded STRICTLY AFTER `sinceIso`.
+//
+// WHY IT EXISTS: "this agent read P at some point in its own transcript" is not
+// the claim a RESUMED reviewer's rebaseline needs. A read recorded in round ONE
+// says nothing about bytes edited AFTER round one finished, and the
+// whole-transcript read set cannot tell the two apart — so a no-op follow-up
+// Stop ("thanks, done") could rebind a path to bytes no round reviewed. The
+// caller passes the receipt's PRIOR finished_at as the round boundary.
+//
+// observedToolPaths is DELIBERATELY LEFT UNTOUCHED rather than refactored into
+// a shared core: it is the corroboration extractor whose exact shape existing
+// pins and callers assert, and this fix's blast radius is the round-scoped read
+// set alone. The classification below is therefore a deliberate second copy of
+// the same rules (same tools, same repo-relative normalization, same
+// .git/.sterling exclusion) — a change to one belongs in both.
+//
+// THE ROUND BOUNDARY IS THE ENTRY'S OWN TOP-LEVEL `timestamp` — an ISO-8601
+// string Claude Code writes as a sibling of `type`/`uuid`/`requestId` on every
+// transcript entry (verified against a live transcript on CC 2.1.263 before
+// this was built).
+//
+// FAIL CLOSED IN BOTH DIRECTIONS THE BOUNDARY CAN BE UNUSABLE:
+//   - an unusable `sinceIso` (absent, non-string, unparseable) means there is
+//     no boundary to measure against, so NOTHING can be shown to belong to this
+//     round -> null, the same "could not observe" value an unreadable
+//     transcript yields;
+//   - an entry whose own `timestamp` is missing or unparseable counts as NOT
+//     THIS ROUND and is skipped — never as "probably recent".
+// Both leave the caller with no positive evidence, which on the rebaseline path
+// means the receipt keeps the bytes it actually reviewed. `truncated` is
+// reported exactly as above, and matters MORE here: a tail window that dropped
+// the start of this round cannot be distinguished from a round that read
+// nothing.
+export function observedToolPathsSince(transcriptPath, cwd, sinceIso) {
+  if (typeof transcriptPath !== 'string' || transcriptPath === '') return null;
+  if (!existsSync(transcriptPath)) return null;
+  if (typeof sinceIso !== 'string' || sinceIso === '') return null;
+  const sinceMs = Date.parse(sinceIso);
+  if (!Number.isFinite(sinceMs)) return null;
+
+  let tail;
+  try {
+    tail = readTail(transcriptPath);
+  } catch {
+    return null; // permission-denied or any other read failure
+  }
+  if (tail === null || tail === '') return null; // unreadable or zero-byte
+
+  let truncated = false;
+  try {
+    truncated = statSync(transcriptPath).size > TAIL_BYTES;
+  } catch {
+    // leave truncated:false — an unprovable claim is not reported as true
+  }
+
+  const reads = new Set();
+  const writes = new Set();
+
+  const add = (set, rawPath) => {
+    if (typeof rawPath !== 'string' || rawPath === '') return;
+    const rel = repoRel(rawPath, cwd);
+    if (!rel) return; // outside cwd, or unresolvable
+    const lower = rel.toLowerCase();
+    if (lower === '.git' || lower.startsWith('.git/') || lower === '.sterling' || lower.startsWith('.sterling/')) return;
+    set.add(rel);
+  };
+
+  for (const line of tail.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue; // malformed line — skipped, not fatal
+    }
+    if (entry?.type !== 'assistant') continue;
+    // THE ROUND FILTER, STRICTLY AFTER (`>`, board 181d11e7's own wording).
+    // `sinceIso` is the PRIOR round's finished_at — the instant that round
+    // ENDED — so a read carrying exactly that timestamp belongs to the round
+    // that just finished, not to this one. Crediting it here would be the
+    // PERMISSIVE direction on the one check that exists to stop a resumed
+    // reviewer claiming credit for reads it did not perform this round, so the
+    // boundary instant itself is excluded (P5, fail closed).
+    const stamp = typeof entry.timestamp === 'string' ? Date.parse(entry.timestamp) : Number.NaN;
+    if (!Number.isFinite(stamp) || stamp <= sinceMs) continue;
+    const content = entry.message?.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || block.type !== 'tool_use') continue;
+      const name = block.name;
+      const input = block.input;
+      if (WRITE_TOOLS_FILE_PATH.has(name)) {
+        add(writes, input?.file_path);
+      } else if (name === 'NotebookEdit') {
+        add(writes, input?.notebook_path);
+      } else if (name === 'Read') {
+        add(reads, input?.file_path);
+      } else if (name === 'Grep') {
+        const p = input?.path;
+        if (typeof p === 'string' && p !== '' && hasFileExtension(p)) add(reads, p);
+      } else if (name === 'Glob') {
+        add(reads, input?.path);
+      }
+    }
+  }
+
+  const result = { reads: [...reads], writes: [...writes] };
+  if (truncated) result.truncated = true;
+  return result;
+}

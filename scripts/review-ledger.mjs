@@ -236,21 +236,26 @@ const USAGE_RECORD_EXTERNAL =
   'usage: node scripts/review-ledger.mjs record-external --file <repo-relative path> [--file <path> …] --provider <id> [--model <id>] ' +
   '--thread-id <id> --round <n> [--note "<single-line note>"]';
 const USAGE_DIGEST = 'usage: node scripts/review-ledger.mjs digest   (no flags — prints the sha256 of the exact current ledger bytes, and nothing else)';
-// THE `superseded` ENTRY FORM IS NOT USABLE ON TODAY'S RECEIPTS, and the usage
-// text says so rather than letting a conductor discover it from a refusal. The
-// entry arm requires the superseder's `observed_reads` — the reads-only half of
-// the observed-evidence upgrade — which NO ledger entry carries yet: H22 records
-// only the merged `observed_files` (reads ∪ writes) today, and the split field
-// arrives in a later slice. Until then the COMMIT form (--superseded-by <40-hex
-// sha>) is the working half, and an entry-form attempt refuses by naming exactly
+// THE `superseded` ENTRY FORM IS USABLE ONLY ON RECEIPTS PROMOTED SINCE THE
+// SPLIT LANDED (board 181d11e7), and the usage text says so rather than letting
+// a conductor discover the boundary from a refusal. The entry arm requires the
+// superseder's `observed_reads` — the reads-only half of the observed-evidence
+// upgrade — which H22 now records beside the merged `observed_files` (reads ∪
+// writes) on every new promotion whose agent transcript was observable. A
+// receipt minted BEFORE that carries only the merged field, and one promoted
+// since from an UNOBSERVABLE transcript carries neither (the whole observed_*
+// group is omitted, never written empty); an entry-form attempt naming either
+// refuses by naming exactly
 // this gap ([refusal: superseder-predates-observed-reads]) instead of silently
 // falling back to observed_files — a writes-inclusive fallback would let a
 // receipt be superseded by an agent that WROTE the files rather than REVIEWED
-// them, which is the opposite of review evidence.
+// them, which is the opposite of review evidence. For those older receipts the
+// COMMIT form (--superseded-by <40-hex sha>) is the working half.
 const USAGE_SUPERSEDED_CONSEQUENCE =
-  "note: --class superseded's ENTRY form (--superseded-by <entry_id>) requires the named receipt to carry `observed_reads`, a field no ledger entry records " +
-  'yet (H22 writes only the merged observed_files today; the split lands in a later slice). Until then use the COMMIT form: --superseded-by <40-hex sha> of a ' +
-  'commit carrying a Reviewed-By-Agent trailer whose files cover this receipt.';
+  "note: --class superseded's ENTRY form (--superseded-by <entry_id>) requires the named receipt to carry `observed_reads`. Receipts promoted since H22 began " +
+  'recording that field carry it and are usable here. TWO KINDS of receipt do not: one minted BEFORE the split (it records only the merged observed_files), and ' +
+  'one promoted since but with an UNOBSERVABLE agent transcript (H22 omits every observed_* field rather than writing an empty placeholder). For both, use the ' +
+  'COMMIT form: --superseded-by <40-hex sha> of a commit carrying a Reviewed-By-Agent trailer whose files cover this receipt.';
 const USAGE = `${USAGE_DISCHARGE}\n${USAGE_RECORD_EXTERNAL}\n${USAGE_DIGEST}`;
 
 // ===========================================================================
@@ -1176,16 +1181,19 @@ function verifySupersededByEntry({ norm, rawEntry, index, entries, covered }) {
 
   // OBSERVED_READS, OR NOTHING. See the class docblock: observed_files is reads ∪
   // writes, so falling back to it would accept an agent's own WRITES as evidence
-  // it reviewed the file. The field does not exist in any ledger yet, which is
-  // why this refusal names the gap instead of failing obscurely.
+  // it reviewed the file. H22 records the field on every promotion since board
+  // 181d11e7 THAT COULD OBSERVE ITS AGENT'S TRANSCRIPT; a receipt older than
+  // that, or one promoted with an unobservable transcript (H22 omits the whole
+  // observed_* group rather than writing an empty placeholder), carries none —
+  // which is why this refusal names both causes instead of failing obscurely.
   if (rawSup.observed_reads === undefined) {
     return classRefusal(
       'superseder-predates-observed-reads',
       `review-ledger discharge: the named survivor records NO observed_reads, so there is no evidence of what it actually READ and the coverage this class ` +
         `requires cannot be established. THERE IS DELIBERATELY NO FALLBACK to observed_files: that field is reads UNION WRITES, so accepting it would let an ` +
-        `agent's own writes count as having reviewed the file — the opposite of review evidence. NOTE: no ledger entry carries observed_reads yet (H22 records ` +
-        `only the merged observed_files today; the split field lands in a later slice), so the ENTRY form of --superseded-by is usable only for receipts minted ` +
-        `after that. ${USAGE_SUPERSEDED_CONSEQUENCE} Nothing written.`
+        `agent's own writes count as having reviewed the file — the opposite of review evidence. NOTE: H22 records observed_reads on every receipt promoted ` +
+        `since the split landed FROM AN OBSERVABLE TRANSCRIPT, so this survivor either PREDATES the split, or was promoted with an unobservable/absent agent ` +
+        `transcript (which omits every observed_* field). Either way the ENTRY form of --superseded-by cannot be used with it. ${USAGE_SUPERSEDED_CONSEQUENCE} Nothing written.`
     );
   }
   if (!Array.isArray(rawSup.observed_reads)) {

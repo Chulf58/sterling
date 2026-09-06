@@ -271,10 +271,11 @@ function assertNoWarningAtAll(stderr) {
 // ===========================================================================
 
 let observedToolPaths;
+let observedToolPathsSince;
 let importError = null;
 before(async () => {
   try {
-    ({ observedToolPaths } = await import(pathToFileURL(LIB_PATH).href));
+    ({ observedToolPaths, observedToolPathsSince } = await import(pathToFileURL(LIB_PATH).href));
   } catch (e) {
     importError = e;
   }
@@ -284,6 +285,18 @@ function requireLib() {
   if (importError || typeof observedToolPaths !== 'function') {
     assert.fail(
       `scripts/hooks/lib/observed-territory.mjs must export observedToolPaths(); import failed or the export is missing: ${importError?.message ?? 'observedToolPaths is not a function'}`
+    );
+  }
+}
+
+// (board 181d11e7 / brief item (a)) observedToolPathsSince is a NEW,
+// separate export added alongside the pre-existing observedToolPaths — its
+// own missing-export check, kept distinct from requireLib() so a PART 4
+// failure never masquerades as a PART 1 failure or vice versa.
+function requireSinceLib() {
+  if (importError || typeof observedToolPathsSince !== 'function') {
+    assert.fail(
+      `scripts/hooks/lib/observed-territory.mjs must export observedToolPathsSince(); import failed or the export is missing: ${importError?.message ?? 'observedToolPathsSince is not a function'}`
     );
   }
 }
@@ -1061,6 +1074,143 @@ test('(P3-truncated) a departing transcript larger than the 1MB tail window prom
     const entry = findEntryByDeclaredFile(readLedger(dir), 'src/declared.mjs');
     assert.ok(entry, 'the promoted receipt is found by its declared file');
     assert.equal(entry.observed_truncated, true, 'a departing transcript exceeding the 1MB tail window promotes observed_truncated:true');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// PART 4 — observedToolPathsSince(transcriptPath, cwd, sinceIso) : round-
+// scoped read filtering (board 181d11e7, brief item (a) — the
+// round-scoping fix for the resumed-reviewer rebaseline). This is a NEW,
+// SEPARATE export added alongside the pre-existing observedToolPaths, which
+// keeps its EXACT prior behavior unmodified for its other callers
+// (P4-legacy-unchanged below is the regression guard for that half).
+//
+// INFERRED, NOT GIVEN (disclosed): the brief specifies filtering "to
+// transcript entries whose `timestamp` is AFTER [or, per its sinceIso
+// wording elsewhere, at/after] the receipt's prior finished_at" but does
+// not name where a per-JSONL-line timestamp lives in this test file's own
+// fixture shape (toolLine()/toolUse() carry no timestamp field at all
+// today). Read here as a top-level `timestamp` ISO-string key on the JSONL
+// line/entry object (`toolLineAt` below), mirroring the real Claude Code
+// transcript convention of one timestamp per line. If a landed
+// implementation reads the timestamp from a different location (e.g.
+// nested under `message`), that is a genuine reportable divergence from
+// this reading, not a reason to weaken the assertions below.
+// ===========================================================================
+
+const toolLineAt = (timestamp, blocks) => ({ type: 'assistant', timestamp, message: { content: blocks } });
+
+// ---------------------------------------------------------------------------
+// (P4-since-boundary) placed first as the load-bearing control+boundary pin:
+// three entries straddle sinceIso — clearly BEFORE (must be excluded),
+// exactly AT (pinned EXCLUDED — sinceIso is the PRIOR round's finished_at,
+// the instant that round ENDED, so a read timestamped exactly then belongs
+// to the round that just finished, not the new one; board 181d11e7's own
+// wording is "AFTER the receipt's prior finished_at", strictly), and clearly
+// AFTER (must be included). A stub unable to discriminate BEFORE from AFTER
+// fails on those two paths outright; the AT case is the boundary itself,
+// pinned in the same test so the boundary reading is asserted, not assumed.
+// PINNED DIRECTION (corrected — coordinator, board 181d11e7 wording):
+// AT-sinceIso is EXCLUDED. The comparison is strict `>`, not `>=`: crediting
+// the exact prior finished_at to the new round is the PERMISSIVE direction
+// on a check whose entire purpose is denying a resumed reviewer credit for
+// reads it did not perform this round — the wrong direction to default to
+// under fail-closed (P5).
+// SABOTAGE: use `>=` instead of a strict `>` — the AT-boundary entry
+// ('at-boundary.mjs') would then be wrongly INCLUDED, reddening the
+// deepEqual below; it is the AT-boundary entry specifically that
+// discriminates `>` from `>=` (the before/after entries pass under either
+// operator).
+// ===========================================================================
+
+test('(P4-since-boundary) observedToolPathsSince excludes strictly-before sinceIso AND exactly-at sinceIso; includes only strictly-after', () => {
+  requireSinceLib();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const sinceIso = '2026-09-01T00:00:00.000Z';
+    const before = new Date(Date.parse(sinceIso) - 60_000).toISOString();
+    const after = new Date(Date.parse(sinceIso) + 60_000).toISOString();
+    const t = writeToolTranscript(dir, [
+      toolLineAt(before, [toolUse('Read', { file_path: join(dir, 'before-excluded.mjs') })]),
+      toolLineAt(sinceIso, [toolUse('Read', { file_path: join(dir, 'at-boundary.mjs') })]),
+      toolLineAt(after, [toolUse('Read', { file_path: join(dir, 'after-included.mjs') })]),
+    ]);
+    const result = observedToolPathsSince(t, dir, sinceIso);
+    assert.ok(result, 'a well-formed transcript never degrades to null');
+    assert.deepEqual(
+      [...result.reads].sort(),
+      ['after-included.mjs'],
+      'strictly-before sinceIso is excluded; the entry exactly AT sinceIso belongs to the round that just ended and is ALSO excluded; only strictly-after is included'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// (P4-since-no-timestamp) an entry with NO timestamp field at all is
+// excluded — fail-closed: an entry whose time cannot be established is
+// never treated as belonging to "this round".
+// SABOTAGE: treat a missing timestamp as always-in-scope (or coerce it to a
+// value that resolves to inclusion either way, e.g. Date.now()) — this test
+// alone catches it; P4-since-boundary (every entry fully timestamped) stays
+// green regardless.
+// ===========================================================================
+
+test('(P4-since-no-timestamp) an entry with no timestamp field at all is excluded — fail-closed, never counted as "this round"', () => {
+  requireSinceLib();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const sinceIso = '2026-09-01T00:00:00.000Z';
+    const t = writeToolTranscript(dir, [
+      toolLine([toolUse('Read', { file_path: join(dir, 'no-timestamp.mjs') })]), // no top-level timestamp at all
+      toolLineAt(new Date(Date.parse(sinceIso) + 60_000).toISOString(), [toolUse('Read', { file_path: join(dir, 'timestamped-after.mjs') })]),
+    ]);
+    const result = observedToolPathsSince(t, dir, sinceIso);
+    assert.ok(result, 'a well-formed transcript never degrades to null');
+    assert.deepEqual(
+      result.reads,
+      ['timestamped-after.mjs'],
+      'the untimestamped entry contributes nothing at all; its properly-timestamped sibling still does'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// (P4-legacy-unchanged) the PRE-EXISTING observedToolPaths (no sinceIso
+// parameter) must be completely unaffected by the new timestamp-based
+// filtering added for observedToolPathsSince — the regression guard for
+// every OTHER caller of the legacy function, which the brief requires to
+// "keep its exact old behaviour".
+// SABOTAGE: make observedToolPaths internally share the new since-filtering
+// code path unconditionally (e.g. defaulting sinceIso to something that
+// silently drops untimestamped or oddly-timestamped entries) — entries with
+// no timestamp, or a far-past/far-future one, would then be dropped,
+// reddening the deepEqual below.
+// ===========================================================================
+
+test('(P4-legacy-unchanged) observedToolPaths (no sinceIso) is unaffected by timestamps — present, absent, past or future, every entry still counts', () => {
+  requireLib();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const farPast = '2000-01-01T00:00:00.000Z';
+    const farFuture = '2099-01-01T00:00:00.000Z';
+    const t = writeToolTranscript(dir, [
+      toolLineAt(farPast, [toolUse('Read', { file_path: join(dir, 'past.mjs') })]),
+      toolLineAt(farFuture, [toolUse('Read', { file_path: join(dir, 'future.mjs') })]),
+      toolLine([toolUse('Read', { file_path: join(dir, 'no-timestamp-at-all.mjs') })]),
+    ]);
+    const result = observedToolPaths(t, dir);
+    assert.ok(result, 'a well-formed transcript never degrades to null');
+    assert.deepEqual(
+      [...result.reads].sort(),
+      ['future.mjs', 'no-timestamp-at-all.mjs', 'past.mjs'],
+      'observedToolPaths ignores timestamps entirely — every entry counts regardless of when (or whether) it is timestamped, exactly as before this change'
+    );
   } finally {
     cleanup();
   }
