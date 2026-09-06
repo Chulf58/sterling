@@ -4210,6 +4210,40 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78). Closing a `reconcile_needed`
+  // item as ALREADY-PAID re-stamps `file_baselines` for exactly that item's
+  // file_keys — otherwise H7's settlement predicate, which compares live bytes
+  // against the UNCHANGED baseline, re-mints the item on the next touch of the
+  // same bytes (consumer-measured 2026-09-05: 90 items drained, five re-minted
+  // by the next commit that touched none of their files). A NAKED baseline
+  // write was rejected because three readers would then read "last reconciled
+  // against exactly this content" from a stamp that no content reconcile
+  // produced. This sibling map is what keeps the two claims distinguishable: a
+  // baseline entry WITHOUT an attestation entry means content-reconciled; WITH
+  // one it means "the close of item <item_id> attested that the prose already
+  // describes these bytes, observed against commit <head_commit>".
+  //
+  // `sha256` IS DUPLICATED HERE DELIBERATELY — it is the hash that was
+  // attested, and a reader must not have to join to the sibling
+  // `file_baselines` map (which any later content reconcile overwrites
+  // wholesale) to learn what this attestation covered. `head_commit` is NAMED
+  // for what it is: a baseline is sha256 of the file's BYTES while HEAD is a
+  // COMMIT identity, and one name for both invites comparing a content hash
+  // against a git object id (which hashes an object header too, and may be
+  // SHA-1).
+  //
+  // SERVER-OWNED, exactly like file_baselines: it is in WRITE_REFUSED_FIELDS
+  // (packages/mcp-server/src/tools.ts), so a caller cannot forge provenance
+  // through knowledge_update. An ordinary knowledge_update CLEARS THE WHOLE MAP
+  // beside recomputing file_baselines — a content update re-baselines every
+  // owned path wholesale, so every resulting baseline belongs to that content
+  // generation even where a hash coincidentally matched.
+  baseline_attestations: external_exports.record(external_exports.string(), external_exports.object({
+    attested_at: external_exports.string().min(1),
+    item_id: external_exports.string().min(1),
+    head_commit: external_exports.string().min(1),
+    sha256: external_exports.string().min(1)
+  })).optional(),
   // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
@@ -5538,8 +5572,11 @@ function isCommandChannelTool(toolName) {
   return toolName === "Bash" || toolName === "PowerShell";
 }
 function namesStoreComponent(normalizedAbs) {
-  const components = normalizedAbs.split(sep2 === "\\" ? /[\\/]+/ : /\/+/);
-  return components.some((component) => component.toLowerCase() === ".sterling");
+  const win32 = sep2 === "\\";
+  const components = normalizedAbs.split(win32 ? /[\\/]+/ : /\/+/);
+  return components.some(
+    (component) => (win32 ? component.replace(/[. ]+$/, "") : component).toLowerCase() === ".sterling"
+  );
 }
 function pathIsInside(parentAbs, childAbs) {
   const rel = relative2(parentAbs, childAbs);
@@ -5578,7 +5615,7 @@ function storeDestinationDenial(toolName, field, submitted, evidence) {
   return `H15: this ${toolName} call targets a Sterling store and is denied \u2014 a store is read and written through the \xA710 MCP tool surface ONLY, never by a direct file edit.
 Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${evidence}.
 THE DESTINATION DECIDES, NOT THE CALLER'S CWD: every \`.sterling\` directory this call can name is protected, whichever project owns it. A session launched in another project (or with any other cwd) could otherwise write a different checkout's review-ledger.json \u2014 the file the merge gate reads to refuse unreviewed commits \u2014 its enforcement-baseline.json, or its config.json. That was a CONFIRMED bypass, reproduced by execution 2026-09-06.
-PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination's path COMPONENTS (case-folded), never by a per-file allowlist and never by a string prefix.
+PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination's path COMPONENTS under the HOST's name rules (case-folded, and on Windows with each component's trailing dots and spaces dropped, since Win32 opens \`.sterling.\` and \`.sterling \` as the real directory), never by a per-file allowlist and never by a string prefix.
 NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.
 Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
 WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only \u2014 a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project's store is not covered, deliberately.
@@ -5630,7 +5667,7 @@ try {
           input.tool_name,
           destinationField,
           submitted,
-          `it resolves to ${destination}, which carries a '.sterling' directory component (compared case-folded)`
+          `it resolves to ${destination}, which carries a '.sterling' directory component (compared under the host's name rules: case-folded, and on win32 with each component's trailing dots and spaces dropped)`
         )
       );
     }

@@ -1501,3 +1501,132 @@ test('R1 (RESIDUAL, never runs): `.ſterling/config.json` (U+017F LONG S) is NOT
 // pathological path cannot wedge unrelated projects machine-wide, and the
 // accepted cost is that a symlink into another project's store is not seen.
 // The rebuild is NOT answerable for any of the three.
+
+// #############################################################################
+// ###  SECTION 21 — NTFS TRAILING-DOT/SPACE ALIASING, CROSS-PROJECT.        ###
+// ###  Added for board 20928f11. Appended to the frozen attack set; nothing ###
+// ###  above this line is touched. Exactly TWO pins: one per side.         ###
+// #############################################################################
+//
+// THE GAP (board 20928f11, found by reviewer-security on the rebuilt arm): the
+// Win32 layer STRIPS TRAILING DOTS AND SPACES from a path component, so
+// `.sterling.` and `.sterling ` both open the real `.sterling` directory on
+// NTFS. `namesStoreComponent` folds a component with `toLowerCase()` only, and
+// neither alias spelling case-folds to `.sterling`, so the destination-decides
+// lexical rule (contract CA, step 3) misses it. Cross-project, the canonical
+// (realpath) layer never runs to catch the miss — it is scoped to the CALLER's
+// own project, and the alias here sits in a DIFFERENT checkout — so the write
+// reaches allow(). IN-PROJECT IS UNAFFECTED (realpath resolves the alias back
+// to the real directory name and the canonical layer denies it); POSIX IS
+// UNAFFECTED (`.sterling.` genuinely names a different directory there, and
+// denying it would be a new false-deny, not a fix).
+//
+// PLATFORM MECHANISM, STATED HONESTLY: the suite spawns the hook as a CHILD
+// PROCESS (`spawnSync(process.execPath, [hookPath])`), and the hook resolves
+// its separator/host behaviour from a module-level `node:path` import — there
+// is NO seam (env var or otherwise) that lets a POSIX parent force a win32
+// verdict out of that child, and none is invented here: a `process.platform`
+// shim, or an env-var seam standing in for one, would be exactly the kind of
+// global mock this section was told not to build, because it would bleed into
+// every one of the other 62+ pins that also spawn the same hook. The
+// established precedent already in this file is S15b / S15b-win: gate the
+// pin on the REAL `process.platform` of the machine running the suite, and
+// SKIP LOUDLY (never silently, never by forcing a verdict) on the host where
+// the pin cannot apply — carrying a WRITTEN-OUT sabotage note in place of an
+// executed mutation, exactly as S15b-win does at its own skip. Under that
+// precedent, on a POSIX host — this machine included (linux/WSL) — S21b below
+// SKIPS and contributes no signal here; only S21a runs, and S21a is the one
+// pin of this pair capable of a live mutation check on this host, since it is
+// the side that actually executes. Read S21b on an actual Windows run.
+
+// KIND: BEHAVIOUR (Pin B). PREDICTION: GREEN on this machine (POSIX) both
+// before and after the win32 fix lands — the fix must be win32-gated and
+// change nothing here. If this goes red on a POSIX host, the fix over-reached
+// (stripped trailing dot/space unconditionally) and produced exactly the new
+// false-deny the board item warns against. THIS IS THE ONE SIDE OF THE PAIR A
+// LIVE MUTATION CHECK IS POSSIBLE FOR ON THIS HOST — see the verification note
+// in the report. SKIPPED on win32: there, this exact spelling IS the NTFS
+// alias and is CORRECTLY denied — that is S21b's subject, not this pin's; the
+// two must never both run and demand opposite verdicts on the same string.
+test('S21a: on POSIX, writing a destination literally named `.sterling.` (trailing dot, a directory the store does not use) is ALLOWED — that is a genuinely distinct directory on this filesystem, and denying it would be a NEW false-deny, not a fix (board 20928f11)', {
+  skip: process.platform === 'win32' ? 'win32-only inverse: on win32 `.sterling.` is an NTFS alias for the real `.sterling` store directory and is correctly DENIED — that is S21b. This pin guards the POSIX false-deny risk only, and asserting ALLOW for the same spelling on win32 would contradict S21b\'s DENY on the identical string.' : false,
+}, () => {
+  const checkout = makeProject('sterling-h15sw-ntfsalias-posix-checkout-');
+  try {
+    const target = join(checkout.dir, '.sterling.', 'review-ledger.json');
+    const sep = checkout.dir.includes('\\') ? '\\' : '/';
+    assert.ok(target.split(sep).includes('.sterling.'), 'fixture precondition: the raw path must carry the exact component `.sterling.`, trailing dot included, or this pin tests nothing');
+    assertAllow(runTool('Write', { file_path: target, content: '{}' }, checkout.dir), 'S21a');
+  } finally {
+    checkout.cleanup();
+  }
+});
+// SABOTAGE: strip trailing dot/space from every path component UNCONDITIONALLY
+// (i.e. apply the win32 alias fix without gating it on the host) → S21a red
+// with exit 2 on this POSIX machine. GUARD: the host gate on the stripping
+// step, alone — no other layer in the arm has an opinion about a literally
+// different directory name, so this pin does not survive that mutation.
+
+// KIND: BEHAVIOUR (Pin A). PREDICTION: CANNOT EXECUTE on this host — win32
+// only, see the section header for why no seam exists to drive it from POSIX.
+// On an actual Windows run: RED at write time (the measured bypass; the
+// parallel fix had not yet landed) — that is correct and expected for a
+// tests-first pin, not a defect in it — and GREEN once
+// `namesStoreComponent` strips a trailing run of dots/spaces from each
+// component, win32-gated, before the case fold.
+test('S21b: on win32, a cross-project destination naming an NTFS trailing-dot/space alias of `.sterling` (both `.sterling.` and `.sterling `) is DENIED even though neither spelling case-folds to `.sterling` — the exact bypass shape from board 20928f11', {
+  skip: process.platform === 'win32' ? false : 'win32-only: trailing dot/space is only an NTFS alias for `.sterling` on win32, and this file builds no platform seam to fake that from POSIX — see the section header. See S21a for the POSIX control guarding the corresponding false-deny risk.',
+}, () => {
+  const caller = makeNonProject('sterling-h15sw-ntfsalias-caller-');
+  const checkoutDot = makeProject('sterling-h15sw-ntfsalias-checkout-dot-');
+  const checkoutSpace = makeProject('sterling-h15sw-ntfsalias-checkout-space-');
+  try {
+    writeFileSync(join(checkoutDot.dir, '.sterling', 'review-ledger.json'), JSON.stringify({ receipts: [] }));
+    writeFileSync(join(checkoutSpace.dir, '.sterling', 'review-ledger.json'), JSON.stringify({ receipts: [] }));
+    const dotTarget = join(checkoutDot.dir, '.sterling.', 'review-ledger.json');
+    const spaceTarget = join(checkoutSpace.dir, '.sterling ', 'review-ledger.json');
+    assert.ok(dotTarget.split('\\').includes('.sterling.'), 'fixture precondition: the raw path must carry the exact component `.sterling.`, trailing dot included, or this pin tests nothing');
+    assert.ok(spaceTarget.split('\\').includes('.sterling '), 'fixture precondition: the raw path must carry the exact component `.sterling ` with its trailing space, or this pin tests nothing');
+    assertDeny(runTool('Write', { file_path: dotTarget, content: '{"forged":true}' }, caller.dir), 'S21b (trailing dot)');
+    assertDeny(runTool('Write', { file_path: spaceTarget, content: '{"forged":true}' }, caller.dir), 'S21b (trailing space)');
+  } finally {
+    checkoutSpace.cleanup();
+    checkoutDot.cleanup();
+    caller.cleanup();
+  }
+});
+// WRITTEN-OUT SABOTAGE (this pin cannot execute on this host, so no mutation
+// was run against it — stated for whoever runs this on Windows to apply):
+//   (1) leave `namesStoreComponent`'s fold as `toLowerCase()` only (the
+//       currently shipped behaviour, and the bug as measured in board
+//       20928f11) → BOTH assertDeny calls fail with exit 0.
+//   (2) strip only a trailing `.` and not a trailing space (or vice versa) →
+//       exactly ONE of the two assertDeny calls fails — which is why both
+//       alias shapes are asserted in the SAME pin rather than one standing in
+//       for the other; a mutation that passes one and fails the other is
+//       still a bug this pin must catch.
+//   (3) implement the strip as "strip, then `startsWith('.sterling')`"
+//       instead of an exact-match compare → would over-deny a non-aliasing
+//       name such as `.sterlingish.` (it strips to `.sterlingish`, which DOES
+//       start with `.sterling`). THIS CONCERN IS CLOSED BY CONSTRUCTION, NOT
+//       BY A PIN — and NOT by S7/S16b, which is worth naming explicitly since
+//       they are the closest-looking candidates: both execute on POSIX, where
+//       the win32-only strip branch this section is about never runs, so
+//       they cannot exercise it at all. The actual reason (3) cannot arise as
+//       a SEPARATE bug from this fix: the strip is stated (board 20928f11) to
+//       feed its result into the SAME fold-and-compare this whole arm already
+//       uses for every component, which is EXACT EQUALITY against the literal
+//       `.sterling` (the arm's general contract — matching "a `.sterling`
+//       path COMPONENT", never a prefix). Given equality as the compare, a
+//       stripped `.sterlingish` fails to equal `.sterling` by the plain
+//       definition of `===` — no separate runtime check is needed to
+//       establish that, any more than one is needed to establish `2 !== 3`.
+//       If a shipped implementation broke that definitional guarantee by
+//       introducing a SEPARATE, win32-only compare, it would be a second,
+//       larger defect (two divergent comparators for one rule) outside this
+//       section's two-pin scope — not something (3) alone should carry, and
+//       not something S7/S16b were ever positioned to see.
+// GUARD: the trailing dot/space strip inside the lexical, destination-decides
+// rule (contract CA), alone. NOT defence in depth: the canonical (realpath)
+// layer cannot reach this verdict at all, because the destination lies outside
+// the caller's own project — there is no second layer here to hide behind.

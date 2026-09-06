@@ -226,9 +226,17 @@ try {
 //      HOST's grammar, which is also why a literal backslash stays an ordinary
 //      filename character on POSIX and IS a separator on win32.
 //   3. LEXICAL COMPONENT RULE, cwd-independent: a destination carrying a path
-//      COMPONENT spelled `.sterling` (case-folded) is inside a store, whosever
-//      store it is. WHOLE COMPONENT, never a prefix and never a substring —
-//      `.sterlingish`, `.sterling.bak` and `STERLING-notes.md` are not stores.
+//      COMPONENT spelled `.sterling` (case-folded, and on win32 with the
+//      component's TRAILING dots/spaces dropped first) is inside a store,
+//      whosever store it is. WHOLE COMPONENT, never a prefix and never a
+//      substring — `.sterlingish`, `.sterling.bak` and `STERLING-notes.md` are
+//      not stores. The comparison is normalized to the HOST's name rules, not
+//      just to case, because this is the ONLY layer that runs cross-project: a
+//      bare case fold left `.sterling.` and `.sterling ` — both of which Win32
+//      opens as the real `.sterling` directory — matching nothing here, and step
+//      4 is scoped to the caller's own project, so a call from another checkout
+//      was ALLOWED onto a foreign store. Deny-only, and NOT applied on POSIX,
+//      where `.sterling.` is a distinct directory and allowing it is correct.
 //      Deliberately LEXICAL, with no realpath: this rule runs for EVERY
 //      structured write on the machine, and calling realpath on all of them
 //      would let one unreadable or pathological path wedge unrelated projects
@@ -350,10 +358,30 @@ function isCommandChannelTool(toolName) {
  * a prefix. Separators are the HOST's: on POSIX a backslash is an ordinary
  * filename character, so `notes\.sterling\x.txt` is ONE component and is not a
  * store path — on win32 that same string is three components and is one.
+ *
+ * ON WIN32 THE FOLD ALSO DROPS EACH COMPONENT'S TRAILING DOTS AND SPACES, for the
+ * same reason the case fold exists: the Win32 layer strips them during name
+ * normalization, so `.sterling.` and `.sterling ` OPEN THE REAL `.sterling`
+ * DIRECTORY while case-folding to neither. Without this the lexical rule missed
+ * both spellings and a cross-project write reached another checkout's store
+ * (step 4's canonical layer is scoped to the caller's own project and never ran).
+ * Deny-only and host-conditioned: stripping can only make MORE strings equal
+ * `.sterling`, never fewer, and it is NOT applied on POSIX, where `.sterling.` is
+ * a genuinely distinct directory that must keep being allowed. Only TRAILING
+ * runs go, so `.sterling.bak` and `.sterlingish` remain non-stores.
+ *
+ * KNOWN OVER-DENIAL, accepted: a `\\?\` VERBATIM path suppresses Win32 name
+ * normalization, so `\\?\C:\p\.sterling.\x` can name a literally distinct
+ * directory that this fold nevertheless denies. That is the fail-safe direction
+ * (a false deny, never a false allow) and is why the strip is described as the
+ * host's ORDINARY name rules, not as a complete model of Win32 path semantics.
  */
 function namesStoreComponent(normalizedAbs) {
-  const components = normalizedAbs.split(sep === '\\' ? /[\\/]+/ : /\/+/);
-  return components.some((component) => component.toLowerCase() === '.sterling');
+  const win32 = sep === '\\';
+  const components = normalizedAbs.split(win32 ? /[\\/]+/ : /\/+/);
+  return components.some(
+    (component) => (win32 ? component.replace(/[. ]+$/, '') : component).toLowerCase() === '.sterling'
+  );
 }
 
 /**
@@ -452,7 +480,7 @@ function storeDestinationDenial(toolName, field, submitted, evidence) {
     `H15: this ${toolName} call targets a Sterling store and is denied — a store is read and written through the §10 MCP tool surface ONLY, never by a direct file edit.\n` +
     `Submitted tool_input.${field}: ${JSON.stringify(submitted)} — ${evidence}.\n` +
     'THE DESTINATION DECIDES, NOT THE CALLER\'S CWD: every `.sterling` directory this call can name is protected, whichever project owns it. A session launched in another project (or with any other cwd) could otherwise write a different checkout\'s review-ledger.json — the file the merge gate reads to refuse unreviewed commits — its enforcement-baseline.json, or its config.json. That was a CONFIRMED bypass, reproduced by execution 2026-09-06.\n' +
-    'PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination\'s path COMPONENTS (case-folded), never by a per-file allowlist and never by a string prefix.\n' +
+    'PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination\'s path COMPONENTS under the HOST\'s name rules (case-folded, and on Windows with each component\'s trailing dots and spaces dropped, since Win32 opens `.sterling.` and `.sterling ` as the real directory), never by a per-file allowlist and never by a string prefix.\n' +
     'NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.\n' +
     'Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.\n' +
     'WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only — a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project\'s store is not covered, deliberately.\n' +
@@ -541,7 +569,7 @@ try {
           input.tool_name,
           destinationField,
           submitted,
-          `it resolves to ${destination}, which carries a '.sterling' directory component (compared case-folded)`
+          `it resolves to ${destination}, which carries a '.sterling' directory component (compared under the host's name rules: case-folded, and on win32 with each component's trailing dots and spaces dropped)`
         )
       );
     }
