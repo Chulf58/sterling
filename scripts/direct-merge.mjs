@@ -355,7 +355,7 @@ if (cleared.length > 0) {
       case 'all_exempt':
         return `every named path is a generated projection (config.generated_projections, ruling e1275166): ${v.exempt_paths.join(', ')}`;
       case 'baseline_match':
-        return `content now MATCHES the owning article's current baseline (already reconciled, or edited and reverted): ${v.matched.join(', ')}`;
+        return `content now MATCHES the owning article's current baseline (already reconciled, edited and reverted, or an attested close re-stamped it, R9): ${v.matched.join(', ')}`;
       case 'baseline_absent':
         return `UNVERIFIED, not clean — the owning article records NO baseline for ${v.unbaselined.join(', ')}, so there was nothing to compare (the settlement predicate abstains rather than inventing drift); this row cannot be cleared by a baseline re-stamp`;
       case 'baseline_match_and_absent':

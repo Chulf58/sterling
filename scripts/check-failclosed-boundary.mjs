@@ -437,7 +437,11 @@ const BASELINE = {
     // top-level statement, so this stays exactly ONE entry and
     // FOUNDING_BASELINE_TOTAL stays 107. What moved is the SIZE of the region
     // that can reach the catch, and it shrank. Verified by RUNNING the check.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #d6a74451" },
+    // ROTATED AN ELEVENTH TIME 2026-09-06 (#d6a74451 -> #91cc0292, R9 slice):
+    // the Stop-settlement call-site comment inside this try now names the R9
+    // attested close as a third rebaseliner. Comment-only; same single entry,
+    // the region's statements are unchanged. Verified by RUNNING the check.
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #91cc0292" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },

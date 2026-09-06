@@ -406,6 +406,12 @@ export type ToolStore = Pick<
   // land through updateRecord, and knowledge_get's `version` parameter reads
   // archived snapshots through getRecordVersion.
   | 'updateRecord'
+  // The NARROW server-owned metadata write (board 8c8b6d78 / R9): the baseline
+  // attestation stamps drift metadata and PRESERVES updated_at, which no other
+  // write path can do — advancing the clock would make the read-time mtime
+  // prefilter suppress unrelated, already-standing drift on the article's other
+  // owned files.
+  | 'updateRecordMetadata'
   | 'editRecordField'
   | 'appendRecordField'
   | 'getRecordVersion'
@@ -1729,6 +1735,72 @@ export class SterlingStore {
   }
 
   /**
+   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
+   * closed list is what makes that method NARROW rather than a second content
+   * write path that happens to skip the clock: anything outside it is refused by
+   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
+   * neither is ever caller-supplied.
+   */
+  private static readonly METADATA_WRITE_FIELDS: readonly string[] = ['file_baselines', 'baseline_attestations'];
+
+  /**
+   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
+   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
+   * record's `updated_at`.
+   *
+   * It bumps `version`, archives the prior body and honours `expected_version`
+   * exactly like every other in-place write: the baselines live in the record
+   * BODY and the body is authoritative, so a same-version body mutation would
+   * evade the CAS and version signal entirely. (addLink's precedent does NOT
+   * apply — its body copy of links[] is non-authoritative and re-hydrated from
+   * record_relations.)
+   *
+   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
+   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
+   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
+   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
+   * re-stamping only SOME owned paths therefore masks real, already-standing
+   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
+   * T1; a metadata write for `a` alone advances the clock to T2; a later read
+   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
+   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
+   * judged against exactly the instant its own baseline was taken.
+   *
+   * `activity_at` is the REAL time, recorded on the activity row (and used for
+   * any `resolves` drain) so the chronology stays true — see applyInPlace's
+   * `internal.activityAt`. It is required in practice for every caller; it
+   * defaults to now rather than to the preserved clock, because silently
+   * back-dating an activity row is the failure this parameter exists to prevent.
+   */
+  updateRecordMetadata(
+    id: string,
+    fields: Record<string, unknown>,
+    opts: RecordWriteOptions & { activity_at?: string } = {}
+  ): DurableRecord {
+    const refused = Object.keys(fields).filter((k) => !SterlingStore.METADATA_WRITE_FIELDS.includes(k));
+    if (refused.length) {
+      throw new Error(
+        `updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(', ')} ${refused.length === 1 ? 'is' : 'are'} not a server-owned metadata field — ` +
+          `this write PRESERVES updated_at, so it must never carry content. The writable set is ` +
+          `${SterlingStore.METADATA_WRITE_FIELDS.join(', ')}; use updateRecord for anything else. Nothing was written.`
+      );
+    }
+    return this.applyInPlace(
+      'updateRecordMetadata',
+      id,
+      (current) => ({
+        ...(current as unknown as Record<string, unknown>),
+        ...fields,
+        // From the IN-TRANSACTION read, never a caller's copy: the whole point is
+        // that the stored clock does not move.
+        updated_at: current.updated_at,
+      }),
+      opts,
+      { activityAt: opts.activity_at ?? new Date().toISOString() }
+    );
+  }
+
+  /**
    * knowledge_append-shaped write: grow an ARRAY field in place (history,
    * files, current_ac, …) without retransmitting the existing entries. One
    * transaction, one version bump, prior array archived.
@@ -1775,13 +1847,24 @@ export class SterlingStore {
    * tombstone: renameFileKey, whose contract is that a move orphans no owning
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
+   *
+   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
+   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
+   * caller that deliberately preserves the stored `updated_at` — see
+   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
+   * content clock. The activity row must NOT inherit that preserved value: the
+   * activity log is a chronology of when things actually happened, and
+   * back-dating an entry to the previous write's timestamp makes it false. So
+   * the metadata write passes the REAL time here while the body keeps the old
+   * one. Absent (every ordinary write), behaviour is exactly as before: the
+   * activity row is stamped from the body's own updated_at.
    */
   private applyInPlace(
     op: string,
     id: string,
     buildPatch: (current: DurableRecord) => Record<string, unknown>,
     opts: RecordWriteOptions,
-    internal: { allowRetired?: boolean } = {}
+    internal: { allowRetired?: boolean; activityAt?: string } = {}
   ): DurableRecord {
     this.assertWritable(op);
     let served!: DurableRecord;
@@ -1897,7 +1980,11 @@ export class SterlingStore {
       // EXACTLY ONE records_fts row per id, current version only (contract 7):
       // the row is replaced, so the prior generation's text stops ranking.
       this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);
-      this.logActivity('updated', validated, (stored.updated_at as string) ?? now);
+      // THE ACTIVITY CLOCK IS SEPARABLE FROM THE BODY CLOCK (see internal.activityAt
+      // above): a metadata write preserves the body's updated_at, and stamping the
+      // activity row from it would place a write that happened NOW at the previous
+      // write's instant.
+      this.logActivity('updated', validated, internal.activityAt ?? (stored.updated_at as string) ?? now);
       if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now);
       // The echo goes through the SAME derivation get() serves, so a write
       // echo can never disagree with the next read of the same record.

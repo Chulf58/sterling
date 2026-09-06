@@ -9,7 +9,8 @@
 // mintSettlementReconcile, called from h10-direct-capture.mjs's Stop and
 // direct-merge.mjs's pre-merge backstop, hashes the FINAL candidate content
 // against the owning article's CURRENT baseline — so an edit-then-revert, or
-// a path an intervening knowledge_update already rebaselined, never mints.
+// a path an intervening knowledge_update (or an attested close, R9) already
+// rebaselined, never mints.
 //
 // R3, ROUND 2 (board c198866d round-4 fixer): an append-only JSONL rewrite of
 // this register was tried first to close the H7-vs-H7 read-modify-write race,

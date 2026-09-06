@@ -4,7 +4,7 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ZodError, type ZodIssue } from 'zod';
 import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
@@ -22,6 +22,7 @@ import {
   type ToolStore,
 } from '@sterling/store';
 import { react, type BrainAction, type ResolvedExit } from './brain.js';
+import { AttestationRefusal, collectAttestationEvidence, type AttestationEvidence } from './attestation-proof.js';
 
 export interface SkippedCheck {
   check: string;
@@ -55,6 +56,39 @@ export interface CreateResult {
    * responses stay byte-identical. Advisory only, never gates the write.
    */
   same_subject?: SameSubjectEntry[];
+}
+
+/**
+ * The receipt an ALREADY-PAID close returns (board 8c8b6d78 / R9) — proof of
+ * exactly what was attested, so the operator can see that a durable claim about
+ * live bytes was minted rather than a bare removal.
+ *
+ * `head_commit` is a COMMIT identity; `paths` were verified byte-identical
+ * between that commit's blobs and the working tree, and their sha256 is now the
+ * article's baseline for them. `attested_at` is the real close time — NOT the
+ * article's `updated_at`, which this write deliberately leaves where it was.
+ */
+export interface BaselineAttestationReceipt {
+  article_id: string;
+  article_slug?: string;
+  article_version: number;
+  head_commit: string;
+  attested_at: string;
+  paths: string[];
+  note: string;
+}
+
+/**
+ * The git evidence for one attested close, gathered BEFORE the store transaction
+ * opens (a `--path=` hash-object runs the repository's configured clean filter,
+ * which is an arbitrary program and must not run under the writer lock), and
+ * bound to the exact tree and key set it answers for — the transaction refuses if
+ * either has moved rather than re-reading anything itself.
+ */
+interface PreparedAttestation {
+  root: string;
+  keys: string[];
+  evidence: AttestationEvidence;
 }
 
 export interface BoardFilter {
@@ -828,6 +862,70 @@ const RECONCILE_RECHECK_GIT_PROBE_CAP = 8;
 // verdict built on whatever node the walk happened to stop on.
 const LIVE_ARTICLE_CHAIN_HOP_CAP = 32;
 
+// BASELINE-ATTESTATION CAPS (board 8c8b6d78 / R9). The attestation branch spends,
+// per file_key, ONE read of the worktree file and ONE `git hash-object` — no more
+// (the earlier three-hash shape died with the rebuild, decision
+// [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
+// ALL of that evidence is collected BEFORE the transaction opens, so no clean-filter
+// program — an arbitrary configured executable, reached through `hash-object
+// --path=` — ever runs under the store's single writer; inside `BEGIN IMMEDIATE`
+// only the CAS metadata write and the item removal remain. The caps therefore bound
+// the EVIDENCE PASS, not the lock: `todo.file_keys` carries NO cardinality limit in
+// the schema and files carry no size limit, so an item naming thousands of paths, or
+// one enormous path, would otherwise spend unbounded reads and subprocesses on one
+// call. Both caps are checked BEFORE any mutation and refuse the WHOLE close (P5) —
+// never a partial attestation, which would stamp provenance for some paths while
+// leaving the item open for the rest.
+//
+// MAGNITUDES: a settlement-minted reconcile item groups one ARTICLE's drifting
+// paths, which is single digits in practice; 64 leaves an order of magnitude of
+// headroom. 16 MiB is twice the per-page recheck byte budget above, because this
+// is one deliberate operator action rather than an incidental read-path cost.
+const ATTESTATION_MAX_PATHS = 64;
+const ATTESTATION_MAX_TOTAL_BYTES = 16 * 1024 * 1024;
+/**
+ * THE OWNER TYPES AN ATTESTED CLOSE CAN STAMP — both of the types that carry
+ * server-computed `file_baselines`, because settlement mints reconcile_needed
+ * items for both (scripts/hooks/lib/settlement.mjs queries
+ * types:['feature_article','reference_material'] and sets `feature_link` to
+ * whichever owner it found).
+ *
+ * WHY IT IS NOT ARTICLE-ONLY (review finding 1). It was, and a
+ * reference_material-owned item was therefore UNCLOSABLE: the attestation
+ * refused it as "not an article", and decision
+ * [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
+ * forbids falling through to ordinary removal, because such an item sits
+ * squarely inside the re-mint predicate and the next settlement pass would
+ * simply mint it again. Nothing about the proof is type-specific: both types
+ * carry baselines (computeBaselines admits exactly these two), and both get
+ * their owned paths from the SAME registered extractor,
+ * RECORD_TYPES[type].fileKeys — so the scope, evidence and CAS path are shared
+ * verbatim rather than forked.
+ */
+const ATTESTABLE_OWNER_TYPES: readonly string[] = ['feature_article', 'reference_material'];
+/** How an attested close NAMES its target where both owner types are admitted. */
+const ATTESTABLE_OWNER_NOUN = 'owning article or reference document';
+// The tree-entry mode set, the no-follow read and the byte budget's enforcement
+// all live in ./attestation-proof.ts now — the evidence collector owns the whole
+// git/filesystem side of the proof (decision
+// [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
+
+/**
+ * A git object id as `rev-parse` prints it: 40 lowercase hex (SHA-1, the default
+ * object format) or 64 (SHA-256 repositories, `git init --object-format=sha256`,
+ * git 2.29+). ACCEPTING BOTH is what keeps a SHA-256 repository able to attest at
+ * all — a 40-only shape check read a perfectly valid HEAD as "git is unavailable"
+ * and refused EVERY attested close there (review finding 4, 2026-09-06).
+ *
+ * NOT the same shape as `todo.measured_at_head`, which the record schema pins to
+ * 40 hex; the two stamping sites therefore narrow this result themselves rather
+ * than widen the schema — see boardAdd/boardUpdate.
+ */
+const GIT_OBJECT_ID_RE = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
+
+/** The shape `todo.measured_at_head` accepts (packages/schemas records.ts) — SHA-1 only. */
+const MEASURED_AT_HEAD_RE = /^[0-9a-f]{40}$/;
+
 /**
  * The verdict of the ONE per-owned-file drift classifier
  * (classifyOwnedFileDrift) that the read-time MINT and the queue's
@@ -873,7 +971,10 @@ interface DriftCheckContext {
   mode: DriftCheckMode;
   /** the working tree the article's paths live in (treeRootFor, already resolved) */
   treeRoot: string;
-  /** the live article's server-computed baselines — the bytes it was written against */
+  /** the live article's server-computed baselines — the bytes it was last
+   *  CONTENT-RECONCILED against, OR (per path) the bytes an already-paid close
+   *  explicitly ATTESTED it already describes (board 8c8b6d78 / R9; which of the
+   *  two is queryable per path via baseline_attestations) */
   baselines: Record<string, string> | undefined;
   /** the instant those baselines were taken: the article's updated_at */
   baselinedAt: string;
@@ -886,6 +987,46 @@ interface DriftCheckContext {
    * that claim false. See the prefilter arm in classifyOwnedFileDrift.
    */
   honorMtimePrefilter: boolean;
+  /**
+   * Paths carrying an ACTIVE `baseline_attestations` entry (board 8c8b6d78 / R9)
+   * — for these the mtime prefilter NEVER terminates, whatever
+   * honorMtimePrefilter says, and the content hash always decides.
+   *
+   * WHY, in one sentence: an attestation write deliberately PRESERVES the
+   * article's `updated_at` while re-stamping that path's baseline, so the
+   * prefilter's inference — "mtime no newer than updated_at means the file
+   * cannot have moved since its baseline was taken" — is exactly what stops
+   * holding for an attested path. The attested bytes were baselined at close
+   * time, which is LATER than `updated_at`, so a post-attestation edit whose
+   * mtime is preserved or backdated (an mtime-preserving copy, a restore from
+   * backup, clock skew) would sit at-or-below the old clock and short-circuit to
+   * `clean` against a baseline it no longer matches. Same reasoning, and same
+   * remedy, as the recheck's unconditional always-hash below — this is the
+   * per-path form of it, and it is the recovery backstop for everything the
+   * attestation's HEAD observation could not freeze.
+   *
+   * THE STANDING COST, STATED (review finding 7). This bypass has NO budget at
+   * the MINT: knowledgeQuery's drift wire calls classifyOwnedFileDrift with no
+   * DriftBudget (the attempt/byte/probe caps exist only on the recheck path), so
+   * after an attestation EVERY knowledge_query that returns the article re-reads
+   * and sha256s each attested path — up to ATTESTATION_MAX_PATHS paths and
+   * ATTESTATION_MAX_TOTAL_BYTES per close, and more if several closes attested
+   * different paths of one article. The cost stands until a CONTENT reconcile
+   * clears `baseline_attestations` wholesale (knowledgeUpdate's re-baseline).
+   *
+   * A MINT-SIDE BYTE BUDGET IS DELIBERATELY NOT ADDED, and this is a soundness
+   * argument rather than a cost one: at the mint an `unavailable` verdict is read
+   * by the CALL SITE exactly as `clean` (see the classifier's own note), so a
+   * budget could only express itself as "stop hashing and report nothing" — i.e.
+   * it would silently restore the very short-circuit this bypass exists to
+   * remove, on precisely the paths whose mtime cannot be trusted. A cap that can
+   * suppress the recovery backstop is worse than a re-read: the re-read is
+   * bounded and visible, the suppression is unbounded and invisible. If the cost
+   * ever needs bounding, it must be bounded by something that still reaches a
+   * VERDICT (fewer attested paths, or an eviction policy on the map), never by
+   * skipping the hash.
+   */
+  attestedPaths?: ReadonlySet<string>;
 }
 
 /**
@@ -966,7 +1107,24 @@ export interface KnowledgeSplitInput {
  * knowledge_create input schema (decision 7c7f6db1) strips exactly this set
  * from every per-type variant instead of re-deriving or copying it.
  */
-export const WRITE_REFUSED_FIELDS: readonly string[] = ['id', 'created_at', 'updated_at', 'status', 'superseded_by', 'type', 'lifecycle', 'freshness', 'file_baselines'];
+export const WRITE_REFUSED_FIELDS: readonly string[] = [
+  'id',
+  'created_at',
+  'updated_at',
+  'status',
+  'superseded_by',
+  'type',
+  'lifecycle',
+  'freshness',
+  'file_baselines',
+  // R9 (board 8c8b6d78): the attestation map is drift PROVENANCE — "the close of
+  // maintenance item X attested that this article's prose already describes these
+  // bytes, observed against commit Y". It is minted only by the attestation branch
+  // of board_remove / maintenance_remove, from a hash the server took itself, so it
+  // joins file_baselines here rather than becoming a field a caller can fabricate a
+  // human's attestation into.
+  'baseline_attestations',
+];
 
 /**
  * knowledge_schema's server-owned mask, widened from WRITE_REFUSED_FIELDS by
@@ -1073,6 +1231,17 @@ export class SterlingTools {
    * mtime reset (a git merge/checkout touches every file's mtime without
    * changing content). No repoRoot, or a file absent at write time, → no entry
    * (the read-time deletion check still covers a vanished owned file).
+   *
+   * A NON-REGULAR owned path (symlink, directory, device) also gets NO entry, on
+   * exactly the same footing as an absent file. hashFile FOLLOWS symlinks — it
+   * must, for its drift callers — so an article owning a symlinked path used to
+   * record the LINK TARGET's bytes as that path's baseline, importing content
+   * from outside the tree into a durable record at create/reconcile time. Both
+   * baseline consumers ABSTAIN on a missing baseline (contentChanged here, and
+   * contentChangedAgainstBaseline in scripts/hooks/lib/settlement.mjs), so
+   * omitting it is the existing absent-file behaviour and not a new rule. The
+   * attested close refuses such a path outright (pin R9-14a); this closes the
+   * upstream route by which those bytes reached file_baselines anyway.
    */
   private computeBaselines(record: Record<string, unknown>): Record<string, string> | undefined {
     if (!this.repoRoot) return undefined;
@@ -1086,6 +1255,10 @@ export class SterlingTools {
     if (unresolved || !root) return undefined;
     const baselines: Record<string, string> = {};
     for (const rel of RECORD_TYPES[type].fileKeys(record)) {
+      // lstat, not stat: the question is what the PATH ITSELF is, and a symlink
+      // to a regular file passes `stat`. Absent → skip, same as before.
+      const shape = lstatSync(join(root, rel), { throwIfNoEntry: false });
+      if (!shape || !shape.isFile()) continue;
       const hash = this.hashFile(rel, root);
       if (hash !== undefined) baselines[rel] = hash;
     }
@@ -1267,13 +1440,25 @@ export class SterlingTools {
     }
   }
 
-  /** Current HEAD's full 40-hex sha in `treeRoot`, or undefined if git/the tree is unavailable (board-provenance-measured-at-head: what board_add/board_update stamp measured_at_head with). */
+  /**
+   * Current HEAD's full object id in `treeRoot`, or undefined if git/the tree is
+   * unavailable (board-provenance-measured-at-head: what board_add/board_update
+   * stamp measured_at_head with; also what the attested close names as the commit
+   * its bytes were observed against).
+   *
+   * ACCEPTS 40- OR 64-HEX (GIT_OBJECT_ID_RE). A SHA-256 repository's ids are 64
+   * hex, so the old 40-only test reported a valid HEAD as unavailable and made
+   * every attested close refuse there (review finding 4, 2026-09-06). The
+   * NARROWING lives at the two `measured_at_head` stamping sites, whose record
+   * schema pins 40 — widening here must never turn a silent no-stamp into a zod
+   * refusal on the board write.
+   */
   private currentHeadSha(treeRoot: string | undefined): string | undefined {
     if (!treeRoot) return undefined;
     const r = this.runGit(treeRoot, ['rev-parse', 'HEAD']);
     if (!r || r.status !== 0) return undefined;
     const sha = r.stdout.trim();
-    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+    return GIT_OBJECT_ID_RE.test(sha) ? sha : undefined;
   }
 
   /**
@@ -1779,7 +1964,8 @@ export class SterlingTools {
   }
 
   /**
-   * The LIVE feature_article a queue item's feature_link points at, following the
+   * The LIVE owner record (a feature_article by default; see `types`) a queue
+   * item's feature_link points at, following the
    * supersede chain to its head (decision queue-truth-at-read-annotation-design:
    * "legacy feature_links resolve through the supersede chain to the LIVE
    * article's baselines").
@@ -1790,10 +1976,18 @@ export class SterlingTools {
    * them would report a drift that reproduces perfectly well against the live
    * article, or abstain where a real verdict was available.
    *
-   * Returns undefined when the link resolves to nothing, or to something that is
-   * not a feature_article — an abstention, never a guess. store.get() (not the
+   * Returns undefined when the link resolves to nothing, or to a type the caller
+   * did not admit — an abstention, never a guess. store.get() (not the
    * id-resolution ladder) deliberately: a feature_link is a full uuid written by
    * the mint, and a READ path must not throw on a broken pointer.
+   *
+   * `types` IS THE CALLER'S ADMISSION, and it defaults to feature_article alone —
+   * the drift-recheck annotation reads an ARTICLE's baselines and is unchanged.
+   * The attested close passes ATTESTABLE_OWNER_TYPES, because settlement mints
+   * reconcile_needed items against reference_material owners too and such an item
+   * would otherwise be unclosable (review finding 1). The chain walk, the cycle
+   * guard, the hop cap and the live-status requirement are identical either way:
+   * only the terminal type test widens, so there is no second resolver to drift.
    *
    * IT MUST TERMINATE ON A LIVE ARTICLE OR ABSTAIN (review FIX 3, 2026-08-31).
    * The first implementation exited the walk on a BROKEN chain — a superseded
@@ -1806,7 +2000,7 @@ export class SterlingTools {
    * against. Every abnormal shape now returns undefined, and the caller's
    * `unavailable:article_unresolved` disclosure is what the reader sees.
    */
-  private liveArticleFor(link: string): DurableRecord | undefined {
+  private liveArticleFor(link: string, types: readonly string[] = ['feature_article']): DurableRecord | undefined {
     let record = this.store.get(link);
     // Bounded AND cycle-guarded: a torn store degrades to an abstention rather
     // than spinning a read forever. The hop cap is a second, shape-independent
@@ -1822,9 +2016,9 @@ export class SterlingTools {
       if (!next || next.id === record.id) return undefined;
       record = next;
     }
-    // Both conditions, not just the type: only a LIVE article's baselines
+    // Both conditions, not just the type: only a LIVE owner's baselines
     // describe the bytes a current read should be compared against.
-    return record && record.type === 'feature_article' && record.status === 'active' ? record : undefined;
+    return record && types.includes(record.type) && record.status === 'active' ? record : undefined;
   }
 
   /**
@@ -1856,7 +2050,13 @@ export class SterlingTools {
     ].some((re) => re.test(role));
   }
 
-  /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read. */
+  /** sha256 of a file's bytes under the given tree root, or undefined if it cannot be read.
+   *  PATHNAME-BASED and symlink-FOLLOWING, deliberately unchanged: its callers are the
+   *  read-time drift wires, which ask "do the bytes this path resolves to still match the
+   *  baseline?" and are answered by the same resolution computeBaselines used to write that
+   *  baseline. The attestation does NOT share it — it collects its own evidence
+   *  through ./attestation-proof.ts, whose whole claim is about a buffer it read
+   *  itself, not about a pathname. */
   private hashFile(rel: string, root: string | undefined = this.repoRoot): string | undefined {
     if (!root) return undefined;
     try {
@@ -1996,7 +2196,15 @@ export class SterlingTools {
     // the recheck it is published as the affirmative claim "the drift no longer
     // reproduces", so a timestamp is nowhere near enough evidence. The content
     // hash decides there, bounded by the attempt and byte axes.
-    if (ctx.honorMtimePrefilter && !(stat.mtimeMs > Date.parse(ctx.baselinedAt))) {
+    //
+    // AND IT IS OFF PER-PATH FOR AN ATTESTED PATH (board 8c8b6d78 / R9), at the
+    // mint too. An attestation re-stamps one path's baseline while PRESERVING the
+    // article's updated_at, so for that path the prefilter's premise ("mtime no
+    // newer than updated_at ⇒ unchanged since the baseline was taken") is simply
+    // false: the baseline is newer than the clock. Hashing is the only sound
+    // answer there, and it is what makes a post-attestation mtime-preserved edit
+    // still visible. See DriftCheckContext.attestedPaths.
+    if (ctx.honorMtimePrefilter && !ctx.attestedPaths?.has(rel) && !(stat.mtimeMs > Date.parse(ctx.baselinedAt))) {
       return { verdict: { kind: 'clean' }, size };
     }
     // A registered generated projection never CONTENT-flags: every regen changes
@@ -2039,8 +2247,15 @@ export class SterlingTools {
    * is COMPUTED here — the baselines exist, H7 and the read-time drift wires
    * already consult them, and projectForQuery strips them from query output so
    * a reader could not see that a record's owned file had moved since the bytes
-   * it was written against. This DERIVES that verdict for the window and hands
+   * the record STANDS BEHIND. This DERIVES that verdict for the window and hands
    * it to the reader, mirroring board_query's annotation + `provenance` pair.
+   *
+   * "STANDS BEHIND" IS THE HONEST WORDING, and it covers two provenances (board
+   * 8c8b6d78 / R9): a baseline is EITHER the bytes the record was last
+   * content-reconciled against, OR the bytes an already-paid close explicitly
+   * ATTESTED the existing prose already describes. Both are claims the record
+   * makes about live bytes, which is what this check tests; the two are told
+   * apart per path by `baseline_attestations`, never by the baseline alone.
    *
    * WHY NOT contentChanged(): that helper deliberately collapses "no baseline"
    * and "cannot read the file" into `false`, because its callers RAISE FLAGS and
@@ -2112,7 +2327,7 @@ export class SterlingTools {
       const notes: string[] = [];
       if (changed.length) {
         notes.push(
-          `⚠ ${changed.length} owned file(s) changed since this record's baseline (${changed.join(', ')}) — it was written against different bytes, so re-read the code before trusting it`
+          `⚠ ${changed.length} owned file(s) changed since this record's baseline (${changed.join(', ')}) — the baseline is the bytes this record was last content-reconciled against, or that an already-paid close explicitly attested it already describes, and they are no longer the bytes on disk, so re-read the code before trusting it`
         );
       }
       if (unverifiable.length) {
@@ -2209,7 +2424,8 @@ export class SterlingTools {
             `To correct a WRONG record, knowledge_update it in place (the correction supersedes the error); do NOT create a second record under the same slug. ` +
             `The one retirement path is knowledge_retire(id, in_favor_of), and it is NARROW: it is for a genuine DUPLICATE whose reader must be sent to the survivor, ` +
             `never for a record that is merely wrong — /sterling:cleanup never hard-deletes knowledge either.`
-          : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile.`)
+          : `id and the clocks are assigned at write; type is fixed at create; lifecycle/freshness are derived by the store; file_baselines is computed server-side at create/reconcile; ` +
+            `baseline_attestations is drift PROVENANCE minted only when a reconcile_needed item is closed as already-paid (board_remove / maintenance_remove), from hashes the server takes itself.`)
     );
   }
 
@@ -2877,8 +3093,19 @@ export class SterlingTools {
       // the article and enqueues ONE reconcile_needed item (same feature_link
       // dedup as H7 — one drain surface regardless of trigger).
       if (record.type === 'feature_article' && this.repoRoot) {
-        const a = record as unknown as { id: string; slug: string; files?: { path: string; role?: string }[]; file_baselines?: Record<string, string> };
+        const a = record as unknown as {
+          id: string;
+          slug: string;
+          files?: { path: string; role?: string }[];
+          file_baselines?: Record<string, string>;
+          baseline_attestations?: Record<string, unknown>;
+        };
         const roleFor = (p: string) => (a.files ?? []).find((f) => f.path === p)?.role;
+        // Paths whose baseline came from an ALREADY-PAID close rather than a
+        // content reconcile (board 8c8b6d78 / R9): the article's updated_at was
+        // preserved by that write, so the mtime prefilter must not terminate on
+        // them — see DriftCheckContext.attestedPaths.
+        const attestedPaths = new Set(Object.keys(a.baseline_attestations ?? {}));
         // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a copy-
         // describing article's files are stat'd against ITS tree — resolving
         // against the project root produced false "out-of-band deletion" items
@@ -2911,6 +3138,7 @@ export class SterlingTools {
             baselines: a.file_baselines,
             baselinedAt: record.updated_at,
             honorMtimePrefilter: true,
+            attestedPaths,
           });
           // Owned bytes that actually exist, for the state-honesty check below —
           // free, because the classifier already took the stat.
@@ -6064,6 +6292,16 @@ export class SterlingTools {
     // merge's mtime reset (§3.2.3). Overwrites any stale baseline carried from old.
     if (next.type === 'feature_article' || next.type === 'reference_material') {
       next.file_baselines = this.computeBaselines(next);
+      // AND THE ATTESTATION MAP IS CLEARED WHOLESALE (board 8c8b6d78 / R9), never
+      // per path. computeBaselines re-hashes EVERY owned path, so after this write
+      // every baseline belongs to the CONTENT-UPDATE generation — including paths
+      // whose hash coincidentally still matches what an earlier close attested.
+      // Keeping a stale attestation entry beside a content-minted baseline would
+      // make the provenance lie about which write produced it, and the whole
+      // point of the sibling map is that those two claims stay distinguishable.
+      // Clearing wholesale also drops, for free, any attestation on a path this
+      // article has stopped owning.
+      next.baseline_attestations = undefined;
     }
     const previousVersion = (old as unknown as { version?: number }).version;
     // EXPLICIT-RESOLVES CLOSURE (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1;
@@ -7365,14 +7603,22 @@ export class SterlingTools {
       // shaResolves — git resolves an abbreviated sha too, so a short-but-real
       // value would pass shaResolves and only fail later at the schema layer
       // with a bare zod message instead of this refusal naming the value.
-      if (!/^[0-9a-f]{40}$/.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
         throw new Error(
           `board_add: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
       }
       stampedHead = candidate;
     } else {
-      stampedHead = this.currentHeadSha(this.repoRoot);
+      // NARROWED TO THE SCHEMA'S SHAPE. currentHeadSha now also answers with a
+      // 64-hex id in a SHA-256 repository (so the attested close works there),
+      // but `todo.measured_at_head` is pinned to 40 hex — stamping the wider form
+      // would turn today's silent no-stamp degrade into a zod refusal that fails
+      // the whole board write. Unstampable stays unstamped, and board_query's
+      // annotation surface is where the absence is disclosed, exactly as when git
+      // is unavailable.
+      const head = this.currentHeadSha(this.repoRoot);
+      stampedHead = head !== undefined && MEASURED_AT_HEAD_RE.test(head) ? head : undefined;
     }
     const res = this.knowledgeCreate('todo', {
       text,
@@ -8067,14 +8313,17 @@ export class SterlingTools {
     if ('measured_at_head' in patch) {
       const candidate = String(patch.measured_at_head);
       // FIX F5: shape check before shaResolves (see boardAdd's identical fix).
-      if (!/^[0-9a-f]{40}$/.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
+      if (!MEASURED_AT_HEAD_RE.test(candidate) || !this.shaResolves(candidate, this.repoRoot)) {
         throw new Error(
           `board_update: measured_at_head '${candidate}' does not resolve to a commit in this repo — refused rather than silently replaced with HEAD (P5, decision board-provenance-measured-at-head)`
         );
       }
     } else if ('text' in patch || 'file_keys' in patch) {
+      // Narrowed to the schema's 40-hex shape, same reasoning as boardAdd's
+      // stamping arm: a 64-hex SHA-256 id would be refused by zod, converting a
+      // silent no-stamp into a failed board write.
       const head = this.currentHeadSha(this.repoRoot);
-      if (head) patch = { ...patch, measured_at_head: head };
+      if (head && MEASURED_AT_HEAD_RE.test(head)) patch = { ...patch, measured_at_head: head };
     }
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
     // 'standalone' clears the grouping to absent (decision a8d2ce6c) — the same
@@ -8403,6 +8652,535 @@ export class SterlingTools {
   }
 
   /**
+   * ========================================================================
+   * THE ALREADY-PAID ATTESTATION — CLOSING A reconcile_needed ITEM IS A CLAIM
+   * ========================================================================
+   * Board 8c8b6d78 (R9), objective rebuild-2026-09.
+   *
+   * THE DEFECT. The drain SOP says an already-paid reconcile_needed item closes
+   * with board_remove / maintenance_remove and NO knowledge_update. But H7's
+   * settlement predicate compares live bytes against the owning article's
+   * UNCHANGED `file_baselines` (scripts/hooks/lib/settlement.mjs), and no remove
+   * verb moves a baseline — so the SOP as written GUARANTEES the re-mint.
+   * Measured in a consuming project 2026-09-05: 90 items drained by that rule,
+   * five re-minted by the next commit, which touched none of their files.
+   *
+   * THE SEMANTICS. The close IS the attestation — "the prose already describes
+   * these bytes" — so it re-stamps the baseline for EXACTLY the item's
+   * file_keys. A NAKED baseline write was rejected: three readers already read a
+   * matching baseline as "last CONTENT-RECONCILED against exactly this
+   * content", so a bare stamp would make all three lie. Hence the sibling
+   * `baseline_attestations` map, which records WHICH close made the claim, WHEN,
+   * and against WHICH COMMIT — the two provenances stay distinguishable per
+   * path, forever, and every reader can say "content-reconciled OR explicitly
+   * attested" and then look up which.
+   *
+   * THE INVARIANT (decision
+   * [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
+   * For each attested path P: the baseline written is sha256(B), where B is a
+   * byte buffer THIS PROCESS READ from the worktree at P, and the proof that B is
+   * HEAD's content is made about B ITSELF — `git hash-object --path=P --stdin`
+   * fed B prints exactly the blob id of P's regular-file entry in the tree of
+   * commit C. Membership, NAME and MODE come from `git ls-tree` against C with
+   * the returned name required to equal P byte-for-byte, so git's tree is the
+   * name authority and no filesystem-level alias (trailing dot, 8.3 short name,
+   * case) can ever match. Because the proof and the baseline are about the SAME
+   * buffer, no race between a filesystem check and a read can make the
+   * attestation lie — that is why there is no containment walk, no identity
+   * proxy, no second re-hash pass and no HEAD re-check here any more: those were
+   * five layers of guarding a hand-resolved PATH, and the path is no longer
+   * hand-resolved. See ./attestation-proof.ts, which owns the whole proof.
+   *
+   * NOT GUARANTEED, stated plainly: that the worktree stays clean afterwards
+   * (read-time drift detection owns that, and an attested path is never
+   * mtime-short-circuited); anything about untracked, absent or non-regular
+   * paths, which are refused; and on Windows, where O_NOFOLLOW does not exist,
+   * the no-follow read is best-effort (lstat before open).
+   *
+   * THE STATE TRANSITION, in this order:
+   *   1. pre-lock: admission (exact full uuid, system source, reconcile_needed
+   *      lane, generated-projection exemption, feature_link resolving to a live
+   *      article), the scope refusals, and then ALL git/filesystem evidence —
+   *      outside the writer lock, because `--path=` runs the repository's
+   *      configured clean filter, an arbitrary program;
+   *   2. inside ONE transaction opened on the store PHYSICALLY HOLDING the
+   *      article (withTransactionForRecord — the holder-affine helper, never the
+   *      label-routed one: a body's `scope` is caller-writable and is not a
+   *      mount, anti_pattern [record-body-scope-is-not-physical-store-identity]),
+   *      re-read the ITEM and the ARTICLE and re-run every admission and scope
+   *      check against THOSE reads — including the two pre-lock fall-through
+   *      tests, which under the lock REFUSE rather than fall through (see the
+   *      fall-through note below), plus a check that the evidence still answers
+   *      for this exact tree and key set;
+   *   3. write the article: version+1, prior body archived, CAS on the version
+   *      just read, baselines MERGED per key, provenance added — and
+   *      `updated_at` PRESERVED (see the clock note below);
+   *   4. remove the item, which writes the §3.2.7 drain log;
+   *   5. any failure rolls all of it back together — there is no partial
+   *      attestation and no closed item beside an unstamped article.
+   *
+   * THE CLOCK IS PRESERVED, AND THAT IS LOAD-BEARING. `updated_at` doubles as
+   * "the instant these baselines were taken" and drives the read-time mtime
+   * prefilter. Advancing it while re-stamping only SOME owned paths MASKS real
+   * standing drift on the others: baselines for `a` and `b` at T0; `b` drifts at
+   * T1; an attestation close for `a` moves the clock to T2; a later read stats
+   * `b`, sees mtime(b)=T1 <= T2, and returns `clean` WITHOUT ever comparing `b`
+   * to its stale hash. store.updateRecordMetadata preserves it; the REAL time
+   * goes to `baseline_attestations[path].attested_at`, to the activity row and
+   * to the drain log, so no chronology is falsified.
+   *
+   * WHY THERE IS NO ATOMICITY DISCLOSURE ANY MORE. The old design compared a
+   * PATH's bytes to HEAD and then wrote a baseline, so every gap between the
+   * check and the write was a hole, and the disclosure had to enumerate how
+   * narrow each one was. The proof is now made about the BUFFER, so there is
+   * nothing left to narrow: whatever else the filesystem does, the bytes that
+   * were hashed are the bytes that were proven, and the receipt claims exactly
+   * that and nothing about later instants. The SQLite transaction still does not
+   * freeze the working tree — it never needed to.
+   *
+   * WHAT AN ACCEPTED CLOSE CAN AND CANNOT COST. Acceptance requires the read
+   * buffer to hash (through git's clean filter for that path) to that path's own
+   * committed blob id, so a close can never mint an arbitrary baseline nor attest
+   * attacker-chosen bytes, and it returns no bytes to the caller. The residual
+   * harm is a wrongly-ACCEPTED close: the item is closed while the in-tree file
+   * is genuinely drifted. H7 still detects that drift afterwards, because the
+   * stamped baseline is HEAD content and the real file differs from it, and the
+   * backstop is the per-attested-path ALWAYS-HASH rule at read time
+   * (DriftCheckContext.attestedPaths) — an attested path never short-circuits on
+   * mtime again, so a post-attestation edit still surfaces as drift even if it
+   * preserved or backdated its mtime.
+   *
+   * WHAT IS DELIBERATELY NOT AN ATTESTATION REFUSAL. A NON-reconcile_needed item,
+   * and an item ALL of whose keys are registered generated projections, fall
+   * THROUGH to today's ordinary removal, unchanged — for the projection case
+   * because settlement strips those paths and read-time classification calls
+   * them clean without ever consulting baselines, so minting durable baseline
+   * provenance for a path H7 does not govern would simply be a lie. A MIXED item
+   * does NOT fall through: it refuses, because its governed path is real debt and
+   * closing it bare would reopen the very loop this mechanism exists to end
+   * (decision
+   * [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
+   * — a bypass needs an AFFIRMATIVE exemption covering the WHOLE item).
+   *
+   * THAT FALL-THROUGH IS AN ADMISSION DECISION, MADE BEFORE THE LOCK — AND IT IS
+   * NOT REPEATED INSIDE (review finding 3). `file_keys` is caller-updatable
+   * (board_update), so an item's keys can be rewritten to a generated-projection
+   * path between the pre-lock test and BEGIN IMMEDIATE. Inside the transaction
+   * that is not a second chance to fall through: the evidence this call was
+   * admitted on has been invalidated, so the whole attestation REFUSES, naming
+   * the offending key. The caller's retry re-reads the new keys pre-lock and
+   * falls through correctly then. Same posture as decision
+   * [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]:
+   * invalidated evidence never earns a bypass.
+   *
+   * Returns the receipt when it attested (the item is REMOVED by then, so the
+   * caller must not remove it again), or undefined when this item is not an
+   * attestation candidate and the caller should perform its ordinary removal.
+   * Every other outcome THROWS, with nothing written.
+   */
+  private attestAlreadyPaidClose(op: string, item: DurableRecord): BaselineAttestationReceipt | undefined {
+    const it = item as unknown as { id: string; source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] };
+    // FALL-THROUGH, NOT REFUSAL — every other lane and every user item removes
+    // exactly as it does today.
+    if (it.source !== 'system' || it.system_reason !== 'reconcile_needed') return undefined;
+    const keys = this.attestationKeys(op, it.id, it.file_keys);
+    // GENERATED PROJECTIONS: NONE → attest, ALL → ordinary removal, MIXED →
+    // REFUSE naming the projection key(s).
+    //
+    // The exemption exists because settlement strips a projection path from every
+    // candidate set BEFORE it evaluates ownership or drift, and the read-time
+    // classifier calls it clean without consulting baselines (decision e1275166's
+    // territory) — so H7 does not govern it and there is no re-mint to suppress.
+    // That is an AFFIRMATIVE exemption, and decision
+    // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
+    // says a bypass needs one for the WHOLE item. A MIXED item has none: its real
+    // path IS governed, and falling through would close a live debt that the next
+    // settlement pass re-mints — the exact loop R9 exists to end. It cannot attest
+    // just the real path either, because the receipt's scope would then misdescribe
+    // the item it names. So it refuses, naming what disqualified it.
+    const exempt = keys.filter((k) => this.isGeneratedProjection(k));
+    if (exempt.length === keys.length && keys.length > 0) return undefined;
+    if (exempt.length > 0) {
+      throw new Error(
+        `${op}: reconcile_needed item '${it.id}' mixes ${exempt.length} registered generated projection(s) (${exempt.join(', ')}) with ` +
+          `${keys.length - exempt.length} governed path(s) — a projection key exempts an item from attestation only when EVERY key is ` +
+          `exempt, because a partial fall-through would close a live reconcile debt on the governed path and the next settlement pass ` +
+          `would re-mint it. Split the item with board_update (projections in one, governed paths in another), or reconcile the article ` +
+          `with knowledge_update and claim this item in 'resolves'. Nothing was written.`
+      );
+    }
+    // EXACT FULL UUID, defensively re-asserted (anti_pattern
+    // [no-bounded-trail-guard-for-destructive-addressing]): both callers already
+    // reach this item through an exact store.get, but this branch both DESTROYS
+    // the item and mints durable provenance naming it, so the addressing contract
+    // is stated where the provenance is minted rather than inferred from a caller.
+    if (!SterlingTools.FULL_UUID_RE.test(it.id)) {
+      throw new Error(
+        `${op}: '${it.id}' is not a full record id, and closing a reconcile_needed item as ALREADY-PAID writes durable provenance ` +
+          `naming the closed item — an abbreviation could name a different item in that record forever. Nothing was written.`
+      );
+    }
+    if (!it.feature_link) {
+      throw new Error(
+        `${op}: reconcile_needed item '${it.id}' carries no feature_link, so there is no ${ATTESTABLE_OWNER_NOUN} whose baseline this close could ` +
+          `attest — and removing it bare would leave H7 re-minting it on the next touch of the same bytes (board 8c8b6d78). ` +
+          `Nothing was written.`
+      );
+    }
+    // PRE-LOCK READ, FOR ROUTING ONLY. It decides which MOUNT the transaction
+    // opens on and nothing else; every fact the attestation acts on is re-read
+    // inside. (The alternative — opening on the project store by assumption —
+    // would put the transaction on a different database than the article write
+    // whenever the two disagree, which is exactly the affinity defect
+    // withTransactionForRecord exists to close.)
+    const routing = this.liveArticleFor(it.feature_link, ATTESTABLE_OWNER_TYPES);
+    if (!routing) {
+      throw new Error(
+        `${op}: reconcile_needed item '${it.id}' has feature_link '${it.feature_link}', which does not resolve to a LIVE ` +
+          `${ATTESTABLE_OWNER_NOUN} (missing, retired into a broken chain, or a type that carries no file_baselines — settlement ` +
+          `mints these items only against ${ATTESTABLE_OWNER_TYPES.join(' / ')}) — there is nothing to attest against. Nothing was written.`
+      );
+    }
+    // ALL GIT AND FILESYSTEM EVIDENCE IS COLLECTED HERE, OUTSIDE THE LOCK.
+    // `git hash-object --path=` runs the repository's configured CLEAN FILTER,
+    // which is an arbitrary program; running it while holding the store's single
+    // writer would put an unbounded external execution surface inside a database
+    // transaction. Inside the lock only the CAS write and the item removal remain.
+    // The evidence is bound to the exact keys and tree it was taken for, and the
+    // transaction refuses if either has moved (see attestInTransaction).
+    const prepared = this.collectAttestationProof(op, it.id, routing, keys);
+    return this.store.withTransactionForRecord(routing.id, () => this.attestInTransaction(op, it.id, routing.id, prepared));
+  }
+
+  /**
+   * The pre-lock evidence pass: resolve the article's tree, decide the key set,
+   * and prove — through git, about the buffers this process reads — that each
+   * key's worktree bytes are its committed content at one captured commit.
+   *
+   * Everything here is READ-ONLY and re-validated under the lock; nothing it
+   * returns is trusted on its own. It exists at this position for one reason:
+   * the proof spawns git (and, through `--path=`, whatever clean filter the
+   * repository configures), and that must not happen under the writer lock.
+   */
+  private collectAttestationProof(op: string, itemId: string, article: DurableRecord, keys: string[]): PreparedAttestation {
+    const rec = article as unknown as Record<string, unknown>;
+    // The article's OWN tree — a mapped working_tree has its own bytes AND its own
+    // HEAD, and an unmapped name abstains loud everywhere else, so it refuses here
+    // rather than reading the project root's same-named files. A MISSING repo root
+    // refuses on the same footing (decision
+    // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]):
+    // evidence this process cannot obtain is never an exemption.
+    const tree = this.treeRootFor(rec);
+    if (tree.unresolved || !tree.root) {
+      throw new Error(
+        `${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` +
+          (tree.unresolved
+            ? ` (working_tree='${String((rec as { working_tree?: unknown }).working_tree)}' is not mapped in config.working_trees)`
+            : ` (no repo root is configured)`) +
+          ` — an attestation must prove the bytes the record actually describes, never another tree's same-named files. Nothing was written.`
+      );
+    }
+    this.refuseAttestationScope(op, itemId, article, keys);
+    return { root: tree.root, keys, evidence: this.attestationEvidence(op, itemId, tree.root, keys) };
+  }
+
+  /**
+   * The scope refusals, in the order that keeps the expensive work last: no keys,
+   * an unowned key, then the path-count cap. Run BOTH pre-lock (so the evidence
+   * pass never touches a set that was never admissible) and again under the lock
+   * against the re-read item and article, because `file_keys` is caller-updatable
+   * through board_update and the two reads can disagree.
+   */
+  private refuseAttestationScope(op: string, itemId: string, article: DurableRecord, keys: string[]): void {
+    if (keys.length === 0) {
+      throw new Error(
+        `${op}: reconcile_needed item '${itemId}' names no files, so closing it as ALREADY-PAID would attest nothing while ` +
+          `claiming the debt is paid. Reconcile the ${ATTESTABLE_OWNER_NOUN} with knowledge_update and claim the item in 'resolves' instead. Nothing was written.`
+      );
+    }
+    // SCOPE AS A SUBSET, NOT AN INTERSECTION. An intersection would silently
+    // permit an EMPTY successful attestation (every key unowned → nothing stamped
+    // → item closed → the debt is lost and the re-mint returns). Owned paths come
+    // from the REGISTERED file-key extractor for THIS OWNER'S TYPE — the same
+    // definition computeBaselines uses (a feature_article's files[].path, a
+    // reference_material's repo-relative location) — never a second hand-rolled
+    // walk, and never the article extractor applied to the other type.
+    const owned = new Set(this.attestableOwnedKeys(op, article));
+    const unowned = keys.filter((k) => !owned.has(k));
+    if (unowned.length) {
+      const slug = (article as unknown as { slug?: string }).slug;
+      throw new Error(
+        `${op}: item '${itemId}' names ${unowned.length} path(s) the ${ATTESTABLE_OWNER_NOUN} '${slug ?? article.id}' does not own ` +
+          `(${unowned.join(', ')}) — an attestation can only claim "the prose already describes these bytes" for paths the prose ` +
+          `actually owns, and stamping a baseline for an unowned path would mint provenance nothing reads. Either bring the path under ` +
+          `the record's ownership (an article's files[], a reference document's location) and reconcile it, or close the item some ` +
+          `other way. Nothing was written.`
+      );
+    }
+    // THE PATH-COUNT CAP, checked whole before any evidence is gathered and again
+    // before any mutation: `todo.file_keys` has no schema cardinality limit, and
+    // each path costs a read plus a git subprocess.
+    if (keys.length > ATTESTATION_MAX_PATHS) {
+      throw new Error(
+        `${op}: item '${itemId}' names ${keys.length} paths, over the ${ATTESTATION_MAX_PATHS}-path attestation cap. ` +
+          `The whole close is refused (never a partial attestation). Reconcile the ${ATTESTABLE_OWNER_NOUN} with knowledge_update, ` +
+          `which re-baselines every owned path in one write, and claim the item in 'resolves'. Nothing was written.`
+      );
+    }
+  }
+
+  /**
+   * The owner's OWN owned paths, from the registered extractor for its own type
+   * — the one definition computeBaselines uses, never a second walk and never
+   * one type's extractor applied to another's shape.
+   *
+   * The type test is re-asserted here rather than assumed from the resolver: this
+   * is the function that decides what "owned" means for the scope subset check,
+   * and an unregistered or non-baseline-carrying type reaching it would silently
+   * produce an EMPTY owned set — which reads as "every key is unowned" and
+   * refuses, but for the wrong stated reason. Refusing by name keeps the message
+   * true to what happened.
+   */
+  private attestableOwnedKeys(op: string, owner: DurableRecord): string[] {
+    const type = owner.type;
+    if (!ATTESTABLE_OWNER_TYPES.includes(type)) {
+      throw new Error(
+        `${op}: '${owner.id}' is a ${type}, not ${ATTESTABLE_OWNER_TYPES.join(' or ')} — only those carry the file_baselines an ` +
+          `attested close re-stamps. Nothing was written.`
+      );
+    }
+    return RECORD_TYPES[type as 'feature_article' | 'reference_material'].fileKeys(owner as unknown as Record<string, unknown>);
+  }
+
+  /** The one place `collectAttestationEvidence`'s typed refusals are rendered in
+   *  this surface's refusal voice. The path and the reason come from the refusal
+   *  itself, so no failure shape can be dropped by omission here. */
+  private attestationEvidence(op: string, itemId: string, root: string, keys: string[]): AttestationEvidence {
+    try {
+      return collectAttestationEvidence({ root, keys, maxTotalBytes: ATTESTATION_MAX_TOTAL_BYTES });
+    } catch (err) {
+      if (err instanceof AttestationRefusal) {
+        throw new Error(
+          `${op}: item '${itemId}' cannot be closed as ALREADY-PAID — ${err.message}. An attestation states that the article's prose ` +
+            `already describes bytes that are COMMITTED, so it refuses the WHOLE close rather than stamp a claim nobody could ` +
+            `re-check. Nothing was written.`
+        );
+      }
+      throw err;
+    }
+  }
+
+  /** The attestation's state transition, run under the write lock — see
+   *  attestAlreadyPaidClose for the invariant. `itemId` / `articleId` are
+   *  IDENTIFIERS ONLY: every fact is re-read here, including the two the caller
+   *  already tested pre-lock (lane, generated projections) — which here REFUSE
+   *  rather than fall through, because a fall-through is an admission decision and
+   *  the item has changed under us.
+   *
+   *  `prepared` carries the git evidence, collected before this lock was taken. It
+   *  is accepted only if the tree and the key set it was taken for are STILL the
+   *  ones this transaction reads; otherwise the evidence describes a different
+   *  question and the close refuses. No git call and no file read happens from
+   *  here on — only the CAS write and the item removal. */
+  private attestInTransaction(op: string, itemId: string, articleId: string, prepared: PreparedAttestation): BaselineAttestationReceipt {
+    const ts = this.now();
+    // (1) THE ITEM, re-read. A concurrent close refuses HERE even though ordinary
+    //     maintenance_remove treats a recent drain-log hit as idempotent success:
+    //     that idempotency answers "the item is gone, which is what you wanted",
+    //     but this branch would additionally mint durable provenance claiming a
+    //     close that this call did not perform.
+    const freshItem = this.store.get(itemId) as
+      | (DurableRecord & { source?: string; system_reason?: string; feature_link?: string; file_keys?: string[] })
+      | undefined;
+    if (!freshItem) {
+      throw new Error(
+        `${op}: item '${itemId}' was removed concurrently — it is already closed, but this call would have written baseline ` +
+          `provenance naming it, so it refuses rather than attesting a close it did not perform. Nothing was written.`
+      );
+    }
+    if (freshItem.type !== 'todo' || freshItem.source !== 'system' || freshItem.system_reason !== 'reconcile_needed') {
+      throw new Error(
+        `${op}: item '${itemId}' is no longer a system-source reconcile_needed item (it now reads type '${freshItem.type}', ` +
+          `source '${freshItem.source ?? 'user'}', lane '${freshItem.system_reason ?? 'none'}') — it changed under this call. Nothing was written.`
+      );
+    }
+    // (2) THE OWNER (article or reference document), re-read, and the admission
+    //     checks against THAT read.
+    const article = this.store.get(articleId) as (DurableRecord & { slug?: string; version?: number; working_tree?: unknown }) | undefined;
+    if (!article) {
+      throw new Error(`${op}: the ${ATTESTABLE_OWNER_NOUN} '${articleId}' was removed concurrently; nothing was written.`);
+    }
+    if (!ATTESTABLE_OWNER_TYPES.includes(article.type)) {
+      throw new Error(
+        `${op}: '${articleId}' is a ${article.type}, not ${ATTESTABLE_OWNER_TYPES.join(' or ')} — only an ${ATTESTABLE_OWNER_NOUN} ` +
+          `carries the baselines this close attests. Nothing was written.`
+      );
+    }
+    // The link must STILL resolve to this same record (its chain included) —
+    // re-resolved from the fresh item, so a feature_link edited between the
+    // routing read and the lock cannot attest against the record we happened to
+    // open the transaction on.
+    const relinked = freshItem.feature_link ? this.liveArticleFor(freshItem.feature_link, ATTESTABLE_OWNER_TYPES) : undefined;
+    if (!relinked || relinked.id !== article.id) {
+      throw new Error(
+        `${op}: item '${itemId}' no longer links to the ${ATTESTABLE_OWNER_NOUN} '${article.id}' — its feature_link now resolves to ` +
+          `'${relinked?.id ?? 'nothing live'}'. Nothing was written.`
+      );
+    }
+    // MOUNT AFFINITY, from the STORAGE LAYER and the label together, neither
+    // implying the other (targetMountFault — the one definition, shared with the
+    // resolves paths). A maintenance item is project-local, so a domain-held
+    // owner record could never share one transaction with its drain.
+    const fault = SterlingTools.targetMountFault(
+      (article as unknown as { scope?: unknown }).scope,
+      this.store.projectStoreHolds(article.id)
+    );
+    if (fault) {
+      throw new Error(
+        `${op}: cannot attest the baseline of the ${ATTESTABLE_OWNER_NOUN} '${article.id}', because it ${fault}. ` +
+          `${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
+      );
+    }
+    // The OWNER's OWN tree, re-resolved — a mapped working_tree has its own
+    // bytes AND its own HEAD, and an unmapped name abstains loud everywhere else,
+    // so it refuses here rather than attesting the project root's same-named files.
+    const tree = this.treeRootFor(article as unknown as Record<string, unknown>);
+    if (tree.unresolved || !tree.root) {
+      throw new Error(
+        `${op}: cannot resolve the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in` +
+          (tree.unresolved ? ` (working_tree='${String(article.working_tree)}' is not mapped in config.working_trees)` : ` (no repo root is configured)`) +
+          ` — an attestation must prove the bytes the record actually describes, never another tree's same-named files. Nothing was written.`
+      );
+    }
+    if (tree.root !== prepared.root) {
+      throw new Error(
+        `${op}: the working tree the ${ATTESTABLE_OWNER_NOUN} '${article.id}' owns its paths in changed under this call ('${prepared.root}' → ` +
+          `'${tree.root}') — the evidence was gathered in the first tree, so it does not answer for the second. Retry. Nothing was written.`
+      );
+    }
+    const keys = this.attestationKeys(op, itemId, freshItem.file_keys);
+    // THE GENERATED-PROJECTION TEST, RE-RUN UNDER THE LOCK — AND HERE IT REFUSES
+    // (review finding 3). Pre-lock, a projection key routes the item to ordinary
+    // removal; that is an ADMISSION decision taken on the item as it was then.
+    // `file_keys` is caller-updatable through board_update, so the keys can be
+    // rewritten to a projection path between that read and BEGIN IMMEDIATE — and
+    // at that point the evidence this call was admitted on is no longer valid.
+    // Falling through HERE would stamp durable provenance for a path H7 does not
+    // govern; so the whole close refuses, naming the key, and a retry re-decides
+    // pre-lock on the new keys. (Decision
+    // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]:
+    // a bypass needs an AFFIRMATIVE exemption, never invalidated evidence.)
+    const projections = keys.filter((k) => this.isGeneratedProjection(k));
+    if (projections.length) {
+      throw new Error(
+        `${op}: item '${itemId}' changed under this call — its file_keys now name ${projections.length} registered generated ` +
+          `projection(s) (${projections.join(', ')}), which were not there when this close was admitted. A projection key routes an ` +
+          `item to ORDINARY removal, a decision made before the lock; it is not a fall-through once the item has mutated, because the ` +
+          `evidence this attestation was admitted on is no longer valid. Retry: the retry re-reads these keys and falls through. Nothing was written.`
+      );
+    }
+    // THE SAME SCOPE REFUSALS the pre-lock pass ran, re-run against the re-read
+    // item and article: no keys, an unowned key, the path cap.
+    this.refuseAttestationScope(op, itemId, article, keys);
+    // THE EVIDENCE MUST ANSWER FOR EXACTLY THIS KEY SET. `file_keys` is
+    // caller-updatable through board_update, so the item can be rewritten between
+    // the evidence pass and BEGIN IMMEDIATE. A key added since then has no proof; a
+    // key removed since then would be stamped without being claimed. Either way the
+    // evidence describes a different question, so the whole close refuses rather
+    // than re-reading the filesystem under the writer lock.
+    const proven = Object.keys(prepared.evidence.perPath).sort();
+    if (proven.length !== keys.length || keys.some((k, i) => k !== proven[i])) {
+      throw new Error(
+        `${op}: item '${itemId}' changed under this call — its file_keys now read (${keys.join(', ') || 'none'}) but the committed-bytes ` +
+          `evidence was gathered for (${proven.join(', ') || 'none'}). The evidence is bound to the exact paths it was taken for, so the ` +
+          `whole close is refused rather than stamped from a proof of something else. Retry. Nothing was written.`
+      );
+    }
+    // (4) THE COMMIT THE PROOF WAS MADE AGAINST. There is no HEAD re-check and no
+    //     second read: `head_commit` is the commit the evidence pass captured, and
+    //     every proven hash is the hash of a buffer that was shown to equal THAT
+    //     commit's blob for THAT path. A ref that moved afterwards changes nothing
+    //     about what was proven — the receipt names the commit the bytes were
+    //     compared against, which is exactly what happened.
+    const headBefore = prepared.evidence.head_commit;
+    // (5) THE ARTICLE WRITE — MERGED PER KEY, never a replacement map: every
+    //     baseline this close does not attest keeps whatever generation produced
+    //     it, so unrelated standing drift on the article's other owned files
+    //     survives untouched.
+    const baselines: Record<string, string> = { ...((article as unknown as { file_baselines?: Record<string, string> }).file_baselines ?? {}) };
+    const attestations: Record<string, { attested_at: string; item_id: string; head_commit: string; sha256: string }> = {
+      ...((article as unknown as { baseline_attestations?: Record<string, { attested_at: string; item_id: string; head_commit: string; sha256: string }> })
+        .baseline_attestations ?? {}),
+    };
+    for (const rel of keys) {
+      const { sha256 } = prepared.evidence.perPath[rel]!;
+      baselines[rel] = sha256;
+      attestations[rel] = { attested_at: ts, item_id: itemId, head_commit: headBefore, sha256 };
+    }
+    const updated = this.store.updateRecordMetadata(
+      article.id,
+      { file_baselines: baselines, baseline_attestations: attestations },
+      // CAS on the version THIS transaction read, and the real time for the
+      // activity row — the body's updated_at is preserved by the primitive.
+      { ...(article.version !== undefined ? { expected_version: article.version } : {}), activity_at: ts }
+    );
+    // (6) THE ITEM LEAVES, through store.remove so the §3.2.7 drain log records
+    //     it exactly as every other system close does. EXPLICIT, not
+    //     `opts.resolves` — the write above would drain it inside the same
+    //     transaction and doing BOTH would double-remove.
+    this.store.remove(itemId, ts);
+    return {
+      article_id: article.id,
+      ...(article.slug ? { article_slug: article.slug } : {}),
+      article_version: (updated as unknown as { version?: number }).version ?? -1,
+      head_commit: headBefore,
+      attested_at: ts,
+      paths: keys,
+      note:
+        `Closed as ALREADY-PAID: the ${ATTESTABLE_OWNER_NOUN}'s baseline for ${keys.length} path(s) was re-stamped and marked as an ATTESTATION ` +
+        `("the prose already describes these bytes"), not as a content reconcile — so H7 will not re-mint this item on the next touch ` +
+        `of the same bytes, and a reader can still tell the two apart (baseline_attestations). WHAT WAS ACTUALLY PROVEN, per path: ` +
+        `git's tree for commit ${headBefore.slice(0, 8)} was asked for an entry whose name equals the path BYTE-FOR-BYTE and whose ` +
+        `mode is a regular file (so a symlink, a submodule gitlink, a directory or any filesystem-level name alias is refused, not ` +
+        `resolved); the file was then read ONCE through ONE descriptor (lstat-checked, and opened with O_NOFOLLOW where the platform ` +
+        `has it — on Windows it does not, and the no-follow read is best-effort there); and \`git hash-object --path\` of THAT SAME ` +
+        `BUFFER printed exactly that tree entry's blob id. The stamped baseline is the sha256 of that same buffer, so the proof and ` +
+        `the baseline are about one set of bytes this process read — which is what makes the claim un-raceable, rather than merely ` +
+        `narrowly-timed. WHAT IS NOT CLAIMED: that the file stays unchanged afterwards. It may change a millisecond later, which is ` +
+        `why an attested path is ALWAYS re-hashed at read time rather than trusted on mtime. The record's updated_at was ` +
+        `deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files). ` +
+        `THE STANDING COST OF THAT, so it is not a surprise later: from now on EVERY knowledge_query that returns this record ` +
+        `re-reads and sha256s each of these ${keys.length} attested path(s) — the mint-side drift check has no byte budget, so the ` +
+        `always-hash rule is uncapped there — and the cost stands until a CONTENT reconcile (knowledge_update) clears ` +
+        `baseline_attestations wholesale.`,
+    };
+  }
+
+  /**
+   * The item's file_keys, normalized, deduped and sorted — or the STANDARD
+   * refusal (review finding 6).
+   *
+   * normalizeRepoPath THROWS on an absolute, drive-prefixed or parent-escaping
+   * key, and `todo.file_keys` is caller-updatable through board_update, so such a
+   * key is reachable. Called bare, it surfaced a raw "path invariant violation"
+   * instead of the "Nothing was written." refusal every other branch of this
+   * close emits. It failed closed either way; this is message fidelity, and it is
+   * shared by BOTH normalization sites (pre-lock routing and under the lock) so
+   * the two cannot drift apart.
+   */
+  private attestationKeys(op: string, itemId: string, fileKeys: string[] | undefined): string[] {
+    try {
+      return [...new Set((fileKeys ?? []).map((k) => normalizeRepoPath(k)))].sort();
+    } catch (err) {
+      throw new Error(
+        `${op}: reconcile_needed item '${itemId}' carries a file_key that is not a repo-relative POSIX path ` +
+          `(${err instanceof Error ? err.message : String(err)}) — an attestation stamps provenance per path, so it refuses rather ` +
+          `than guess which bytes were meant. Fix the item's file_keys with board_update, or close it some other way. Nothing was written.`
+      );
+    }
+  }
+
+  /**
    * EXACT FULL ID ONLY on the destructive board path (USER-RULED RETRACTION
    * 2026-08-22, partly retracting decision
    * id-ladder-extends-to-board-tools-with-collision-guard).
@@ -8427,11 +9205,25 @@ export class SterlingTools {
    * Every refusal here NAMES WHY (removedItemError) — a bare "no record" is
    * what sent callers hunting for a deleted item in the first place.
    */
-  boardRemove(id: string): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[] } {
+  boardRemove(id: string): {
+    removed: string;
+    artifact_evidence?: Record<string, unknown>[];
+    note?: string;
+    check_skipped?: SkippedCheck[];
+    baseline_attestation?: BaselineAttestationReceipt;
+  } {
     const record = this.store.get(id);
     if (!record) throw this.removedItemError('board_remove', id);
     if (record.type !== 'todo') throw new Error(`board_remove: '${id}' is a ${record.type}, not a task`);
     const evidence = this.removalArtifactEvidence(record);
+    // R9 PARITY (board 8c8b6d78): a system reconcile_needed item closes the SAME
+    // way from either removal tool. board_remove is the conductor's surface and
+    // maintenance_remove the librarian's, but the item and the debt are identical,
+    // so the attestation cannot live on one of them only — a close through the
+    // other would re-mint on the next touch and the two tools would disagree
+    // about what closing an already-paid item means.
+    const attestation = this.attestAlreadyPaidClose('board_remove', record);
+    if (attestation) return { removed: record.id, ...evidence, baseline_attestation: attestation };
     this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: record.id, ...evidence };
   }
@@ -8456,9 +9248,14 @@ export class SterlingTools {
    * a user item by design, naming board_remove as the conductor's path so the
    * refusal teaches rather than merely blocks.
    */
-  maintenanceRemove(
-    id: string
-  ): { removed: string; artifact_evidence?: Record<string, unknown>[]; note?: string; check_skipped?: SkippedCheck[]; already_drained?: boolean } {
+  maintenanceRemove(id: string): {
+    removed: string;
+    artifact_evidence?: Record<string, unknown>[];
+    note?: string;
+    check_skipped?: SkippedCheck[];
+    already_drained?: boolean;
+    baseline_attestation?: BaselineAttestationReceipt;
+  } {
     // EXACT FULL ID ONLY, for the same reason board_remove is — this tool
     // hard-deletes a row too (see boardRemove's doc comment for the reverted
     // ladder extension and the two reviews that reverted it).
@@ -8492,6 +9289,9 @@ export class SterlingTools {
       );
     }
     const evidence = this.removalArtifactEvidence(record);
+    // R9: same attestation branch board_remove takes — see its parity note.
+    const attestation = this.attestAlreadyPaidClose('maintenance_remove', record);
+    if (attestation) return { removed: record.id, ...evidence, baseline_attestation: attestation };
     this.store.remove(record.id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
     return { removed: record.id, ...evidence };
   }

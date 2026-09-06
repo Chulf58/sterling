@@ -370,6 +370,13 @@ export class MountedStores {
     return this.mutatingStoreHolding('updateRecord', args[0]).updateRecord(...args);
   }
 
+  /** NARROW server-owned metadata write (board 8c8b6d78 / R9) in the holding
+   *  store — same routing as updateRecord, since it is the same in-place core
+   *  with the body clock preserved. */
+  updateRecordMetadata(...args: Parameters<SterlingStore['updateRecordMetadata']>): ReturnType<SterlingStore['updateRecordMetadata']> {
+    return this.mutatingStoreHolding('updateRecordMetadata', args[0]).updateRecordMetadata(...args);
+  }
+
   /** knowledge_edit-shaped exactly-once passage replace in the holding store. */
   editRecordField(...args: Parameters<SterlingStore['editRecordField']>): ReturnType<SterlingStore['editRecordField']> {
     return this.mutatingStoreHolding('editRecordField', args[0]).editRecordField(...args);

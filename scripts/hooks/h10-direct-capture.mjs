@@ -772,8 +772,9 @@ try {
   // is where reconcile_needed actually mints, hashing each candidate's CURRENT
   // content (or its ABSENCE — F1: a deleted governed file is drift too)
   // against its owning article's CURRENT baseline, so anything this turn's
-  // capture/reconcile knowledge_update calls already rebaselined, or an
-  // edit-then-revert, never mints. F6: called ONLY from the three
+  // capture/reconcile knowledge_update calls (or an attested close, R9)
+  // already rebaselined, or an edit-then-revert, never mints. F6: called
+  // ONLY from the three
   // duties-satisfied release sites below — settlement is the design's "Stop
   // AFTER capture/reconcile writes", so a Stop that is about to NAG or queue
   // an owed/missing item (duties still outstanding) never mints here; its
