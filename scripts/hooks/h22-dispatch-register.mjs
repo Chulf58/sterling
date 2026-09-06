@@ -34,6 +34,18 @@
 // imprecision (it can over-attribute a sibling's files, which over-defers; the
 // staleness TTL in H10 bounds that).
 //
+// REVIEWER TERRITORY IS PROVISIONAL AT START AND BINDS AT STOP (decision
+// edbaa38d, 2026-09-06). The paragraph above is still true for every
+// NON-reviewer class, but a reviewer-class register entry is a HINT only: its
+// `files`/`files_source` come from a positional match that the parent
+// transcript is sometimes too slow to support (the spawning record is not
+// always on disk when SubagentStart fires), so a receipt built by copying it
+// can attest another dispatch's territory — measured live. At SubagentStop the
+// receipt's territory is therefore RE-DERIVED from the brief this agent
+// provably received (bindReviewerTerritoryAtStop below) and fails closed to
+// 'unattributable' when it cannot be bound. The register entry itself is
+// unchanged: H10 and H26 keep reading exactly what they read before.
+//
 // NEVER A GATE (h19-dispatch-staging posture): this hook must never deny a
 // spawn or a stop. Internal failure is loud but non-blocking (warnNonBlocking,
 // exit 1); a corrupt register on disk degrades to empty and is rewritten valid.
@@ -69,7 +81,7 @@ import { lastDispatchBlocks, extractPathCandidates, parseReviewTerritory } from 
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates } from './lib/dispatch-advisory.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
-import { readTail } from './lib/transcript.mjs';
+import { readTail, readFromStart } from './lib/transcript.mjs';
 // isEvidenceObject / isUsableBlobSha are IMPORTED, never re-spelled here: the
 // refresh's per-path sha comparison (below) has to read a receipt's recorded
 // evidence with exactly the predicates commit-reviewed's byte gate reads it
@@ -546,6 +558,37 @@ function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
 }
 
+// PATH NORMALIZATION FOR EVERY TERRITORY THIS FILE RECORDS — hoisted out of
+// the SubagentStart branch (where it was a `toRegisterPaths` closure) when the
+// Stop-time reviewer binding became a SECOND producer of territory (decision
+// edbaa38d). It is hoisted rather than copied for the reason this file's
+// header already gives about shared detectors: two spellings of "which paths
+// may be recorded" drift, and a rebound receipt territory that normalized
+// differently from a Start-attributed one would be a second path shape on the
+// same field. The Start branch keeps a one-line alias so its call sites are
+// byte-identical; the semantics below are unchanged from that closure.
+//
+// (Original rationale, verbatim in substance: the extractor's permissiveness
+// costs more here than in H19 — a false candidate enters the register, so it
+// SUPPRESSES a real duty and holds H10's releases non-terminal for the whole
+// life of the dispatch. Under-defer is the safe direction, so this filter
+// drops anything doubtful. Repo-relative POSIX only (§3.2 path invariant at
+// the hook boundary); .git/.sterling are never governed territory, so they can
+// never own a duty. 'sterling/…' and 'git/…' are dropped too: the extractor's
+// directory segments exclude '.', so '.sterling/transient/x.json' in prompt
+// prose arrives dot-stripped as 'sterling/transient/x.json' and would
+// otherwise walk straight past the .sterling/ guard.)
+function normalizeRegisterPaths(cands, cwd) {
+  return [...new Set(cands.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
+    (r) =>
+      r !== '.git' &&
+      !r.startsWith('.git/') &&
+      !r.startsWith('.sterling/') &&
+      !r.startsWith('sterling/') &&
+      !r.startsWith('git/')
+  );
+}
+
 // REVIEW-TERRITORY resolution (decision 8f137474,
 // review-territory-structured-receipt-files) — the entry-level `files`
 // source, replacing a bare candidatesFromBlocks() call at SubagentStart.
@@ -589,6 +632,320 @@ function resolveTerritory(blocks) {
   }
   return { candidates: candidatesFromBlocks(blocks), files_source: 'free-prose-fallback', warnings };
 }
+
+// ===========================================================================
+// STOP-TIME REVIEWER TERRITORY BINDING (decision edbaa38d, slug
+// reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
+// user-decided 2026-09-06). THE ONE THING TO UNDERSTAND BEFORE CHANGING ANY OF
+// THIS: the defect it closes is TRANSCRIPT LAG, not mis-ordering. At
+// SubagentStart the parent's spawning assistant record is sometimes NOT YET ON
+// DISK, so attributeBlocks above walks back to an older block or unions across
+// types — measured live in session 2d57d164 on 2026-09-06, where a reviewer
+// receipt recorded a CODER's territory. It is a nondeterministic
+// write-visibility race, so NO Start-time positional scheme can be made safe,
+// and FIFO-across-messages was explicitly REJECTED as institutionalising the
+// guess. Do not "improve" the Start-side attribution to fix an unattributable
+// receipt; the fix is here, at Stop, where the artifacts are complete.
+//
+// WHAT BINDS, in two halves that must BOTH hold:
+//   PRIMARY — the FIRST record of the child transcript (stdin.agent_transcript_path)
+//   is the brief as DELIVERED to this agent, verbatim. That is the brief which
+//   provably reached THIS agent, so no join is needed to establish it, and
+//   REVIEW-TERRITORY is parsed out of it with the SAME parseReviewTerritory the
+//   Start side uses — never a second parser.
+//   CORROBORATION/BINDING — the .meta.json sidecar beside that transcript
+//   carries the spawning tool_use's id, so the block is located in the parent by
+//   a KNOWN ID rather than by position. Byte-identical briefs on two concurrent
+//   dispatches — the case where prompt-matching and positional schemes alike
+//   fail — are unambiguous under this, which is the reason the sidecar is the
+//   binding key and the prompt equality is only the cross-check.
+//
+// VERIFY-AT-BUILD — PLATFORM ASSUMPTIONS, all UNDOCUMENTED SURFACES (register:
+// decision 19678617; same standing as research_finding ffa6219c "SubagentStart
+// carries no tool_use_id" and 20b44518 "agent_transcript_path arrives on Stop"):
+//   (1) the child transcript's FIRST record is
+//       {parentUuid:null, isSidechain:true, type:'user', message:{role:'user',
+//       content:<string>}} and that content is the delivered brief byte-for-byte
+//       (measured 15/15 this session, foreground and background alike);
+//   (2) a sidecar exists at <agent_transcript_path minus .jsonl>.meta.json
+//       carrying {agentType, description, toolUseId, spawnDepth, model}
+//       (measured present 1753/1754 child transcripts across all sessions;
+//       toolUseId matches the originating tool_use.id 15/15). It is REWRITTEN on
+//       every SendMessage delivery, but toolUseId keeps the ORIGINAL spawn's
+//       value — which is what makes it usable on a continuation round;
+//   (3) that first record ALSO carries a TOP-LEVEL `agentId` equal to the
+//       stopping agent's stdin `agent_id` — the bare `a380392b87af09bd1` form,
+//       which is also the `agent-<agentId>.jsonl` filename token (measured
+//       29/29 child transcripts of session 2d57d164 on 2026-09-06, CC as
+//       installed on this machine; corroborated against the live dispatch
+//       register's own agent_id values);
+//   (4) each SendMessage continuation round appends ANOTHER user record whose
+//       message.content is a STRING to the SAME child transcript, so the count
+//       of string-content user records IS the round number (measured 2026-09-06
+//       over the same 29 transcripts: 26 never-resumed children carry exactly
+//       one, and the three resumed ones carry 2, 3 and 7). Keyed on that
+//       STRUCTURE, never on the English wording of the coordinator envelope,
+//       which is not a contract.
+// Every one of those assumptions is checked here rather than trusted: if the
+// platform changes any of them, this fails CLOSED to 'unattributable' and says
+// which check failed, instead of recording a guess.
+//
+// WHY THESE SHAPES REFUSE: the decision's own fail-closed list is exhaustive
+// for the shapes IT names, and parentUuid/isSidechain are deliberately still
+// NOT checked, because the prompt-equality cross-check already subsumes them —
+// a first record that is not this agent's brief cannot equal the spawning
+// block's prompt. Assumptions (3) and (4) are ADDITIONS to that list, each
+// closing a measured hole an external review found in the shipped derivation,
+// and each derived from data this function already reads:
+//   • (3) closes THE BIND IS NOT TIED TO THIS AGENT. Without it the checks
+//     prove only that the transcript agrees with its sidecar, the sidecar with
+//     stdin.agent_type, and the prompt with a parent block — never that the
+//     transcript belongs to THIS agent_id. Two sibling reviewers of the SAME
+//     class have interchangeable, self-consistent triples, so a wrong
+//     agent_transcript_path would bind a FOREIGN territory onto this agent's
+//     receipt with a spendable source. An ABSENT agentId refuses too: a record
+//     that does not name an agent proves nothing about which one it belongs to.
+//   • (4) closes A RESUMED REVIEWER MINTING A SECOND SPENDABLE RECEIPT. The
+//     Stop-side gate below reads `!existingReceipt` as "first Stop", which is
+//     false once commit-reviewed has SPENT and deleted the first receipt: a
+//     later round would then re-bind the ORIGINAL brief's territory, hash the
+//     CURRENT bytes, and mint a fresh spendable receipt for bytes nobody
+//     reviewed. The refusal is named for what is OBSERVED (this is not the
+//     first Stop), never for a cause — the same state also arises from a crash
+//     between mint and ledger write, and nothing here can tell the two apart.
+const CHILD_SCAN_BYTES = 64 * 1024 * 1024; // whole-child scan: assumption (4) counts rounds across the FILE, not just the first line (largest child measured on this machine 2026-09-06: ~1.3MB; same headroom posture as PARENT_SCAN_BYTES)
+const PARENT_SCAN_BYTES = 64 * 1024 * 1024; // ~5x the largest parent transcript measured on this machine (~12MB, 2026-09-06)
+
+/** The child transcript's first record content (the delivered brief) plus the
+ *  two other facts the bind needs from the SAME read — the record's own
+ *  `agentId` (assumption (3)) and the number of string-content user records,
+ *  i.e. the round count (assumption (4)) — or a named refusal. Reads FORWARD
+ *  (readFromStart) — readTail's window is at the wrong end of the file for
+ *  this. `complete` is returned rather than acted on here: a round count is an
+ *  ABSENCE claim ("no further rounds") and is only valid over a COMPLETE read,
+ *  which is the caller's ordering decision. */
+function childBriefFromTranscript(childPath) {
+  const read = readFromStart(childPath, CHILD_SCAN_BYTES);
+  if (read === null) return { ok: false, reason: 'child-transcript-missing', detail: `no file at '${childPath}'` };
+  const nl = read.text.indexOf('\n');
+  if (nl === -1 && !read.complete) {
+    return {
+      ok: false,
+      reason: 'child-first-record-truncated',
+      detail: `the child transcript's first line exceeds the ${CHILD_SCAN_BYTES}-byte read window, so the delivered brief could not be read whole`,
+    };
+  }
+  const firstLine = (nl === -1 ? read.text : read.text.slice(0, nl)).trim();
+  if (firstLine === '') return { ok: false, reason: 'child-transcript-empty', detail: `'${childPath}' has no first record` };
+  let record;
+  try {
+    record = JSON.parse(firstLine);
+  } catch {
+    return { ok: false, reason: 'child-first-record-unparseable', detail: 'the first line of the child transcript is not JSON' };
+  }
+  // The KNOWN GAP the decision names: a resumed/split session shape whose child
+  // transcript begins with an ASSISTANT record (observed
+  // 6fd7cc7d/subagents/agent-a3b2de11b9b6de9ff.jsonl). Refused here by name.
+  if (!record || record.type !== 'user') {
+    return { ok: false, reason: 'child-first-record-not-user', detail: `first record type is ${JSON.stringify(record?.type)}, not 'user' (the resumed/split-session shape the decision refuses)` };
+  }
+  const content = record.message?.content;
+  if (typeof content !== 'string') {
+    return { ok: false, reason: 'child-first-record-content-not-string', detail: `first record message.content is ${typeof content}, not the delivered brief string` };
+  }
+  // ROUND COUNT (assumption (4)): every SendMessage continuation appends one
+  // more string-content user record to this same file, so counting that SHAPE
+  // — never the envelope's prose — tells the caller whether this is round one.
+  // The first record itself is one of them.
+  //
+  // AN UNPARSEABLE LINE IS COUNTED, NOT SKIPPED — the opposite of the parent
+  // scan's posture, and deliberately so. The parent scan searches for a KNOWN
+  // id (a positive find), so skipping a partial line at worst delays a find;
+  // here the conclusion is an ABSENCE ("no further round exists"), and a record
+  // cut off mid-write is exactly where the round this check exists to catch
+  // would be hiding. So the caller is told, and refuses rather than concluding.
+  let userStringRecords = 0;
+  let unparseableLines = 0;
+  for (const line of read.text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      unparseableLines++;
+      continue;
+    }
+    if (entry?.type === 'user' && typeof entry?.message?.content === 'string') userStringRecords++;
+  }
+  return { ok: true, brief: content, agentId: record.agentId, userStringRecords, unparseableLines, complete: read.complete };
+}
+
+/** The .meta.json sidecar beside a child transcript, or a named refusal. */
+function sidecarForChildTranscript(childPath) {
+  if (!childPath.endsWith('.jsonl')) {
+    return { ok: false, reason: 'sidecar-path-underivable', detail: `agent_transcript_path '${childPath}' does not end in .jsonl, so the sidecar path cannot be derived` };
+  }
+  const sidecarPath = `${childPath.slice(0, -'.jsonl'.length)}.meta.json`;
+  if (!existsSync(sidecarPath)) return { ok: false, reason: 'sidecar-missing', detail: `no file at '${sidecarPath}'` };
+  let meta;
+  try {
+    meta = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+  } catch {
+    return { ok: false, reason: 'sidecar-unparseable', detail: `'${sidecarPath}' is not readable JSON` };
+  }
+  if (!meta || typeof meta !== 'object' || Array.isArray(meta)) {
+    return { ok: false, reason: 'sidecar-malformed', detail: `'${sidecarPath}' does not hold a JSON object` };
+  }
+  if (typeof meta.toolUseId !== 'string' || meta.toolUseId === '') {
+    return { ok: false, reason: 'sidecar-tool-use-id-missing', detail: `sidecar toolUseId is ${JSON.stringify(meta.toolUseId)}` };
+  }
+  // NESTED AGENTS ARE REFUSED (decision edbaa38d's named gap): a spawnDepth
+  // above 1 means the spawning block does not live in the parent transcript
+  // this Stop was handed, so the binding below could not be completed honestly.
+  // A MISSING depth is refused too — an unstated depth is not a stated 1.
+  if (meta.spawnDepth !== 1) {
+    return { ok: false, reason: 'sidecar-spawn-depth', detail: `sidecar spawnDepth is ${JSON.stringify(meta.spawnDepth)}, not 1 (nested agents are refused for reviewer receipts)` };
+  }
+  return { ok: true, meta, sidecarPath };
+}
+
+/** The parent's tool_use block with this id. A search for a KNOWN id cannot
+ *  false-match, which is why it may scan the whole parent rather than
+ *  readTail's window (decision edbaa38d point 6). An INCOMPLETE scan can never
+ *  report absence — it refuses instead. */
+function findParentToolUseBlock(parentPath, toolUseId) {
+  if (typeof parentPath !== 'string' || parentPath === '') {
+    return { ok: false, reason: 'parent-transcript-path-absent', detail: 'stdin carried no transcript_path to locate the spawning block in' };
+  }
+  const read = readFromStart(parentPath, PARENT_SCAN_BYTES);
+  if (read === null) return { ok: false, reason: 'parent-transcript-missing', detail: `no file at '${parentPath}'` };
+  for (const line of read.text.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue; // a partial trailing line while the platform is mid-append
+    }
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+    const block = content.find((b) => b?.type === 'tool_use' && b.id === toolUseId);
+    if (block) return { ok: true, block };
+  }
+  if (!read.complete) {
+    return {
+      ok: false,
+      reason: 'parent-scan-truncated',
+      detail: `the parent transcript exceeds the ${PARENT_SCAN_BYTES}-byte scan window, so '${toolUseId}' being unfound proves nothing`,
+    };
+  }
+  return { ok: false, reason: 'tool-use-id-absent-from-parent', detail: `no tool_use block with id '${toolUseId}' anywhere in the parent transcript` };
+}
+
+/**
+ * Binds THIS reviewer dispatch's territory from artifacts that are complete at
+ * Stop. Returns either
+ *   { bound: true, files, files_source, warnings, tool_use_id }  — authoritative
+ *   { bound: false, reason, detail }                            — fail closed
+ * and never throws for a shape it does not recognise.
+ *
+ * WHAT A SUCCESSFUL BIND YIELDS is still decided by the DECLARED line, exactly
+ * as decision 9500cce1 requires (declared REVIEW-TERRITORY is authoritative;
+ * observed paths only corroborate and never gate). All this changes is WHICH
+ * COPY of the brief the declaration is read from: the one that provably reached
+ * this agent, instead of a positionally-guessed block. A bound brief carrying
+ * NO valid declaration is therefore NOT a refusal — it is the ordinary
+ * free-prose fallback, now computed over the right prompt, which is strictly
+ * better evidence than the same fallback over a possibly-foreign block. The
+ * decision's fail-closed list names unbindable SHAPES, not undeclared briefs.
+ */
+function bindReviewerTerritoryAtStop(input) {
+  const childPath = input.agent_transcript_path;
+  if (typeof childPath !== 'string' || childPath === '') {
+    return { bound: false, reason: 'agent-transcript-path-absent', detail: 'stdin carried no agent_transcript_path, so there is no delivered brief to bind against' };
+  }
+  const brief = childBriefFromTranscript(childPath);
+  if (!brief.ok) return { bound: false, reason: brief.reason, detail: brief.detail };
+  // AGENT IDENTITY, assumption (3): the transcript must belong to THIS agent.
+  // Nothing else in this function establishes that — the sidecar/agent_type/
+  // prompt chain is satisfiable by ANY sibling of the same class, so without
+  // this a wrong agent_transcript_path binds a foreign territory onto this
+  // agent's receipt with a spendable source. Absent refuses exactly like a
+  // mismatch: a record naming no agent proves nothing.
+  if (typeof input.agent_id !== 'string' || input.agent_id === '' || typeof brief.agentId !== 'string' || brief.agentId !== input.agent_id) {
+    return {
+      bound: false,
+      reason: 'child-transcript-agent-mismatch',
+      detail: `the child transcript's first record carries agentId ${JSON.stringify(brief.agentId)}, which is not the stopping agent's stdin agent_id ${JSON.stringify(input.agent_id)}, so '${childPath}' is not provably this agent's transcript`,
+    };
+  }
+  // FIRST STOP ONLY, assumption (4). A second-or-later Stop reaching the bind
+  // means the receipt this dispatch already minted is GONE — spent by
+  // scripts/commit-reviewed.mjs, or lost between mint and ledger write — and
+  // re-binding would mint a FRESH spendable receipt attesting the CURRENT bytes
+  // under the ORIGINAL brief's territory: bytes nobody reviewed. Checked before
+  // the truncation refusal below because finding extra rounds is a POSITIVE
+  // observation that a partial read cannot invalidate.
+  if (brief.userStringRecords > 1) {
+    return {
+      bound: false,
+      reason: 'not-first-stop-no-existing-receipt',
+      detail: `the child transcript carries ${brief.userStringRecords} string-content user records, so this is continuation round ${brief.userStringRecords}, not the first Stop — yet no receipt exists for this dispatch to refresh. Territory is bound at the FIRST Stop only; what happened to the earlier receipt (spent by a commit, or lost) is not knowable from here`,
+    };
+  }
+  // ...and the "exactly one round" conclusion is an ABSENCE claim, so it is
+  // only honest over a COMPLETE read. INCOMPLETE HAS TWO SHAPES and both
+  // refuse: the scan window cut the file short, or a line was cut off mid-write
+  // so its record could not be read at all. Neither can prove that no further
+  // continuation record exists.
+  if (!brief.complete || brief.unparseableLines > 0) {
+    return {
+      bound: false,
+      reason: 'child-scan-truncated',
+      detail: brief.complete
+        ? `the child transcript holds ${brief.unparseableLines} unreadable line(s) — a record cut off mid-write — so 'exactly one round' cannot be concluded: an unreadable record could itself be the continuation this check exists to catch`
+        : `the child transcript exceeds the ${CHILD_SCAN_BYTES}-byte scan window, so 'exactly one round' cannot be concluded — an unread tail could hold further continuation records`,
+    };
+  }
+  const sidecar = sidecarForChildTranscript(childPath);
+  if (!sidecar.ok) return { bound: false, reason: sidecar.reason, detail: sidecar.detail };
+  // AGENT-TYPE CORROBORATION: the sidecar must agree with the stdin this hook
+  // was invoked for. A disagreement means the sidecar does not describe this
+  // Stop, and everything downstream of it would be another dispatch's evidence.
+  if (sidecar.meta.agentType !== input.agent_type) {
+    return {
+      bound: false,
+      reason: 'agent-type-mismatch',
+      detail: `sidecar agentType ${JSON.stringify(sidecar.meta.agentType)} does not equal stdin agent_type ${JSON.stringify(input.agent_type)}`,
+    };
+  }
+  const located = findParentToolUseBlock(input.transcript_path, sidecar.meta.toolUseId);
+  if (!located.ok) return { bound: false, reason: located.reason, detail: located.detail };
+  // PROMPT EQUALITY, byte-for-byte: the spawning block's prompt and the brief
+  // the child actually received must be the same string. This is what proves
+  // the id, the sidecar and the delivered brief all describe ONE dispatch.
+  if (located.block.input?.prompt !== brief.brief) {
+    return {
+      bound: false,
+      reason: 'prompt-mismatch',
+      detail: `the parent block '${sidecar.meta.toolUseId}' prompt is not byte-identical to the child's first record, so the sidecar and the delivered brief do not describe one dispatch`,
+    };
+  }
+  // ONE SYNTHETIC BLOCK, run through the SAME resolveTerritory the Start side
+  // uses — declared-wins-over-prose, malformed declarations warned about, never
+  // a second parser and never a second aggregation rule.
+  const { candidates, files_source, warnings } = resolveTerritory([{ subagent_type: sidecar.meta.agentType, prompt: brief.brief }]);
+  return {
+    bound: true,
+    files: normalizeRegisterPaths(candidates, input.cwd),
+    files_source,
+    warnings,
+    tool_use_id: sidecar.meta.toolUseId,
+  };
+}
+// ===========================================================================
 
 // TERRITORY EXAMINED vs TERRITORY CLAIMED — the write-side half of the
 // negation guard (board c56862a9, research_finding 289cd172
@@ -861,26 +1218,12 @@ try {
     }
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
     const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
-    // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19. There a false
-    // candidate cost one store query that found nothing; here it enters the
-    // register, so it SUPPRESSES a real duty and holds H10's releases
-    // non-terminal for the whole life of the dispatch. Under-defer is the safe
-    // direction, so this filter drops anything doubtful.
-    // Repo-relative POSIX only (§3.2 path invariant at the hook boundary);
-    // .git/.sterling are never governed territory, so they can never own a duty.
-    // 'sterling/…' and 'git/…' are dropped too: the extractor's directory
-    // segments exclude '.', so '.sterling/transient/x.json' in prompt prose
-    // arrives dot-stripped as 'sterling/transient/x.json' and would otherwise
-    // walk straight past the .sterling/ guard.
-    const toRegisterPaths = (cands) =>
-      [...new Set(cands.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-        (r) =>
-          r !== '.git' &&
-          !r.startsWith('.git/') &&
-          !r.startsWith('.sterling/') &&
-          !r.startsWith('sterling/') &&
-          !r.startsWith('git/')
-      );
+    // THE EXTRACTOR'S PERMISSIVENESS COSTS MORE HERE THAN IN H19, and the
+    // normalization/exclusion filter that answers it now lives in ONE place,
+    // shared with the Stop-time reviewer binding — its full rationale is on
+    // normalizeRegisterPaths above. This alias keeps every call site below
+    // byte-identical.
+    const toRegisterPaths = (cands) => normalizeRegisterPaths(cands, input.cwd);
     const files = toRegisterPaths(candidates);
     // The negation-aware subset (see claimedFromBlocks above) goes through the
     // IDENTICAL normalization and exclusion filter — one expression, so
@@ -1146,13 +1489,66 @@ try {
       // territory — which the refresh reads but NEVER rewrites (decision
       // 9500cce1: declared territory is authoritative and is not re-derived).
       const stopAgentType = departingIsReviewer ? departing.agent_type : resumeCandidate.agent_type;
+      // STOP-TIME TERRITORY BINDING, FRESH MINTS ONLY (decision edbaa38d — see
+      // bindReviewerTerritoryAtStop above for the mechanism and the measured
+      // race it closes).
+      //
+      // WHY `!existingReceipt` GATES IT: a receipt already in hand means this
+      // Stop can only REFRESH, and a refresh NEVER re-derives territory
+      // (decision 9500cce1; the refresh path below rewrites finished_at,
+      // evidence, observed_* and resume_count and nothing else). A continuation
+      // round matters here specifically: SendMessage appends a
+      // coordinator-message record to the SAME child transcript, so only the
+      // FIRST record is the delivered brief — binding on a later round would
+      // still read record one, but the receipt it would write to is not this
+      // mechanism's to rewrite. So round >= 2 does not bind at all.
+      //
+      // `!existingReceipt` IS NOT PROOF OF A FIRST STOP, and is no longer
+      // trusted as one: once commit-reviewed has SPENT and deleted the first
+      // receipt, a resumed reviewer's second Stop also finds no receipt, and
+      // binding here would mint a FRESH spendable receipt over the current
+      // bytes. This gate therefore only decides whether binding is ATTEMPTED;
+      // bindReviewerTerritoryAtStop itself decides whether this really is round
+      // one, from the child transcript's own round count (assumption (4)), and
+      // refuses 'not-first-stop-no-existing-receipt' when it is not.
+      //
+      // NON-REVIEWER CLASSES NEVER REACH THIS: `departingIsReviewer` is the
+      // 'reviewer-' prefix check, and every other class keeps the Start-side
+      // block/union attribution untouched (decision 5d3747c1). Their only
+      // consumers are H10's deferral and H26's advisory, where an imprecise
+      // attribution costs a bounded over-defer or one advisory line — there is
+      // no durable artifact to falsify.
+      const stopBinding = departingIsReviewer && !existingReceipt ? bindReviewerTerritoryAtStop(input) : null;
+      if (stopBinding) {
+        for (const w of stopBinding.warnings ?? []) process.stderr.write(w + '\n');
+        if (stopBinding.bound) {
+          process.stderr.write(
+            `H22: reviewer territory BOUND AT STOP for '${input.agent_id}' (agent_type '${stopAgentType}') from the brief this agent actually received — child transcript first record, corroborated by sidecar toolUseId '${stopBinding.tool_use_id}' and a byte-identical parent prompt. Receipt territory records ${stopBinding.files.length} file(s) with source '${stopBinding.files_source}'; the SubagentStart register attribution (files_source '${departing.files_source}') was provisional and is NOT what this receipt attests.\n`
+          );
+        } else {
+          process.stderr.write(
+            `H22: UNATTRIBUTABLE TERRITORY AT STOP — reviewer '${input.agent_id}' (agent_type '${stopAgentType}') could not be bound to its dispatch block [${stopBinding.reason}]: ${stopBinding.detail}. The Start-side attribution is a positional GUESS (SubagentStart carries no tool_use_id, research_finding ffa6219c, and the parent's spawning record is sometimes not yet on disk when it fires — decision edbaa38d), so it is recorded as territory.source 'unattributable': scripts/commit-reviewed.mjs will NEVER stamp or consume this receipt, and it stays in the ledger for a human to judge. observed_files (read from this agent's OWN transcript) remains its only trustworthy territory.\n`
+          );
+        }
+      }
+      // What the fresh mint below will actually record. Fail-closed by
+      // construction: territory is the BOUND territory or nothing, and any
+      // shape that did not bind is labelled 'unattributable' whatever the
+      // register entry claimed.
+      const boundTerritory = stopBinding && stopBinding.bound ? stopBinding : null;
+      const mintFiles = boundTerritory ? boundTerritory.files : departing?.files;
+      const mintFilesSource = boundTerritory ? boundTerritory.files_source : 'unattributable';
       // THE TERRITORY TO HASH COMES FROM THE RECEIPT WHENEVER ONE EXISTS, and
       // from the register entry ONLY for a genuinely fresh mint (see the
       // unconditional ledger read above for the measured defect). A receipt in
       // hand means this Stop can only REFRESH it, and a refresh's evidence must
       // describe the territory that receipt DECLARES — never a register entry's
       // re-scraped guess about it.
-      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : departing.files;
+      // For a FRESH MINT this is now the STOP-BOUND territory (mintFiles above)
+      // rather than the register entry's Start-time guess — the precompute must
+      // hash the territory the receipt will actually declare, or the memo below
+      // misses and the evidence is rebuilt under the lock for no reason.
+      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : mintFiles;
       // Lock-guarded (see withLedgerLock above) — this durable ledger has no
       // TTL/H1-wipe safety net, unlike the register below, so a lost update
       // here would be a permanent loss of reviewer evidence rather than a
@@ -1720,6 +2116,18 @@ try {
           );
           return;
         } else {
+          // THE ONE FRESH-MINT SHAPE THAT NEVER ATTEMPTED A STOP BINDING: a
+          // receipt for this dispatch existed at the unlocked decision read (so
+          // the binding was correctly skipped as a refresh) and was CONSUMED
+          // before this lock was acquired, leaving a mint to perform with no
+          // bound territory in hand. mintFilesSource is already 'unattributable'
+          // by construction there — this says so out loud rather than letting a
+          // receipt appear with an unspendable source and no reason given.
+          if (departingIsReviewer && !stopBinding) {
+            process.stderr.write(
+              `H22: UNATTRIBUTABLE TERRITORY AT STOP — reviewer '${input.agent_id}' (agent_type '${stopAgentType}') is being minted fresh because its existing receipt was consumed (stamped onto a commit) while this ledger lock was being acquired, so no Stop-time territory binding was performed for it (decision edbaa38d binds only on a fresh mint). Its territory records the SubagentStart guess with source 'unattributable': scripts/commit-reviewed.mjs will never stamp or consume it.\n`
+            );
+          }
           // session_id comes from the REGISTER entry, not from stdin: it is the
           // session that dispatched the reviewer. (The prune above already
           // guarantees the two are equal — the fallback exists so a hand-written
@@ -1763,11 +2171,21 @@ try {
               agent_id: departing.agent_id,
             },
             territory: {
-              files: departing.files,
-              // Nested home of decision 8f137474's already-shipped
-              // files_source/attribution fields — copied unchanged from the
-              // register entry, same copy-if-present posture as before.
-              source: departing.files_source,
+              // BOUND AT STOP, NOT COPIED FROM THE REGISTER (decision edbaa38d)
+              // — see bindReviewerTerritoryAtStop and the mintFiles/
+              // mintFilesSource computation above. The register entry's
+              // Start-time attribution is PROVISIONAL for a reviewer, so what
+              // this receipt attests is the territory declared in the brief this
+              // agent provably received; every shape that could not be bound is
+              // 'unattributable' and unspendable, never a copied guess.
+              files: mintFiles,
+              source: mintFilesSource,
+              // Decision 8f137474's attribution label is UNCHANGED and still
+              // copied verbatim from the register entry: it names which
+              // Start-side positional case fired ('block'/'union') and is read
+              // by nothing that judges spendability — territory.source carries
+              // that verdict. Rewriting it here would silently restate the
+              // Stop binding in a field whose existing meaning is the Start one.
               attribution: departing.attribution,
             },
             // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision
@@ -1805,14 +2223,16 @@ try {
                   ...(observed.truncated ? { observed_truncated: true } : {}),
                 }
               : {}),
-            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`departing.files`,
-            // one line above), not for whatever territory the outside-the-lock
+            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`mintFiles`, the
+            // Stop-bound territory a few lines above — no longer
+            // `departing.files`, which is the provisional Start-time guess),
+            // not for whatever territory the outside-the-lock
             // precompute happened to use: this branch is reachable when the
             // receipt found at decision time was consumed while the lock was
             // being acquired, and the precompute would then describe THAT
             // receipt's territory rather than this fresh mint's. A cache HIT in
             // every ordinary mint (the precompute used exactly these files).
-            content_evidence: evidenceFor(departing.files),
+            content_evidence: evidenceFor(mintFiles),
             disposition: null,
           });
         }

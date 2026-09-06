@@ -49,17 +49,14 @@
 // `tools:` frontmatter line entirely (all-tools default, per that suite's
 // case 9) so no unrelated capability warning pollutes these assertions.
 //
-// EXPECTED STATE TODAY: the H25 hook already exists (an earlier slice
-// shipped the tool-capability advisory), so process spawn succeeds and exit
-// code is already 0 for every case — these tests do NOT fail on r.code the
-// way a from-scratch-hook spec would. Every WARN-case test instead fails on
-// its content assertion (parseAdditionalContext(r) does not yet contain the
-// TDD/mutation-axis wording, because neither config key is consulted yet)
-// until the coder lands the two checks. The CONTROL/SILENT-case tests may
-// already pass today for the wrong reason (nothing warns about this axis at
-// all yet) — expected for a not-yet-implemented axis, not a defect in the
-// pin; once implemented, they start proving the gating rather than passing
-// by default.
+// CURRENT STATE: this axis SHIPPED in commit e15f3b6 — H25 now reads both
+// config.tdd.enabled and config.mutation_verification.enabled live and warns
+// on the two independently-gated conditions described above. Every test
+// below is green at HEAD: the WARN-case tests prove the content each axis
+// produces when its flag is OFF and its trigger condition matches, and the
+// CONTROL/SILENT-case tests prove the gating itself (silent when the flag is
+// ON, and silent when the flag is OFF but the trigger condition does not
+// match) — not a default silence from an unimplemented axis.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

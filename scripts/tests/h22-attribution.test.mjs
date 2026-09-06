@@ -559,3 +559,794 @@ test('H26 attribution PIN6b: a legacy entry with no attribution field at all is 
     cleanup();
   }
 });
+
+// ===========================================================================
+// STOP-BIND — REVIEWER RECEIPT TERRITORY BINDS AT SubagentStop FROM THE CHILD
+// TRANSCRIPT + .meta.json SIDECAR (slice 4A of objective
+// dome-farmer-issues-2026-09-05, board 491bb54b) — SPEC ONLY, red-first,
+// authored from the GOVERNING DECISION (opened via knowledge_get, not from
+// scripts/hooks/h22-dispatch-register.mjs's internals — H4 read wall honored):
+//
+// knowledge_get edbaa38d-a632-45c2-88f3-840c01690010 (slug
+// reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
+// user-decided 2026-09-06). VERBATIM MECHANISM PINNED HERE:
+//   At SubagentStop, for REVIEWER-CLASS agents only (agent_type starting
+//   'reviewer-'): (1) PRIMARY — the FIRST record of the child transcript at
+//   stdin.agent_transcript_path is {parentUuid:null, isSidechain:true,
+//   type:'user', message:{role:'user', content:<string>}}, and that content
+//   is the delivered brief VERBATIM; territory is parsed from it with the
+//   existing parseReviewTerritory (REVIEW-TERRITORY: [...] marker line, per
+//   decision 8f137474/scripts/tests/h22-review-territory.test.mjs). (2)
+//   CORROBORATION — the sidecar at
+//   `<agent_transcript_path with .jsonl replaced>.meta.json` carries
+//   {agentType, description, toolUseId, spawnDepth, model}; that toolUseId
+//   locates the tool_use block in the PARENT transcript (stdin.transcript_path);
+//   binding requires block.input.prompt === child-first-record content
+//   BYTE-IDENTICAL, AND meta.agentType === stdin.agent_type. (3) FAIL CLOSED
+//   to territory.source:'unattributable' on every abnormal shape: missing
+//   child transcript; first record not a type:'user' record with string
+//   content; missing or malformed sidecar; toolUseId absent from the parent;
+//   prompt mismatch; agentType mismatch; spawnDepth !== 1. (4) non-reviewer
+//   classes are completely UNTOUCHED (today's delete-only SubagentStop path).
+//   (5) a second-and-later SubagentStop (a SendMessage continuation round,
+//   which appends a coordinator-message record to the SAME child transcript)
+//   must NEVER re-derive territory — only the FIRST record is authoritative.
+//
+// Also read: knowledge_get 9500cce1 (declared REVIEW-TERRITORY is
+// authoritative, observed paths corroborate/never gate — (D) still reads
+// territory from the declared line, merely from the copy of the brief that
+// provably reached THIS agent) and knowledge_get 5d3747c1 (this decision
+// RETIRES 5d3747c1's named residual "same-type twins remain
+// union-ambiguous" — the Start-time positional REGISTER pins above
+// (REVIEWER-R0/R1/R2/R3, PIN1-PIN3) are left completely UNTOUCHED by this
+// section: they describe SubagentStart's `files_source` on the transient
+// REGISTER entry, which this decision explicitly keeps as a mere PROVISIONAL
+// hint ("the register at Start is a hint, and the receipt must bind at
+// Stop"); nothing in edbaa38d specifies the Start-side algorithm itself
+// changes shape, so those pins were neither weakened nor deleted here).
+//
+// TWO ASSUMPTIONS DISCLOSED (the decision does not name either explicitly —
+// stated here rather than guessed silently, per this role's anti-invention
+// constraint):
+//   (a) SUCCESS-CASE territory.source VALUE: edbaa38d names the FAILURE
+//       literal ('unattributable') explicitly but never names what a
+//       genuine bind records. Decision 8f137474 already establishes exactly
+//       two literals for this field ('review-territory' when a
+//       REVIEW-TERRITORY marker parses, 'free-prose-fallback' otherwise),
+//       and edbaa38d states the SAME parseReviewTerritory parser is reused,
+//       merely reading from a different location (the child transcript
+//       instead of the parent block). Every pin below therefore asserts
+//       territory.source === 'review-territory' on a genuine bind (every
+//       fixture's child-transcript content below carries a valid marker
+//       line) — this is the most parsimonious reading, not an invented
+//       field. If the landed implementation instead mints a distinct new
+//       literal for a Stop-derived bind, that is a reportable divergence
+//       from this stated reading, not a reason to weaken these assertions.
+//   (b) PROMOTION-ON-FAILURE: edbaa38d says territory "fails closed to
+//       unattributable" but does not say whether the ledger PROMOTION itself
+//       still occurs on a fail-closed shape (vs. being skipped entirely).
+//       Every FAIL-CLOSED pin below asserts a ledger entry IS still promoted
+//       (with territory.source:'unattributable') — mirroring the pre-existing
+//       REGISTER-level convention (REVIEWER-R1/R2/R3 above, which likewise
+//       still append a register entry, merely flagged 'unattributable') and
+//       the fact that ledger promotion is gated purely on the
+//       agent_type-prefix check today, independent of territory derivation.
+//       If the real implementation instead skips promotion outright on these
+//       shapes, that is a reportable divergence, not a reason to weaken this.
+//
+// HARNESS NOTE: neither scripts/tests/h22-review-ledger.test.mjs nor any
+// other suite in this repo constructs a `.meta.json` sidecar or a
+// `{parentUuid:null, isSidechain:true, type:'user', ...}` first-record child
+// transcript today (confirmed via a files_with_matches-only grep for
+// "meta.json"/"toolUseId"/"spawnDepth" across scripts/ — H4 honored, no
+// content read of any implementation file) — the fixture helpers below
+// (writeChildTranscript/writeSidecar/firstUserRecord/continuationRecord) are
+// therefore modeled directly on the shapes edbaa38d itself specifies, not
+// copied from an existing harness idiom. The parent-transcript /
+// tool_use-block idiom (taskLine/taskBlockId), the register seeding
+// idiom (registerEntry/writeRegisterRaw), and the ledger reader
+// (ledgerPath/readLedger) ARE copied from this file's own makeH22Project /
+// writeParentTranscript helpers above and from
+// scripts/tests/h22-review-ledger.test.mjs's registerEntry/ledgerPath/
+// readLedger idiom (reproduced standalone, without importing that file, per
+// this repo's established no-cross-import convention between sibling
+// H22 suites).
+// ===========================================================================
+
+function registerEntry(agentId, agentType, files, at = new Date().toISOString()) {
+  return { agent_id: agentId, agent_type: agentType, session_id: 's1', files, at };
+}
+function ledgerPath(dir) {
+  return join(dir, '.sterling', 'review-ledger.json');
+}
+function readLedger(dir) {
+  return existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : [];
+}
+function writeChildTranscript(dir, name, records) {
+  const p = join(dir, 't', name);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  return p;
+}
+function sidecarPathFor(childPath) {
+  return childPath.replace(/\.jsonl$/, '.meta.json');
+}
+function writeSidecar(childPath, meta) {
+  writeFileSync(sidecarPathFor(childPath), JSON.stringify(meta));
+}
+// agentId is the SECOND, optional param (per decision edbaa38d's measured
+// fact: the child transcript's first record carries a TOP-LEVEL `agentId`
+// equal to the agent id). Omitted entirely -> the key is absent from the
+// record, for the ABSENT-arm below; every OTHER call site in this file passes
+// the correct matching agent id so those arms continue to bind successfully
+// once the new PIN-A check lands (fixture realism, not a weakened assertion).
+const firstUserRecord = (content, agentId) => ({
+  parentUuid: null,
+  isSidechain: true,
+  type: 'user',
+  ...(agentId !== undefined ? { agentId } : {}),
+  message: { role: 'user', content },
+});
+const continuationRecord = (content) => ({ parentUuid: 'parent-uuid-of-first-record', isSidechain: true, type: 'user', message: { role: 'user', content } });
+// Carries an `id` (real tool_use blocks do) so the sidecar's toolUseId can
+// name it uniquely — the pre-existing local `taskBlock` above never needed
+// an id for the positional-attribution pins, so this is additive, not a
+// modification of it.
+const taskBlockId = (id, subagent_type, prompt) => ({ type: 'tool_use', id, name: 'Task', input: { subagent_type, prompt } });
+
+function assertUnattributableStop(dir, agentId) {
+  const ledger = readLedger(dir);
+  const entry = ledger.find((e) => e.identity?.agent_id === agentId);
+  assert.ok(entry, 'a reviewer-class Stop still promotes a ledger entry — fail-closed is a VALUE recorded on the entry, not a refusal to promote (assumption (b) above)');
+  assert.equal(entry.territory.source, 'unattributable', 'an abnormal Stop-bind shape fails closed to unattributable, never a guessed or silently-wrong territory');
+  return entry;
+}
+
+// ===========================================================================
+// STOP-BIND CONTROL (placed FIRST, per this role's own multi-cause
+// discipline): proves the derivation genuinely BINDS from real artifacts —
+// without this, a green run on every FAIL-CLOSED arm below would be
+// indistinguishable from "every reviewer-class Stop is unconditionally
+// unattributable", a far more aggressive, wrong implementation that would
+// ALSO pass every FAIL-CLOSED arm for the wrong reason. Also proves the
+// ledger's territory comes from the CHILD transcript, never from the
+// register's own (stale, Start-time-positional) files — the register here
+// is deliberately seeded with a WRONG file.
+// SABOTAGE: read territory straight from the register entry's
+// files/files_source (today's pre-(D) ledger-promotion path) instead of
+// deriving it from the child transcript at Stop — this test goes red
+// (territory.files would read ['src/WRONG.mjs'] instead of
+// ['scripts/target-a.mjs']).
+// ===========================================================================
+
+test('H22 STOP-BIND CONTROL (placed FIRST): reviewer-class territory binds at SubagentStop from the child transcript\'s delivered brief, corroborated by the sidecar\'s toolUseId — the register\'s own (wrong) files are never used', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review the recent diff for correctness.\nREVIEW-TERRITORY: ["scripts/target-a.mjs"]\nFocus only on the declared scope.';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_stopbind_1', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-stopbind', 'reviewer-correctness', ['src/WRONG.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-stopbind.jsonl', [firstUserRecord(brief, 'agent-stopbind')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'review pass', toolUseId: 'toolu_stopbind_1', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-stopbind', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+
+    const ledger = readLedger(dir);
+    const entry = ledger.find((e) => e.identity?.agent_id === 'agent-stopbind');
+    assert.ok(entry, 'the reviewer-class Stop promotes a ledger entry');
+    assert.deepEqual(entry.territory.files, ['scripts/target-a.mjs'], "territory.files comes from the CHILD transcript's delivered brief, never the register's src/WRONG.mjs");
+    assert.equal(entry.territory.source, 'review-territory', 'a genuinely bound derivation records the ordinary review-territory provenance, never unattributable');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// STOP-BIND BYTE-IDENTICAL BRIEFS — the highest-value arm in this suite: the
+// exact case every rejected alternative (FIFO, content-uniqueness matching)
+// fails on. Two dispatch blocks in ONE parent message carry byte-identical
+// prompt text; two agents each spawn with their OWN child transcript + own
+// sidecar naming their OWN distinct toolUseId. Neither must be rejected as
+// ambiguous.
+// SABOTAGE: disambiguate the parent tool_use block by searching for a UNIQUE
+// content match instead of looking it up by the sidecar's toolUseId first —
+// with two byte-identical prompts this becomes a 2-way ambiguous match, so a
+// "must find exactly one content match" implementation fails closed for
+// BOTH agents — reddening entryA.territory.source AND
+// entryB.territory.source (both would read 'unattributable' instead of
+// 'review-territory').
+// ===========================================================================
+
+test('H22 STOP-BIND BYTE-IDENTICAL BRIEFS: two dispatch blocks with identical prompt text still attribute correctly via the sidecar\'s unique toolUseId, never rejected as ambiguous', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const sharedBrief = 'Please review the shared scope.\nREVIEW-TERRITORY: ["scripts/shared-target.mjs"]\nBoth reviewers received this exact text.';
+    writeParentTranscript(dir, [
+      taskLine([taskBlockId('toolu_byteid_A', 'reviewer-correctness', sharedBrief), taskBlockId('toolu_byteid_B', 'reviewer-correctness', sharedBrief)]),
+    ]);
+    writeRegisterRaw(dir, [
+      registerEntry('agent-byteid-a', 'reviewer-correctness', ['src/WRONG-A.mjs'], '2026-09-06T00:00:00.000Z'),
+      registerEntry('agent-byteid-b', 'reviewer-correctness', ['src/WRONG-B.mjs'], '2026-09-06T00:00:01.000Z'),
+    ]);
+
+    const childA = writeChildTranscript(dir, 'agent-byteid-a.jsonl', [firstUserRecord(sharedBrief, 'agent-byteid-a')]);
+    writeSidecar(childA, { agentType: 'reviewer-correctness', description: 'A', toolUseId: 'toolu_byteid_A', spawnDepth: 1, model: 'claude-x' });
+    const childB = writeChildTranscript(dir, 'agent-byteid-b.jsonl', [firstUserRecord(sharedBrief, 'agent-byteid-b')]);
+    writeSidecar(childB, { agentType: 'reviewer-correctness', description: 'B', toolUseId: 'toolu_byteid_B', spawnDepth: 1, model: 'claude-x' });
+
+    let r = runH22(h22Input(dir, { agent_id: 'agent-byteid-a', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childA }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    r = runH22(h22Input(dir, { agent_id: 'agent-byteid-b', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childB }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const ledger = readLedger(dir);
+    const entryA = ledger.find((e) => e.identity?.agent_id === 'agent-byteid-a');
+    const entryB = ledger.find((e) => e.identity?.agent_id === 'agent-byteid-b');
+    assert.ok(entryA && entryB, 'BOTH byte-identical-brief dispatches promote their own ledger entry');
+    assert.equal(entryA.territory.source, 'review-territory', 'A binds correctly despite an identical-content sibling — never rejected as ambiguous');
+    assert.equal(entryB.territory.source, 'review-territory', 'B binds correctly despite an identical-content sibling — never rejected as ambiguous');
+    assert.deepEqual(entryA.territory.files, ['scripts/shared-target.mjs']);
+    assert.deepEqual(entryB.territory.files, ['scripts/shared-target.mjs']);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// STOP-BIND CONTINUATION — a second SubagentStop (a SendMessage continuation
+// round) must NEVER re-derive territory from a record appended after the
+// first. The sidecar is rewritten on delivery (per edbaa38d: "rewritten on
+// every SendMessage delivery but toolUseId keeps the original spawn's
+// value") — simulated here too, so this arm cannot be satisfied merely by an
+// implementation that happens to ignore sidecar rewrites.
+// SABOTAGE: re-parse the child transcript's LAST record (or union every
+// record) on every Stop instead of freezing on the first — reddens the
+// territory.files deepEqual (would include or become
+// ['scripts/should-never-be-used.mjs']).
+// ===========================================================================
+
+test('H22 STOP-BIND CONTINUATION: a second SubagentStop never re-derives territory from an appended coordinator-continuation record — only the FIRST record is authoritative', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/first-round.mjs"]\nThis is the original dispatch.';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_cont_1', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-cont', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-cont.jsonl', [firstUserRecord(brief, 'agent-cont')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'round 1', toolUseId: 'toolu_cont_1', spawnDepth: 1, model: 'claude-x' });
+
+    let r = runH22(
+      h22Input(dir, { agent_id: 'agent-cont', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const entry1 = readLedger(dir).find((e) => e.identity?.agent_id === 'agent-cont');
+    assert.ok(entry1, 'first Stop promotes the receipt');
+    assert.deepEqual(entry1.territory.files, ['scripts/first-round.mjs']);
+
+    const decoy = 'Thanks, one more thing to check.\nREVIEW-TERRITORY: ["scripts/should-never-be-used.mjs"]';
+    writeFileSync(childPath, readFileSync(childPath, 'utf8') + JSON.stringify(continuationRecord(decoy)) + '\n');
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'round 2 (continuation)', toolUseId: 'toolu_cont_1', spawnDepth: 1, model: 'claude-x' });
+
+    r = runH22(
+      h22Input(dir, { agent_id: 'agent-cont', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const ledgerAfter = readLedger(dir);
+    const entry2 = ledgerAfter.find((e) => e.entry_id === entry1.entry_id) ?? ledgerAfter.find((e) => e.identity?.agent_id === 'agent-cont');
+    assert.ok(entry2, 'the same receipt is still present after the second Stop');
+    assert.deepEqual(entry2.territory.files, ['scripts/first-round.mjs'], 'the second Stop never re-derives territory from the appended continuation record');
+    assert.ok(!entry2.territory.files.includes('scripts/should-never-be-used.mjs'), 'the decoy REVIEW-TERRITORY in the continuation record never leaks into territory.files');
+    assert.equal(entry2.territory.source, 'review-territory', 'the source stays the original genuine binding, never flipped to unattributable by a confusing multi-record shape');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// STOP-BIND NON-REVIEWER — non-reviewer classes are completely untouched by
+// this mechanism, even when fully valid Stop-bind artifacts (child
+// transcript + sidecar) are present. This is the arm proving the new
+// derivation is gated strictly on the 'reviewer-' agent_type prefix, not on
+// artifact availability.
+// SABOTAGE: broaden the new Stop-bind derivation to run (and promote a
+// ledger entry) whenever a valid child transcript + sidecar are present,
+// regardless of agent_type — this test goes red (a ledger file would be
+// created for a 'coder' Stop).
+// ===========================================================================
+
+test('H22 STOP-BIND NON-REVIEWER: a non-reviewer agent_type ("coder") is completely unaffected — delete-only, no ledger entry, even with fully valid child-transcript+sidecar artifacts present', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please implement the change.\nREVIEW-TERRITORY: ["scripts/coder-target.mjs"]\n';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_nonrev_1', 'coder', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-nonrev', 'coder', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-nonrev.jsonl', [firstUserRecord(brief, 'agent-nonrev')]);
+    writeSidecar(childPath, { agentType: 'coder', description: 'implement', toolUseId: 'toolu_nonrev_1', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-nonrev', agent_type: 'coder', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+
+    assert.equal(existsSync(ledgerPath(dir)), false, 'a non-reviewer Stop never creates a ledger entry, no matter how complete the Stop-bind artifacts are');
+    assert.deepEqual(readRegister(dir), [], "the register entry is still removed exactly as today's delete-only path");
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// STOP-BIND FAIL-CLOSED ARMS — each of edbaa38d's seven enumerated abnormal
+// shapes gets its OWN arm, each constructed so a naive/partial implementation
+// that is missing THAT ONE specific check would produce a real (wrong,
+// non-unattributable) bind instead — a blanket "always unattributable"
+// implementation cannot satisfy these ARMS either (it would fail the
+// CONTROL/BYTE-IDENTICAL/CONTINUATION arms above), and a blanket "never
+// unattributable" implementation cannot satisfy ANY of the arms below.
+// ===========================================================================
+
+// SABOTAGE: skip the child-transcript-existence check and fall through to a
+// silent default (e.g. the register's own files/files_source) instead of
+// failing closed — this test goes red (territory.source would read
+// 'free-prose-fallback' or similar instead of 'unattributable').
+test('H22 STOP-BIND FAIL-CLOSED (missing child transcript): agent_transcript_path names a file that does not exist on disk — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f1', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f1', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+    const missingChildPath = join(dir, 't', 'agent-f1-DOES-NOT-EXIST.jsonl');
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f1', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: missingChildPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f1');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: reach for record.message.content and coerce it (e.g.
+// String(content) or content[0]?.text) instead of requiring type:'user' with
+// a plain string — this test goes red (it would recover the brief text
+// anyway and derive real territory instead of unattributable).
+test('H22 STOP-BIND FAIL-CLOSED (malformed first record): the child transcript\'s first record is assistant-shaped with array content, not {type:"user", message:{content:<string>}} — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f2', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f2', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f2.jsonl', [{ type: 'assistant', message: { content: [{ type: 'text', text: brief }] } }]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_f2', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f2', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f2');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: treat a missing sidecar as "corroboration not required" and
+// trust the child-transcript-parsed territory unconditionally — reddens the
+// source assertion (would read 'review-territory' instead of
+// 'unattributable').
+test('H22 STOP-BIND FAIL-CLOSED (missing sidecar): the child transcript is well-formed but its .meta.json sidecar does not exist at all — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f3', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f3', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f3.jsonl', [firstUserRecord(brief, 'agent-f3')]);
+    // Deliberately no writeSidecar call at all — the sidecar file never exists.
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f3', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f3');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: swallow the JSON.parse failure on the sidecar and fall through
+// to trusting the child-transcript-parsed territory unconditionally (as if
+// no corroboration were required) — reddens the source assertion.
+test('H22 STOP-BIND FAIL-CLOSED (malformed sidecar): the .meta.json sidecar exists but is corrupt (unparseable) JSON — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f4', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f4', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f4.jsonl', [firstUserRecord(brief, 'agent-f4')]);
+    writeFileSync(sidecarPathFor(childPath), '{ this is not valid json at all');
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f4', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f4');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: fall back to searching the parent transcript for a tool_use
+// block whose input.prompt equals the child's first-record content when the
+// sidecar's toolUseId isn't found in the parent — the sabotaged version
+// would wrongly find/bind to 'toolu_f5_real' (matching CONTENT, wrong id),
+// reddening the source assertion (would read 'review-territory' instead of
+// 'unattributable').
+test('H22 STOP-BIND FAIL-CLOSED (toolUseId not in parent): the sidecar\'s toolUseId matches no tool_use block in the parent transcript — unattributable even though a DIFFERENT block with matching prompt CONTENT exists', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    // A real block exists with matching CONTENT but a DIFFERENT id — a
+    // content-based fallback would wrongly succeed here; the id-first lookup
+    // must not.
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f5_real', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f5', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f5.jsonl', [firstUserRecord(brief, 'agent-f5')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_DOES_NOT_EXIST', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f5', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f5');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: skip the byte-equality check between the resolved parent block's
+// input.prompt and the child's first-record content (trust the toolUseId
+// lookup alone) — the sabotaged version derives territory from either side's
+// content instead of failing closed, reddening the source assertion.
+test('H22 STOP-BIND FAIL-CLOSED (prompt mismatch): the sidecar\'s toolUseId resolves to a real parent block, but that block\'s input.prompt differs from the child\'s first-record content — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const childContent = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    const parentPrompt = 'Please review.\nREVIEW-TERRITORY: ["scripts/DIFFERENT.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f6', 'reviewer-correctness', parentPrompt)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f6', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f6.jsonl', [firstUserRecord(childContent, 'agent-f6')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_f6', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f6', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f6');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: drop the meta.agentType === stdin.agent_type equality check from
+// the binding condition (require only a successful toolUseId+prompt match) —
+// this test goes red (territory binds successfully despite the mismatch).
+test('H22 STOP-BIND FAIL-CLOSED (agentType mismatch): the sidecar\'s agentType differs from stdin.agent_type (both valid reviewer-* values) — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f7', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f7', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f7.jsonl', [firstUserRecord(brief, 'agent-f7')]);
+    writeSidecar(childPath, { agentType: 'reviewer-security', description: 'x', toolUseId: 'toolu_f7', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f7', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f7');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: drop the spawnDepth === 1 gate from the binding condition — this
+// test goes red (territory binds successfully despite the nested-agent
+// shape).
+test('H22 STOP-BIND FAIL-CLOSED (spawnDepth !== 1): a nested agent (sidecar spawnDepth: 2) is refused for reviewer receipt binding — unattributable, disclosed', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/target.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_f8', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-f8', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-f8.jsonl', [firstUserRecord(brief, 'agent-f8')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_f8', spawnDepth: 2, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-f8', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-f8');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// PIN A — THE BIND MUST BE TIED TO THIS AGENT (fail-closed on cross-agent
+// substitution). SPEC PER THE LAUNCHING AGENT (external review of edbaa38d's
+// mechanism, not read from any implementation file): the Stop-bind mechanism
+// as specified proves the child transcript agrees with its own sidecar, the
+// sidecar agrees with stdin.agent_type, and the resolved parent block agrees
+// with the child's first-record content — but NEVER that the transcript
+// BELONGS TO stdin.agent_id. Two sibling reviewer dispatches of the SAME
+// class therefore have interchangeable, self-consistent artifact triples, so
+// a wrong agent_transcript_path could bind a FOREIGN territory with a fully
+// spendable source.
+//
+// MEASURED FACT (per the launching agent, verified on real transcripts this
+// session): the child transcript's FIRST record carries a TOP-LEVEL
+// `agentId` field equal to the agent id, alongside parentUuid:null,
+// isSidechain:true, type:'user'.
+//
+// firstUserRecord() above now takes an optional second `agentId` param
+// (added this slice) — every PRE-EXISTING call site elsewhere in this file
+// was updated to pass its own test's correct, matching agent id, so those
+// arms keep proving exactly what they always proved once this new check
+// lands; only the three arms below deliberately vary agentId.
+// ===========================================================================
+
+// CONTROL (placed FIRST): the otherwise-identical fixture WITH a matching
+// agentId must bind successfully — without this, a green DIFFERS/ABSENT arm
+// below is indistinguishable from "Stop-bind broke and now always refuses",
+// a regression that would ALSO pass those two arms for the wrong reason.
+// SABOTAGE: wire the new agentId check backwards (require agentId !==
+// stdin.agent_id, or compare it to the wrong field) — this CONTROL goes red
+// (territory.source would read 'unattributable' instead of
+// 'review-territory').
+test('H22 STOP-BIND PIN A CONTROL (placed FIRST): a child transcript whose first record\'s agentId matches stdin.agent_id binds successfully', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/pinA-ctrl.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinA_ctrl', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-pinA-ctrl', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-pinA-ctrl.jsonl', [firstUserRecord(brief, 'agent-pinA-ctrl')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_pinA_ctrl', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-pinA-ctrl', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const entry = readLedger(dir).find((e) => e.identity?.agent_id === 'agent-pinA-ctrl');
+    assert.ok(entry, 'a matching agentId still promotes a ledger entry');
+    assert.equal(entry.territory.source, 'review-territory', 'a matching agentId binds normally — the control PIN A\'s other two arms depend on');
+    assert.deepEqual(entry.territory.files, ['scripts/pinA-ctrl.mjs']);
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: never compare the first record's agentId to stdin.agent_id at
+// all (bind purely on toolUseId + prompt + agentType, exactly as before this
+// pin) — this test goes red (territory.source would read 'review-territory'
+// instead of 'unattributable', and territory.files would wrongly read
+// ['scripts/pinA-diff.mjs'] — a foreign agent's territory bound as this
+// agent's own).
+test('H22 STOP-BIND PIN A (agentId differs): a child transcript whose first record\'s agentId DIFFERS from stdin.agent_id — sidecar, prompt and parent block all otherwise valid and self-consistent — is unattributable, never bound to a foreign sibling\'s territory', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/pinA-diff.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinA_diff', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-pinA-diff', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    // The child transcript's own first-record agentId names a DIFFERENT
+    // sibling agent — everything else (sidecar toolUseId, agentType, prompt
+    // byte-equality) is fully valid and self-consistent.
+    const childPath = writeChildTranscript(dir, 'agent-pinA-diff.jsonl', [firstUserRecord(brief, 'agent-pinA-OTHER-SIBLING')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_pinA_diff', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-pinA-diff', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-pinA-diff');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: treat a missing agentId as "no check possible, fall through to
+// trusting the toolUseId+prompt+agentType match" instead of failing closed —
+// this test goes red (territory.source would read 'review-territory' instead
+// of 'unattributable').
+test('H22 STOP-BIND PIN A (agentId absent): a child transcript whose first record has NO agentId field at all is unattributable — an absent field proves nothing about which agent the transcript belongs to', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review.\nREVIEW-TERRITORY: ["scripts/pinA-absent.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinA_absent', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-pinA-absent', 'reviewer-correctness', ['src/whatever.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    // No second arg to firstUserRecord -> the agentId key is absent entirely.
+    const childPath = writeChildTranscript(dir, 'agent-pinA-absent.jsonl', [firstUserRecord(brief)]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'x', toolUseId: 'toolu_pinA_absent', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-pinA-absent', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-pinA-absent');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// PIN B — A RESUMED REVIEWER MUST NOT MINT A FRESH BOUND RECEIPT (the
+// critical pin, per the launching agent). Binding is gated on "no existing
+// receipt", treated as proof this is the FIRST Stop — false once
+// commit-reviewed has already consumed the first receipt. The dangerous
+// sequence: reviewer reviews x.mjs -> Stop mints a receipt -> the receipt is
+// CONSUMED by a commit -> x.mjs CHANGES -> a follow-up message RESUMES the
+// same agent -> the second Stop finds no receipt, treats itself as a first
+// Stop, rebinds x.mjs from the ORIGINAL brief, hashes the CURRENT bytes, and
+// mints a spendable receipt for bytes nobody reviewed.
+//
+// MEASURED FACT (per the launching agent): each continuation round appends a
+// STRING-CONTENT user record to the SAME child transcript. A first-Stop
+// transcript has exactly ONE user record whose message.content is a string;
+// a resumed one has more (measured 7 in a transcript resumed 6 times).
+//
+// Pinned on STRUCTURE (the COUNT of string-content user records), never on
+// the English wording of the platform's coordinator envelope, which is not a
+// contract — continuationRecord() uses realistic-looking continuation text,
+// but no assertion in this section matches against its wording.
+// ===========================================================================
+
+// CONTROL (placed FIRST, essential per this role's own multi-cause
+// discipline): the SAME fixture shape with exactly ONE string-content user
+// record binds successfully — without this, a green UNSAFE arm below is
+// indistinguishable from "the fixture is simply broken" or "Stop-bind is now
+// unconditionally disabled", neither of which proves the COUNT is what
+// discriminates.
+// SABOTAGE: treat every Stop as a resumed Stop unconditionally (hardcode the
+// multi-record refusal to always fire) — this CONTROL goes red
+// (territory.source would read 'unattributable' instead of
+// 'review-territory').
+test('H22 STOP-BIND PIN B CONTROL (placed FIRST): a child transcript with exactly ONE string-content user record binds successfully, proving the COUNT — not the fixture shape — is what the unsafe arm below discriminates on', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/pinB-ctrl.mjs"]\nThis is the original dispatch.';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinB_ctrl', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-pinB-ctrl', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = writeChildTranscript(dir, 'agent-pinB-ctrl.jsonl', [firstUserRecord(brief, 'agent-pinB-ctrl')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'single round', toolUseId: 'toolu_pinB_ctrl', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-pinB-ctrl', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const entry = readLedger(dir).find((e) => e.identity?.agent_id === 'agent-pinB-ctrl');
+    assert.ok(entry, 'exactly one string-content user record still promotes a ledger entry');
+    assert.equal(entry.territory.source, 'review-territory', 'a genuine first Stop (one string-content user record) binds normally — the control PIN B\'s unsafe arm depends on');
+    assert.deepEqual(entry.territory.files, ['scripts/pinB-ctrl.mjs']);
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: gate the rebind purely on "no existing ledger receipt" (today's
+// treatment) without counting string-content user records at all — this test
+// goes red (territory.source would read 'review-territory' instead of
+// 'unattributable', and territory.files would wrongly read
+// ['scripts/pinB-original.mjs'] as if this were a genuine first Stop).
+test('H22 STOP-BIND PIN B (resumed reviewer, no existing receipt): a child transcript with MORE THAN ONE string-content user record and NO existing ledger receipt is unattributable — never re-bound as if this were a fresh first Stop', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/pinB-original.mjs"]\nThis is the original dispatch.';
+    const continuation = 'Thanks for the first pass — one more thing before you wrap up, please also double check the error paths.';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinB_resumed', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-pinB-resumed', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    // Simulates the post-consumption state directly: the ledger has NO entry
+    // for this agent (as it would not, once commit-reviewed had consumed and
+    // removed the first receipt) while the child transcript already carries
+    // a second, appended string-content user record from the resumed round.
+    const childPath = writeChildTranscript(dir, 'agent-pinB-resumed.jsonl', [
+      firstUserRecord(brief, 'agent-pinB-resumed'),
+      continuationRecord(continuation),
+    ]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'resumed round', toolUseId: 'toolu_pinB_resumed', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-pinB-resumed', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-pinB-resumed');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});
+
+// INCOMPLETE/TRUNCATED CHILD READ — this check concludes an ABSENCE (no
+// second string-content user record found, therefore first Stop), so it is
+// only valid over a COMPLETE read of the child transcript. Constructed
+// deterministically as a file whose trailing bytes are cut off mid-record
+// (invalid JSON on the last line, no trailing newline) — this reproduces
+// identically on every run without depending on any timing/race, and it is
+// exactly the byte shape a genuinely truncated on-disk write would leave
+// behind for a reader arriving mid-flush.
+// SABOTAGE: on a JSON-parse failure for a trailing line, silently skip that
+// line and conclude from only the lines that DID parse (i.e. "only one real
+// string-content user record found, therefore first Stop") — this test goes
+// red (territory.source would read 'review-territory' instead of
+// 'unattributable', since the hidden partial record is exactly the second
+// round this pin exists to catch).
+test('H22 STOP-BIND PIN B (truncated child read): a child transcript whose last line is invalid/incomplete JSON must refuse rather than conclude "first Stop" from only the lines it could parse', () => {
+  const { dir, cleanup } = makeH22Project();
+  try {
+    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/pinB-truncated.mjs"]\nThis is the original dispatch.';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinB_trunc', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [registerEntry('agent-pinB-truncated', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
+
+    const childPath = join(dir, 't', 'agent-pinB-truncated.jsonl');
+    mkdirSync(dirname(childPath), { recursive: true });
+    const line1 = JSON.stringify(firstUserRecord(brief, 'agent-pinB-truncated'));
+    // A second record cut off mid-write: a valid-looking JSON prefix, missing
+    // its closing quote/braces and trailing newline — exactly what a reader
+    // arriving mid-flush would see on disk, constructed here with plain bytes
+    // so it reproduces identically every run.
+    const truncatedSecondLine = '{"parentUuid":"parent-uuid-of-first-record","isSidechain":true,"type":"user","message":{"role":"user","content":"one more thing before you wrap';
+    writeFileSync(childPath, line1 + '\n' + truncatedSecondLine);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'truncated read', toolUseId: 'toolu_pinB_trunc', spawnDepth: 1, model: 'claude-x' });
+
+    const r = runH22(
+      h22Input(dir, { agent_id: 'agent-pinB-truncated', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    assertUnattributableStop(dir, 'agent-pinB-truncated');
+    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+  } finally {
+    cleanup();
+  }
+});

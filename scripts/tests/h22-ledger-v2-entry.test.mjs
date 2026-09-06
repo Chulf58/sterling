@@ -331,7 +331,20 @@ test('V2-1: a reviewer-* SubagentStop promotion writes a full v2 entry (schema_v
     assert.match(entry.identity?.base_sha ?? '', SHA_RE);
 
     assert.deepEqual([...(entry.territory?.files ?? [])].sort(), ['src/a.mjs', 'src/b.mjs']);
-    assert.equal(entry.territory?.source, 'review-territory', "territory.source is the nested home of the already-shipped files_source field");
+    // RULING SUPERSEDED 2026-09-06 by decision edbaa38d
+    // (reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
+    // user-decided), recorded on 8f137474 under "NARROWED FOR REVIEWER
+    // CLASSES": for a reviewer-* agent_type, territory.source no longer
+    // travels unchanged from the register entry's seeded files_source — it
+    // binds at Stop from the child transcript's delivered brief, corroborated
+    // by the .meta.json sidecar's toolUseId. This fixture's SubagentStop call
+    // supplies no `agent_transcript_path` at all (only `transcript_path`,
+    // which is the PARENT transcript, is overridden above) — the first named
+    // fail-closed shape in edbaa38d ("missing child transcript") — so the
+    // correct value is 'unattributable', never the register's seeded
+    // 'review-territory' guess. territory.files/attribution are untouched by
+    // this change (per the launching brief) and stay pinned above/below as-is.
+    assert.equal(entry.territory?.source, 'unattributable', "a reviewer-class Stop with no agent_transcript_path fails closed — the register's seeded files_source is provisional only (decision edbaa38d)");
     assert.equal(entry.territory?.attribution, 'block', 'territory.attribution is the nested home of the already-shipped attribution field');
 
     assert.equal(entry.content_evidence?.status, 'complete', 'both declared files exist on disk — content evidence is complete');

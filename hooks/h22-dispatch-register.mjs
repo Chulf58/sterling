@@ -5259,6 +5259,30 @@ import { existsSync as existsSync3 } from "node:fs";
 
 // scripts/hooks/lib/transcript.mjs
 import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync2, statSync, readdirSync } from "node:fs";
+function readFromStart(path, bytes) {
+  if (!existsSync2(path)) return null;
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const stat = fstatSync(fd);
+      if (!stat.isFile()) return null;
+      const size = stat.size;
+      const want = Math.min(size, bytes);
+      const buf = Buffer.alloc(want);
+      let readTotal = 0;
+      while (readTotal < want) {
+        const n = readSync(fd, buf, readTotal, want - readTotal, readTotal);
+        if (n === 0) break;
+        readTotal += n;
+      }
+      return { text: buf.toString("utf8", 0, readTotal), complete: readTotal === size };
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync2(path)) return null;
@@ -6019,6 +6043,11 @@ function attributeBlocks(transcriptPath, agentType) {
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
 }
+function normalizeRegisterPaths(cands, cwd) {
+  return [...new Set(cands.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
+    (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
+  );
+}
 function resolveTerritory(blocks) {
   const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
   const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
@@ -6030,6 +6059,157 @@ function resolveTerritory(blocks) {
     return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: "review-territory", warnings };
   }
   return { candidates: candidatesFromBlocks(blocks), files_source: "free-prose-fallback", warnings };
+}
+var CHILD_SCAN_BYTES = 64 * 1024 * 1024;
+var PARENT_SCAN_BYTES = 64 * 1024 * 1024;
+function childBriefFromTranscript(childPath) {
+  const read = readFromStart(childPath, CHILD_SCAN_BYTES);
+  if (read === null) return { ok: false, reason: "child-transcript-missing", detail: `no file at '${childPath}'` };
+  const nl = read.text.indexOf("\n");
+  if (nl === -1 && !read.complete) {
+    return {
+      ok: false,
+      reason: "child-first-record-truncated",
+      detail: `the child transcript's first line exceeds the ${CHILD_SCAN_BYTES}-byte read window, so the delivered brief could not be read whole`
+    };
+  }
+  const firstLine = (nl === -1 ? read.text : read.text.slice(0, nl)).trim();
+  if (firstLine === "") return { ok: false, reason: "child-transcript-empty", detail: `'${childPath}' has no first record` };
+  let record;
+  try {
+    record = JSON.parse(firstLine);
+  } catch {
+    return { ok: false, reason: "child-first-record-unparseable", detail: "the first line of the child transcript is not JSON" };
+  }
+  if (!record || record.type !== "user") {
+    return { ok: false, reason: "child-first-record-not-user", detail: `first record type is ${JSON.stringify(record?.type)}, not 'user' (the resumed/split-session shape the decision refuses)` };
+  }
+  const content = record.message?.content;
+  if (typeof content !== "string") {
+    return { ok: false, reason: "child-first-record-content-not-string", detail: `first record message.content is ${typeof content}, not the delivered brief string` };
+  }
+  let userStringRecords = 0;
+  let unparseableLines = 0;
+  for (const line of read.text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      unparseableLines++;
+      continue;
+    }
+    if (entry?.type === "user" && typeof entry?.message?.content === "string") userStringRecords++;
+  }
+  return { ok: true, brief: content, agentId: record.agentId, userStringRecords, unparseableLines, complete: read.complete };
+}
+function sidecarForChildTranscript(childPath) {
+  if (!childPath.endsWith(".jsonl")) {
+    return { ok: false, reason: "sidecar-path-underivable", detail: `agent_transcript_path '${childPath}' does not end in .jsonl, so the sidecar path cannot be derived` };
+  }
+  const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
+  if (!existsSync5(sidecarPath)) return { ok: false, reason: "sidecar-missing", detail: `no file at '${sidecarPath}'` };
+  let meta;
+  try {
+    meta = JSON.parse(readFileSync3(sidecarPath, "utf8"));
+  } catch {
+    return { ok: false, reason: "sidecar-unparseable", detail: `'${sidecarPath}' is not readable JSON` };
+  }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
+    return { ok: false, reason: "sidecar-malformed", detail: `'${sidecarPath}' does not hold a JSON object` };
+  }
+  if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") {
+    return { ok: false, reason: "sidecar-tool-use-id-missing", detail: `sidecar toolUseId is ${JSON.stringify(meta.toolUseId)}` };
+  }
+  if (meta.spawnDepth !== 1) {
+    return { ok: false, reason: "sidecar-spawn-depth", detail: `sidecar spawnDepth is ${JSON.stringify(meta.spawnDepth)}, not 1 (nested agents are refused for reviewer receipts)` };
+  }
+  return { ok: true, meta, sidecarPath };
+}
+function findParentToolUseBlock(parentPath, toolUseId) {
+  if (typeof parentPath !== "string" || parentPath === "") {
+    return { ok: false, reason: "parent-transcript-path-absent", detail: "stdin carried no transcript_path to locate the spawning block in" };
+  }
+  const read = readFromStart(parentPath, PARENT_SCAN_BYTES);
+  if (read === null) return { ok: false, reason: "parent-transcript-missing", detail: `no file at '${parentPath}'` };
+  for (const line of read.text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let entry;
+    try {
+      entry = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    const content = entry?.message?.content;
+    if (!Array.isArray(content)) continue;
+    const block = content.find((b) => b?.type === "tool_use" && b.id === toolUseId);
+    if (block) return { ok: true, block };
+  }
+  if (!read.complete) {
+    return {
+      ok: false,
+      reason: "parent-scan-truncated",
+      detail: `the parent transcript exceeds the ${PARENT_SCAN_BYTES}-byte scan window, so '${toolUseId}' being unfound proves nothing`
+    };
+  }
+  return { ok: false, reason: "tool-use-id-absent-from-parent", detail: `no tool_use block with id '${toolUseId}' anywhere in the parent transcript` };
+}
+function bindReviewerTerritoryAtStop(input2) {
+  const childPath = input2.agent_transcript_path;
+  if (typeof childPath !== "string" || childPath === "") {
+    return { bound: false, reason: "agent-transcript-path-absent", detail: "stdin carried no agent_transcript_path, so there is no delivered brief to bind against" };
+  }
+  const brief = childBriefFromTranscript(childPath);
+  if (!brief.ok) return { bound: false, reason: brief.reason, detail: brief.detail };
+  if (typeof input2.agent_id !== "string" || input2.agent_id === "" || typeof brief.agentId !== "string" || brief.agentId !== input2.agent_id) {
+    return {
+      bound: false,
+      reason: "child-transcript-agent-mismatch",
+      detail: `the child transcript's first record carries agentId ${JSON.stringify(brief.agentId)}, which is not the stopping agent's stdin agent_id ${JSON.stringify(input2.agent_id)}, so '${childPath}' is not provably this agent's transcript`
+    };
+  }
+  if (brief.userStringRecords > 1) {
+    return {
+      bound: false,
+      reason: "not-first-stop-no-existing-receipt",
+      detail: `the child transcript carries ${brief.userStringRecords} string-content user records, so this is continuation round ${brief.userStringRecords}, not the first Stop \u2014 yet no receipt exists for this dispatch to refresh. Territory is bound at the FIRST Stop only; what happened to the earlier receipt (spent by a commit, or lost) is not knowable from here`
+    };
+  }
+  if (!brief.complete || brief.unparseableLines > 0) {
+    return {
+      bound: false,
+      reason: "child-scan-truncated",
+      detail: brief.complete ? `the child transcript holds ${brief.unparseableLines} unreadable line(s) \u2014 a record cut off mid-write \u2014 so 'exactly one round' cannot be concluded: an unreadable record could itself be the continuation this check exists to catch` : `the child transcript exceeds the ${CHILD_SCAN_BYTES}-byte scan window, so 'exactly one round' cannot be concluded \u2014 an unread tail could hold further continuation records`
+    };
+  }
+  const sidecar = sidecarForChildTranscript(childPath);
+  if (!sidecar.ok) return { bound: false, reason: sidecar.reason, detail: sidecar.detail };
+  if (sidecar.meta.agentType !== input2.agent_type) {
+    return {
+      bound: false,
+      reason: "agent-type-mismatch",
+      detail: `sidecar agentType ${JSON.stringify(sidecar.meta.agentType)} does not equal stdin agent_type ${JSON.stringify(input2.agent_type)}`
+    };
+  }
+  const located = findParentToolUseBlock(input2.transcript_path, sidecar.meta.toolUseId);
+  if (!located.ok) return { bound: false, reason: located.reason, detail: located.detail };
+  if (located.block.input?.prompt !== brief.brief) {
+    return {
+      bound: false,
+      reason: "prompt-mismatch",
+      detail: `the parent block '${sidecar.meta.toolUseId}' prompt is not byte-identical to the child's first record, so the sidecar and the delivered brief do not describe one dispatch`
+    };
+  }
+  const { candidates, files_source, warnings } = resolveTerritory([{ subagent_type: sidecar.meta.agentType, prompt: brief.brief }]);
+  return {
+    bound: true,
+    files: normalizeRegisterPaths(candidates, input2.cwd),
+    files_source,
+    warnings,
+    tool_use_id: sidecar.meta.toolUseId
+  };
 }
 function claimedFromBlocks(blocks) {
   return [
@@ -6136,9 +6316,7 @@ try {
     }
     const claimedCandidates = claimedFromBlocks(matchedBlocks);
     const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
-    const toRegisterPaths = (cands) => [...new Set(cands.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-      (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
-    );
+    const toRegisterPaths = (cands) => normalizeRegisterPaths(cands, input.cwd);
     const files = toRegisterPaths(candidates);
     const claimedFiles = toRegisterPaths(claimedCandidates);
     const claimedGlobPrefixes = toRegisterPaths(globPrefixCandidates);
@@ -6241,7 +6419,25 @@ try {
     const resumeIsReviewer = !!resumeCandidate && typeof resumeCandidate.agent_type === "string" && resumeCandidate.agent_type.startsWith("reviewer-");
     if (departingIsReviewer || resumeIsReviewer) {
       const stopAgentType = departingIsReviewer ? departing.agent_type : resumeCandidate.agent_type;
-      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : departing.files;
+      const stopBinding = departingIsReviewer && !existingReceipt ? bindReviewerTerritoryAtStop(input) : null;
+      if (stopBinding) {
+        for (const w of stopBinding.warnings ?? []) process.stderr.write(w + "\n");
+        if (stopBinding.bound) {
+          process.stderr.write(
+            `H22: reviewer territory BOUND AT STOP for '${input.agent_id}' (agent_type '${stopAgentType}') from the brief this agent actually received \u2014 child transcript first record, corroborated by sidecar toolUseId '${stopBinding.tool_use_id}' and a byte-identical parent prompt. Receipt territory records ${stopBinding.files.length} file(s) with source '${stopBinding.files_source}'; the SubagentStart register attribution (files_source '${departing.files_source}') was provisional and is NOT what this receipt attests.
+`
+          );
+        } else {
+          process.stderr.write(
+            `H22: UNATTRIBUTABLE TERRITORY AT STOP \u2014 reviewer '${input.agent_id}' (agent_type '${stopAgentType}') could not be bound to its dispatch block [${stopBinding.reason}]: ${stopBinding.detail}. The Start-side attribution is a positional GUESS (SubagentStart carries no tool_use_id, research_finding ffa6219c, and the parent's spawning record is sometimes not yet on disk when it fires \u2014 decision edbaa38d), so it is recorded as territory.source 'unattributable': scripts/commit-reviewed.mjs will NEVER stamp or consume this receipt, and it stays in the ledger for a human to judge. observed_files (read from this agent's OWN transcript) remains its only trustworthy territory.
+`
+          );
+        }
+      }
+      const boundTerritory = stopBinding && stopBinding.bound ? stopBinding : null;
+      const mintFiles = boundTerritory ? boundTerritory.files : departing?.files;
+      const mintFilesSource = boundTerritory ? boundTerritory.files_source : "unattributable";
+      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : mintFiles;
       const sterlingDir = join3(input.cwd, ".sterling");
       const identity = gitReceiptIdentity(input.cwd);
       const evidenceByTerritory = /* @__PURE__ */ new Map();
@@ -6413,6 +6609,12 @@ try {
           );
           return;
         } else {
+          if (departingIsReviewer && !stopBinding) {
+            process.stderr.write(
+              `H22: UNATTRIBUTABLE TERRITORY AT STOP \u2014 reviewer '${input.agent_id}' (agent_type '${stopAgentType}') is being minted fresh because its existing receipt was consumed (stamped onto a commit) while this ledger lock was being acquired, so no Stop-time territory binding was performed for it (decision edbaa38d binds only on a fresh mint). Its territory records the SubagentStart guess with source 'unattributable': scripts/commit-reviewed.mjs will never stamp or consume it.
+`
+            );
+          }
           ledger.push({
             schema_version: 2,
             entry_id: randomUUID2(),
@@ -6440,11 +6642,21 @@ try {
               agent_id: departing.agent_id
             },
             territory: {
-              files: departing.files,
-              // Nested home of decision 8f137474's already-shipped
-              // files_source/attribution fields — copied unchanged from the
-              // register entry, same copy-if-present posture as before.
-              source: departing.files_source,
+              // BOUND AT STOP, NOT COPIED FROM THE REGISTER (decision edbaa38d)
+              // — see bindReviewerTerritoryAtStop and the mintFiles/
+              // mintFilesSource computation above. The register entry's
+              // Start-time attribution is PROVISIONAL for a reviewer, so what
+              // this receipt attests is the territory declared in the brief this
+              // agent provably received; every shape that could not be bound is
+              // 'unattributable' and unspendable, never a copied guess.
+              files: mintFiles,
+              source: mintFilesSource,
+              // Decision 8f137474's attribution label is UNCHANGED and still
+              // copied verbatim from the register entry: it names which
+              // Start-side positional case fired ('block'/'union') and is read
+              // by nothing that judges spendability — territory.source carries
+              // that verdict. Rewriting it here would silently restate the
+              // Stop binding in a field whose existing meaning is the Start one.
               attribution: departing.attribution
             },
             // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision
@@ -6480,14 +6692,16 @@ try {
               observed_source: "subagent-transcript",
               ...observed.truncated ? { observed_truncated: true } : {}
             } : {},
-            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`departing.files`,
-            // one line above), not for whatever territory the outside-the-lock
+            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`mintFiles`, the
+            // Stop-bound territory a few lines above — no longer
+            // `departing.files`, which is the provisional Start-time guess),
+            // not for whatever territory the outside-the-lock
             // precompute happened to use: this branch is reachable when the
             // receipt found at decision time was consumed while the lock was
             // being acquired, and the precompute would then describe THAT
             // receipt's territory rather than this fresh mint's. A cache HIT in
             // every ordinary mint (the precompute used exactly these files).
-            content_evidence: evidenceFor(departing.files),
+            content_evidence: evidenceFor(mintFiles),
             disposition: null
           });
         }
