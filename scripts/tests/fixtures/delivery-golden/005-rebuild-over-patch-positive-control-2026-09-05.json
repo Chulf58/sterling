@@ -1,0 +1,9 @@
+{
+  "event": "PostToolUse",
+  "payload": { "tool_name": "Edit", "tool_input": { "file_path": "CLAUDE.md" } },
+  "expected_ids": [
+    "b93fec51-a969-4f64-a398-6500479c70aa"
+  ],
+  "expected_absent_ids": [],
+  "source_incident": "2026-09-05, POSITIVE CONTROL (delivery that WORKED): the rebuild-over-patch decision (b93fec51) was authored into CLAUDE.md the same session it settled. This fixture pins that an Edit of CLAUDE.md delivers this decision — the delivery mechanics working as intended, kept as a regression guard against a future silent miss on this same file. (Ambiguity resolved here: the source incident's own text names H20 as the delivering hook, but H20 registers only on Task/AskUserQuestion/Codex-consult, never on Edit — an Edit of CLAUDE.md can only be H19's file-touch channel, which is what this fixture exercises.)"
+}

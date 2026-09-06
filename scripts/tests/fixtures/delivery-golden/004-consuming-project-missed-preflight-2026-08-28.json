@@ -1,0 +1,9 @@
+{
+  "event": "PostToolUse",
+  "payload": { "tool_name": "Read", "tool_input": { "file_path": "packages/mcp-server/src/server.ts" } },
+  "expected_ids": [
+    "7491b0cf-c263-4308-9419-f60c6bc8574f"
+  ],
+  "expected_absent_ids": [],
+  "source_incident": "2026-08-28: a consuming project reported never finding knowledge_preflight as its single biggest structural gap, though the tool had shipped 2026-08-10 (decision 7491b0cf). This fixture pins that touching the tool's own registration surface (packages/mcp-server/src/server.ts) still delivers the decision that introduced it, so a future session cannot repeat the same discovery failure on this file."
+}

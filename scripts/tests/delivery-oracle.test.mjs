@@ -15,7 +15,11 @@
 // THE CONTRACT — scripts/delivery-oracle.mjs must export exactly these.
 // ===========================================================================
 //
-//   deriveExpected(store, { repoRoot }) -> Entry[]
+//   deriveExpected(store, { repoRoot, outputAxisProbes }) -> Entry[]
+//     outputAxisProbes (optional, default []): the H23 output-axis probe
+//     extension (GROUP J-N below) — { rel, tool, tool_response, agent_id? }[].
+//     agent_id is optional; when present the case is silenced with
+//     expected_reason 'agent_id_present' (GROUP R below).
 //     Entry is a Case or an Exclusion.
 //     Case = {
 //       kind: 'case',
@@ -29,7 +33,15 @@
 //       event?: string, tool?: string,    // optional payload overrides
 //     }
 //     Exclusion = { kind:'exclusion', rel: string, record_id: string|null,
-//                   reason: 'gitignored'|'working_tree_article' }
+//                   reason: 'gitignored'|'working_tree_article'|
+//                           'descends_from_file_claim'|'real_directory'|
+//                           'ancestor_of_claim',
+//                   record_ids: string[],  // ALL claimants, deduped;
+//                                           // record_id === record_ids[0]
+//                   raw?: string }         // the FIRST claim's original
+//                                           // (pre-normalization) spelling,
+//                                           // e.g. 'a/' when rel is 'a'
+//     (GROUP T below, conductor follow-up after the coder's review pass.)
 //
 //   synthesizePayload(caseOrProbe, { cwd, agent_id, session_id })
 //       -> { stdin: object, sandbox_writes: {rel, json}[] }
@@ -49,6 +61,23 @@
 //   loadProbes(dir) -> Probe[]            (throws, naming the file, on a bad probe)
 //   auditDir(projectRoot) -> string
 //   writeRunReport(projectRoot, report) -> { run_path, history_path }
+//   loadGoldenFixtures(dir) -> Fixture[]   // GROUP S below (board ab288113);
+//                       Fixture = { file, event, payload, expected_ids,
+//                       expected_absent_ids, source_incident }; throws,
+//                       naming the file and the reason, on: a missing
+//                       required field (S4); expected_ids AND
+//                       expected_absent_ids both empty (S6); a non-UUID
+//                       entry in expected_ids (S7); an (event, tool_name)
+//                       pair with no hook route (S8).
+//   goldenManifest(fixtures) -> { version:1, fixtures:[{file, expected_ids,
+//                       expected_absent_ids}] }  // sorted by file; each id
+//                       set sorted; independent of input order.
+//   goldenManifestDigest(fixtures) -> string  // SHA-256 hex over the
+//                       canonical manifest above; stimulus fields
+//                       (event/payload/source_incident) are NOT hashed.
+//   runGoldenFixtures(...) -> report          // replays the golden corpus
+//                       through the bundled hooks; not unit-tested here (see
+//                       GROUP S's header) — the CLI gate covers it.
 //
 // AMBIGUITIES RESOLVED HERE (flagged in the handoff, not silently decided):
 //  - synthesizePayload's return shape (above) — H10 has no stdin touch field.
@@ -1945,6 +1974,494 @@ test('Q1: content clearing term-overlap + the discriminating floor via ONLY the 
     assert.deepEqual(c.expected_ids, [], 'peripheral-only overlap (game/field/cell) is not centrality — the record must not be named');
     assert.ok(!c.expected.hazards.includes(ap.id), 'the record must not surface via its peripheral words alone');
     assert.equal(c.expected_reason, 'below_axis_floor', 'silent for a three-floor axis reason — centrality is one of the three, per this article\'s own contract');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// GROUP R — H23's two SILENT gates ahead of everything else (board f1e056bd
+// item 3): deriveExpected's output-axis arm now mirrors h23-output-axis.mjs
+// :134 (an unsupported tool — anything but Read/Bash/PowerShell — silences
+// the arm with expected_reason 'unsupported_tool') and :137 (agent_id
+// present, the conductor-only gate, silences it with 'agent_id_present'),
+// CHECKED FIRST and in that exact order — ahead of the path-exclusion
+// (Group O), no-tool-response (Group P) and ownership/content (Groups J/Q)
+// gates already pinned above. Written blind (H4), from this dispatch's brief
+// alone. outputAxisProbes entries gain an optional `agent_id` field
+// alongside the existing rel/tool/tool_response (documented in the top
+// contract comment above).
+// ===========================================================================
+
+test('R0 CONTROL: the SAME content over a SUPPORTED tool (Bash) matches the anti_pattern, while over an UNSUPPORTED tool (Grep) the case still exists but is silenced as "unsupported_tool" — proves the silence is about the TOOL, not a content miss', () => {
+  // SABOTAGE: delete the tool-allowlist gate from the mirror.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(axisAntiPattern('AP-ALPHA'));
+    const probes = [
+      { rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE },
+      { rel: null, tool: 'Grep', tool_response: CONTENT_SENTENCE },
+    ];
+    const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
+    const bashCase = h23CaseOf(entries, 'Bash');
+    const grepCase = h23CaseOf(entries, 'Grep');
+    assert.ok(bashCase, 'the supported-tool probe produces a case');
+    assert.deepEqual(bashCase.expected.hazards, [ap.id], 'matching content over a supported tool gets the pointer');
+    assert.ok(grepCase, 'the unsupported-tool probe still gets a case, never silently dropped');
+    assert.deepEqual(grepCase.expected_ids, [], 'an unsupported tool is silent regardless of content match');
+    assert.equal(grepCase.expected_reason, 'unsupported_tool', 'silent because the TOOL is unsupported — the Bash arm above proves the identical content DOES match');
+  } finally {
+    cleanup();
+  }
+});
+
+test('R1: an agent_id present on the probe silences the arm even over a supported tool with matching content — expected_reason "agent_id_present" (the conductor-only gate; H23 stays silent for subagent-attributed touches)', () => {
+  // SABOTAGE: delete the agent_id gate entirely, or move its check to AFTER content matching has already produced a match.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    store.create(axisAntiPattern('AP-ALPHA'));
+    const probes = [{ rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE, agent_id: 'agent-123' }];
+    const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
+    const c = h23CaseOf(entries, 'Bash');
+    assert.ok(c, 'the probe still gets a case, never silently dropped');
+    assert.deepEqual(c.expected_ids, [], 'a subagent-attributed touch is silent for H23 regardless of a content match');
+    assert.equal(c.expected_reason, 'agent_id_present');
+  } finally {
+    cleanup();
+  }
+});
+
+test('R2: an UNSUPPORTED tool WITH agent_id present reads as "unsupported_tool", not "agent_id_present" — the tool-allowlist gate runs FIRST, per h23-output-axis.mjs\'s own gate order', () => {
+  // SABOTAGE: swap the gate order (check agent_id before the tool allowlist).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    store.create(axisAntiPattern('AP-ALPHA'));
+    const probes = [{ rel: null, tool: 'Grep', tool_response: CONTENT_SENTENCE, agent_id: 'agent-123' }];
+    const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
+    const c = h23CaseOf(entries, 'Grep');
+    assert.ok(c);
+    assert.deepEqual(c.expected_ids, []);
+    assert.equal(c.expected_reason, 'unsupported_tool', 'the tool gate is checked before the agent_id gate — R0 establishes what "unsupported_tool" alone looks like, R1 establishes what "agent_id_present" alone looks like, this is their combination');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// GROUP S — golden delivery scenarios (board ab288113, decision 08872881:
+// "Golden delivery-scenario expectations stay IN the fixture JSON, guarded
+// by a SHA-256 digest pin inside the frozen test file"). Fixtures live at
+// scripts/tests/fixtures/delivery-golden/*.json, one whole scenario per
+// file: { event, payload, expected_ids, expected_absent_ids, source_incident }.
+// GOLDEN_DIGEST below is a LITERAL, minted over the canonical manifest of
+// ONLY the expectations — {version:1, fixtures:[{file, expected_ids:[sorted],
+// expected_absent_ids:[sorted]}]}, fixtures sorted by filename, canonical
+// UTF-8 JSON — so a coder facing a red golden scenario cannot turn it green
+// by editing expected_ids without ALSO producing a second, independent red
+// right here inside the frozen test file (the exact bypass H5's wall exists
+// to prevent). Stimulus fields (event/payload/source_incident) are
+// deliberately NOT hashed — they would create churn without buying
+// protection.
+//
+// AMBIGUITY RESOLVED HERE (flagged, not silently decided, per this file's
+// own convention): loadGoldenFixtures is assumed to annotate each returned
+// fixture with its source `file` (basename) alongside the four JSON fields —
+// goldenManifest's {file, expected_ids, expected_absent_ids} contract needs
+// it from somewhere, and nothing else in the declared interface supplies it.
+//
+// NOTE: no unit test here for runGoldenFixtures per this dispatch's
+// instruction — it spawns real hook subprocesses over a sandbox project,
+// which is exactly what the CLI-level gate (running the oracle for real)
+// already covers; a mocked-subprocess unit test of it would pin the mock,
+// not the wiring.
+// ===========================================================================
+
+const GOLDEN_DIR = join(root, 'scripts', 'tests', 'fixtures', 'delivery-golden');
+const GOLDEN_DIGEST = '58d6cc2e892e1da16d896e2a2e38f81bcd09ac4064679c3bdd63c93c2fc68505';
+
+test('S0: the five real golden scenarios load, and goldenManifestDigest matches the frozen literal — this ALSO serves as S1/S2\'s control: matching an exact, independently-minted 64-hex literal on real data rules out a stub/constant digest function', () => {
+  // SABOTAGE: edit any one fixture's expected_ids in scripts/tests/fixtures/delivery-golden/ without re-minting GOLDEN_DIGEST above.
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const goldenManifestDigest = fn('goldenManifestDigest');
+  const fixtures = loadGoldenFixtures(GOLDEN_DIR);
+  assert.equal(fixtures.length, 5, 'all five seeded incident fixtures load');
+  assert.equal(goldenManifestDigest(fixtures), GOLDEN_DIGEST, 'the frozen digest guards the fixture corpus\'s EXPECTATIONS');
+});
+
+test('S1: mutating source_incident on every fixture leaves the digest UNCHANGED — the digest covers only expectations, never stimulus/provenance (relies on S0 above as its control: S0 already proves the digest is a real, data-sensitive computation, not a constant)', () => {
+  // SABOTAGE: fold source_incident (or event/payload) into the hashed manifest instead of only {file, expected_ids, expected_absent_ids}.
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const goldenManifestDigest = fn('goldenManifestDigest');
+  const fixtures = loadGoldenFixtures(GOLDEN_DIR);
+  const mutated = fixtures.map((f) => ({ ...f, source_incident: `mutated-for-S1-${f.file}` }));
+  assert.equal(goldenManifestDigest(mutated), goldenManifestDigest(fixtures));
+});
+
+test('S2: appending a bogus id to ONE fixture\'s expected_ids MOVES the digest', () => {
+  // SABOTAGE: build the canonical manifest from only {file} per fixture (or otherwise exclude expected_ids/expected_absent_ids from what gets hashed) — this must go red, because appending an id would no longer move the digest.
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const goldenManifestDigest = fn('goldenManifestDigest');
+  const fixtures = loadGoldenFixtures(GOLDEN_DIR);
+  const before = goldenManifestDigest(fixtures);
+  const mutated = fixtures.map((f, i) => (i === 0 ? { ...f, expected_ids: [...f.expected_ids, 'bogus-id-added-for-s2'] } : f));
+  assert.notEqual(goldenManifestDigest(mutated), before);
+});
+
+// AMBIGUITY RESOLVED HERE: every synthetic fixture from here on carries
+// payload.tool_name and a real (event, tool_name) route — 'PostToolUse' +
+// 'Read' (H23's own allowed-tool set per Group R above, and B3's file_touch
+// convention already in this file: every synthesized stdin carries
+// tool_name alongside tool_input) — so that S3/S5/S6/S7, which are NOT
+// testing route validity, don't collide with S8's new route check below.
+// Likewise every expected_ids/expected_absent_ids entry from here on is a
+// syntactically valid UUID (matching this file's own UUID_RE shape) unless
+// the test is S7 itself, and no fixture below leaves BOTH id arrays empty
+// unless the test is S6 itself — both are now independent load-time
+// refusals per the conductor's follow-up.
+const ROUTABLE_PAYLOAD = { tool_name: 'Read' };
+const UUID_A = '00000000-0000-0000-0000-000000000001';
+const UUID_B = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+
+test('S3: goldenManifest sorts fixtures by FILENAME and sorts each fixture\'s id sets — synthetic fixtures, deliberately out of order, so the pin does not depend on the real corpus happening to already be sorted', () => {
+  // SABOTAGE: emit the manifest in directory/load order instead of sorting by file, or emit id sets unsorted.
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const goldenManifest = fn('goldenManifest');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-order-'));
+  try {
+    writeFileSync(join(dir, 'z-second.json'), JSON.stringify({ event: 'PostToolUse', payload: ROUTABLE_PAYLOAD, expected_ids: [UUID_B, UUID_A], expected_absent_ids: [UUID_B, UUID_A], source_incident: 'x' }));
+    writeFileSync(join(dir, 'a-first.json'), JSON.stringify({ event: 'PostToolUse', payload: ROUTABLE_PAYLOAD, expected_ids: [UUID_A], expected_absent_ids: [], source_incident: 'y' }));
+    const fixtures = loadGoldenFixtures(dir);
+    const m = goldenManifest(fixtures);
+    assert.deepEqual(m.fixtures.map((f) => f.file), ['a-first.json', 'z-second.json'], 'fixtures are ordered by FILENAME, not directory/load order');
+    const second = m.fixtures.find((f) => f.file === 'z-second.json');
+    assert.deepEqual(second.expected_ids, [UUID_A, UUID_B], 'each fixture\'s own id set is sorted');
+    assert.deepEqual(second.expected_absent_ids, [UUID_A, UUID_B]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S4: loadGoldenFixtures REFUSES a fixture missing `event`, naming the offending file', () => {
+  // SABOTAGE: default a missing `event` to '' (or some other fallback) instead of throwing.
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-bad-'));
+  try {
+    writeFileSync(join(dir, 'bad.json'), JSON.stringify({ payload: {}, expected_ids: [], source_incident: 'x' }));
+    let thrown = null;
+    try {
+      loadGoldenFixtures(dir);
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown, 'loadGoldenFixtures must throw on a fixture missing `event`');
+    assert.match(thrown.message, /bad\.json/, 'the error names the offending file');
+    assert.match(thrown.message, /event/, 'the error names the missing field');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S5: expected_absent_ids defaults to [] when the fixture omits it entirely', () => {
+  // SABOTAGE: leave expected_absent_ids undefined (rather than defaulting to []) when the field is absent.
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-noabsent-'));
+  try {
+    writeFileSync(join(dir, 'ok.json'), JSON.stringify({ event: 'PostToolUse', payload: ROUTABLE_PAYLOAD, expected_ids: [UUID_A], source_incident: 'x' }));
+    const fixtures = loadGoldenFixtures(dir);
+    assert.equal(fixtures.length, 1);
+    assert.deepEqual(fixtures[0].expected_absent_ids, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// S6-S8 — three load-time refusals added after review (conductor follow-up,
+// same dispatch). Same mkdtemp shape as S4/S5.
+// ---------------------------------------------------------------------------
+
+test('S6: a fixture whose expected_ids AND expected_absent_ids are BOTH empty is REFUSED, naming the file', () => {
+  // SABOTAGE: drop the both-empty guard (accept a fixture that asserts nothing at all).
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-empty-'));
+  try {
+    writeFileSync(join(dir, 'empty.json'), JSON.stringify({ event: 'PostToolUse', payload: ROUTABLE_PAYLOAD, expected_ids: [], expected_absent_ids: [], source_incident: 'x' }));
+    let thrown = null;
+    try {
+      loadGoldenFixtures(dir);
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown, 'a fixture with nothing to assert must be refused, not silently accepted as a vacuous pass');
+    assert.match(thrown.message, /empty\.json/, 'the error names the offending file');
+    assert.match(thrown.message, /empty/, 'the error names WHY: both id sets are empty');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S7: a non-UUID entry in expected_ids is REFUSED, naming the file and the field', () => {
+  // SABOTAGE: drop UUID-shape validation on expected_ids entries (accept any string as a record id).
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-badid-'));
+  try {
+    writeFileSync(join(dir, 'badid.json'), JSON.stringify({ event: 'PostToolUse', payload: ROUTABLE_PAYLOAD, expected_ids: ['not-a-uuid'], expected_absent_ids: [], source_incident: 'x' }));
+    let thrown = null;
+    try {
+      loadGoldenFixtures(dir);
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown, 'a malformed record id must be refused at load time, not silently carried into a run that can never match it');
+    assert.match(thrown.message, /badid\.json/, 'the error names the offending file');
+    assert.match(thrown.message, /expected_ids/, 'the error names the offending field');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('S8: an (event, tool_name) pair with no hook route — PostToolUse + Grep — is REFUSED at load time, naming the file, with a valid UUID present so only the route check can be at fault', () => {
+  // SABOTAGE: drop the route-existence check (accept any event/tool_name pair, routing it nowhere at run time instead of refusing it up front).
+  const loadGoldenFixtures = fn('loadGoldenFixtures');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-noroute-'));
+  try {
+    writeFileSync(join(dir, 'noroute.json'), JSON.stringify({ event: 'PostToolUse', payload: { tool_name: 'Grep' }, expected_ids: [UUID_A], expected_absent_ids: [], source_incident: 'x' }));
+    let thrown = null;
+    try {
+      loadGoldenFixtures(dir);
+    } catch (e) {
+      thrown = e;
+    }
+    assert.ok(thrown, 'a valid id and a valid event alone are not enough — the (event, tool_name) pair itself must resolve to a real hook route');
+    assert.match(thrown.message, /noroute\.json/, 'the error names the offending file');
+    assert.match(thrown.message, /hook route/, 'the error names WHY: no hook is registered for this event/tool_name pair');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// GROUP T — runGoldenFixtures miss-reason reporting (T0/T1) + deriveExpected's
+// new exclusion classes and fields (T2-T5). Conductor follow-up, same
+// dispatch, after the oracle coder applied the review follow-ups. Written
+// blind (H4).
+//
+// T0/T1 EXERCISE runGoldenFixtures DIRECTLY — GROUP S's own header
+// deliberately declined to unit-test it (real hook subprocesses; the CLI
+// gate covers the wiring). This follow-up asks for it anyway, scoped
+// narrowly to the MISS-REASON computation the conductor named, not the
+// subprocess plumbing.
+//
+// AMBIGUITY DISCLOSED, NOT SILENTLY DECIDED (H4 blocks confirming any of
+// this against scripts/delivery-oracle.mjs or the coder's own probe):
+//  - RESOLVED by conductor follow-up (the coder fixed three real defects
+//    behind T0/T1), TWICE — the return shape is a per-FIXTURE array of
+//    result entries (`report` itself, or `report.results`/`report.fixtures`
+//    when not a bare array); the miss dict lives on the entry, present only
+//    when that fixture has missing_ids: `entry.misses[id] -> {miss_reason,
+//    ...}` (delivery-oracle.mjs:1453-1468). firstGoldenResult() below reads
+//    entry[0] defensively and asserts its shape, naming the actual keys on
+//    failure, rather than a bare property-access crash. runGoldenFixtures no
+//    longer takes a `repoRoot` option (dropped below — sandboxDir/snapshotDb
+//    alone are the real surface).
+//  - sandboxDir is passed as the SAME directory as repoRoot was — every
+//    sandbox builder already in this file (makeFixtureRepo,
+//    makeAxisFixtureRepo) uses exactly one project directory, never a
+//    second one for the project root itself. Still unconfirmed by direct
+//    read (H4).
+//  - snapshotDb is produced via `store.snapshot(path)`, an INSTANCE method,
+//    per article 79d2a189's own wording: "snapshots the WAL store via
+//    SterlingStore.snapshot (VACUUM INTO)". Still unconfirmed by direct
+//    read (H4).
+//  - the fixture's `payload` field is shaped as an ordinary hook stdin body
+//    (tool_name / tool_input.file_path / cwd), mirroring synthesizePayload's
+//    own established shape (Group B) rather than a new one invented here.
+// If either remaining assumption is wrong, T0/T1 fail at SETUP with a
+// thrown error naming the missing method/shape — report that back to the
+// conductor/coder rather than silently reshaping the test to match whatever
+// the code actually does (that would anchor the oracle to the
+// implementation, exactly what H4 exists to prevent).
+//
+// T2-T5 carry NO such risk — they call ONLY the already-proven, already-
+// exported deriveExpected, through the same makeAxisFixtureRepo fixture and
+// caseFor/exclusionFor helpers Groups A/J-R already use.
+// ===========================================================================
+
+const DECISION_POINTER_CAP = 8;
+
+function firstGoldenResult(report) {
+  const entry = Array.isArray(report) ? report[0] : (report.results ?? report.fixtures ?? [])[0];
+  assert.ok(entry, `runGoldenFixtures must return at least one per-fixture result entry — got: ${JSON.stringify(report)}`);
+  assert.equal(typeof entry.misses, 'object', `entry.misses must be an object naming the missing ids — entry keys were: ${Object.keys(entry).join(', ')}`);
+  return entry;
+}
+
+function buildGoldenSandbox(files) {
+  assert.ok(SterlingStore, 'packages/store/dist must be built for the oracle fixture (npm run build)');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-golden-run-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  for (const [rel, content] of Object.entries(files)) {
+    mkdirSync(join(dir, dirname(rel)), { recursive: true });
+    writeFileSync(join(dir, rel), content);
+  }
+  const init = git(dir, ['init', '-q']);
+  assert.equal(init.status, 0, 'git is required to build the golden-run sandbox');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-qm', 'golden-run fixture']);
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const cleanup = () => {
+    try { store.close(); } catch { /* already closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { dir, store, cleanup };
+}
+
+test('T0: a golden MISS on an id genuinely eligible for the touched path, evicted by DECISION_POINTER_CAP\'s rendering tail, reports miss_reason "cap_evicted" with {rendered, suppressed_count, cap}', () => {
+  // SABOTAGE: report a bare 'not_delivered' for every miss, never distinguishing a cap eviction from a true non-candidate.
+  const runGoldenFixtures = fn('runGoldenFixtures');
+  const { dir, store, cleanup } = buildGoldenSandbox({ 'src/hot.mjs': '// hot\n' });
+  try {
+    const decisions = [];
+    for (let i = 0; i < DECISION_POINTER_CAP + 1; i++) {
+      const extra = i === 0
+        ? { file_keys: ['src/hot.mjs'], created_at: '2020-01-01T00:00:00.000Z', updated_at: '2020-01-01T00:00:00.000Z' }
+        : { file_keys: ['src/hot.mjs'] };
+      decisions.push(store.create(axisDecision(`HOT-${i}`, extra)));
+    }
+    const oldest = decisions[0];
+    const snapshotDb = join(dir, '.sterling', 'snapshot.db');
+    store.snapshot(snapshotDb);
+    const fixture = {
+      file: 't0-cap-evicted.json',
+      event: 'PostToolUse',
+      payload: { tool_name: 'Read', tool_input: { file_path: join(dir, 'src', 'hot.mjs') }, cwd: dir },
+      expected_ids: [oldest.id],
+      expected_absent_ids: [],
+      source_incident: 'T0 synthetic (conductor follow-up)',
+    };
+    const report = runGoldenFixtures([fixture], { sandboxDir: dir, snapshotDb });
+    const entry = firstGoldenResult(report);
+    const miss = entry.misses[oldest.id];
+    assert.ok(miss, 'the evicted decision is reported as a miss, never silently absent from the report');
+    assert.equal(miss.miss_reason, 'cap_evicted');
+    assert.equal(miss.rendered, DECISION_POINTER_CAP);
+    assert.equal(miss.suppressed_count, 1);
+    assert.equal(miss.cap, DECISION_POINTER_CAP);
+  } finally {
+    cleanup();
+  }
+});
+
+test('T1: a MISS on an id that was never a candidate for the touched path reports "not_delivered", with none of rendered/suppressed_count/cap present', () => {
+  // SABOTAGE: attach rendered/suppressed_count/cap to every miss regardless of reason, collapsing the two miss classes into one shape.
+  const runGoldenFixtures = fn('runGoldenFixtures');
+  const { dir, store, cleanup } = buildGoldenSandbox({ 'src/hot.mjs': '// hot\n', 'src/cold.mjs': '// cold\n' });
+  try {
+    const stranger = store.create(axisDecision('STRANGER', { file_keys: ['src/cold.mjs'] }));
+    const snapshotDb = join(dir, '.sterling', 'snapshot.db');
+    store.snapshot(snapshotDb);
+    const fixture = {
+      file: 't1-not-delivered.json',
+      event: 'PostToolUse',
+      payload: { tool_name: 'Read', tool_input: { file_path: join(dir, 'src', 'hot.mjs') }, cwd: dir },
+      expected_ids: [stranger.id],
+      expected_absent_ids: [],
+      source_incident: 'T1 synthetic (conductor follow-up)',
+    };
+    const report = runGoldenFixtures([fixture], { sandboxDir: dir, snapshotDb });
+    const entry = firstGoldenResult(report);
+    const miss = entry.misses[stranger.id];
+    assert.ok(miss, 'the never-a-candidate id is still reported, never silently dropped');
+    assert.equal(miss.miss_reason, 'not_delivered');
+    assert.equal(Object.hasOwn(miss, 'rendered'), false, 'not_delivered carries no rendered field — that belongs to the cap_evicted shape only');
+    assert.equal(Object.hasOwn(miss, 'suppressed_count'), false);
+    assert.equal(Object.hasOwn(miss, 'cap'), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test('T2: a real FILE claim survives as an ordinary case when a DIFFERENT record claims a bogus path nested under it', () => {
+  // SABOTAGE: once any record's file_keys names a path nested under a real file, treat the real file itself as excluded too (instead of excluding only the bogus nested claim).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, ids, cleanup } = makeAxisFixtureRepo();
+  try {
+    const bogus = store.create(axisDecision('BOGUS-NESTED', { file_keys: ['src/owned.mjs/nested.mjs'] }));
+    const entries = deriveExpected(store, { repoRoot: dir });
+    const c = caseFor(entries, 'src/owned.mjs', 'h19-knowledge-delivery.mjs');
+    assert.ok(c, 'the real file keeps its ordinary case');
+    assert.deepEqual(sorted(c.expected.owners), [ids.owner], 'the bogus nested claim confers no ownership on the real file');
+    const x = exclusionFor(entries, 'src/owned.mjs/nested.mjs');
+    assert.ok(x, 'the bogus nested path is accounted for by name, not silently dropped');
+    assert.equal(x.reason, 'descends_from_file_claim');
+    assert.equal(x.record_id, bogus.id);
+  } finally {
+    cleanup();
+  }
+});
+
+test('T3: a path that stats as a real DIRECTORY is excluded with reason "real_directory"', () => {
+  // SABOTAGE: drop the is-directory check, letting a directory path fall through to an ordinary case.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const dec = store.create(axisDecision('DIR-CLAIM', { file_keys: ['src'] }));
+    const entries = deriveExpected(store, { repoRoot: dir });
+    const x = exclusionFor(entries, 'src');
+    assert.ok(x, 'a directory claim is accounted for by name, not silently dropped');
+    assert.equal(x.reason, 'real_directory');
+    assert.equal(x.record_id, dec.id);
+    assert.equal(casesFor(entries, 'src').length, 0, 'a real directory never gets an ordinary case');
+  } finally {
+    cleanup();
+  }
+});
+
+test('T4: an ABSENT path that is merely a STRING ancestor of another claim is excluded with reason "ancestor_of_claim" — distinct from T3\'s real_directory (this ancestor does not exist on disk at all)', () => {
+  // SABOTAGE: collapse ancestor_of_claim into real_directory, or drop the ancestor check entirely, leaving the absent ancestor as an ordinary (nonexistent-but-claimed) case.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const deep = store.create(axisDecision('DEEP-CLAIM', { file_keys: ['src/nested/deep.mjs'] }));
+    const ancestor = store.create(axisDecision('ANCESTOR-CLAIM', { file_keys: ['src/nested'] }));
+    const entries = deriveExpected(store, { repoRoot: dir });
+    const deepCase = caseFor(entries, 'src/nested/deep.mjs', 'h19-knowledge-delivery.mjs');
+    assert.ok(deepCase, 'the deeper, real claim still gets its ordinary case');
+    assert.deepEqual(deepCase.expected.rationale, [deep.id], 'a decision confers RATIONALE, never ownership (A2b)');
+    assert.deepEqual(deepCase.expected.owners, [], 'a decision never confers ownership (A2b)');
+    const x = exclusionFor(entries, 'src/nested');
+    assert.ok(x, 'the absent ancestor path is accounted for by name, not silently dropped');
+    assert.equal(x.reason, 'ancestor_of_claim');
+    assert.equal(x.record_id, ancestor.id);
+  } finally {
+    cleanup();
+  }
+});
+
+test('T5: every exclusion carries record_ids (ALL claimants, deduped, record_id === record_ids[0]) plus `raw` — the STORED (post-normalization) spelling; record_ids is compared as a SET, since order follows the store\'s own query tiebreak, not creation order', () => {
+  // SABOTAGE: report only the LAST claimant instead of the deduped full set, or drop the `raw` field entirely.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    mkdirSync(join(dir, 'a'));
+    // CORRECTED per conductor follow-up: packages/schemas normalizeRepoPath
+    // strips trailing slashes at store.create() TIME, so 'a/' can never
+    // reach the oracle as 'a/' — both claims below are stored as the
+    // identical normalized rel 'a', and `raw` reports that stored spelling,
+    // not an unrecoverable pre-normalization one.
+    const first = store.create(axisDecision('FIRST-CLAIM', { file_keys: ['a/'] }));
+    const second = store.create(axisDecision('SECOND-CLAIM', { file_keys: ['a'] }));
+    const entries = deriveExpected(store, { repoRoot: dir });
+    const x = exclusionFor(entries, 'a');
+    assert.ok(x, 'the shared directory claim is excluded and accounted for');
+    assert.equal(x.reason, 'real_directory');
+    assert.deepEqual([...x.record_ids].sort(), [first.id, second.id].sort(), 'every claimant is named, deduped — compared as a SET since the store\'s own query tiebreak decides order, not creation order');
+    assert.equal(x.record_id, x.record_ids[0], 'record_id is the first of the full set, never an arbitrary pick independent of it');
+    assert.equal(x.raw, 'a', 'raw is the STORED (already-normalized) spelling — normalizeRepoPath strips the trailing slash before the oracle ever sees it');
   } finally {
     cleanup();
   }

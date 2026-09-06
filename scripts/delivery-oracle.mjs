@@ -23,15 +23,18 @@
 // predicate is CONTENT-matched (axis terms extracted from tool_response, the
 // same three relevance floors, a centrality check) rather than path-matched, so
 // deriveExpected mirrors it only when the caller supplies `outputAxisProbes`
-// ({rel, tool, tool_response}[]) — a cheap silence-only arm was rejected
-// because H23 is silent for at least six different reasons (no tool_response,
-// an excluded path, owned-path suppression, no term match, dedup, the pointer
-// cap) and a verdict that cannot tell them apart is exactly the multiply-caused
-// silence anti_pattern 1b141d1f warns about; `expected_reason`
-// ('no_tool_response' | 'path_excluded' | 'owned_suppressed' |
-// 'below_axis_floor') names which of the four STORE-DERIVABLE silence causes
-// applies (dedup/subagent-silence stay h23-output-axis.mjs's own frozen
-// suite's concern, never re-derived here). The content a real Read/Bash call
+// ({rel, tool, tool_response, agent_id?}[]) — a cheap silence-only arm was
+// rejected because H23 is silent for at least eight different reasons (an
+// unsupported tool, an agent-scoped call, no tool_response, an excluded path,
+// owned-path suppression, no term match, dedup, the pointer cap) and a
+// verdict that cannot tell them apart is exactly the multiply-caused silence
+// anti_pattern 1b141d1f warns about; `expected_reason` ('unsupported_tool' |
+// 'agent_id_present' | 'no_tool_response' | 'path_excluded' |
+// 'owned_suppressed' | 'below_axis_floor') names which of the six
+// STORE-DERIVABLE silence causes applies (dedup and the pointer cap stay
+// h23-output-axis.mjs's own frozen suite's concern, never re-derived here —
+// board f1e056bd item 3 closed the other two, which this mirror omitted
+// entirely until now). The content a real Read/Bash call
 // would have returned cannot be reconstructed from the store alone, so a live
 // `--project` run with no probes supplied drives zero h23-output-axis cases
 // today — the arm itself is fully exercised by
@@ -108,6 +111,7 @@ const H19_BASH = 'h19-bash-delivery.mjs';
 const H10 = 'h10-direct-capture.mjs';
 const DRAIN = 'h19-delivery-drain.mjs';
 const H23 = 'h23-output-axis.mjs';
+const H20 = 'h20-mechanism-axis.mjs';
 
 // H10's demand-block header (h10-direct-capture.mjs:1712). Used as the LIVENESS
 // arm of the inverted ownership verdict: its absence means H10 never printed a
@@ -173,6 +177,25 @@ const isRepoPath = (p) => {
   return true;
 };
 
+/** Canonicalize an already-isRepoPath-accepted string into the segment form
+ *  every later comparison (the directory/ancestor screen, the ancestor's own
+ *  entry, materialize) uses. Without this, an ALIAS SPELLING of the same
+ *  path — a trailing slash ('a/'), a './' segment ('a/./b'), a doubled
+ *  slash ('a//b') — compares UNEQUAL to its canonical sibling in a plain
+ *  string ancestor check, so a directory-shaped claim spelled 'a/' beside a
+ *  file claim 'a/b' is never recognised as the ancestor it is: on disk,
+ *  resolving 'a/' collapses to the same path as 'a', and materializing it
+ *  still writes a REGULAR FILE there, reproducing the exact EEXIST crash the
+ *  screen exists to prevent (Codex review, MUST-FIX 1). Empty and '.'
+ *  segments are dropped; a '..' segment or an all-empty result is refused
+ *  (returns null) — isRepoPath already refuses raw '..', this is defense in
+ *  depth against the same case surviving in a form isRepoPath did not model. */
+function normalizeClaimedPath(p) {
+  const segs = p.split('/').filter((s) => s !== '' && s !== '.');
+  if (!segs.length || segs.some((s) => s === '..')) return null;
+  return segs.join('/');
+}
+
 /** ONE H23-output-axis Case, mirroring h23-output-axis.mjs's OWN predicate
  *  exactly (board 5d462868) — never an independent opinion about relevance.
  *  Output-axis content matching confers no OWNERSHIP (decision b266d6b7): the
@@ -206,8 +229,8 @@ function deriveOutputAxisExpected(store, probe, index) {
   };
   // Every SILENT verdict names WHICH cause produced it (anti_pattern 1b141d1f:
   // H23's silence is multiply-caused, and a verdict that cannot tell its causes
-  // apart audits nothing). One shape for the three EARLY-EXIT causes below; the
-  // fourth ('below_axis_floor') is only knowable after the content match runs,
+  // apart audits nothing). One shape for the five EARLY-EXIT causes below; the
+  // sixth ('below_axis_floor') is only knowable after the content match runs,
   // and is attached at this function's final return.
   const silent = (reason) => ({
     ...base,
@@ -216,9 +239,24 @@ function deriveOutputAxisExpected(store, probe, index) {
     expected_reason: reason,
   });
 
-  // NOTHING TO MATCH AGAINST (h23-output-axis.mjs:139-140), checked FIRST
-  // because that is where the HOOK checks it — before the store is even opened,
-  // and therefore before the read-seam gates below. An absent/null tool_response
+  // UNSUPPORTED TOOL (h23-output-axis.mjs:134): the hook allows silently for
+  // any tool that is not Read/Bash/PowerShell, checked FIRST and before the
+  // store is even opened — board f1e056bd item 3, previously omitted from
+  // this mirror entirely (a probe with tool:'Grep' would have derived a
+  // non-empty expected set against a hook that is correctly silent).
+  if (tool !== 'Read' && tool !== 'Bash' && tool !== 'PowerShell') return silent('unsupported_tool');
+
+  // AGENT-SCOPED SILENCE (h23-output-axis.mjs:137): the pending queue serves
+  // the CONDUCTOR's next prompt; a subagent invocation carries `agent_id` and
+  // the hook allows silently before even looking at tool_response. Also board
+  // f1e056bd item 3 — a probe with `agent_id` set would otherwise have
+  // derived a non-empty expected set against this hook's deliberate silence.
+  if (probe?.agent_id) return silent('agent_id_present');
+
+  // NOTHING TO MATCH AGAINST (h23-output-axis.mjs:139-140), checked next in
+  // the HOOK's own order — after the tool-type and agent-scope gates above,
+  // before the store is even opened, and therefore before the read-seam gates
+  // below. An absent/null tool_response
   // is a first-class silent allow, and it is NOT 'below_axis_floor': "there was
   // no response at all" and "the content did not clear the floors" are different
   // findings, and collapsing them would mislabel a payload-synthesis fault as a
@@ -277,10 +315,11 @@ function deriveOutputAxisExpected(store, probe, index) {
     ...base,
     expected: { owners: [], hazards, rationale },
     expected_ids,
-    // Present ONLY when silent — the LAST of the four derivable silence
-    // reasons ('no_tool_response' | 'path_excluded' | 'owned_suppressed' |
-    // 'below_axis_floor'); dedup and subagent-silence stay out of scope here,
-    // per the module header and h23-output-axis.mjs's own frozen suite.
+    // Present ONLY when silent — the LAST of the six derivable silence
+    // reasons ('unsupported_tool' | 'agent_id_present' | 'no_tool_response' |
+    // 'path_excluded' | 'owned_suppressed' | 'below_axis_floor'); dedup and
+    // the pointer cap stay out of scope here, per the module header and
+    // h23-output-axis.mjs's own frozen suite.
     ...(expected_ids.length === 0 ? { expected_reason: 'below_axis_floor' } : {}),
   };
 }
@@ -289,8 +328,18 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
   // 1. ENUMERATE candidate paths from the records themselves. This is not the
   //    predicate — every path found here is re-asked through the hooks' own
   //    query below, so an enumeration quirk can never widen an expectation.
-  const claimants = new Map(); // rel -> first record id that named it
+  // claimants: norm -> EVERY claimant, {record_id, record_type, raw} — never
+  // just the first (roster review round 2, item 4): a directory-shaped or
+  // ancestor exclusion names every record that claimed the path, and the RAW
+  // spelling that produced the normalized form, so an operator reading the
+  // exclusion can see WHICH claim(s) to fix.
+  const claimants = new Map();
   const rejectedPaths = [];
+  const addClaimant = (norm, record, raw) => {
+    const list = claimants.get(norm) ?? [];
+    if (!list.some((c) => c.record_id === record.id)) list.push({ record_id: record.id, record_type: record.type, raw });
+    claimants.set(norm, list);
+  };
   for (const type of ['feature_article', 'reference_material', 'anti_pattern', 'decision']) {
     // cap + 1 so a FULL page is detectable. A silently truncated enumeration
     // under-reports the audit's own coverage, which is the one error class an
@@ -307,11 +356,68 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
         if (typeof p !== 'string' || !p) continue;
         // Accounted for BY NAME, never dropped (anti_pattern 1b141d1f).
         if (!isRepoPath(p)) { rejectedPaths.push({ rel: p, record_id: record.id }); continue; }
-        if (!claimants.has(p)) claimants.set(p, record.id);
+        // NORMALIZE BEFORE USE AS A KEY (Codex review, MUST-FIX 1): the
+        // directory/ancestor screen below, and everything after it, compares
+        // this canonical form — never the raw claimed string — so an alias
+        // spelling ('a/', 'a/.', 'a//b') cannot dodge the ancestor check.
+        const norm = normalizeClaimedPath(p);
+        if (norm === null) { rejectedPaths.push({ rel: p, record_id: record.id }); continue; }
+        addClaimant(norm, record, p);
       }
     }
   }
-  const rels = [...claimants.keys()].sort();
+  const allRels = [...claimants.keys()].sort();
+
+  // 1b. DIRECTORY-SHAPED / ANCESTOR CLAIMS (board 26152d5e, roster review
+  //     round 2 items 2-3): a record's files[]/file_keys entry is
+  //     schema-valid but names a PATH THAT IS ACTUALLY A DIRECTORY (decision
+  //     1dab2a9f claims packages/mcp-server/src/tests) — every delivery
+  //     consumer compares by EXACT FILE equality, so such a claim can never
+  //     deliver anything. Worse, materialize() stands in a REGULAR FILE at
+  //     every claimed path (h19-bash-delivery needs one to exist), so a
+  //     directory-shaped claim materializes a FILE exactly where a nested
+  //     claim underneath it needs a DIRECTORY, and mkdirSync throws EEXIST —
+  //     the crash this fix closes. Screened here, before any case or
+  //     materialization work, and reported BY NAME (anti_pattern 1b141d1f)
+  //     rather than silently dropped or left to crash the run. The upstream
+  //     fork this board item ALSO owes (reject vs. teach every hook a
+  //     directory scope) is a separate, later decision — this fix only keeps
+  //     the audit itself from choking on the data as it exists today.
+  //
+  //     TWO DISTINCT REASONS, not one umbrella (round 2 item 3 — no frozen
+  //     pin cited the old single 'directory_shaped_claim' string, so nothing
+  //     needed grandfathering): 'real_directory' when the path stats as a
+  //     directory on disk; 'ancestor_of_claim' when it is merely a STRING
+  //     ancestor of another claim (no disk evidence either way). A THIRD
+  //     case is the opposite finding (round 2 item 2): when the ancestor
+  //     stats as a REAL REGULAR FILE, that file claim is the legitimate one
+  //     and the DESCENDANT claim underneath it is the malformed data — the
+  //     descendant is excluded instead ('descends_from_file_claim'), naming
+  //     the descendant's own claimant(s), and the file claim proceeds as an
+  //     ordinary case. A real owned file must never be dropped because some
+  //     OTHER record's bad descendant claim happens to nest under it.
+  const excluded = new Map(); // rel -> { reason }
+  for (const rel of allRels) {
+    if (excluded.has(rel)) continue;
+    let isRealDir = false;
+    let isRealFile = false;
+    try {
+      const st = statSync(join(root, rel));
+      isRealDir = st.isDirectory();
+      isRealFile = st.isFile();
+    } catch { /* absent or unreadable is neither */ }
+    const descendants = allRels.filter((other) => other !== rel && other.startsWith(`${rel}/`));
+    if (isRealDir) {
+      excluded.set(rel, { reason: 'real_directory' });
+    } else if (descendants.length) {
+      if (isRealFile) {
+        for (const d of descendants) excluded.set(d, { reason: 'descends_from_file_claim' });
+      } else {
+        excluded.set(rel, { reason: 'ancestor_of_claim' });
+      }
+    }
+  }
+  const rels = allRels.filter((rel) => !excluded.has(rel));
 
   // 2. NEIGHBOURS — the FRONTIER arm's candidates. H19's ignore check exists
   //    solely to suppress the unowned-territory notice on ignored paths, and an
@@ -344,6 +450,22 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
   // unaudited path that vanishes from the report reads as a conformant one.
   for (const r of rejectedPaths) {
     entries.push({ kind: 'exclusion', rel: r.rel, record_id: r.record_id, reason: 'unsafe_path' });
+  }
+  // DIRECTORY-SHAPED / ANCESTOR / DESCENDANT CLAIMS, screened above (1b) —
+  // reported the same way, never silently dropped, and never reaching
+  // materialize(). EVERY claimant is named (record_ids), record_id kept as
+  // the first for compatibility, and the RAW spelling that produced the
+  // normalized rel rides beside it (roster review round 2, item 4).
+  for (const [rel, x] of [...excluded.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))) {
+    const claims = claimants.get(rel) ?? [];
+    entries.push({
+      kind: 'exclusion', rel,
+      record_id: claims[0]?.record_id ?? null,
+      record_ids: claims.map((c) => c.record_id),
+      record_type: claims[0]?.record_type ?? null,
+      raw: claims[0]?.raw ?? rel,
+      reason: x.reason,
+    });
   }
   // FRONTIER SUPPRESSION, recorded by name. An UNOWNED path that git ignores is
   // the one place gitignore actually changes a hook's behaviour: H19 withholds
@@ -980,6 +1102,374 @@ function newestPriorRun(projectRoot) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// GOLDEN SCENARIOS — layer 2 (board ab288113), per decision 08872881
+// (golden-fixture-expectations-stay-in-the-fixture-guarded-by-a-digest-pin,
+// USER-RULED 2026-09-06): the expectations stay IN the fixture JSON at
+// scripts/tests/fixtures/delivery-golden/*.json —
+// {event, payload, expected_ids, expected_absent_ids, source_incident} — and
+// the frozen test file carries a SHA-256 digest pin over a canonical manifest
+// of ONLY the expectations, guarding against a coder turning a red golden
+// scenario green by editing the fixture instead of the code.
+//
+// REPLAY MECHANISM (not pinned by the decision, decided here): each fixture
+// replays against the SAME real-store sandbox/snapshot the rest of a run
+// already builds — real record ids, no synthetic fixture repo — because the
+// fixtures name REAL production record ids (resolved live with
+// knowledge_query at authoring time, never guessed). `event` is the
+// hook_event_name (PostToolUse/PreToolUse/Stop/UserPromptSubmit); which
+// hook(s) fire is resolved from `event` + `payload.tool_name` via
+// GOLDEN_EVENT_HOOKS below, a small table mirroring hooks/hooks.json's own
+// registration for those matchers — restricted to the delivery-relevant hooks
+// this oracle already knows how to run and parse. A `payload.tool_input.
+// file_path` is authored REPO-RELATIVE (Windows/Linux parity, same convention
+// as every other case in this file) and resolved to the sandbox's absolute
+// path at replay time.
+//
+// A MISS CARRIES miss_reason: 'cap_evicted' means the expected record WAS a
+// genuine candidate for the touched path and a rendering CAP (e.g.
+// DECISION_POINTER_CAP) pushed it out of the shown slice — this is a RANKING
+// finding about the live store's growth, never a hook fault, and it is NOT
+// relabelled as a false positive: a cap silently dropping an incident's own
+// fix is exactly the regression this layer exists to surface (roster review
+// round 2, item 1). 'not_delivered' means the record was never a candidate
+// at all (a stale or mis-targeted fixture, or a genuine wiring miss).
+//
+// THIS TABLE MIRRORS hooks/hooks.json AND MUST MOVE WITH IT (Codex review,
+// MUST-FIX 2): a matcher added, removed or re-targeted there and not echoed
+// here silently starves a golden fixture of the hook it needs, or routes it
+// to a hook the platform would never actually run.
+const GOLDEN_EVENT_HOOKS = {
+  PostToolUse: {
+    Read: [H19, H23],                    // hooks/hooks.json PostToolUse/Read
+    Edit: [H19], Write: [H19], MultiEdit: [H19], // .../Edit|Write|MultiEdit
+    Bash: [H19_BASH, H23], PowerShell: [H19_BASH, H23], // .../Bash|PowerShell
+  },
+  PreToolUse: {
+    // hooks/hooks.json PreToolUse Edit|Write|MultiEdit ALSO carries H19
+    // (material on injection_rung 'edit', where PostToolUse's own H19
+    // registration is broken and PreToolUse is the only surface that injects).
+    Edit: [H19], Write: [H19], MultiEdit: [H19],
+    // hooks/hooks.json PreToolUse Task|Agent / AskUserQuestion /
+    // mcp__codex__codex(-reply) matchers, restricted to H20 (the
+    // delivery-relevant member of each of those matcher groups).
+    Task: [H20], Agent: [H20], AskUserQuestion: [H20],
+    'mcp__codex__codex': [H20], 'mcp__codex__codex-reply': [H20],
+  },
+  Stop: { '*': [H10] },                  // hooks/hooks.json Stop
+  UserPromptSubmit: { '*': [DRAIN] },    // hooks/hooks.json UserPromptSubmit
+};
+
+function hooksForGolden(event, toolName) {
+  const byEvent = GOLDEN_EVENT_HOOKS[event];
+  if (!byEvent) return [];
+  return byEvent[toolName] ?? byEvent['*'] ?? [];
+}
+
+// An id in a golden fixture is a real production uuid, never a slug or a
+// placeholder — validated against the canonical shape (anchored, unlike the
+// module's own extraction-purpose UUID_RE, which is unanchored and global by
+// design). Codex review, MUST-FIX 3.
+const UUID_SHAPE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Frozen, hand-authored golden fixtures — validated STRICTLY, same discipline
+ *  as loadProbes: a fixture that cannot fail measures nothing. */
+export function loadGoldenFixtures(dir) {
+  const files = readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
+  const fixtures = [];
+  for (const file of files) {
+    const path = join(dir, file);
+    const bad = (why) => { throw new Error(`golden fixture ${file}: ${why}`); };
+    let json;
+    try {
+      json = JSON.parse(readFileSync(path, 'utf8'));
+    } catch (e) {
+      bad(`unparseable JSON — ${e.message}`);
+    }
+    if (typeof json.event !== 'string' || !json.event) bad('missing event');
+    if (!json.payload || typeof json.payload !== 'object' || Array.isArray(json.payload)) bad('missing payload object');
+    if (!Array.isArray(json.expected_ids)) bad('missing expected_ids — a fixture with no expectation can never fail');
+    if (json.expected_absent_ids !== undefined && !Array.isArray(json.expected_absent_ids)) bad('expected_absent_ids must be an array when present');
+    if (typeof json.source_incident !== 'string' || !json.source_incident) bad('missing source_incident');
+    // A fixture with BOTH sets empty can never fail either way it is scored
+    // (Codex review, MUST-FIX 3) — the same "cannot fail measures nothing"
+    // rule loadProbes already enforces for a probe's own expected_ids.
+    const expectedAbsentIds = json.expected_absent_ids ?? [];
+    if (json.expected_ids.length === 0 && expectedAbsentIds.length === 0) {
+      bad('both expected_ids and expected_absent_ids are empty — a fixture with no expectation can never fail');
+    }
+    // Every id is a real production uuid — never a slug, an empty string, or
+    // a placeholder that would silently pass an `includes()` check forever.
+    for (const [field, ids] of [['expected_ids', json.expected_ids], ['expected_absent_ids', expectedAbsentIds]]) {
+      for (const id of ids) {
+        if (typeof id !== 'string' || !UUID_SHAPE_RE.test(id)) {
+          bad(`${field} contains '${id}', which is not a uuid — a golden expectation names a real production record id`);
+        }
+      }
+    }
+    // The event/tool_name pair must resolve to at least one hook this oracle
+    // knows how to route, or the fixture can never be replayed and would
+    // silently fall through to runGoldenFixtures' own harness_error at RUN
+    // time instead of failing loud at LOAD time, naming the file.
+    if (hooksForGolden(json.event, json.payload?.tool_name).length === 0) {
+      bad(`event '${json.event}' + tool_name '${json.payload?.tool_name}' has no known hook route (see GOLDEN_EVENT_HOOKS) — the fixture can never be replayed`);
+    }
+    fixtures.push({
+      file,
+      event: json.event,
+      payload: json.payload,
+      expected_ids: json.expected_ids,
+      expected_absent_ids: expectedAbsentIds,
+      source_incident: json.source_incident,
+    });
+  }
+  return fixtures;
+}
+
+/** The canonical manifest decision 08872881 pins — ONLY the expectations,
+ *  fixtures sorted by filename, each id set sorted. Stimulus fields (event,
+ *  payload, source_incident) are deliberately NOT included: they would create
+ *  digest churn without buying any protection the decision's own text names. */
+export function goldenManifest(fixtures = []) {
+  return {
+    version: 1,
+    fixtures: [...fixtures]
+      .sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0))
+      .map((f) => ({
+        file: f.file,
+        expected_ids: [...(f.expected_ids ?? [])].sort(),
+        expected_absent_ids: [...(f.expected_absent_ids ?? [])].sort(),
+      })),
+  };
+}
+
+export function goldenManifestDigest(fixtures = []) {
+  return sha(JSON.stringify(goldenManifest(fixtures)));
+}
+
+/** payload.tool_input.file_path is normally authored repo-relative and is
+ *  resolved against the sandbox; an ALREADY-ABSOLUTE file_path passes through
+ *  unchanged (path.resolve's own semantics — a later absolute segment wins —
+ *  matching materialize()/sandboxPath()'s existing behaviour, so the two
+ *  never disagree about the same path). `join` was WRONG here (round-2
+ *  review finding): join('/sandbox', '/abs/path') concatenates rather than
+ *  replacing, producing a doubled, nonexistent path and silencing the hook
+ *  entirely — never a partial credit, a bare miss indistinguishable from a
+ *  real one. */
+function resolveGoldenStdin(fixture, sandboxDir) {
+  const payload = JSON.parse(JSON.stringify(fixture.payload ?? {}));
+  if (payload.tool_input && typeof payload.tool_input.file_path === 'string') {
+    payload.tool_input.file_path = resolve(sandboxDir, payload.tool_input.file_path);
+  }
+  return { cwd: sandboxDir, session_id: 'oracle-golden', hook_event_name: fixture.event, ...payload };
+}
+
+/** The touched path, REPO-RELATIVE to sandboxDir, derived from the RESOLVED
+ *  stdin (never the raw fixture spelling, which may already be absolute) —
+ *  the only form `isEligibleForRel` can compare against a record's own
+ *  repo-relative file_keys/files claim. null when the resolved path falls
+ *  outside the sandbox entirely (never eligible for anything). */
+function goldenRelFromStdin(stdin, sandboxDir) {
+  const abs = stdin?.tool_input?.file_path;
+  if (typeof abs !== 'string') return null;
+  const root = resolve(sandboxDir);
+  const p = resolve(abs);
+  if (p === root) return '.';
+  if (!p.startsWith(root + sep)) return null;
+  return p.slice(root.length + 1).split(sep).join('/');
+}
+
+function goldenRel(fixture) {
+  const fp = fixture.payload?.tool_input?.file_path;
+  return typeof fp === 'string' ? fp : null;
+}
+
+// A MISS ON A GOLDEN SCENARIO IS THE FINDING THIS LAYER EXISTS FOR — a cap
+// evicting the very fix an incident recorded is a real regression, never
+// relabelled as a false positive of the oracle. But a miss still has TWO
+// distinct CAUSES an operator needs told apart (roster review round 2, item
+// 1): the record was never even a candidate for this path (a stale/wrong
+// fixture), or it WAS a candidate and a rendering CAP evicted it. The second
+// is a RANKING finding — the hook did not fail, its pointer budget did not
+// stretch to an old-but-still-true fix on a heavily-decisioned file — never
+// a hook fault.
+
+/** Two known disclosure-tail SHAPES report suppression: H19's direct
+ *  decision/hazard-pointer tail "… N more NOT shown (cap N)"
+ *  (scripts/hooks/lib/delivery.mjs renderDecisionPointers/renderHazards) and
+ *  H23's queue tail "(+N more matched)" (decision 284fc4b0). Only the first
+ *  names its own cap; the second's cap is a caller-known constant, so `cap`
+ *  is null there rather than guessed. */
+function extractSuppressionTail(text) {
+  const s = String(text ?? '');
+  const notShown = s.match(/…\s*(\d+)\s*more(?:\s+\S+)*\s+NOT shown\s*\(cap\s*(\d+)\)/);
+  if (notShown) return { suppressed_count: Number(notShown[1]), cap: Number(notShown[2]) };
+  const tail = s.match(/\(\+(\d+) more matched\)/);
+  if (tail) return { suppressed_count: Number(tail[1]), cap: null };
+  return null;
+}
+
+/** Was `id` a genuine CANDIDATE for `rel` — i.e. does the record's OWN claim
+ *  (files[]/location/file_keys, whichever its type carries) name this exact
+ *  path? Reads the raw claim directly rather than re-querying with a cap, so
+ *  this answers "was it ever in scope" independent of any rendering budget. */
+function isEligibleForRel(store, id, rel) {
+  if (!store || !rel) return false;
+  const record = store.get(id);
+  if (!record) return false;
+  if (record.type === 'decision' || record.type === 'anti_pattern') {
+    return Array.isArray(record.file_keys) && record.file_keys.includes(rel);
+  }
+  if (record.type === 'feature_article') {
+    return Array.isArray(record.files) && record.files.some((f) => f?.path === rel);
+  }
+  if (record.type === 'reference_material') {
+    return record.location === rel;
+  }
+  return false;
+}
+
+/** Replays every golden fixture against the SAME sandbox/store the rest of
+ *  the run already built (real ids, real store — see the module comment
+ *  above). Each fixture gets a freshly wiped, freshly restored sandbox, same
+ *  as every other case in this file, so one fixture's state can never leak
+ *  into the next. A queued (not directly rendered) delivery is followed
+ *  through the drain, mirroring the H19/H19_BASH cases' own `drain: true`
+ *  convention. ID-ONLY matching (no token/slug fallback): every golden
+ *  expectation names a real production uuid, which every delivery channel
+ *  this oracle mirrors renders literally. */
+// NO `repoRoot` OPTION HERE, deliberately (round-2 review finding: an API
+// defect, not a test mistake). `deriveExpected`'s `repoRoot` names the
+// AUDITED PROJECT; a same-named option here was read the same way by a
+// test-writer blind to the implementation, but this function needs the
+// CLONE root instead — where hooks/*.mjs actually live — which is always the
+// module-level `repoRoot` constant above and never varies per call. Taking
+// it as a caller option only invited exactly this confusion, so hook
+// resolution now ALWAYS uses the module constant; nothing a caller can pass
+// changes it.
+/** Minimal, SYNCHRONOUS, read-only `.get(id)` shim over the records table's
+ *  own `body` column (JSON.parse(row.body) IS the full record — verified
+ *  against packages/store/src/index.ts's own read paths, which return
+ *  exactly that with no further merge). Deliberately NOT SterlingStore: that
+ *  class only loads via a dynamic `import()`, which is asynchronous and would
+ *  force this function's whole call signature to become async — breaking
+ *  every existing SYNCHRONOUS caller for the sake of one optional fallback
+ *  path. node:sqlite's DatabaseSync is already a static, synchronous import
+ *  at the top of this file; this shim exists ONLY to answer `isEligibleForRel`
+ *  and is never a general store surface. */
+function openFallbackReader(snapshotDb) {
+  const db = new DatabaseSync(snapshotDb, { readOnly: true });
+  const stmt = db.prepare('SELECT body FROM records WHERE id = ?');
+  return {
+    get(id) {
+      const row = stmt.get(id);
+      return row ? JSON.parse(row.body) : undefined;
+    },
+    close() { db.close(); },
+  };
+}
+
+export function runGoldenFixtures(fixtures, { sandboxDir, snapshotDb, store }) {
+  // `store` is an OPTIONAL reuse of the caller's already-open handle on the
+  // same snapshot (main()'s own call always has one); when absent this opens
+  // its OWN read-only fallback rather than silently degrading every
+  // eligibility check to false (round-2 review finding: a caller that never
+  // passed `store` made every miss read as 'not_delivered', permanently
+  // hiding the cap_evicted arm this function exists to report).
+  const ownStore = store ? null : openFallbackReader(snapshotDb);
+  const effectiveStore = store ?? ownStore;
+  try {
+    return fixtures.map((fixture) => runOneGoldenFixture(fixture, { sandboxDir, snapshotDb, store: effectiveStore }));
+  } finally {
+    if (ownStore) ownStore.close();
+  }
+}
+
+function runOneGoldenFixture(fixture, { sandboxDir, snapshotDb, store }) {
+    const root = repoRoot;
+    const hooks = hooksForGolden(fixture.event, fixture.payload?.tool_name);
+    const base = {
+      file: fixture.file, source_incident: fixture.source_incident,
+      expected_ids: fixture.expected_ids, expected_absent_ids: fixture.expected_absent_ids,
+    };
+    if (!hooks.length) {
+      return {
+        ...base, observed_ids: [], pass: false,
+        harness_error: `no delivery hook is known for event '${fixture.event}' + tool '${fixture.payload?.tool_name}' — the fixture cannot be replayed`,
+      };
+    }
+    resetSandbox(sandboxDir, {});
+    restoreStore(sandboxDir, snapshotDb);
+    const rawRel = goldenRel(fixture);
+    if (rawRel) materialize(sandboxDir, rawRel);
+    const stdin = resolveGoldenStdin(fixture, sandboxDir);
+    // REPO-RELATIVE, from the RESOLVED stdin — never the raw fixture spelling,
+    // which may already be absolute (round-2 review finding: comparing an
+    // absolute path against a record's repo-relative file_keys always fails,
+    // permanently misclassifying every cap_evicted miss as not_delivered).
+    const rel = goldenRelFromStdin(stdin, sandboxDir) ?? rawRel;
+    let observed = [];
+    let allText = '';
+    let queuedAny = false;
+    let harness_error;
+    for (const hook of hooks) {
+      const parsed = parseDelivery(runHook(root, hook, stdin, sandboxDir), sandboxDir);
+      // ABNORMAL SHAPES FAIL LOUD — same rule the case runner applies: an exit
+      // code outside the hook contract (0 allow / 1 warn / 2 deny) means the
+      // fixture was NOT MEASURED, never a silent pass with an empty observed set.
+      if (!parsed.harness_error && ![0, 1, 2].includes(parsed.exit_code)) {
+        harness_error = harness_error ?? `${hook}: abnormal hook exit ${parsed.exit_code} (contract is 0 allow / 1 warn / 2 deny)`;
+      }
+      if (parsed.harness_error) harness_error = harness_error ?? `${hook}: ${parsed.harness_error}`;
+      observed = uniq([...observed, ...(parsed.rendered_ids ?? []), ...parsed.denied_ids, ...parsed.queued_ids]);
+      allText += `\n${parsed.rendered_text ?? ''}\n${parsed.stderr_text ?? ''}\n${parsed.queued_text ?? ''}`;
+      if (parsed.queued_entries) queuedAny = true;
+    }
+    if (queuedAny) {
+      const drainParsed = parseDelivery(
+        runHook(root, DRAIN, { cwd: sandboxDir, hook_event_name: 'UserPromptSubmit', session_id: 'oracle-golden' }, sandboxDir),
+        sandboxDir
+      );
+      if (!drainParsed.harness_error && ![0, 1, 2].includes(drainParsed.exit_code)) {
+        harness_error = harness_error ?? `${DRAIN}: abnormal hook exit ${drainParsed.exit_code} (contract is 0 allow / 1 warn / 2 deny)`;
+      }
+      if (drainParsed.harness_error) harness_error = harness_error ?? `${DRAIN}: ${drainParsed.harness_error}`;
+      observed = uniq([...observed, ...(drainParsed.rendered_ids ?? [])]);
+      allText += `\n${drainParsed.rendered_text ?? ''}`;
+    }
+    const missing_ids = fixture.expected_ids.filter((id) => !observed.includes(id));
+    const absent_violations = (fixture.expected_absent_ids ?? []).filter((id) => observed.includes(id));
+    const pass = !harness_error && missing_ids.length === 0 && absent_violations.length === 0;
+
+    // MISS REASON (roster review round 2, item 1) — computed PER MISSING ID,
+    // never overriding `pass` (the audit's own verdict). A cap eviction of a
+    // real candidate is the ranking finding this layer exists to surface,
+    // distinguished from a record that was never even a candidate for this
+    // path (a stale or mis-targeted fixture). `misses` is keyed BY ID — a
+    // miss must be a reportable OBJECT, not folded into a single fixture-wide
+    // verdict, because two expected ids on the same fixture can miss for two
+    // DIFFERENT reasons and each needs its own cause named.
+    const tail = missing_ids.length ? extractSuppressionTail(allText) : null;
+    const misses = {};
+    let miss_reason; // dominant summary: 'cap_evicted' if ANY id is, else 'not_delivered'
+    for (const id of missing_ids) {
+      const evicted = Boolean(tail) && isEligibleForRel(store, id, rel);
+      if (evicted) {
+        misses[id] = { miss_reason: 'cap_evicted', rendered: observed.length, suppressed_count: tail.suppressed_count, cap: tail.cap };
+        miss_reason = 'cap_evicted';
+      } else {
+        misses[id] = { miss_reason: 'not_delivered' };
+        miss_reason = miss_reason ?? 'not_delivered';
+      }
+    }
+
+    return {
+      ...base, observed_ids: observed, missing_ids, absent_violations, pass,
+      ...(missing_ids.length ? { miss_reason, misses } : {}),
+      ...(harness_error ? { harness_error } : {}),
+    };
+}
+
 async function main(argv) {
   const arg = (name, fallback) => {
     const i = argv.indexOf(name);
@@ -987,6 +1477,7 @@ async function main(argv) {
   };
   const projectRoot = arg('--project', process.cwd());
   const probeDir = arg('--probes', join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-probes'));
+  const goldenDir = arg('--golden', join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-golden'));
   const dbPath = join(projectRoot, '.sterling', 'sterling.db');
   if (!existsSync(dbPath)) {
     console.error(`delivery-oracle: no Sterling store at ${dbPath} — not an initialized project`);
@@ -1068,6 +1559,19 @@ async function main(argv) {
     }
   }
 
+  // A MISSING OR EMPTY GOLDEN DIRECTORY IS ALSO A NAMED FINDING — layer 2
+  // (board ab288113) going missing must never read as "no known incidents",
+  // same discipline as the probe directory above.
+  let goldenFixtures = [];
+  if (!existsSync(goldenDir)) {
+    exclusions.push({ kind: 'exclusion', rel: goldenDir, record_id: null, reason: 'golden_dir_missing' });
+  } else {
+    goldenFixtures = loadGoldenFixtures(goldenDir);
+    if (!goldenFixtures.length) {
+      exclusions.push({ kind: 'exclusion', rel: goldenDir, record_id: null, reason: 'golden_dir_empty' });
+    }
+  }
+
   // SNAPSHOT DIGEST over the snapshot BYTES — the board's first branch, taken
   // because VACUUM INTO was MEASURED byte-deterministic (2026-09-05, this
   // repo's packages/store: three consecutive snapshots of an unchanged source
@@ -1082,6 +1586,7 @@ async function main(argv) {
 
   const sandbox = buildSandbox(snapshotDb, config);
   const scored = [];
+  let golden = [];
   try {
     // MATCH MODE, RECORDED PER ID (never collapsed to a boolean). A record
     // counts as DELIVERED when the channel names its uuid ('id') or renders it
@@ -1294,6 +1799,15 @@ async function main(argv) {
         { hook: 'h20-mechanism-axis.mjs', payloadCase: p, expected_ids: p.expected_ids, seed_ledger: p.seed_ledger, drain: false, probe: p }
       ));
     }
+
+    // GOLDEN SCENARIOS (layer 2, board ab288113) replay against this SAME
+    // sandbox/snapshot — real store, real record ids, no synthetic fixture
+    // repo. Each fixture wipes and re-restores the sandbox itself (see
+    // runGoldenFixtures), matching the isolation every case/probe above gets.
+    // repoRoot (the CLONE root, where hooks/*.mjs actually live) — NOT
+    // projectRoot, which is the audited project and may differ under
+    // --project. Same rule runHook already follows for every other case.
+    golden = runGoldenFixtures(goldenFixtures, { sandboxDir: sandbox, snapshotDb, store });
   } finally {
     store.close();
     rmSync(sandbox, { recursive: true, force: true });
@@ -1321,7 +1835,7 @@ async function main(argv) {
     exclusions,
     metrics: metrics(scored),
     transitions,
-    golden: [],
+    golden,
   };
   const { run_path, history_path } = writeRunReport(projectRoot, report);
 
@@ -1334,7 +1848,13 @@ async function main(argv) {
   // a probe miss is a finding about delivery, which is the thing being measured.
   const controls = scored.filter((c) => c.control);
   const controlFailures = controls.filter((c) => !c.rendered && !c.harness_error);
-  const harnessErrors = scored.filter((c) => c.harness_error);
+  // A golden fixture's harness_error (e.g. an event/tool this oracle has no
+  // known hook route for) is a HARNESS defect, not a delivery finding — it
+  // means the fixture was never measured, the same rule cases already follow.
+  // A plain golden MISS (a known route, delivery just didn't happen) is
+  // surfaced but does NOT gate the exit code, mirroring the probe convention:
+  // it is a finding ABOUT delivery, which is the thing being measured.
+  const harnessErrors = [...scored.filter((c) => c.harness_error), ...golden.filter((g) => g.harness_error)];
 
   if (argv.includes('--json')) {
     console.log(JSON.stringify(report, null, 2));
@@ -1356,9 +1876,16 @@ async function main(argv) {
     for (const x of exclusions.filter((e) => e.reason.startsWith('probe_dir'))) {
       console.log(`  PROBE SET: ${x.reason} (${x.rel}) — the H20 arm did not run`);
     }
+    for (const x of exclusions.filter((e) => e.reason.startsWith('golden_dir'))) {
+      console.log(`  GOLDEN SET: ${x.reason} (${x.rel}) — layer 2 did not run`);
+    }
+    for (const g of golden) {
+      const verdict = g.harness_error ? 'UNMEASURED' : g.pass ? 'pass' : 'MISS';
+      console.log(`  golden ${g.file}: ${verdict} — ${g.source_incident}`);
+    }
     if (harnessErrors.length) {
       console.log(`  HARNESS ERRORS: ${harnessErrors.length} case(s) NOT MEASURED (excluded from every ratio above)`);
-      for (const c of harnessErrors) console.log(`    ${c.fixture_id}: ${c.harness_error}`);
+      for (const c of harnessErrors) console.log(`    ${c.fixture_id ?? c.file}: ${c.harness_error}`);
     }
     if (controlFailures.length) console.log(`  CONTROL FAILED: ${controlFailures.map((c) => c.fixture_id).join(', ')} — the audit cannot discriminate; treat every verdict above as unproven`);
     if (transitions.pass_to_miss.length) console.log(`  REGRESSIONS: ${transitions.pass_to_miss.join(', ')}`);
