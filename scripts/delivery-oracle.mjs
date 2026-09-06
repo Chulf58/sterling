@@ -16,20 +16,47 @@
 // subagents make H19 deliberately silent. A green run can coexist with broken
 // platform injection; layer 3 (live subagent acceptance probe) owns that half.
 //
-// HOOKS ACTUALLY AUDITED, exactly: h19-knowledge-delivery (file-touch),
+// HOOKS MIRRORED, exactly: h19-knowledge-delivery (file-touch),
 // h19-bash-delivery (pointer surface), h19-delivery-drain (the queue's second
-// half), h10-direct-capture (ownership agreement only) and h20-mechanism-axis
-// (the frozen probes). H23-OUTPUT-AXIS IS **NOT** AUDITED — an owed follow-up,
-// stated here rather than implied away. Its predicate is CONTENT-matched
-// (axis terms extracted from tool_response, three relevance floors, a
-// centrality check) rather than path-matched, so deriving its expectation means
-// mirroring the axis matcher itself; a cheap silence-only arm was considered
-// and rejected, because H23 is silent for at least four different reasons
-// (owned-path suppression, no term match, dedup, the pointer cap) and a verdict
-// that cannot tell them apart is exactly the multiply-caused silence
-// anti_pattern 1b141d1f warns about. The 'output_axis' payload arm in
-// synthesizePayload is live and contract-required, but nothing in main() drives
-// it yet — that is the shape of the follow-up.
+// half), h10-direct-capture (ownership agreement only), h20-mechanism-axis
+// (the frozen probes) and h23-output-axis (board 5d462868 closure). H23's
+// predicate is CONTENT-matched (axis terms extracted from tool_response, the
+// same three relevance floors, a centrality check) rather than path-matched, so
+// deriveExpected mirrors it only when the caller supplies `outputAxisProbes`
+// ({rel, tool, tool_response}[]) — a cheap silence-only arm was rejected
+// because H23 is silent for at least six different reasons (no tool_response,
+// an excluded path, owned-path suppression, no term match, dedup, the pointer
+// cap) and a verdict that cannot tell them apart is exactly the multiply-caused
+// silence anti_pattern 1b141d1f warns about; `expected_reason`
+// ('no_tool_response' | 'path_excluded' | 'owned_suppressed' |
+// 'below_axis_floor') names which of the four STORE-DERIVABLE silence causes
+// applies (dedup/subagent-silence stay h23-output-axis.mjs's own frozen
+// suite's concern, never re-derived here). The content a real Read/Bash call
+// would have returned cannot be reconstructed from the store alone, so a live
+// `--project` run with no probes supplied drives zero h23-output-axis cases
+// today — the arm itself is fully exercised by
+// scripts/tests/delivery-oracle.test.mjs groups J-N; wiring main() to a real
+// probe source is a separate, later follow-up.
+//
+// TWO STANDING LIMITS OF THIS ARM, both gating that follow-up (review 2026-09-06):
+//   (1) THE VERDICT IS NOT CAP-AWARE. deriveOutputAxisExpected names every
+//       matching record while the live hook renders at most
+//       OUTPUT_AXIS_POINTER_CAP = 1 pointer plus a "(+N more matched)" tail
+//       (decision h23-kept-raised-threshold-one-pointer-payload, 284fc4b0), and
+//       run()'s `covers` is a bare `expected_ids.every(...)`. A probe matching
+//       2+ records would therefore score a permanent FALSE MISS against a hook
+//       behaving exactly as ruled. Latent only because main() supplies no
+//       probes; wiring a probe source REQUIRES a cap-aware verdict first
+//       (covered up to the cap, with parseDelivery's per-entry
+//       `suppressed_count` reconciling the remainder).
+//   (2) THE OUTPUT-AXIS DEDUP SEED IS HALF-WIRED, DELIBERATELY. resetSandbox
+//       honours `seed_output_axis_guard` (pinned by group N1), but nothing in
+//       run()/loadProbes can set it, because no output_axis case reaches run()
+//       yet. It is kept, not deleted: it is the reset half of the same
+//       probe-wiring follow-up, and its contract mirrors seed_ledger's. Wiring
+//       it needs a seeder for guard-conductor.json's `output_axis` field and a
+//       case source that sets the flag — both belong with the probe work, not
+//       ahead of it.
 //
 // GITIGNORE is MIRRORED, not applied wholesale (pins A5/A5b/A5c/A5d, re-cut
 // after an outside-family review read the hook sources). An OWNED path that git
@@ -61,6 +88,9 @@ import { tmpdir } from 'node:os';
 import { join, dirname, basename, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, hasRecordCentralityHit, MAX_RANK_TERMS,
+} from '@sterling/store';
 
 export const ORACLE_VERSION = 1;
 
@@ -77,12 +107,25 @@ const H19 = 'h19-knowledge-delivery.mjs';
 const H19_BASH = 'h19-bash-delivery.mjs';
 const H10 = 'h10-direct-capture.mjs';
 const DRAIN = 'h19-delivery-drain.mjs';
+const H23 = 'h23-output-axis.mjs';
 
 // H10's demand-block header (h10-direct-capture.mjs:1712). Used as the LIVENESS
 // arm of the inverted ownership verdict: its absence means H10 never printed a
 // demand at all, which is unmeasured — never "the path is owned".
 const H10_DUTIES_MARKER = 'H10 ▸ duties before this session ends';
 
+// H23's own clip + candidate cap, mirrored verbatim (h23-output-axis.mjs:85,
+// :181-182) so a rename there is the only place these constants must move.
+const OUTPUT_AXIS_CLIP = 16_000;
+const OUTPUT_AXIS_CANDIDATE_CAP = 40;
+
+// 'output_axis_pointers' is the kind the live H23 hook actually enqueues
+// (h23-output-axis.mjs:236) and is therefore the ONLY output-axis name here.
+// An earlier draft also pre-seeded 'output_axis', a name the test pins had
+// assumed while blind and which nothing emits; it was removed rather than
+// aliased, because an oracle bucket keyed on a kind no hook produces can pass
+// forever while auditing nothing — the hollow-arm failure anti_pattern
+// 1b141d1f exists to prevent, and indistinguishable from a correct silence.
 const QUEUE_KINDS = ['delivery', 'frontier', 'bash_pointers', 'output_axis_pointers'];
 const PROBE_KINDS = ['agent', 'ask', 'consult'];
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
@@ -130,7 +173,119 @@ const isRepoPath = (p) => {
   return true;
 };
 
-export function deriveExpected(store, { repoRoot: root } = {}) {
+/** ONE H23-output-axis Case, mirroring h23-output-axis.mjs's OWN predicate
+ *  exactly (board 5d462868) — never an independent opinion about relevance.
+ *  Output-axis content matching confers no OWNERSHIP (decision b266d6b7): the
+ *  case's `expected.owners` is always empty, and the cap
+ *  (h23-output-axis.mjs's OUTPUT_AXIS_POINTER_CAP) is a DELIVERY-time concern,
+ *  never applied here — `expected_ids` names every matching candidate.
+ *
+ *  ⚠ LATENT VERDICT DEFECT — READ THIS BEFORE WIRING PROBES INTO main().
+ *  Naming every match here is correct at EXPECTATION time (pinned by group J3),
+ *  but run()'s verdict is `expected_ids.every(...)` (see `covers`, ~line 1069)
+ *  while the live hook renders at most OUTPUT_AXIS_POINTER_CAP = 1 pointer plus
+ *  a "(+N more matched)" tail (decision h23-kept-raised-threshold-one-pointer-
+ *  payload, 284fc4b0). A probe matching 2+ records would therefore score a
+ *  PERMANENT FALSE MISS — the hook behaving exactly as ruled, reported as a
+ *  delivery regression. It is unreachable today ONLY because main() calls
+ *  deriveExpected with no `outputAxisProbes` (~line 966), so no output_axis case
+ *  ever reaches run(). Wiring a probe source REQUIRES a cap-aware verdict first:
+ *  covered up to the cap, with parseDelivery's per-entry `suppressed_count`
+ *  reconciling the remainder. Do not wire probes before that lands. */
+function deriveOutputAxisExpected(store, probe, index) {
+  const tool = probe?.tool ?? 'Read';
+  const rel = probe?.rel ?? null;
+  const base = {
+    kind: 'case',
+    fixture_id: `${H23}:output_axis:${index}:${tool}:${rel ?? 'null'}`,
+    hook: H23,
+    payload_kind: 'output_axis',
+    rel,
+    tool,
+    tool_response: probe?.tool_response,
+  };
+  // Every SILENT verdict names WHICH cause produced it (anti_pattern 1b141d1f:
+  // H23's silence is multiply-caused, and a verdict that cannot tell its causes
+  // apart audits nothing). One shape for the three EARLY-EXIT causes below; the
+  // fourth ('below_axis_floor') is only knowable after the content match runs,
+  // and is attached at this function's final return.
+  const silent = (reason) => ({
+    ...base,
+    expected: { owners: [], hazards: [], rationale: [] },
+    expected_ids: [],
+    expected_reason: reason,
+  });
+
+  // NOTHING TO MATCH AGAINST (h23-output-axis.mjs:139-140), checked FIRST
+  // because that is where the HOOK checks it — before the store is even opened,
+  // and therefore before the read-seam gates below. An absent/null tool_response
+  // is a first-class silent allow, and it is NOT 'below_axis_floor': "there was
+  // no response at all" and "the content did not clear the floors" are different
+  // findings, and collapsing them would mislabel a payload-synthesis fault as a
+  // relevance miss. AUTHORITY NOTE (review finding 3): the PROBE's tool_response
+  // is authoritative for both halves — synthesizePayload's 'output_axis' arm
+  // sends its absence through unchanged rather than substituting placeholder
+  // content, so the payload the hook sees and the expectation derived here are
+  // computed from the same bytes. The alternative (deriving over the substitute)
+  // was rejected: it makes this hook arm unauditable, because a probe could
+  // never exercise the no-response allow the hook explicitly implements.
+  const raw = probe?.tool_response;
+  if (raw == null) return silent('no_tool_response');
+
+  // READ-SEAM GATES (h23-output-axis.mjs:159-169), applied in the hook's OWN
+  // ORDER and checked BEFORE and INDEPENDENTLY of any content match:
+  //   (1) .git, (2) .sterling/, then (3) ownership.
+  // PATH EXCLUSIONS (1)+(2) mirror the hook's own mirror of
+  // h19-knowledge-delivery.mjs:41-42: reading the store's own tree or its
+  // delivery queue is self-referential — matching on pending.json's content
+  // would let the hook feed itself — so the hook is deliberately silent there.
+  // They get their own reason: without it, a Read of a .sterling/ path whose
+  // content happens to match a stored record would make this mirror expect a
+  // pointer and score the hook's CORRECT, deliberate silence as a regression.
+  // Ownership (3) is a different silence again: H19 already delivers substance
+  // on an owned path, so a second block would be double delivery.
+  if (tool === 'Read') {
+    if (rel === '.git' || rel?.startsWith('.git/')) return silent('path_excluded');
+    if (rel?.startsWith('.sterling/')) return silent('path_excluded');
+    if (rel) {
+      const owners = store.query({ types: OWNER_TYPES, file_keys: [rel], cap: HOOK_CAP }).filter((r) => !r.working_tree);
+      if (owners.length) return silent('owned_suppressed');
+    }
+  }
+  // CONTENT MATCH (h23-output-axis.mjs:171-193): stringify an object-shaped
+  // tool_response exactly as the hook does, clip to the same window, extract
+  // axis terms, then apply the SAME three floors over the SAME two candidate
+  // types at the SAME per-type cap.
+  const content = typeof raw === 'string' ? raw : JSON.stringify(raw);
+  const clipped = content.slice(0, OUTPUT_AXIS_CLIP);
+  const terms = extractAxisTerms(clipped, MAX_RANK_TERMS);
+  let hazards = [];
+  let rationale = [];
+  if (terms.length >= AXIS_MIN_HITS) {
+    const candidates = [
+      ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: OUTPUT_AXIS_CANDIDATE_CAP }),
+      ...store.query({ types: ['decision'], rank_terms: terms, cap: OUTPUT_AXIS_CANDIDATE_CAP }),
+    ];
+    const scored = candidates
+      .map((r) => ({ record: r, hits: axisHits(r, terms) }))
+      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, clipped));
+    hazards = scored.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record.id);
+    rationale = scored.filter((x) => x.record.type === 'decision').map((x) => x.record.id);
+  }
+  const expected_ids = uniq([...hazards, ...rationale]);
+  return {
+    ...base,
+    expected: { owners: [], hazards, rationale },
+    expected_ids,
+    // Present ONLY when silent — the LAST of the four derivable silence
+    // reasons ('no_tool_response' | 'path_excluded' | 'owned_suppressed' |
+    // 'below_axis_floor'); dedup and subagent-silence stay out of scope here,
+    // per the module header and h23-output-axis.mjs's own frozen suite.
+    ...(expected_ids.length === 0 ? { expected_reason: 'below_axis_floor' } : {}),
+  };
+}
+
+export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } = {}) {
   // 1. ENUMERATE candidate paths from the records themselves. This is not the
   //    predicate — every path found here is re-asked through the hooks' own
   //    query below, so an enumeration quirk can never widen an expectation.
@@ -250,6 +405,14 @@ export function deriveExpected(store, { repoRoot: root } = {}) {
       mk(H10, 'h10_ownership', { owners: ids(owners), hazards: [], rationale: [] });
     }
   }
+
+  // H23 output-axis (board 5d462868): content-matched, never path-enumerated —
+  // one Case per caller-supplied probe, mirroring h23-output-axis.mjs's own
+  // predicate (deriveOutputAxisExpected above). Backward-compatible: an empty
+  // (default) outputAxisProbes list adds nothing, so every pre-existing call
+  // site is unchanged.
+  outputAxisProbes.forEach((probe, i) => entries.push(deriveOutputAxisExpected(store, probe, i)));
+
   return entries;
 }
 
@@ -281,12 +444,35 @@ export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {
       stdin.tool_name = c.tool ?? 'Bash';
       stdin.tool_input = { command: `grep -n TODO ${c.rel}` };
       break;
-    case 'output_axis':
+    case 'output_axis': {
+      // Unlike 'file_touch'/'bash' (always Read/Bash respectively), an
+      // output_axis case's `tool` selects the SHAPE of tool_input — 'Bash'
+      // carries a command string, everything else (default 'Read') carries an
+      // absolute file_path under the sandbox cwd (B3/B2's own rule, extended).
+      const oaTool = c.tool ?? 'Read';
       stdin.hook_event_name = c.event ?? 'PostToolUse';
-      stdin.tool_name = c.tool ?? 'Read';
-      stdin.tool_input = { file_path: join(cwd, c.rel) };
-      stdin.tool_response = c.tool_response ?? `contents of ${c.rel}`;
+      stdin.tool_name = oaTool;
+      stdin.tool_input =
+        oaTool === 'Bash' || oaTool === 'PowerShell'
+          ? { command: c.rel ? `grep -n TODO ${c.rel}` : 'grep -rn TODO .' }
+          : { file_path: join(cwd, c.rel) };
+      // The real tool_response shape passes through UNCHANGED: a string is
+      // sent byte-for-byte, an OBJECT is sent unstringified — the real hook
+      // does its own stringification (h23-output-axis.mjs:173), so
+      // pre-stringifying here would test a shape the platform never sends.
+      // ABSENCE PASSES THROUGH TOO (review finding 3). The earlier
+      // `?? `contents of ${c.rel}`` substitute meant the payload and
+      // deriveOutputAxisExpected's expectation were computed from DIFFERENT
+      // content whenever a probe omitted tool_response. THE PROBE IS
+      // AUTHORITATIVE, and deriveOutputAxisExpected mirrors it: an absent
+      // tool_response stays absent so the hook takes its own no-response allow
+      // (h23-output-axis.mjs:139-140) and the case's 'no_tool_response'
+      // expectation measures exactly that arm. Substituting instead would have
+      // made that arm permanently unauditable. `null` is forwarded as null —
+      // the hook treats it identically, and the platform can send it.
+      if (c.tool_response !== undefined) stdin.tool_response = c.tool_response;
       break;
+    }
     case 'h10_ownership':
       // NOTHING about the path in stdin — H10 reads the touched set from disk,
       // and feeding it by stdin would audit a channel the hook does not use.
@@ -378,7 +564,17 @@ export function parseDelivery(hookResult, sandboxDir) {
     // print the uuid at all. A frontier entry names territory and no record —
     // assuming every queue entry is article-shaped drops the signal it carries.
     const text = JSON.stringify(entry ?? null);
-    const parsedEntry = { kind, rel: entry?.rel ?? null, ids: idsIn(text), text };
+    // H23's own disclosure tail (board 5d462868, decision 284fc4b0), parsed with
+    // the SAME regex h23-output-axis.mjs's own frozen suite pins — a rename of
+    // the tail format then breaks both suites identically instead of silently
+    // diverging. 0, never undefined, when the tail is absent: "not measured"
+    // would be wrong here — no tail means nothing was suppressed.
+    const payloadText = typeof entry?.payload === 'string' ? entry.payload : '';
+    const tailMatch = payloadText.match(/\(\+(\d+) more matched\)/);
+    const parsedEntry = {
+      kind, rel: entry?.rel ?? null, ids: idsIn(text), text,
+      suppressed_count: tailMatch ? Number(tailMatch[1]) : 0,
+    };
     (queued_by_kind[kind] ??= []).push(parsedEntry);
   }
   const queued_ids = uniq(Object.values(queued_by_kind).flat().flatMap((e) => e.ids));
@@ -540,9 +736,23 @@ export function metrics(cases = []) {
 
 export function resetSandbox(sandboxDir, caseObj = {}) {
   const dir = join(sandboxDir, '.sterling', 'transient');
-  // An override case's prior denial is written BEFORE this call and must
-  // survive it; the runner wipes and re-seeds those cases explicitly.
-  if (caseObj.seed_ledger) return { removed: false };
+  // An override case's prior denial (seed_ledger), or a deliberately-seeded
+  // H23 output-axis guard (seed_output_axis_guard, board 5d462868 — mirrors
+  // seed_ledger's own contract for this arm's guard), is written BEFORE this
+  // call and must survive it; the runner wipes and re-seeds those cases
+  // explicitly.
+  //
+  // seed_output_axis_guard IS HONOURED HERE BUT NOT YET REACHABLE FROM run()
+  // (review 2026-09-06, finding 6) — and that is deliberate, not an oversight.
+  // Only an output_axis case could set it, and none reaches run() until main()
+  // supplies `outputAxisProbes` (see limit (2) in the module header). It is
+  // kept rather than deleted because it is the RESET half of that follow-up and
+  // is pinned by group N1; it is not wired now because doing so would add a
+  // guard-conductor.json `output_axis` seeder and a run() parameter that no
+  // caller can exercise and no frozen pin covers — dead machinery ahead of the
+  // work that gives it meaning. Wire it WITH the probe source, beside
+  // seed_ledger, and pin the pair together.
+  if (caseObj.seed_ledger || caseObj.seed_output_axis_guard) return { removed: false };
   const existed = existsSync(dir);
   rmSync(dir, { recursive: true, force: true });
   return { removed: existed };
@@ -943,6 +1153,16 @@ async function main(argv) {
 
       const match_modes = {};
       for (const id of expected_ids) match_modes[id] = hitMode(id, observed, allText);
+      // ⚠ NOT CAP-AWARE — this is the OTHER half of the latent defect recorded
+      // at deriveOutputAxisExpected. `every` demands that EVERY expected id be
+      // observed, which is right for H19/H20 (they render the whole set) and
+      // WRONG for h23-output-axis, whose OUTPUT_AXIS_POINTER_CAP = 1 renders one
+      // pointer plus a "(+N more matched)" tail by ruling (decision
+      // h23-kept-raised-threshold-one-pointer-payload, 284fc4b0). No output_axis
+      // case reaches here today (main() supplies no `outputAxisProbes`), so the
+      // false MISS is latent. WIRING PROBES INTO main() REQUIRES CHANGING THIS
+      // FIRST: covered up to the cap, with parseDelivery's per-entry
+      // `suppressed_count` reconciling the remainder — never a bare `every`.
       const covers = (ids, text) => expected_ids.length > 0 && expected_ids.every((id) => hitMode(id, ids, text) !== null);
 
       let rendered = covers(directIds, directText);

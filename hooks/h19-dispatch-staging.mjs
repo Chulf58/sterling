@@ -7953,10 +7953,36 @@ var SUBJECT_MAX_DECISIONS = 5;
 var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
 var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
 var input = readStdin();
+var TDD_POSTURE_AGENT_TYPES = /* @__PURE__ */ new Set(["coder", "test-writer"]);
+var tddPostureLine = "";
+try {
+  if (TDD_POSTURE_AGENT_TYPES.has(input.agent_type)) {
+    let cfg = null;
+    let cfgUnusable = false;
+    try {
+      cfg = loadConfig(input.cwd);
+    } catch {
+      cfg = null;
+      cfgUnusable = true;
+    }
+    if (cfg !== null && (typeof cfg !== "object" || Array.isArray(cfg))) {
+      cfgUnusable = true;
+    }
+    if (cfgUnusable) {
+      tddPostureLine = "TDD posture: UNKNOWN \u2014 the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+    } else {
+      const tddOn = cfg?.tdd?.enabled !== false;
+      const mutationOn = cfg?.mutation_verification?.enabled !== false;
+      tddPostureLine = `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} \xB7 mutation verification ${mutationOn ? "ON" : "OFF"} (config.tdd.enabled / config.mutation_verification.enabled \u2014 TUI System tab; explicit asks still work)`;
+    }
+  }
+} catch {
+}
 var emitted = false;
 function combinedContext(payload) {
   const out = [];
   if (payload) out.push(payload);
+  if (tddPostureLine) out.push(tddPostureLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
   return out.join("\n\n");
 }

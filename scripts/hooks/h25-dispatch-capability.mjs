@@ -550,6 +550,47 @@ function citationStalenessAdvisory(prompt, cwd) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// FOURTH ADVISORY: TDD / mutation-verification posture (decision 752caf98
+// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C). Same
+// warn-only posture as the three advisories above — never a block (decision
+// dc6c1afb: H25 is warn-only). Two independent triggers, either or both may
+// fire on the same dispatch: (1) a test-writer dispatched while
+// config.tdd.enabled is explicitly false — the automatic tests-first default
+// does not apply in this project, so an unexplained test-writer dispatch is
+// worth a nudge; (2) a brief mentioning mutation/sabotage/mutant while
+// config.mutation_verification.enabled is explicitly false. loadConfig is
+// read fresh here (review fix C4's own pattern, mirrored from hasPathTrigger
+// above) rather than shared with any other call site, so a present-but-
+// malformed config degrades only THIS advisory, never the others already
+// computed in this hook. Only an explicit `false` fires either arm — absent/
+// undefined reads as the documented default (true, decision 752caf98), never
+// treated as OFF.
+const MUTATION_WORD_RE = /\b(mutation|sabotage|mutant)\b/i;
+function tddPostureAdvisory(subagentType, prompt, cwd) {
+  let config;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    return null;
+  }
+  const parts = [];
+  if (subagentType === 'test-writer' && config?.tdd?.enabled === false) {
+    parts.push(
+      `H25 TDD POSTURE ADVISORY — tests-first is OFF in this project; dispatch a test-writer only ` +
+        `on an explicit ask (config.tdd.enabled, TUI System tab).`
+    );
+  }
+  if (config?.mutation_verification?.enabled === false && MUTATION_WORD_RE.test(String(prompt ?? ''))) {
+    parts.push(
+      `H25 MUTATION-VERIFICATION POSTURE ADVISORY — mutation verification is OFF in this project ` +
+        `(config.mutation_verification.enabled, TUI System tab): the automatic verify-by-mutation default ` +
+        `does not apply here — proceed only on an explicit ask.`
+    );
+  }
+  return parts.length ? parts.join('\n\n') : null;
+}
+
 let input;
 try {
   input = readStdin();
@@ -576,6 +617,7 @@ try {
   // the (up to) four advisories ever clobber each other when several apply.
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
   const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
+  const tddAdvisory = tddPostureAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
   // Assigned later, once the target agent's real grant is known to hold
   // NEITHER shell tool — stays undefined on every branch that cannot know
   // that (unknown agent, all-tools default, unevaluable grant), read by
@@ -588,6 +630,7 @@ try {
     if (commandShapeMsg) parts.push(commandShapeMsg);
     if (taAdvisory) parts.push(taAdvisory);
     if (citeAdvisory) parts.push(citeAdvisory);
+    if (tddAdvisory) parts.push(tddAdvisory);
     if (parts.length) emit(parts.join('\n\n'));
     allow();
   }

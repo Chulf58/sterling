@@ -77,10 +77,10 @@ function article(slug, paths, extra = {}) {
   };
 }
 
-function makeProject() {
+function makeProject(configOverride = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h19-stage-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({}));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(configOverride));
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   const cleanup = () => {
     store.close();
@@ -538,8 +538,9 @@ test('H19+H28 shared-fate: a staging-internal failure after stdin parses still e
 // Sabotage: removing the catch-path contract emit (letting the staging
 // exception propagate uncaught past the whole handler, or catching it but
 // forgetting to still emit the contract) flips the STERLING DEFAULT RETURN
-// CONTRACT match above red. RED AT THE CURRENT TREE until the fold's
-// shared-fate regression is fixed.
+// CONTRACT match above red. GREEN AT HEAD — the fold's shared-fate
+// regression has been fixed; this arm is kept as a standing regression pin,
+// not a today-red spec.
 
 // ===========================================================================
 // EXEMPT + APPLICABLE PAYLOAD (outside-family review finding): PIN 2 proves
@@ -573,3 +574,298 @@ test('H28 exemption suppresses ONLY the contract, not staging: exempt agent_type
 // Sabotage: an exemption check that early-returns before staging runs at all
 // (instead of only skipping the contract-injection branch) flips the
 // STERLING KNOWLEDGE DELIVERY / alpha match above red.
+
+// ===========================================================================
+// TDD/MUTATION-VERIFICATION POSTURE LINE (slice 3C, board 7e7279c4,
+// objective dome-farmer-issues-2026-09-05). SPEC-ONLY, blind to the coder's
+// parallel implementation.
+//
+// Governing knowledge: decision 752caf98 (tdd-and-mutation-toggles-in-
+// system-tab); decision 466ac94f (H25 is warn-only — the same
+// never-a-gate posture the toggle checks extend, though this hook is H19,
+// not H25). Board 7e7279c4's fix shape item (3): H19's combinedContext()
+// pushes the SAME one-line posture (see scripts/tests/h1-tdd-posture-line.
+// test.mjs for the exact string) into `coder` and `test-writer` dispatch
+// context, so the SPAWNED agent reads live config rather than a template
+// copy. This is independent of the STAGING half (governed-file delivery) —
+// it is keyed off the SPAWNED agent's OWN `agent_type` field on stdin, not
+// off anything found in the parent transcript, so a transcript with no
+// Task/Agent block (contract-only) still carries the posture line for a
+// coder/test-writer spawn.
+//
+// CURRENT STATE: h19-dispatch-staging.mjs now reads config.tdd /
+// config.mutation_verification and injects the posture line for coder/
+// test-writer dispatches; the tests below are green at HEAD and prove the
+// gating (not merely that the string once failed to appear). The ABSENCE
+// test (reviewer-correctness) is a genuine negative pin: the posture line is
+// scoped away from that dispatch class, not silent because nothing exists.
+// ===========================================================================
+
+const POSTURE_SUFFIX =
+  '(config.tdd.enabled / config.mutation_verification.enabled — TUI System tab; explicit asks still work)';
+
+function postureLine(tddOn, mutOn) {
+  return `TDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} · mutation verification ${mutOn ? 'ON' : 'OFF'} ${POSTURE_SUFFIX}`;
+}
+
+test('posture line (OFF/OFF) is injected into a CODER dispatch context, contract-only transcript', () => {
+  const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
+  try {
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const r = runHook(
+      'h19-dispatch-staging.mjs',
+      subagentStart(dir, transcript, { agent_type: 'coder' }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(
+      ctx.includes(postureLine(false, false)),
+      `expected the OFF/OFF posture line verbatim in a coder dispatch's context; got: ${ctx}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: drop 'coder' from the set of agent_types that receive the
+// posture line (leave only 'test-writer') — this test goes red.
+
+test('posture line (ON/ON, config-driven not hardcoded) is injected into a TEST-WRITER dispatch context', () => {
+  const { dir, cleanup } = makeProject({ tdd: { enabled: true }, mutation_verification: { enabled: true } });
+  try {
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const r = runHook(
+      'h19-dispatch-staging.mjs',
+      subagentStart(dir, transcript, { agent_type: 'test-writer' }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(
+      ctx.includes(postureLine(true, true)),
+      `expected the ON/ON posture line verbatim in a test-writer dispatch's context; got: ${ctx}`
+    );
+    assert.ok(
+      !ctx.includes(postureLine(false, false)),
+      'must not print the OFF/OFF line when config says ON/ON (rules out a hardcoded string)'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: hardcode the injected posture line (e.g. always OFF/OFF, a copy-
+// pasted literal instead of a live config read) — the first assert.ok goes
+// red (the ON/ON line is never found).
+
+test('posture line ABSENT for a dispatch class where it does not apply (reviewer-correctness)', () => {
+  const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
+  try {
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const r = runHook(
+      'h19-dispatch-staging.mjs',
+      subagentStart(dir, transcript, { agent_type: 'reviewer-correctness' }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const out = JSON.parse(r.stdout);
+    const ctx = out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'sanity: the unrelated contract injection still fires for this class');
+    assert.doesNotMatch(
+      ctx,
+      /TDD posture:/,
+      'the posture line is scoped to coder/test-writer dispatches only, never a reviewer'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: widen the posture-line injection to fire for every non-exempt
+// agent_type (instead of only 'coder'/'test-writer') — the doesNotMatch
+// assertion above goes red.
+
+// ===========================================================================
+// COVERAGE GAP (external review): every H19 posture arm above uses explicit
+// `true`/`false` for both keys, so H19 had NO absent-key pin at all — a
+// sabotage inverting the absent-key default (e.g. reading
+// `cfg?.tdd?.enabled === true` instead of defaulting via `?? true`) would
+// pass every existing H19 arm. The two tests below isolate each key's
+// absent-default independently.
+// ===========================================================================
+
+test('GAP: config has NO tdd key at all (mutation_verification explicit false) -> tdd half still defaults ON', () => {
+  const { dir, cleanup } = makeProject({ mutation_verification: { enabled: false } });
+  try {
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const r = runHook(
+      'h19-dispatch-staging.mjs',
+      subagentStart(dir, transcript, { agent_type: 'coder' }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(
+      ctx.includes(postureLine(true, false)),
+      `expected "tests-first ON" (absent tdd key defaults ON) alongside the explicit "mutation verification OFF"; got: ${ctx}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage (verbatim from review): read the tdd flag as `cfg?.tdd?.
+// enabled === true` instead of `cfg?.tdd?.enabled ?? true` — an absent key
+// is `undefined`, and `undefined === true` is false, so the line would
+// wrongly read "tests-first OFF" instead of "ON". This test goes red.
+
+test('GAP: config has NO mutation_verification key at all (tdd explicit false) -> mutation half still defaults ON', () => {
+  const { dir, cleanup } = makeProject({ tdd: { enabled: false } });
+  try {
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const r = runHook(
+      'h19-dispatch-staging.mjs',
+      subagentStart(dir, transcript, { agent_type: 'test-writer' }),
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(
+      ctx.includes(postureLine(false, true)),
+      `expected "mutation verification ON" (absent key defaults ON) alongside the explicit "tests-first OFF"; got: ${ctx}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage (verbatim from review, same class applied to the other
+// key): read the mutation_verification flag as `cfg?.mutation_verification?.
+// enabled === true` instead of defaulting via `?? true` for an absent key —
+// this test goes red (the line would wrongly read "mutation verification
+// OFF" instead of "ON").
+
+// ===========================================================================
+// COVERAGE GAP (external review, same battery as scripts/tests/
+// h1-tdd-posture-line.test.mjs GAP 5/6): H19 renders the SAME one-line TDD/
+// mutation posture into a coder/test-writer dispatch context that H1 renders
+// at SessionStart for an unreadable or JSON-legal-but-non-object config —
+// H1's own suite pins that case must render "TDD posture: UNKNOWN" and never
+// a confident ON/OFF, because in THIS repo both toggles are actually OFF, so
+// a fallback ON/ON would state the exact opposite of the truth. H19 had
+// ZERO arms for this case. The one corrupt-config arm already in this file
+// (the H19+H28 shared-fate test above) spawns with
+// agent_type: 'reviewer-correctness' — precisely the dispatch class that
+// receives NO posture line at all — so it proves nothing about this axis.
+//
+// Both currently-reachable wrong outcomes are bad: H19 could render a
+// confident "tests-first ON · mutation verification ON" to a spawned coder
+// while H1's own banner says UNKNOWN for the identical corrupt config (a
+// false posture, and a DIVERGENT one between the conductor and its own
+// subagent reading the same project) — or H19 could drop the line silently
+// while H1 says UNKNOWN, a quieter but still real divergence.
+//
+// A coder is fixing the implementation in parallel and has been told it MAY
+// legitimately choose to SUPPRESS the line for H19 instead of rendering
+// UNKNOWN, provided it discloses that choice and records the divergence from
+// H1. So the arms below pin the ANTI-DEFECT FIRST AND FOREMOST — no
+// confident tests-first ON/OFF text for a non-object config — which holds
+// regardless of which of the two legitimate choices the coder made. The
+// positive half (which of UNKNOWN-vs-absent) is pinned only as an explicit
+// disjunction, flagged for tightening once the coder's actual choice is
+// known — the same discipline this dispatch already applied to
+// scripts/tests/delivery-oracle.mjs's expected_reason arms rather than
+// guessing.
+// ===========================================================================
+
+test('GAP: config UNPARSEABLE for a CODER dispatch -> no confident tests-first ON/OFF text (the anti-defect, pinned first)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.doesNotMatch(
+      ctx,
+      /tests-first (ON|OFF)/,
+      'an unreadable config must never render a confident ON/OFF posture to a spawned coder — in THIS repo both toggles are actually OFF, so a fallback ON/ON would state the exact opposite of the truth'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage: remove the whole-config shape guard from H19's posture
+// block (let a parse failure fall through to the same default-ON path used
+// for a genuinely absent file) — a confident "tests-first ON · mutation
+// verification ON" appears and this test goes red.
+
+test('GAP: config JSON-legal but NOT AN OBJECT ([]) for a CODER dispatch -> no confident tests-first ON/OFF text (the anti-defect, pinned first)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    writeFileSync(join(dir, '.sterling', 'config.json'), '[]');
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.doesNotMatch(
+      ctx,
+      /tests-first (ON|OFF)/,
+      'a JSON-legal but non-object config (here: an array) must not fall through optional-chaining (config?.tdd?.enabled) to a confident ON/OFF default'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage: same as above — dropping the whole-config shape guard lets
+// `config?.tdd?.enabled` optional-chain through the non-object straight to
+// `undefined`, and the `?? true` default renders a confident ON/ON; this
+// test goes red.
+
+test('GAP (positive half, FLAGGED FOR TIGHTENING): an UNPARSEABLE config for a CODER dispatch either renders the UNKNOWN line H1 uses, or omits the posture line entirely — never a confident reading', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    const hasUnknownLine = /TDD posture: UNKNOWN/.test(ctx);
+    const hasNoPostureLineAtAll = !/TDD posture:/.test(ctx);
+    assert.ok(
+      hasUnknownLine || hasNoPostureLineAtAll,
+      `expected either the UNKNOWN posture line or no posture line at all (never a confident ON/OFF); got: ${ctx}`
+    );
+    // FLAGGED, NOT GUESSED: once the coder's actual choice (render UNKNOWN vs.
+    // suppress) is confirmed and its H1-divergence disclosure is recorded,
+    // tighten this to a single assert.ok/assert.doesNotMatch — mirroring how
+    // P1/P2 in scripts/tests/delivery-oracle.test.mjs were tightened to
+    // assert.equal(..., 'no_tool_response') once that name was known.
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage: render ANY posture line that is neither the UNKNOWN text
+// nor absent (e.g. a confident ON/ON, or a differently-worded silent
+// fallback) for an unreadable config — this test goes red.
+
+test('GAP (positive half, FLAGGED FOR TIGHTENING): a NON-OBJECT ([]) config for a CODER dispatch either renders the UNKNOWN line H1 uses, or omits the posture line entirely — never a confident reading', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    writeFileSync(join(dir, '.sterling', 'config.json'), '[]');
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    const hasUnknownLine = /TDD posture: UNKNOWN/.test(ctx);
+    const hasNoPostureLineAtAll = !/TDD posture:/.test(ctx);
+    assert.ok(
+      hasUnknownLine || hasNoPostureLineAtAll,
+      `expected either the UNKNOWN posture line or no posture line at all (never a confident ON/OFF); got: ${ctx}`
+    );
+    // FLAGGED, NOT GUESSED: same tightening note as the unparseable-config arm above.
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage: same as the unparseable-config positive-half arm above.

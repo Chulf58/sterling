@@ -5725,6 +5725,27 @@ This does not claim the cited lines are wrong \u2014 only that the file's bytes 
     return null;
   }
 }
+var MUTATION_WORD_RE = /\b(mutation|sabotage|mutant)\b/i;
+function tddPostureAdvisory(subagentType, prompt, cwd) {
+  let config;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    return null;
+  }
+  const parts = [];
+  if (subagentType === "test-writer" && config?.tdd?.enabled === false) {
+    parts.push(
+      `H25 TDD POSTURE ADVISORY \u2014 tests-first is OFF in this project; dispatch a test-writer only on an explicit ask (config.tdd.enabled, TUI System tab).`
+    );
+  }
+  if (config?.mutation_verification?.enabled === false && MUTATION_WORD_RE.test(String(prompt ?? ""))) {
+    parts.push(
+      `H25 MUTATION-VERIFICATION POSTURE ADVISORY \u2014 mutation verification is OFF in this project (config.mutation_verification.enabled, TUI System tab): the automatic verify-by-mutation default does not apply here \u2014 proceed only on an explicit ask.`
+    );
+  }
+  return parts.length ? parts.join("\n\n") : null;
+}
 var input;
 try {
   input = readStdin();
@@ -5746,6 +5767,7 @@ try {
     if (commandShapeMsg) parts.push(commandShapeMsg);
     if (taAdvisory) parts.push(taAdvisory);
     if (citeAdvisory) parts.push(citeAdvisory);
+    if (tddAdvisory) parts.push(tddAdvisory);
     if (parts.length) emit(parts.join("\n\n"));
     allow();
   };
@@ -5753,6 +5775,7 @@ try {
   if (!subagentType) allow();
   const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
   const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
+  const tddAdvisory = tddPostureAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
   let commandShapeMsg;
   const agentPath = join4(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
   if (!existsSync4(agentPath)) {

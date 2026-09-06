@@ -8323,10 +8323,15 @@ if (!store) {
   allow();
 }
 var config = null;
+var configUnreadable = false;
 try {
   config = loadConfig(input.cwd);
 } catch {
   config = null;
+  configUnreadable = true;
+}
+if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
+  configUnreadable = true;
 }
 var roleContext = "";
 try {
@@ -8342,6 +8347,19 @@ MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The comm
     } else {
       roleContext = '\n\nMACHINE ROLE: UNDECLARED \u2014 treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
     }
+  }
+} catch {
+}
+var tddPostureContext = "";
+try {
+  if (configUnreadable) {
+    tddPostureContext = "\n\nTDD posture: UNKNOWN \u2014 the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+  } else {
+    const tddOn = config?.tdd?.enabled !== false;
+    const mutationOn = config?.mutation_verification?.enabled !== false;
+    tddPostureContext = `
+
+TDD posture: tests-first ${tddOn ? "ON" : "OFF"} \xB7 mutation verification ${mutationOn ? "ON" : "OFF"} (config.tdd.enabled / config.mutation_verification.enabled \u2014 TUI System tab; explicit asks still work)`;
   }
 } catch {
 }
@@ -8843,7 +8861,7 @@ try {
 var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

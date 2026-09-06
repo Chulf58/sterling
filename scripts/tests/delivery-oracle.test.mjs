@@ -1233,3 +1233,719 @@ test('I4: two runs write two DISTINCT run files — a rerun never clobbers the p
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ===========================================================================
+// GROUP J–N — H23 OUTPUT-AXIS ARM (board 5d462868, slice 3D of objective
+// dome-farmer-issues-2026-09-05). Layer 1 previously did not audit H23 at all
+// (article 79d2a189 v6: "H23 is NOT audited"); a Codex review (thread
+// 01a07249) additionally found the output_axis payload arm already present as
+// DEAD CODE while the header still claimed the same limit — these groups pin
+// the arm that closes both gaps at once. Written BLIND to
+// scripts/delivery-oracle.mjs and scripts/hooks/h23-output-axis.mjs (H4); the
+// H23 predicate facts below come from decisions b266d6b7 and 284fc4b0 (both
+// standing) and from scripts/tests/h23-output-axis.test.mjs — h23's OWN
+// frozen suite, itself a TEST file, not implementation, and the source of the
+// AXIS_MIN_HITS(2) / three-floor / domain-vocabulary idiom reused verbatim
+// below so these fixtures clear or miss the real floors regardless of the
+// exact internal scoring this suite was never allowed to read.
+//
+// SCOPE FENCE (mirrors this file's own header, line 5): H23's own dedup,
+// centrality and cap-rendering correctness are ALREADY pinned at
+// scripts/tests/h23-output-axis.test.mjs (AC1/AC5/AC7) — re-asserting those
+// here would violate this file's stated charter. What belongs here is only
+// the ORACLE'S OWN mirroring/scoring/reporting of that arm.
+//
+// INTERFACE EXTENSION (ambiguity resolved here, not silently decided — same
+// convention as the AMBIGUITIES block at the top of this file; FLAGGED to the
+// conductor/coder in the handoff, since it was authored without implementation
+// read access):
+//   deriveExpected(store, { repoRoot, outputAxisProbes }) — outputAxisProbes
+//   is a NEW, backward-compatible optional array (default []); every existing
+//   Group A call site omits it and is UNCHANGED — deriveExpected cannot
+//   invent tool_response content from a repo walk alone, unlike H19/H10
+//   which are pure path-owner lookups. Each probe is
+//     { rel: string|null, tool: 'Bash'|'Read', tool_response: string|object }.
+//   For each probe, deriveExpected mirrors h23-output-axis.mjs's OWN
+//   predicate and emits ONE Case using the contract's EXISTING optional
+//   `tool` override field (already declared at the top of this file) plus a
+//   NEW `tool_response` field:
+//     { kind:'case', hook:'h23-output-axis.mjs', payload_kind:'output_axis',
+//       rel: probe.rel, tool: probe.tool, tool_response: probe.tool_response,
+//       expected: { owners: [], hazards: [...], rationale: [...] },
+//         // owners is ALWAYS empty — output-axis content matching confers
+//         // no ownership (decision b266d6b7)
+//       expected_ids: <deduped union of hazards+rationale>,
+//       expected_reason?: 'owned_suppressed' | 'below_axis_floor' }
+//         // present ONLY when expected_ids is empty, naming WHICH of the
+//         // two STORE-DERIVABLE silence reasons applies. Dedup and
+//         // subagent-silence are RUNTIME/session facts, not store-derivable
+//         // from (store, repoRoot) alone, and stay h23-output-axis.mjs's
+//         // own frozen suite's job (per the scope fence above) — Group N
+//         // below covers only the piece that IS the oracle's: the sandbox
+//         // reset must not let one case's guard state leak into the next.
+//   'below_axis_floor' fires when the content simply fails the three-floor
+//   axis match (tool==='Bash' never has an ownership concept at all).
+//   'owned_suppressed' fires when tool==='Read' names a path owned by a
+//   non-working_tree feature_article/reference_material, REGARDLESS of
+//   content match — ownership is checked before, and independently of,
+//   content matching (mirrors h23-output-axis.test.mjs AC2).
+//
+//   parseDelivery's pending-queue entries for this arm carry
+//   { kind: 'output_axis_pointers', rel, payload } — the REAL name the shipped
+//   hook emits (scripts/hooks/h23-output-axis.mjs:236, conductor-verified;
+//   corrected here from this test-writer's earlier blind assumption
+//   'output_axis', which nothing produces and is now removed, not aliased —
+//   joining h19-bash-delivery's 'bash_pointers' and h19-knowledge-delivery's
+//   'delivery' kinds in the same pending.json (decision b266d6b7: "the same
+//   pending queue h19-bash-delivery uses"). parseDelivery additionally
+//   extracts a numeric `suppressed_count` per
+//   queued_by_kind.output_axis_pointers entry from the
+//   "(+N more matched)" tail decision 284fc4b0 mandates — the SAME regex
+//   scripts/tests/h23-output-axis.test.mjs already pins at the hook level
+//   (/\(\+(\d+) more matched\)/), reused verbatim below rather than
+//   re-derived, so a rename of the tail format breaks both suites identically
+//   instead of silently diverging.
+// ===========================================================================
+
+const DOMAIN_TRIGGER =
+  'breach countdown breach countdown widget flywheel widget flywheel ballast klaxon ballast klaxon ' +
+  'recur constantly though this bug rarely touches a game field cell during setup work';
+const DOMAIN_STATEMENT =
+  'No surface may ever silence the breach countdown alarm: breach countdown widget flywheel widget flywheel ' +
+  'ballast klaxon ballast klaxon must remain audible regardless of setup context.';
+const CONTENT_SENTENCE =
+  'The reactor log shows the breach alarm firing while the widget assembly and the flywheel governor both spike past nominal load.';
+const UNRELATED_CONTENT =
+  'The invoice export pipeline now writes a CSV header row before every batch of billing rows.';
+
+function axisAntiPattern(marker, extra = {}) {
+  return {
+    ...envelope('anti_pattern'),
+    title: `${marker} breach countdown widget flywheel ballast klaxon failure`,
+    trigger: DOMAIN_TRIGGER,
+    guidance: 'guidance prose',
+    wrong_way: 'wrong way',
+    right_way: 'right way',
+    source_evidence: 'fixture',
+    basis: 'codebase',
+    severity: 'warn',
+    file_keys: [],
+    ...extra,
+  };
+}
+
+function axisDecision(marker, extra = {}) {
+  return {
+    ...envelope('decision'),
+    title: `${marker} breach countdown widget flywheel ballast klaxon ruling`,
+    statement: DOMAIN_STATEMENT,
+    alternatives_rejected: [],
+    rationale: 'rationale prose',
+    file_keys: [],
+    ...extra,
+  };
+}
+
+function makeAxisFixtureRepo() {
+  assert.ok(SterlingStore, 'packages/store/dist must be built for the oracle fixture (npm run build)');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-axis-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  mkdirSync(join(dir, 'logs'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'owned.mjs'), '// owned\n');
+  writeFileSync(join(dir, 'logs', 'unowned.log'), '// unowned\n');
+  const init = git(dir, ['init', '-q']);
+  assert.equal(init.status, 0, 'git is required to build the oracle fixture');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-qm', 'axis fixture']);
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const owner = store.create(articleRecord('axis-owner', ['src/owned.mjs']));
+  const cleanup = () => {
+    try { store.close(); } catch { /* already closed */ }
+    rmSync(dir, { recursive: true, force: true });
+  };
+  return { dir, store, ids: { owner: owner.id }, cleanup };
+}
+
+const h23CaseOf = (entries, tool) =>
+  entries.find((e) => e.kind === 'case' && e.hook === 'h23-output-axis.mjs' && e.tool === tool);
+
+// ===========================================================================
+// GROUP J — deriveExpected: the H23 output-axis arm (store-side mirror).
+// ===========================================================================
+
+test('J0 CONTROL: the SAME content via Bash gets matched hazards, while via Read on an OWNED path it is suppressed for the OPPOSITE reason (ownership, not absence of a match)', () => {
+  // SABOTAGE: make the output_axis arm always return empty expected_ids (a do-nothing stub standing in for the "dead code" this arm replaces).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(axisAntiPattern('AP-ALPHA'));
+    const probes = [
+      { rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE },
+      { rel: 'src/owned.mjs', tool: 'Read', tool_response: CONTENT_SENTENCE },
+    ];
+    const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
+    const bashCase = h23CaseOf(entries, 'Bash');
+    const readCase = h23CaseOf(entries, 'Read');
+    assert.ok(bashCase, 'the Bash probe produces an H23 case');
+    assert.deepEqual(bashCase.expected.hazards, [ap.id], 'matching content over Bash gets the pointer');
+    assert.ok(readCase, 'the Read probe also produces an H23 case (never silently dropped)');
+    assert.deepEqual(readCase.expected_ids, [], 'the owned path is suppressed');
+    assert.equal(readCase.expected_reason, 'owned_suppressed', 'suppressed FOR OWNERSHIP, not because the content failed to match — the Bash arm proves the same content DOES match');
+  } finally {
+    cleanup();
+  }
+});
+
+test('J1: content sharing no axis vocabulary with any store record is silent on an UNOWNED path, distinguished as below_axis_floor', () => {
+  // SABOTAGE: collapse expected_reason to a single constant regardless of cause, so 'owned_suppressed' and 'below_axis_floor' become indistinguishable.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    store.create(axisAntiPattern('AP-ALPHA'));
+    const probes = [{ rel: 'logs/unowned.log', tool: 'Read', tool_response: UNRELATED_CONTENT }];
+    const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
+    const c = h23CaseOf(entries, 'Read');
+    assert.ok(c, 'an unowned, non-matching path still gets a case, never silently dropped');
+    assert.deepEqual(c.expected_ids, []);
+    assert.equal(c.expected_reason, 'below_axis_floor', 'unowned + no vocabulary overlap is the OTHER silence reason — must read differently from J0\'s owned_suppressed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('J2: matches classify into hazards (anti_pattern) vs rationale (decision), NEVER owners, and expected_ids is their deduped union', () => {
+  // SABOTAGE: push output-axis matches into expected.owners (output-axis content matching confers no ownership).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(axisAntiPattern('AP-ALPHA'));
+    const dec = store.create(axisDecision('DEC-GAMMA'));
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE }],
+    });
+    const c = h23CaseOf(entries, 'Bash');
+    assert.deepEqual(c.expected.hazards, [ap.id]);
+    assert.deepEqual(c.expected.rationale, [dec.id]);
+    assert.deepEqual(c.expected.owners, [], 'output-axis content matching is never ownership');
+    assert.deepEqual(sorted(c.expected_ids), sorted([ap.id, dec.id]));
+  } finally {
+    cleanup();
+  }
+});
+
+test('J3: expected_ids names EVERY matching candidate, unbounded by OUTPUT_AXIS_POINTER_CAP — the cap is a delivery-time concern, not an expectation-time one', () => {
+  // SABOTAGE: truncate expected.hazards to 1 entry inside deriveExpected, pre-empting the cap check that belongs at parse/metrics time.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const a = store.create(axisAntiPattern('AP-ALPHA'));
+    const b = store.create(axisAntiPattern('AP-BETA'));
+    const g = store.create(axisAntiPattern('AP-GAMMA'));
+    const d = store.create(axisAntiPattern('AP-DELTA'));
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE }],
+    });
+    const c = h23CaseOf(entries, 'Bash');
+    assert.deepEqual(sorted(c.expected.hazards), sorted([a.id, b.id, g.id, d.id]), 'all 4 matches are named — capping to the real 1-line payload happens later, at parse/metrics time');
+  } finally {
+    cleanup();
+  }
+});
+
+test('J4: an OBJECT-shaped tool_response computes the IDENTICAL expected set as its STRING equivalent', () => {
+  // SABOTAGE: only match against string tool_response, treating an object as automatically non-matching (or throwing).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(axisAntiPattern('AP-ALPHA'));
+    const stringEntries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE }],
+    });
+    const objectEntries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: { stdout: CONTENT_SENTENCE, stderr: '', exitCode: 0 } }],
+    });
+    const stringCase = h23CaseOf(stringEntries, 'Bash');
+    const objectCase = h23CaseOf(objectEntries, 'Bash');
+    assert.deepEqual(objectCase.expected.hazards, stringCase.expected.hazards);
+    assert.deepEqual(objectCase.expected.hazards, [ap.id]);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// GROUP K — synthesizePayload: the H23 output-axis payload (both tool_response forms).
+// ===========================================================================
+
+test('K0 CONTROL: an output_axis case carries stdin.tool_response; an ordinary H19 "bash" case with the SAME tool/rel does NOT — inclusion keys on payload_kind, not tool name', () => {
+  // SABOTAGE: attach tool_response to every Bash-tooled case regardless of payload_kind.
+  const synthesizePayload = fn('synthesizePayload');
+  const outputAxis = synthesizePayload(
+    { kind: 'case', payload_kind: 'output_axis', tool: 'Bash', rel: null, tool_response: CONTENT_SENTENCE },
+    { cwd: SANDBOX }
+  );
+  const bashH19 = synthesizePayload({ kind: 'case', payload_kind: 'bash', rel: 'src/shared.mjs' }, { cwd: SANDBOX });
+  assert.equal(outputAxis.stdin.tool_response, CONTENT_SENTENCE);
+  assert.equal(Object.hasOwn(bashH19.stdin, 'tool_response'), false, 'H19\'s bash-pointer arm never carries content — only output_axis does');
+});
+
+test('K1: a STRING tool_response passes through byte-for-byte', () => {
+  // SABOTAGE: JSON.stringify the string tool_response, corrupting it with quotes.
+  const synthesizePayload = fn('synthesizePayload');
+  const { stdin } = synthesizePayload(
+    { kind: 'case', payload_kind: 'output_axis', tool: 'Bash', rel: null, tool_response: CONTENT_SENTENCE },
+    { cwd: SANDBOX }
+  );
+  assert.equal(stdin.tool_response, CONTENT_SENTENCE);
+  assert.equal(stdin.tool_name, 'Bash');
+  assert.equal(stdin.hook_event_name, 'PostToolUse');
+});
+
+test('K2: an OBJECT tool_response is sent UNSTRINGIFIED — the real hook does its own stringification, so a pre-stringified payload would test a shape the platform never sends', () => {
+  // SABOTAGE: JSON.stringify the object tool_response before putting it on stdin.
+  const synthesizePayload = fn('synthesizePayload');
+  const obj = { stdout: CONTENT_SENTENCE, stderr: '', exitCode: 0 };
+  const { stdin } = synthesizePayload(
+    { kind: 'case', payload_kind: 'output_axis', tool: 'Bash', rel: null, tool_response: obj },
+    { cwd: SANDBOX }
+  );
+  assert.deepEqual(stdin.tool_response, obj);
+  assert.equal(typeof stdin.tool_response, 'object');
+});
+
+test('K3: tool "Read" synthesizes an ABSOLUTE file_path under the sandbox cwd; tool "Bash" synthesizes a non-empty command — same rule B3/B2 already pin, extended to output_axis', () => {
+  // SABOTAGE: emit case.rel unresolved (relative) for the Read arm, or omit tool_input.command for the Bash arm.
+  const synthesizePayload = fn('synthesizePayload');
+  const read = synthesizePayload(
+    { kind: 'case', payload_kind: 'output_axis', tool: 'Read', rel: 'src/owned.mjs', tool_response: CONTENT_SENTENCE },
+    { cwd: SANDBOX }
+  );
+  assert.equal(read.stdin.tool_input.file_path, join(SANDBOX, 'src/owned.mjs'));
+  assert.equal(read.stdin.tool_name, 'Read');
+  const bash = synthesizePayload(
+    { kind: 'case', payload_kind: 'output_axis', tool: 'Bash', rel: null, tool_response: CONTENT_SENTENCE },
+    { cwd: SANDBOX }
+  );
+  assert.equal(typeof bash.stdin.tool_input.command, 'string');
+  assert.ok(bash.stdin.tool_input.command.length > 0);
+  assert.equal(bash.stdin.tool_name, 'Bash');
+});
+
+// ===========================================================================
+// GROUP L — parseDelivery: the H23 'output_axis_pointers' queue kind + disclosure tail.
+// (Re-cut: this test-writer's first pass asserted 'output_axis', named as an
+// explicit blind assumption — WRONG. Conductor-verified against the shipped
+// hook at scripts/hooks/h23-output-axis.mjs:236: the real kind is
+// 'output_axis_pointers'. Per anti_pattern 1b141d1f, a kind nothing emits is
+// HOLLOW BY CONSTRUCTION — it would pass forever while auditing nothing, so
+// this is a correctness fix, not a rename for style. No compatibility arm for
+// the old name: that name is fiction and pinning it would be pinning fiction.)
+// ===========================================================================
+
+test('L0 CONTROL: a queue holding BOTH "output_axis_pointers" and "bash_pointers" entries partitions them into separate buckets — a fixture with only one kind could pass by accident, this one cannot', () => {
+  // SABOTAGE: merge every kind into one bucket keyed by the first kind seen.
+  const parseDelivery = fn('parseDelivery');
+  const dir = makeSandbox();
+  const oa = randomUUID();
+  const bp = randomUUID();
+  try {
+    writePending(dir, [
+      { kind: 'output_axis_pointers', rel: null, payload: `hazard (knowledge_get ${oa})` },
+      { kind: 'bash_pointers', rel: 'src/b.mjs', payload: `owner (knowledge_get ${bp})` },
+    ]);
+    const p = parseDelivery({ code: 0, stdout: '', stderr: '' }, dir);
+    assert.deepEqual(sorted(p.queued_by_kind.output_axis_pointers.flatMap((e) => e.ids)), [oa]);
+    assert.deepEqual(sorted(p.queued_by_kind.bash_pointers.flatMap((e) => e.ids)), [bp]);
+    assert.deepEqual(sorted(p.queued_ids), sorted([oa, bp]));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('L1: the "(+N more matched)" tail is parsed into a numeric suppressed_count per entry, using the SAME regex the hook\'s own frozen suite pins — a payload with no tail reports 0, never undefined or a hardcoded positive', () => {
+  // SABOTAGE: hardcode suppressed_count to a fixed positive number, or read a different tail format than /\(\+(\d+) more matched\)/.
+  const parseDelivery = fn('parseDelivery');
+  const dir = makeSandbox();
+  const shown = randomUUID();
+  const untailed = randomUUID();
+  try {
+    writePending(dir, [
+      { kind: 'output_axis_pointers', rel: null, payload: `hazard (knowledge_get ${shown}) (+3 more matched)` },
+      { kind: 'output_axis_pointers', rel: null, payload: `hazard (knowledge_get ${untailed})` },
+    ]);
+    const p = parseDelivery({ code: 0, stdout: '', stderr: '' }, dir);
+    const entries = p.queued_by_kind.output_axis_pointers;
+    const withTail = entries.find((e) => e.ids.includes(shown));
+    const withoutTail = entries.find((e) => e.ids.includes(untailed));
+    assert.equal(withTail.suppressed_count, 3, 'AC7\'s own fixture proves 4 matched minus 1 shown leaves 3 suppressed — reusing that exact number here');
+    assert.equal(withoutTail.suppressed_count, 0, 'no tail means nothing was suppressed, not "unmeasured"');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// GROUP M — metrics/report: H23 joins the audited set; the stale disclosure is gone.
+// ===========================================================================
+
+test('M0 CONTROL: metrics().per_hook carries the "h23-output-axis.mjs" key ONLY when a case for it is present — presence is data-driven, not a hardcoded hook list', () => {
+  // SABOTAGE: hardcode the per_hook key set to the four pre-existing hooks, ignoring what cases were actually passed in.
+  const metrics = fn('metrics');
+  const withH23 = metrics([mcase({ hook: 'h23-output-axis.mjs' })]).per_hook;
+  const withoutH23 = metrics([mcase({ hook: 'h19-knowledge-delivery.mjs' })]).per_hook;
+  assert.ok(Object.hasOwn(withH23, 'h23-output-axis.mjs'), 'a case for h23 produces its metrics bucket');
+  assert.equal(Object.hasOwn(withoutH23, 'h23-output-axis.mjs'), false, 'no h23 case, no h23 bucket — nothing is special-cased into existing regardless of input');
+});
+
+test('M1: a capped H23 delivery (expected 3 hazards, only 1 delivered because OUTPUT_AXIS_POINTER_CAP=1) still scores a full per-case rendered_recall — the missing 2 are the disclosure tail\'s job (parseDelivery.suppressed_count), not a metrics-level partial miss', () => {
+  // SABOTAGE: compute rendered_recall as delivered_ids.length / expected_ids.length per case instead of the boolean "rendered" flag — this must still read 1.0 for a capped-but-delivered case.
+  const metrics = fn('metrics');
+  const m = metrics([
+    mcase({ hook: 'h23-output-axis.mjs', expected_ids: ['x', 'y', 'z'], delivered_ids: ['x'], rendered: true }),
+  ]).per_hook['h23-output-axis.mjs'];
+  assert.equal(m.rendered_recall, 1, 'case-level pass/fail, not an id-level fraction inside one payload');
+  assert.equal(m.precision, 1, 'the one delivered id is a correct member of expected — capping does not manufacture noise');
+});
+
+test('M2: the module\'s own disclosure no longer claims H23 is unaudited, and still names the hook it now covers', () => {
+  // SABOTAGE: wire the arm but leave the stale "H23 is NOT audited" comment/string in place (the exact Codex-review finding this arm exists to fix).
+  const src = readFileSync(ORACLE, 'utf8');
+  assert.doesNotMatch(src, /H23[\s\S]{0,120}not\s+audited/i, 'the stale disclosure must be removed once the arm is wired, not just left beside working code');
+  assert.match(src, /h23-output-axis/i, 'the header must still name the hook, so the disclosure states what IS covered');
+});
+
+test('M3: a report containing an h23-output-axis.mjs case round-trips through writeRunReport unchanged — no hook is filtered out of the persisted report', () => {
+  // SABOTAGE: filter cases to a fixed allow-list of hook names before writing the report.
+  const writeRunReport = fn('writeRunReport');
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-oracle-report-h23-'));
+  try {
+    const report = { ...REPORT(), cases: [...REPORT().cases, { fixture_id: 'f-h23', hook: 'h23-output-axis.mjs', expected_hash: 'h9', rendered: true }] };
+    const { run_path } = writeRunReport(dir, report);
+    const written = JSON.parse(readFileSync(run_path, 'utf8'));
+    assert.ok(written.cases.some((cc) => cc.hook === 'h23-output-axis.mjs'), 'the h23 case survives the write untouched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// GROUP N — sandbox reset: the H23 output-axis guard joins the wholesale wipe
+// (spec point: "a repeat within one guard window expects dedup"). The DEDUP
+// BEHAVIOR ITSELF is h23-output-axis.mjs's own concern, already frozen at
+// scripts/tests/h23-output-axis.test.mjs AC5 — re-pinning it here would
+// violate this file's own charter (line 5: "They do NOT re-test H19/H20/
+// H23/H10 themselves"). What the ORACLE must get right is the piece that IS
+// its own: stale output-axis guard state surviving a reset would let ONE
+// case's dedup state silently suppress the NEXT case's pointer, misreporting
+// a real hook regression as a correct dedup — the exact G0/G1 failure mode,
+// extended to this arm's own guard state. TIGHTENED (coder-reported, real
+// shape): H23's guard state is NOT a separate file — it lives inside the SAME
+// guard-conductor.json H19/H20 already use, as an `output_axis` field beside
+// H19's `records`. Both pins below now seed and assert that exact field,
+// byte-for-byte (G1's own style), instead of a fictional separate file.
+// ===========================================================================
+
+test('N0 CONTROL: an ordinary reset wipes guard-conductor.json\'s output_axis field along with everything else — no dedup state survives into the next case', () => {
+  // SABOTAGE: resetSandbox preserves the output_axis key specifically while clearing/rewriting the rest of guard-conductor.json (a field-level wipe instead of the wholesale directory wipe G0 already requires).
+  const resetSandbox = fn('resetSandbox');
+  const dir = seededSandbox();
+  const guardPath = join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json');
+  const guard = JSON.parse(readFileSync(guardPath, 'utf8'));
+  writeFileSync(guardPath, JSON.stringify({ ...guard, output_axis: ['id-2'] }));
+  try {
+    resetSandbox(dir, { kind: 'case', fixture_id: 'f1' });
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'delivery')), false, 'the WHOLE delivery dir is wiped (G0\'s existing rule) — a surviving output_axis field would silently dedup the next case\'s otherwise-correct pointer into an apparent miss');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('N1: a case marked seed_output_axis_guard keeps guard-conductor.json — INCLUDING its output_axis field — byte-identical across reset, mirroring G1\'s seed_ledger contract for this arm\'s own guard field', () => {
+  // SABOTAGE: ignore case.seed_output_axis_guard and always wipe wholesale, OR honour the flag for the file but strip the output_axis key specifically while preserving H19's records.
+  const resetSandbox = fn('resetSandbox');
+  const dir = seededSandbox();
+  const guardPath = join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json');
+  const guard = JSON.parse(readFileSync(guardPath, 'utf8'));
+  writeFileSync(guardPath, JSON.stringify({ ...guard, output_axis: ['id-2'] }));
+  const before = readFileSync(guardPath, 'utf8');
+  try {
+    resetSandbox(dir, { kind: 'case', fixture_id: 'f1', seed_output_axis_guard: true });
+    assert.equal(existsSync(guardPath), true, 'seeded guard-conductor.json survives so a dedup-suppression case can be exercised deliberately');
+    assert.equal(readFileSync(guardPath, 'utf8'), before, 'the output_axis field survives byte-for-byte alongside H19\'s records field — a partial-field wipe is not a pass');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ===========================================================================
+// GROUP O — H23 DEFECT 1 (independent review of slice 3D, board 5d462868):
+// PATH EXCLUSIONS missing from the mirror. The real hook applies THREE gates
+// in order on a Read: a `.git` / `.git/`-prefixed path is allowed (silent);
+// a `.sterling/`-prefixed path is allowed (silent); only THEN ownership. The
+// oracle's mirror implemented only the ownership gate, so a Read of a
+// `.sterling/` path whose content matched a stored record made the oracle
+// EXPECT a pointer and score H23's deliberate silence as a regression. Fix
+// adds both guards with a new expected_reason value: 'path_excluded'.
+//
+// Per anti_pattern 1b141d1f (silence is multiply-caused), every arm below
+// asserts the REASON, not just emptiness — an arm checking only
+// "expected_ids is empty" would have passed under the OLD buggy mirror for
+// the WRONG reason (it would read as a correct-but-coincidental match-miss,
+// not as path exclusion), and is worthless as a regression pin for THIS
+// defect. Reviewer's own proof this was unpinned: "Add a .git/.sterling
+// early-allow to the mirror -> NOTHING goes red" against the pre-existing
+// suite. O1-O3 below are built to go red under exactly that add (i.e. under
+// its removal from a fixed mirror).
+// ===========================================================================
+
+test('O0 CONTROL: matching content on an ORDINARY unowned, non-excluded Read path DOES get the hazard pointer — proves the content clears the axis floor on its own, so O1-O3\'s silence below is provably about the PATH, not a content miss', () => {
+  // SABOTAGE: remove the store record entirely (nothing could ever match) — would make O1-O3 vacuous rather than discriminating.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(axisAntiPattern('AP-ALPHA'));
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: 'logs/unowned.log', tool: 'Read', tool_response: CONTENT_SENTENCE }],
+    });
+    const c = entries.find((e) => e.kind === 'case' && e.hook === 'h23-output-axis.mjs' && e.rel === 'logs/unowned.log');
+    assert.ok(c, 'an ordinary unowned Read path gets a case');
+    assert.deepEqual(c.expected_ids, [ap.id], 'the content matches on a plain, non-excluded path');
+    assert.equal(c.expected_reason, undefined, 'a non-empty expected_ids carries no silence reason at all');
+  } finally {
+    cleanup();
+  }
+});
+
+test('O1: a .sterling/-prefixed Read path with the SAME matching content is silently excluded — expected_reason "path_excluded", never "below_axis_floor"', () => {
+  // SABOTAGE: delete the .sterling/-prefix early-allow gate from the mirror (fall through to ownership-only checking).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    store.create(axisAntiPattern('AP-ALPHA'));
+    const rel = '.sterling/transient/delivery/pending.json';
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel, tool: 'Read', tool_response: CONTENT_SENTENCE }],
+    });
+    const c = entries.find((e) => e.kind === 'case' && e.hook === 'h23-output-axis.mjs' && e.rel === rel);
+    assert.ok(c, 'the excluded path still gets a case, never silently dropped');
+    assert.deepEqual(c.expected_ids, [], 'excluded before content matching is ever consulted');
+    assert.equal(c.expected_reason, 'path_excluded', 'silence here is a PATH gate, not a content-floor miss — O0 proves the identical content matches elsewhere');
+  } finally {
+    cleanup();
+  }
+});
+
+test('O2: a .git/-prefixed Read path with the SAME matching content is silently excluded the same way', () => {
+  // SABOTAGE: delete the .git/-prefix early-allow gate from the mirror.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    store.create(axisAntiPattern('AP-ALPHA'));
+    const rel = '.git/HEAD';
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel, tool: 'Read', tool_response: CONTENT_SENTENCE }],
+    });
+    const c = entries.find((e) => e.kind === 'case' && e.hook === 'h23-output-axis.mjs' && e.rel === rel);
+    assert.ok(c, 'the excluded path still gets a case');
+    assert.deepEqual(c.expected_ids, []);
+    assert.equal(c.expected_reason, 'path_excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+test('O3: the BARE ".git" path (no trailing slash, no prefix to match against) is ALSO excluded — a startsWith(".git/") check alone would miss this exact-equality case', () => {
+  // SABOTAGE: implement the .git gate as rel.startsWith('.git/') only, never the exact-equality '.git' form.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    store.create(axisAntiPattern('AP-ALPHA'));
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: '.git', tool: 'Read', tool_response: CONTENT_SENTENCE }],
+    });
+    const c = entries.find((e) => e.kind === 'case' && e.hook === 'h23-output-axis.mjs' && e.rel === '.git');
+    assert.ok(c, 'the bare .git path still gets a case');
+    assert.deepEqual(c.expected_ids, []);
+    assert.equal(c.expected_reason, 'path_excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// GROUP P — H23 DEFECT 2 (same review): an ABSENT tool_response THREW.
+// `probe.tool_response === undefined` reached `JSON.stringify(undefined)` ->
+// `undefined`, then `.slice()` threw a TypeError that aborted the WHOLE
+// derivation — every H19 and H10 case built in the SAME deriveExpected call,
+// not merely the one H23 case. The fix adds an explicit `raw == null` arm
+// with its own NAMED reason, distinct from 'below_axis_floor' (which would
+// mislabel "there was no response at all" as "the content did not match").
+//
+// The coder chooses the name for that reason; per this dispatch's
+// instruction it is NOT guessed here — P1/P2 assert only that it is a
+// non-empty string distinct from the two known reasons, and P1/P2's own
+// comments flag that the exact value needs tightening once named.
+// ===========================================================================
+
+test('P0 CONTROL: an ORDINARY H19 case for an unrelated owned file is present in a derivation that ALSO carries an H23 probe — establishes the baseline P3 must not disturb', () => {
+  // SABOTAGE: as a smoke check only — remove the axis-owner article, which would leave P3 unable to prove anything survived.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, ids, cleanup } = makeAxisFixtureRepo();
+  try {
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: CONTENT_SENTENCE }],
+    });
+    const h19 = caseFor(entries, 'src/owned.mjs', 'h19-knowledge-delivery.mjs');
+    assert.ok(h19, 'the ordinary owned-file case is present alongside an H23 probe');
+    assert.deepEqual(h19.expected.owners, [ids.owner]);
+  } finally {
+    cleanup();
+  }
+});
+
+test('P1: a probe with tool_response ABSENT ENTIRELY does not throw, and gets its own case with the exact named reason \'no_tool_response\' (distinct from group O\'s \'path_excluded\')', () => {
+  // SABOTAGE: revert to `JSON.stringify(probe.tool_response).slice(0, N)` with no `raw == null` guard — this must throw again on an absent field.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const probes = [{ rel: null, tool: 'Bash' }]; // tool_response key entirely omitted
+    let entries;
+    assert.doesNotThrow(() => { entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes }); },
+      'an absent tool_response must never abort the derivation');
+    const c = h23CaseOf(entries, 'Bash');
+    assert.ok(c, 'the probe still gets a case, never silently dropped');
+    assert.deepEqual(c.expected_ids, []);
+    assert.equal(c.expected_reason, 'no_tool_response', 'the coder-named reason for "there was no response at all" — must never be conflated with below_axis_floor, owned_suppressed, or group O\'s path_excluded');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P2: a probe with tool_response EXPLICITLY null behaves identically to one where the field is absent', () => {
+  // SABOTAGE: guard only `probe.tool_response === undefined`, missing the `=== null` case (an explicit null still reaches JSON.stringify/.slice and throws).
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const probes = [{ rel: null, tool: 'Bash', tool_response: null }];
+    let entries;
+    assert.doesNotThrow(() => { entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes }); });
+    const c = h23CaseOf(entries, 'Bash');
+    assert.ok(c);
+    assert.deepEqual(c.expected_ids, []);
+    assert.equal(c.expected_reason, 'no_tool_response');
+  } finally {
+    cleanup();
+  }
+});
+
+test('P3 (THE ARM THAT MATTERS MOST): a case list containing an absent-tool_response H23 probe ALONGSIDE ordinary H19/H10 cases still returns the FULL expected set for those other cases — the real damage was the ABORT, not this one case\'s own reason', () => {
+  // SABOTAGE: revert the raw==null guard so the H23 arm throws mid-loop, losing every H19/H10/H23 entry from the SAME deriveExpected call, not only this one probe's case.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, ids, cleanup } = makeAxisFixtureRepo();
+  try {
+    const probes = [{ rel: null, tool: 'Bash' }]; // tool_response absent
+    const entries = deriveExpected(store, { repoRoot: dir, outputAxisProbes: probes });
+    const h19 = caseFor(entries, 'src/owned.mjs', 'h19-knowledge-delivery.mjs');
+    const h10 = caseFor(entries, 'src/owned.mjs', 'h10-direct-capture.mjs');
+    assert.ok(h19, 'the unrelated H19 case for the owned file must survive a throw inside the H23 arm');
+    assert.deepEqual(h19.expected.owners, [ids.owner]);
+    assert.ok(h10, 'the unrelated H10 ownership case must also survive');
+    assert.deepEqual(sorted(h10.expected_ids), [ids.owner]);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// GROUP Q — CENTRALITY ISOLATION. The reviewer flagged one of this
+// test-writer's OWN prior sabotages as possibly unpinned: "replace
+// hasRecordCentralityHit(x.record, clipped) with `true` -> J1 may stay
+// GREEN, because the unrelated content likely fails at the term-overlap
+// stage before centrality matters." If so, the mirror's OWN centrality
+// scoring is unpinned by every existing arm in this file.
+//
+// This group isolates it with content that clears AXIS_MIN_HITS and the
+// discriminating floor while sharing NONE of the record's own dominant
+// (top-6) terms — the exact fixture shape scripts/tests/h20-centrality.test.mjs
+// (a TEST file, not implementation) already proved clears term-overlap /
+// discriminating while failing centrality, for the identical false-positive
+// class (the 2026-08-09 Blender case) H20's own centrality floor exists to
+// close. H23 mirrors H20's three floors verbatim per
+// scripts/tests/h23-output-axis.test.mjs's own header comment ("the same
+// three-floor axis discipline H20 already proved"), so the same fixture
+// shape isolates the same floor here.
+// ===========================================================================
+
+const CENTRAL_TITLE = 'Boolean modifier mesh manifold topology solver stability failure';
+const CENTRAL_TRIGGER =
+  'boolean modifier boolean modifier mesh manifold mesh manifold topology solver topology solver ' +
+  'recur constantly though this bug rarely touches a game field cell during setup work';
+const CENTRAL_TERMS_CONTENT =
+  'Investigate why the boolean operation corrupts the mesh: check whether the modifier stack introduces non-manifold geometry.';
+const PERIPHERAL_ONLY_CONTENT =
+  'Write tests for the game field cell logic: cover the game field cell grid, ' +
+  'the field cell adjacency rules, and the game field cell lifecycle events.';
+
+function centralityAntiPattern() {
+  return {
+    ...envelope('anti_pattern'),
+    title: CENTRAL_TITLE,
+    trigger: CENTRAL_TRIGGER,
+    guidance: 'guidance prose',
+    wrong_way: 'wrong way',
+    right_way: 'right way',
+    source_evidence: 'fixture',
+    basis: 'codebase',
+    severity: 'warn',
+    file_keys: [],
+  };
+}
+
+test('Q0 CONTROL: the SAME record fires when its own CENTRAL terms (boolean/mesh/modifier) appear in the content — proves the record IS reachable at all, so Q1\'s silence is provably about centrality, not a record that can never match', () => {
+  // SABOTAGE: neuter the record (wrong title/trigger) so nothing could ever fire — would make Q1 vacuous rather than discriminating.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(centralityAntiPattern());
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: CENTRAL_TERMS_CONTENT }],
+    });
+    const c = h23CaseOf(entries, 'Bash');
+    assert.ok(c, 'a case is produced');
+    assert.deepEqual(c.expected_ids, [ap.id], 'central-term content matches — the record is reachable at all');
+  } finally {
+    cleanup();
+  }
+});
+
+test('Q1: content clearing term-overlap + the discriminating floor via ONLY the record\'s PERIPHERAL words (game/field/cell) stays silent — the mirror must independently score CENTRALITY, not merely count distinct hits', () => {
+  // SABOTAGE: replace the mirror's own centrality check with an unconditional true (equivalent to deleting the call) — this content clears every OTHER floor on its own, so unlike J1's off-topic content (which fails earlier floors regardless of centrality), THIS input is the one that exposes a stubbed-true centrality check.
+  const deriveExpected = fn('deriveExpected');
+  const { dir, store, cleanup } = makeAxisFixtureRepo();
+  try {
+    const ap = store.create(centralityAntiPattern());
+    const entries = deriveExpected(store, {
+      repoRoot: dir,
+      outputAxisProbes: [{ rel: null, tool: 'Bash', tool_response: PERIPHERAL_ONLY_CONTENT }],
+    });
+    const c = h23CaseOf(entries, 'Bash');
+    assert.ok(c, 'a case is produced even though it is silent');
+    assert.deepEqual(c.expected_ids, [], 'peripheral-only overlap (game/field/cell) is not centrality — the record must not be named');
+    assert.ok(!c.expected.hazards.includes(ap.id), 'the record must not surface via its peripheral words alone');
+    assert.equal(c.expected_reason, 'below_axis_floor', 'silent for a three-floor axis reason — centrality is one of the three, per this article\'s own contract');
+  } finally {
+    cleanup();
+  }
+});

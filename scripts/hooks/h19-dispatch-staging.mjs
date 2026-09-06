@@ -79,6 +79,67 @@ const RETURN_CONTRACT =
 
 const input = readStdin();
 
+// TDD / MUTATION-VERIFICATION POSTURE (decision 752caf98
+// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): coder and
+// test-writer dispatches get the SAME live per-project posture line H1
+// injects at SessionStart — read fresh here via loadConfig rather than
+// relying on a copy baked into the agent template at install time, so a
+// toggle flipped mid-session still reaches a freshly spawned agent's own
+// context (agent templates are NOT edited for this — no sync-agents needed).
+// Guarded like every other config read in this file: a malformed config
+// costs only this line, never the knowledge payload or the return contract.
+// Only an explicit `false` reads as OFF — absent/undefined is the documented
+// schema default (both true, decision 752caf98), never invented.
+//
+// THREE-STATE TREATMENT, mirroring h1-session-start.mjs's configUnreadable
+// guard exactly (review 2026-09-06 — H19 reproduced the same false-posture
+// defect H1 already closed there). loadConfig can THROW (malformed JSON) or
+// return a value that PARSES but is not a usable object (`[]`, `true`,
+// `false`, `0`, `""`, `"x"`, `5`) — every `cfg?.x?.y` read below optional-
+// chains to undefined for either shape, which would otherwise render a
+// confident "ON / ON" for a config that was never actually read. Both shapes
+// fold into one `cfgUnusable` flag and render the SAME UNKNOWN wording H1
+// uses, rather than the old silent catch: a coder seeing no posture line
+// while the session banner (H1) says UNKNOWN is a divergence someone would
+// have to notice and track down later, so this deliberately matches H1
+// instead of staying silent.
+// `null` (an ABSENT file) is excluded from the shape guard, same as H1: an
+// absent config legitimately means the documented default.
+// THE COMPARISON MUST STAY A NULL TEST, NOT A TRUTHINESS TEST — `if (cfg &&
+// ...)` would wrongly swallow `false`, `0` and `""` back into a confident
+// ON/ON reading (same hazard named in H1's comment).
+const TDD_POSTURE_AGENT_TYPES = new Set(['coder', 'test-writer']);
+let tddPostureLine = '';
+try {
+  if (TDD_POSTURE_AGENT_TYPES.has(input.agent_type)) {
+    let cfg = null;
+    let cfgUnusable = false;
+    try {
+      cfg = loadConfig(input.cwd);
+    } catch {
+      cfg = null;
+      cfgUnusable = true;
+    }
+    if (cfg !== null && (typeof cfg !== 'object' || Array.isArray(cfg))) {
+      cfgUnusable = true;
+    }
+    if (cfgUnusable) {
+      tddPostureLine =
+        'TDD posture: UNKNOWN — the project config could not be read, so neither ' +
+        'config.tdd.enabled nor config.mutation_verification.enabled could be determined. ' +
+        'This is NOT the default posture: repair the config, or state your posture explicitly.';
+    } else {
+      const tddOn = cfg?.tdd?.enabled !== false;
+      const mutationOn = cfg?.mutation_verification?.enabled !== false;
+      tddPostureLine =
+        `TDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} · mutation verification ${mutationOn ? 'ON' : 'OFF'} ` +
+        `(config.tdd.enabled / config.mutation_verification.enabled — TUI System tab; explicit asks still work)`;
+    }
+  }
+} catch {
+  // fail-open — a malformed config costs only this line, never h19's other staging
+}
+
 // Set the moment ANY additionalContext actually reaches stdout — guards the
 // catch block below against a double-emit (review finding, S7 fixer-mode):
 // once something has gone out, a later throw must never write a second time.
@@ -89,6 +150,7 @@ let emitted = false;
 function combinedContext(payload) {
   const out = [];
   if (payload) out.push(payload);
+  if (tddPostureLine) out.push(tddPostureLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
   return out.join('\n\n');
 }

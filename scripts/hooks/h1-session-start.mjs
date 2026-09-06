@@ -552,10 +552,41 @@ if (!store) {
 // (H3/H5/H14/H15), which fail CLOSED on exactly this input — a hook that cannot
 // evaluate must deny only where denying is its job (anti_pattern e13f0fb5).
 let config = null;
+let configUnreadable = false;
 try {
   config = loadConfig(input.cwd);
 } catch {
   config = null;
+  configUnreadable = true;
+}
+// A config that PARSES but is not an object (`[]`, `true`, `false`, `0`, `""`,
+// `"x"`, `5`) is unusable in exactly the way a throw is: every `config?.x?.y`
+// read below optional-chains to undefined, which the posture line would
+// otherwise render as the documented default. That is the same false-posture
+// defect the UNKNOWN branch closes, reached through a JSON-LEGAL corruption
+// instead of a malformed one, so it takes the same branch (review 2026-09-06).
+//
+// `null` IS DELIBERATELY EXCLUDED: loadConfig returns null for an ABSENT file,
+// which must keep rendering the documented default; a file whose content is
+// literally `null` parses to that same value and is therefore indistinguishable
+// from absent, so it shares that outcome as an accepted limitation (pinned as
+// such in h1-tdd-posture-line.test.mjs).
+//
+// THE COMPARISON MUST STAY A NULL TEST, NOT A TRUTHINESS TEST. Rewriting it as
+// `if (config && ...)` swallows `false`, `0` and `""` — three JSON-legal
+// non-object configs that would silently return to a confident ON/ON — and the
+// four truthy non-object arms (`[]`, `true`, `"x"`, `5`) plus the null-trap arm all
+// stay GREEN under that rewrite, which is why those three falsy shapes are
+// pinned explicitly. Measured, not assumed: the truthiness rewrite reddens
+// exactly those three arms and nothing else. `!=` vs `!==` here is NOT the
+// hazard — they differ only for `undefined`, which loadConfig never returns, so
+// that swap is behaviourally inert and correctly leaves the suite green.
+//
+// It does NOT change any other consumer: `config` stays null-or-as-parsed and
+// roleContext / the queue threshold / the concurrency ceiling all keep
+// degrading to their own defaults as before.
+if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
+  configUnreadable = true;
 }
 
 // MACHINE ROLE (todo cabbc10f, decision a9b98b7d): stated ONLY when this
@@ -584,6 +615,51 @@ try {
   }
 } catch {
   // fail-open — a malformed config or unresolved plugin root costs only this line
+}
+
+// TDD / MUTATION-VERIFICATION POSTURE (decision 752caf98
+// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): mechanizes
+// the "check what this machine is set to" instruction CLAUDE.md states in
+// prose by reading the LIVE per-project toggles at every SessionStart, rather
+// than leaving the conductor to consult a value it cannot see. loadConfig
+// (above) returns the raw parsed .sterling/config.json with NO zod defaults
+// applied (unlike the MCP server's parseConfig) — a project whose config
+// predates this toggle, or config === null on a malformed read, leaves
+// config?.tdd?.enabled undefined here. Undefined is treated as the
+// DOCUMENTED SCHEMA DEFAULT (both fields default true, decision 752caf98)
+// rather than invented: only an explicit `false` reads as OFF. Positioned
+// immediately after roleContext in the output concatenation below. Guarded
+// like every other H1 read — H1 is soft, so a malformed config costs only
+// this one line, never the conventions injection.
+//
+// AN UNREADABLE CONFIG REPORTS UNKNOWN, NEVER THE DEFAULT (external review
+// 2026-09-06, Codex thread 01a075e9, which caught this where two roster
+// reviewers did not). ABSENT and UNREADABLE are different facts and this line
+// must not collapse them: an absent key genuinely IS the schema default, but a
+// config that could not be PARSED tells us nothing about either toggle, and
+// rendering that as "ON / ON" asserts a posture the hook never read. That is
+// the worst failure available here — worse than printing nothing — because
+// this line exists precisely to stop the conductor assuming a posture, and in
+// a project where both toggles are OFF (this clone, today) a corrupt config
+// would confidently state the exact opposite of the truth. loadConfig returns
+// null for an ABSENT file and THROWS on a malformed one, which is what makes
+// the two distinguishable at all.
+let tddPostureContext = '';
+try {
+  if (configUnreadable) {
+    tddPostureContext =
+      '\n\nTDD posture: UNKNOWN — the project config could not be read, so neither ' +
+      'config.tdd.enabled nor config.mutation_verification.enabled could be determined. ' +
+      'This is NOT the default posture: repair the config, or state your posture explicitly.';
+  } else {
+    const tddOn = config?.tdd?.enabled !== false;
+    const mutationOn = config?.mutation_verification?.enabled !== false;
+    tddPostureContext =
+      `\n\nTDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} · mutation verification ${mutationOn ? 'ON' : 'OFF'} ` +
+      `(config.tdd.enabled / config.mutation_verification.enabled — TUI System tab; explicit asks still work)`;
+  }
+} catch {
+  // fail-open — a malformed config costs only this line
 }
 
 // CLONE-CURRENCY SIGNAL (closes the gap decision be9168e8 surfaced and parked:
@@ -1569,7 +1645,7 @@ const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurre
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();

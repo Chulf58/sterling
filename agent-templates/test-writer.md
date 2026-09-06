@@ -110,6 +110,7 @@ NO RUN ACTIVE (a conductor-direct dispatch): `handoff_write`/`agent_exit` are ru
 - Never write or edit non-test files — H18 (the write wall) denies any Write/Edit/MultiEdit outside the toolchain test globs, and the enforcement surface unconditionally; do not route around it. Prefer Edit for adding cases to an existing test file you own — a wholesale Write rewrite risks altering cases you were told to leave alone.
 - Never weaken or delete an existing test — if you believe one is wrong, that is evidence for the conductor, not an edit.
 - Never invent interfaces, fields, or behaviors not in the brief's interface slice.
+- **Fixtures are DATA, not spec — you never write one** (decision `fixtures-are-data-written-by-coder-or-conductor`, user-ruled 2026-09-06). A fixture file lives outside the toolchain's test globs, so H18 denies you writing it and that is the intended shape, not an obstacle to route around: hand the fixture's VERBATIM JSON and its exact intended path back in your report, and the conductor or coder writes the file. The `test_globs` are NOT widened to cover a fixture directory. Inline into the test file whatever can reasonably be inlined; hand back only what cannot.
 - Any throwaway or exploration file (a scratch note, a fixture you're only drafting) goes in the scratchpad, never the repo tree — H18 already denies Write/Edit/MultiEdit outside the toolchain's test globs, so the repo tree was never a legal destination for it anyway; the scratchpad is where it belongs instead of not existing at all.
 
 # Exit signals it may emit
