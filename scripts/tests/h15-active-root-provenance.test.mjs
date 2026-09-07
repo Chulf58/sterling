@@ -89,7 +89,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, realpathSync, chmodSync, cpSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, realpathSync, chmodSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -1200,6 +1200,290 @@ test('PV-10b (expect GREEN today and after): a BACKSLASH spelling of an in-clone
 // Windows-parity change is likely to touch BOTH case-folding and separator
 // normalization, and only separate pins say which one broke.
 
+// ---------------------------------------------------------------------------
+// PV-10c / PV-10d — R3's WIN32 FORWARD-SLASH DRIVE FORM.
+//
+// SPEC: decision `r3-plugin-root-resolver-canonical-module-win32-forward-slash-
+// drive-word-backslash-provisional` (knowledge_get 37e588fb), step (B):
+// sanctioned-provenance.mjs gains `wordSyntaxAdmits(word, platform =
+// process.platform)` — the POSIX form /^[A-Za-z0-9_./+-]+$/ on EVERY platform,
+// and when `platform === 'win32'` ALSO the forward-slash drive-absolute form
+// /^[A-Za-z]:\/[A-Za-z0-9_./+-]+$/. Step (C): the BACKSLASH form stays refused
+// on every platform (PROVISIONAL — the native-Windows shell string is
+// unmeasured, and H14's h14-git-ro-grant.test.mjs:241-257 currently disagrees;
+// the conflict is ruled once, after measurement, not here). Step (E): a drive
+// path containing SPACES stays refused, symmetrically with the POSIX form — a
+// DISCLOSED limitation, deliberately pinned so widening it is a visible,
+// deliberate act rather than a quiet regex edit.
+//
+// The platform seam is a FUNCTION PARAMETER, never env/config (an env seam is
+// the production-bypass shape 95c2c109 F2 rejected). That is what lets PV-10c
+// exercise the win32 branch on this Linux host without any ambient state, and
+// it is also why PV-10c is a UNIT pin: end-to-end, this platform's gate can
+// never take the win32 branch at all.
+// ---------------------------------------------------------------------------
+
+test('PV-10c (UNIT, expect RED today): wordSyntaxAdmits gates the forward-slash DRIVE form on the platform PARAMETER, keeps refusing backslashes on both platforms, and keeps refusing spaces', async () => {
+  let mod;
+  try {
+    mod = await import(pathToFileURL(join(root, 'scripts', 'hooks', 'lib', 'sanctioned-provenance.mjs')).href);
+  } catch (err) {
+    assert.fail(
+      `could not import scripts/hooks/lib/sanctioned-provenance.mjs (${err && err.message}) — R3 step (B) puts wordSyntaxAdmits in this module (the RESOLVER moves to plugin-root.mjs; the word syntax does not)`
+    );
+  }
+  assert.ok(
+    typeof mod.wordSyntaxAdmits === 'function',
+    `expected a wordSyntaxAdmits export — decision 37e588fb step (B) names it by this exact name and gives it the signature (word, platform = process.platform). exports=${Object.keys(mod).join(', ')}`
+  );
+  // Boolean-coerced deliberately: the spec fixes the DECISION ("admits" /
+  // "refuses"), not the exact truthy value, and this author has not read the
+  // module (H4). Over-pinning a return shape the spec never states would be a
+  // false red.
+  const admits = (word, platform) => Boolean(mod.wordSyntaxAdmits(word, platform));
+  // NO platform argument at all — the shape PRODUCTION uses.
+  const admitsByDefault = (word) => Boolean(mod.wordSyntaxAdmits(word));
+
+  // --- CONTROL ARMS FIRST (they must pass for the OPPOSITE reason) ----------
+  // Without these, every refusal below is satisfied identically by a function
+  // that returns false unconditionally — "this syntax refuses everything" and
+  // "this syntax refuses the drive form off win32" are indistinguishable from
+  // a deny alone. These two arms are what make the refusals interpretable.
+  assert.ok(
+    admits('scripts/init.mjs', 'linux'),
+    'CONTROL: the POSIX form /^[A-Za-z0-9_./+-]+$/ is admitted on EVERY platform (step B). If this is false, the function refuses everything and no refusal arm below proves anything'
+  );
+  assert.ok(
+    admits('scripts/init.mjs', 'win32'),
+    'CONTROL: the POSIX form is admitted on win32 TOO — the drive form is an ADDITION on win32, never a replacement (step B). A win32 branch that only admits drive-absolute words would break every self-hosted repo-relative invocation (PV-C3\'s shape)'
+  );
+  assert.ok(
+    admits('C:/clone/scripts/init.mjs', 'win32'),
+    'CONTROL / THE R3 WIDENING ITSELF: on win32 the forward-slash drive-absolute form /^[A-Za-z]:\\/[A-Za-z0-9_./+-]+$/ is admitted. This is the whole point of R3 step (B) — the word-syntax fence refusing `:` meant no native-Windows clone could ever sanction its own scripts (Windows/Linux 1:1 parity is a standing requirement)'
+  );
+  // WIDENED POSITIVES, so that a LITERAL-MATCHING implementation cannot pass
+  // this pin: an `if (word === 'C:/clone/scripts/init.mjs')` special case, or a
+  // regex anchored to this file's one fixture spelling, satisfies the three
+  // arms above and NONE of the five below. Different drive letter, different
+  // depth, and the POSIX class's less-obvious members (`..`, nested
+  // directories, `+ - _`) are all admitted by the stated regexes.
+  assert.ok(admits('D:/work/init.mjs', 'win32'), 'ANY drive letter, not just C: — /^[A-Za-z]:\\//. A pin that only ever showed C: would be satisfied by a hardcoded "C:" prefix test');
+  assert.ok(admits('C:/a/b/c/init.mjs', 'win32'), 'ANY depth under the drive root — the tail class /[A-Za-z0-9_./+-]+/ includes `/`, so nesting is not a special case');
+  assert.ok(admits('../scripts/init.mjs', 'linux'), 'the POSIX class admits `.` and `/`, so a `..` word is SYNTACTICALLY admitted on every platform. Syntax is not the guard that stops a `..` escape — realpath + containment is (PV-6), and conflating the two is exactly how a syntax tweak silently becomes a containment change');
+  assert.ok(admits('../scripts/init.mjs', 'win32'), 'the same on win32: the drive form is an ADDITION, so the POSIX class must still admit a relative `..` word there');
+  assert.ok(admits('scripts/sub/x.mjs', 'linux'), 'nested relative paths are admitted — the POSIX class is not one-segment-deep');
+  assert.ok(admits('a+b-c_d.mjs', 'linux'), 'the `+`, `-` and `_` members of the POSIX class /^[A-Za-z0-9_./+-]+$/ are admitted. They are the characters most easily lost in a hand-retyped character class, and losing one would silently deny a legitimate consumer script');
+  assert.ok(admits('a+b-c_d.mjs', 'win32'), 'the same on win32 — every POSIX-form word stays admitted there');
+
+  // --- THE DEFAULT PLATFORM (the shape production uses) ---------------------
+  // The `platform` parameter DEFAULTS to process.platform, so a call with no
+  // second argument must behave exactly like this host. Guarded on the runner:
+  // on win32 the correct answer inverts.
+  if (process.platform !== 'win32') {
+    assert.ok(
+      admitsByDefault('scripts/init.mjs'),
+      'CONTROL for the default-platform arm below, opposite reason: called with NO platform argument, the POSIX form is still admitted. Without this, the refusal below is satisfied identically by a defaulted call that throws away every word'
+    );
+    assert.ok(
+      !admitsByDefault('C:/x/y.mjs'),
+      `called with NO platform argument on a ${process.platform} host, the drive form must be REFUSED — the default is the RUNNING platform, never a hardcoded 'win32'. WHAT THIS ARM DOES AND DOES NOT CATCH, stated because the difference is easy to assume away: it reddens if the default is written as \`platform = 'win32'\` (or if the parameter is ignored and win32 assumed), and it does NOT redden if the default is DROPPED ALTOGETHER — an absent default makes platform \`undefined\`, which refuses the drive form on this host exactly as process.platform does. That second mutation is invisible to every runnable arm off win32, and is pinned in the SOURCE by PV-10f instead`
+    );
+  }
+
+  // --- THE REFUSALS --------------------------------------------------------
+  assert.ok(
+    !admits('C:/clone/scripts/init.mjs', 'linux'),
+    'THE PLATFORM GATE. The drive form is admitted ONLY when the platform argument is win32; the identical word must be REFUSED for a non-win32 platform. A drive-lettered word on POSIX is not a path — `C:` is a plain directory-name component there — and admitting it would let a word be sanctioned whose canonicalization is not what the shell would run'
+  );
+  assert.ok(
+    !admits('C:\\clone\\scripts\\init.mjs', 'win32'),
+    'STEP (C), PROVISIONAL AND DELIBERATE: the BACKSLASH drive form stays refused on win32. Which shell string the gate actually sees on native Windows is UNMEASURED (sterling.bat enters WSL; in Git Bash a backslash word is escape-processed before argv), so admitting it would sanction a word that is not the path the shell runs — and the rejected alternative in 37e588fb is exactly a backslash-to-slash substitution before realpath. Overturning this needs the native measurement (raw tool_input.command AND executed argv), not a regex edit'
+  );
+  assert.ok(
+    !admits('C:\\clone\\scripts\\init.mjs', 'linux'),
+    'the backslash form is refused on EVERY platform — this arm is the non-win32 half of step (C), and it is also the unit-level statement of what PV-10b pins end-to-end'
+  );
+  assert.ok(
+    !admits('C:/Program Files/x/init.mjs', 'win32'),
+    'STEP (E), DISCLOSED NOT WIDENED: a drive path containing SPACES is refused, exactly as a POSIX path with spaces is. The asymmetric widening (admit spaces on win32 only, because a quoted argument stays one word) was REJECTED in 37e588fb and is its own item if ever needed. This arm exists so that widening becomes a visible decision instead of a silent character-class edit'
+  );
+});
+// SABOTAGE (one line each; each names the arm that must redden, and every other
+// arm must stay green — that separation is the point of pinning them apart):
+//   * drop the `platform === 'win32'` condition (admit the drive form
+//     unconditionally) -> the 'linux' drive arm goes red; both CONTROLs and the
+//     win32 drive arm stay green.
+//   * delete the drive-form alternative from the syntax -> the win32 drive
+//     CONTROL goes red; every refusal arm stays green (which is exactly why the
+//     control is placed FIRST — a suite passing only its refusals would look
+//     identical to a syntax that admits nothing).
+//   * add `\\` to the character class (or substitute backslash->slash before
+//     matching) -> both backslash arms go red.
+//   * add a space to the character class -> the 'Program Files' arm goes red.
+//   * `return false` unconditionally -> the two POSIX CONTROL arms go red FIRST,
+//     which is the difference between "the fence works" and "the fence is a
+//     brick wall".
+//   * default the parameter to 'win32' (or ignore it and assume win32) -> the
+//     default-platform arm goes red on this host. DROPPING the default entirely
+//     is NOT caught here and cannot be caught off win32 (undefined refuses the
+//     drive form exactly as a POSIX platform string does) — PV-10f pins that in
+//     the source.
+//   * special-case the one fixture spelling (`word === 'C:/clone/scripts/init.mjs'`)
+//     or anchor the regex to it -> the widened positives (other drive letter,
+//     deeper path, `..`, nested relative, `a+b-c_d.mjs`) go red while the three
+//     original controls stay green. That is what those five arms are for.
+// WHICH GUARD CARRIES THE VERDICT: the platform parameter alone for the
+// linux/win32 split, and the character class alone for the backslash and space
+// arms — nothing else in the function can produce these verdicts, because this
+// is a pure syntax predicate with no filesystem access.
+
+test('PV-10d (END-TO-END on the RUNNING platform, expect GREEN today and after — MUST NEVER FALSE-ALLOW): a forward-slash DRIVE-form word naming a non-sanctioned basename is DENIED', () => {
+  const { base, project, cleanup } = makeWorld();
+  try {
+    // Same fixture shape as PV-10b: the case-clone contains `scripts/Init.mjs`
+    // (a REAL regular file, in NO entry set) and NO lowercase sibling, so the
+    // fixture is meaningful on a case-insensitive mount too.
+    const caseClone = makeClone(base, 'case-clone', { scripts: CASE_SCRIPTS });
+    const candidate = posix(join(caseClone, 'scripts', 'Init.mjs'));
+    // Platform-neutral construction of the DRIVE-ABSOLUTE FORWARD-SLASH word:
+    // on win32 the clone path is already `X:/…` in POSIX spelling; on this host
+    // it is `/tmp/…`, so a `C:` prefix produces the shape R3 step (B) admits
+    // only on win32. Both spellings are the word syntax's drive form; what
+    // differs is whether this platform admits it at all.
+    const word = /^[A-Za-z]:\//.test(candidate) ? candidate : `C:${candidate}`;
+    const r = runHook(`node ${word} ${DB}`, project, seam(caseClone));
+    assert.notEqual(r.code, null, 'the gate must not crash on a drive-form word');
+    assert.equal(
+      r.code,
+      2,
+      `R3 widens the SYNTAX only; it does not widen WHAT IS SANCTIONED. The admitted word still flows into the UNCHANGED realpath + active-plugin-root containment + EXACT clone-relative equality (5b82e94f steps 3-6), so \`scripts/Init.mjs\` — a real regular file in the root, in NO entry set — must still be DENIED. WHAT THE VERDICT RESTS ON, per platform, stated because it differs: on win32 the word IS admitted and canonicalizes to a real in-root file, so the deny is carried by the ENTRY-SET EQUALITY alone (the PV-10/PV-C2 guard); on this non-win32 host the word is refused by the platform gate AND could not canonicalize anyway, so the deny is carried by the syntax fence and the containment check together. The OPPOSITE-REASON CONTROL for this exact fixture is PV-10-control above (a correctly-spelled sanctioned script in the SAME case-clone must be ALLOWED) — without it, this deny could merely mean "this root never worked". word=${word} stderr=${flat(r.stderr)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE (on THIS host — a non-win32 runner): treat a syntactically-admitted
+// word as sanctioned WITHOUT the realpath/containment/equality steps (i.e.
+// return the exemption straight off the syntax match), or fail OPEN when the
+// candidate cannot be canonicalized (allow on a realpath throw) — either one
+// turns this pin red (deny 2 -> allow 0) while PV-C1, PV-C2 and PV-10-control
+// all stay green, because none of those exercises an uncanonicalizable word.
+// ON A WIN32 RUNNER the load-bearing guard is a DIFFERENT one and the sabotage
+// changes accordingly: skip the entry-set equality and grant any regular file
+// contained under the canonical root (the PV-C2 sabotage) — there the word
+// resolves, so only the equality check stands between it and a false allow.
+// NOT hollow-by-construction and stated plainly: this pin is GREEN at HEAD, as
+// PV-10b is, because a HEAD that compares literal words denies every absolute
+// spelling. Its job is the never-false-ALLOW direction across the R3 change,
+// which is the direction a syntax widening actually threatens.
+
+// ---------------------------------------------------------------------------
+// PV-10f — SOURCE PIN: THE WIDENED PREDICATE IS WIRED INTO PRODUCTION.
+//
+// WHY A SOURCE PIN, STATED PLAINLY BECAUSE IT IS THE ONLY ONE IN THIS FILE:
+// OFF WIN32 THE WIDENING IS UNOBSERVABLE END-TO-END. PV-10d's deny is
+// satisfied by the OLD fence just as well as by the new one (both refuse
+// `C:/…` on a POSIX host), and no runnable arm here can tell "production
+// consults the widened predicate" apart from "production still inlines the old
+// regex" — the two agree on EVERY input a Linux runner can present. So the
+// end-to-end surface cannot carry this claim at all, and the only
+// Linux-observable evidence is the SOURCE. This is a static pin BY NECESSITY,
+// not preference; the behavioural half is measurement-owed on native Windows
+// (board cbe93c31, which names the drive-form sanction arm).
+//
+// WHAT IT ASSERTS IS STRUCTURE, NEVER PROSE, AND IT IS IDENTIFIER-AGNOSTIC:
+// the ARITY of the production call (one argument, so the platform parameter
+// DEFAULTS), never the local variable's name; and the presence of
+// `= process.platform` in the definition's parameter list, which is the exact
+// signature decision 37e588fb step (B) states. The test reads the module's
+// TEXT at runtime — the author of this file has not read that module (H4).
+//
+// FAIL-OPEN CORNERS, DISCLOSED: the surviving-raw-regex check keys on an
+// UPPER_SNAKE identifier containing "SYNTAX"; a differently-named constant
+// makes that arm pass vacuously. It is a hygiene check riding beside the two
+// load-bearing assertions, not the pin itself.
+// ---------------------------------------------------------------------------
+
+test('PV-10f (SOURCE PIN, expect RED today): the production fence calls wordSyntaxAdmits with ONE argument (platform DEFAULTS), the definition defaults it to process.platform, and no raw word-syntax regex test survives outside that function', () => {
+  const srcPath = join(root, 'scripts', 'hooks', 'lib', 'sanctioned-provenance.mjs');
+  let src;
+  try {
+    src = readFileSync(srcPath, 'utf8');
+  } catch (err) {
+    assert.fail(`could not read scripts/hooks/lib/sanctioned-provenance.mjs (${err && err.message}) — R3 step (B) puts the word-syntax predicate in this module`);
+  }
+
+  // (1) THE DEFINITION EXISTS AND CARRIES THE DEFAULT. Both the `function` and
+  // the assigned-expression forms are accepted: the spec fixes the SIGNATURE
+  // (`wordSyntaxAdmits(word, platform = process.platform)`), not the form.
+  const defIdx = src.search(/(?:export\s+)?(?:function\s+wordSyntaxAdmits\b|(?:const|let|var)\s+wordSyntaxAdmits\b)/);
+  assert.ok(
+    defIdx >= 0,
+    'no definition of wordSyntaxAdmits found in sanctioned-provenance.mjs — decision 37e588fb step (B) names it by this exact name and puts it in this module'
+  );
+  const defParams = (src.slice(defIdx).match(/\(([^)]*)\)/) || [, ''])[1];
+  assert.match(
+    defParams,
+    /=\s*process\.platform/,
+    `THE PLATFORM SEAM IS A FUNCTION PARAMETER THAT DEFAULTS TO THE RUNNING PLATFORM. 37e588fb states the signature verbatim: wordSyntaxAdmits(word, platform = process.platform). A default of 'win32' (or no default at all) would either sanction drive-shaped words on every POSIX host or silently disable the widening on Windows, and NO arm runnable on this host can see either one — which is why it is pinned here. got params=${JSON.stringify(defParams)}`
+  );
+
+  // (2) EVERY PRODUCTION CALL SITE PASSES EXACTLY ONE ARGUMENT. Both modules
+  // that could legitimately hold the call site are scanned, so a coder who
+  // wires the fence from the guard rather than from the provenance module gets
+  // a GREEN, not a false red — the claim is about the CALL, not its address.
+  // Two filters exclude the DEFINITION itself: the negative lookbehind on
+  // `function `, and (for spacing/arrow forms the lookbehind cannot see) the
+  // presence of a `= process.platform` default in the captured parameter list.
+  const callSiteSources = [src];
+  try {
+    callSiteSources.push(readFileSync(join(root, 'scripts', 'hooks', 'h15-store-guard.mjs'), 'utf8'));
+  } catch {
+    // the guard is scanned only if present; its absence is PV-1's problem, not this pin's
+  }
+  const calls = callSiteSources
+    .flatMap((text) => [...text.matchAll(/(?<!function\s)wordSyntaxAdmits\s*\(([^)]*)\)/g)])
+    .map((m) => m[1].trim())
+    .filter((argList) => !/=\s*process\.platform/.test(argList));
+  assert.ok(
+    calls.length >= 1,
+    'wordSyntaxAdmits is DEFINED but never CALLED in sanctioned-provenance.mjs or h15-store-guard.mjs — the fence must consult it, or the widening is dead code and the gate still runs the old inline regex'
+  );
+  for (const argList of calls) {
+    assert.ok(
+      argList.length > 0 && !argList.includes(','),
+      `THE SURVIVING MUTATION THIS PIN CLOSES: a production call of the form wordSyntaxAdmits(word, 'win32') leaves every RUNNABLE pin in this file green — PV-10c supplies its own platform argument, and PV-10d's deny is over-determined (its word also fails canonicalization). Production must pass ONE argument and let the platform DEFAULT. got call args=${JSON.stringify(argList)}`
+    );
+  }
+
+  // (3) HYGIENE, fail-open by construction (see the disclosed corner above): no
+  // raw word-syntax regex test survives outside the predicate's own body, so
+  // there is exactly ONE place the syntax is decided.
+  const after = src.slice(defIdx);
+  const endRel = after.search(/\n\}/);
+  const defEnd = endRel === -1 ? src.length : defIdx + endRel + 2;
+  for (const m of src.matchAll(/\b[A-Z][A-Z0-9_]*SYNTAX[A-Z0-9_]*\s*\.test\s*\(/g)) {
+    assert.ok(
+      m.index >= defIdx && m.index < defEnd,
+      `a raw word-syntax regex test survives OUTSIDE wordSyntaxAdmits (at index ${m.index}, the predicate spans ${defIdx}..${defEnd}) — two places deciding one syntax is how a widening ships while the gate keeps consulting the old fence. match=${JSON.stringify(m[0])}`
+    );
+  }
+});
+// SABOTAGE (each reddens exactly one assertion above; nothing else in this file
+// observes any of them):
+//   * change the production call to `wordSyntaxAdmits(word, 'win32')` -> (2)
+//     goes red; PV-10c, PV-10d, PV-C1 and PV-C2 all stay green.
+//   * change the definition's default to `platform = 'win32'`, or drop the
+//     default entirely -> (1) goes red. Dropping it is INVISIBLE to every
+//     runnable arm on a POSIX host (undefined !== 'win32' refuses the drive
+//     form exactly as process.platform does), which is precisely why it is
+//     pinned in the source.
+//   * leave the fence calling the old inline regex and never call the new
+//     predicate -> (2)'s `calls.length >= 1` goes red.
+// WHICH GUARD CARRIES THE VERDICT: assertions (1) and (2) are independent and
+// each stands alone; (3) is hygiene and may pass vacuously — it is NOT claimed
+// as load-bearing.
+
 // =============================================================================
 // SECTION 12 — A CONSUMER-DECLARED, PROJECT-LOCAL allow_scripts ENTRY.
 // Slice dome-farmer-issues-2026-09-05, follow-up ruling 2026-09-05 (prose-only
@@ -1497,10 +1781,17 @@ test('B2b (board fb7c43fb PIN GAP, expect RED today — CALL SHAPE CONFIRMED by 
   // ---------------------------------------------------------------------
   let mod;
   try {
-    mod = await import(pathToFileURL(join(root, 'scripts', 'hooks', 'lib', 'sanctioned-provenance.mjs')).href);
+    // R3 (decision r3-plugin-root-resolver-canonical-module-…, step (A)): the
+    // resolver's ONE canonical home is scripts/hooks/lib/plugin-root.mjs, and
+    // the spec states there is NO compatibility re-export from
+    // sanctioned-provenance.mjs — exactly one import path exists, so this pin
+    // imports the canonical module DIRECTLY. If the extraction is incomplete
+    // (module absent, or the export left behind), this fails on the assertion
+    // below, never on a crash.
+    mod = await import(pathToFileURL(join(root, 'scripts', 'hooks', 'lib', 'plugin-root.mjs')).href);
   } catch (err) {
     assert.fail(
-      `could not import scripts/hooks/lib/sanctioned-provenance.mjs (${err && err.message}) — this module and its resolveActivePluginRoot export are the subject of board fb7c43fb's pin gap`
+      `could not import scripts/hooks/lib/plugin-root.mjs (${err && err.message}) — this module and its resolveActivePluginRoot export are the subject of board fb7c43fb's pin gap, and R3 step (A) makes plugin-root.mjs its ONE canonical home (no re-export from sanctioned-provenance.mjs)`
     );
   }
   assert.ok(

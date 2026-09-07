@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h15-store-guard.mjs
-import { existsSync as existsSync2, realpathSync as realpathSync2, statSync as statSync2 } from "node:fs";
-import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2, sep as sep2 } from "node:path";
+import { existsSync as existsSync2, realpathSync as realpathSync3, statSync as statSync3 } from "node:fs";
+import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2, sep as sep3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5425,13 +5425,12 @@ function appendMissingSanctioned(allowScripts2) {
   return { next: added.length ? [...existing, ...added] : existing, added };
 }
 
-// scripts/hooks/lib/sanctioned-provenance.mjs
+// scripts/hooks/lib/plugin-root.mjs
 import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, join as join2, relative, sep } from "node:path";
+import { join as join2, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 var realNative = realpathSync.native ?? realpathSync;
 var toPosix = (p) => String(p).split(sep).join("/");
-var WORD_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
 var ABSENT_CODES = /* @__PURE__ */ new Set(["ENOENT", "ENOTDIR"]);
 var PLUGIN_MARKERS = [
   [".claude-plugin/plugin.json", (dir) => statSync(join2(dir, ".claude-plugin", "plugin.json")).isFile()],
@@ -5533,6 +5532,20 @@ function resolveActivePluginRoot(moduleUrl, env = process.env) {
     reason: `no ACTIVE PLUGIN ROOT could be derived from the running hook's own location \u2014 ${walkUpFailure}. An unresolvable plugin root WITHHOLDS every sanctioned-script exemption rather than granting one.`
   };
 }
+
+// scripts/hooks/lib/sanctioned-provenance.mjs
+import { realpathSync as realpathSync2, statSync as statSync2 } from "node:fs";
+import { isAbsolute, relative, sep as sep2 } from "node:path";
+var realNative2 = realpathSync2.native ?? realpathSync2;
+var toPosix2 = (p) => String(p).split(sep2).join("/");
+var WORD_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
+var WIN32_DRIVE_WORD_SYNTAX = /^[A-Za-z]:\/[A-Za-z0-9_./+-]+$/;
+function wordSyntaxAdmits(word, platform = process.platform) {
+  if (typeof word !== "string") return false;
+  if (WORD_SYNTAX.test(word)) return true;
+  if (platform === "win32" && WIN32_DRIVE_WORD_SYNTAX.test(word)) return true;
+  return false;
+}
 function sanctionedProvenance(word, entries, opts) {
   const pluginRoot = opts?.pluginRoot ?? { root: null, reason: "no plugin root was supplied to the provenance check" };
   const cwd = opts?.cwd;
@@ -5544,54 +5557,54 @@ function sanctionedProvenance(word, entries, opts) {
   if (!pluginRoot.root) {
     return { allow: false, candidate: null, reason: pluginRoot.reason };
   }
-  if (!WORD_SYNTAX.test(word)) {
+  if (!wordSyntaxAdmits(word)) {
     return {
       allow: false,
       candidate: null,
-      reason: `the executable candidate ${JSON.stringify(word)} is outside the sanctionable word syntax (letters, digits and _ . / + - only \u2014 no backslash, ~, $, backtick, colon or glob). Not sanctioned.`
+      reason: `the executable candidate ${JSON.stringify(word)} is outside the sanctionable word syntax (letters, digits and _ . / + - only, plus a win32 forward-slash drive-absolute form on win32 \u2014 no backslash, ~, $, backtick or glob; a colon only in the win32 forward-slash drive form). Not sanctioned.`
     };
   }
   if (typeof cwd !== "string" || cwd === "") {
     return { allow: false, candidate: null, reason: "the project cwd is unknown, so a relative candidate cannot be resolved the way the shell would resolve it; no exemption." };
   }
-  const rawCandidate = isAbsolute(word) ? word : `${String(cwd).replace(/[\\/]+$/, "")}${sep}${word}`;
+  const rawCandidate = isAbsolute(word) ? word : `${String(cwd).replace(/[\\/]+$/, "")}${sep2}${word}`;
   let canonicalCandidate;
   try {
-    canonicalCandidate = realNative(rawCandidate);
+    canonicalCandidate = realNative2(rawCandidate);
   } catch (e) {
     return {
       allow: false,
       candidate: null,
-      reason: `the executable candidate ${JSON.stringify(word)} (resolved from the project cwd as ${toPosix(rawCandidate)}) could not be canonicalized (${e && e.code || e && e.message || e}) \u2014 it does not exist, or it is a dangling symlink. A candidate that cannot be resolved to a regular file inside the active plugin root is DENIED; there is no bare-name fallback.`
+      reason: `the executable candidate ${JSON.stringify(word)} (resolved from the project cwd as ${toPosix2(rawCandidate)}) could not be canonicalized (${e && e.code || e && e.message || e}) \u2014 it does not exist, or it is a dangling symlink. A candidate that cannot be resolved to a regular file inside the active plugin root is DENIED; there is no bare-name fallback.`
     };
   }
   let stat;
   try {
-    stat = statSync(canonicalCandidate);
+    stat = statSync2(canonicalCandidate);
   } catch (e) {
     return {
       allow: false,
       candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)}, which could not be stat'd (${e && e.code || e && e.message || e}). Not sanctioned.`
+      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which could not be stat'd (${e && e.code || e && e.message || e}). Not sanctioned.`
     };
   }
   if (!stat.isFile()) {
     return {
       allow: false,
       candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)}, which is NOT A REGULAR FILE (${stat.isDirectory() ? "directory" : "special file"}). A sanctioned entry names a shipped script; not sanctioned.`
+      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which is NOT A REGULAR FILE (${stat.isDirectory() ? "directory" : "special file"}). A sanctioned entry names a shipped script; not sanctioned.`
     };
   }
   const rel = relative(pluginRoot.root, canonicalCandidate);
-  const escapes = rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || rel.startsWith("../") || isAbsolute(rel);
+  const escapes = rel === "" || rel === ".." || rel.startsWith(`..${sep2}`) || rel.startsWith("../") || isAbsolute(rel);
   if (escapes) {
     return {
       allow: false,
       candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)}, which is OUTSIDE the active plugin root ${toPosix(pluginRoot.root)}. Provenance binds the FILE, not the spelling: a project-local file matching a sanctioned NAME is a different file from the shipped one. Not sanctioned.`
+      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which is OUTSIDE the active plugin root ${toPosix2(pluginRoot.root)}. Provenance binds the FILE, not the spelling: a project-local file matching a sanctioned NAME is a different file from the shipped one. Not sanctioned.`
     };
   }
-  const relPosix = toPosix(rel);
+  const relPosix = toPosix2(rel);
   const matched = entrySet.some((entry) => {
     const e = typeof entry === "string" ? entry.startsWith("./") ? entry.slice(2) : entry : null;
     return e !== null && relPosix === e;
@@ -5600,13 +5613,13 @@ function sanctionedProvenance(word, entries, opts) {
     return {
       allow: false,
       candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix(canonicalCandidate)} \u2014 a real file inside the active plugin root ${toPosix(pluginRoot.root)}, at clone-relative path ${relPosix}, which is not ${named}. Not sanctioned.`
+      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)} \u2014 a real file inside the active plugin root ${toPosix2(pluginRoot.root)}, at clone-relative path ${relPosix}, which is not ${named}. Not sanctioned.`
     };
   }
   return {
     allow: true,
     candidate: canonicalCandidate,
-    reason: `sanctioned: ${toPosix(canonicalCandidate)} is the shipped ${relPosix} inside the active plugin root ${toPosix(pluginRoot.root)}.`
+    reason: `sanctioned: ${toPosix2(canonicalCandidate)} is the shipped ${relPosix} inside the active plugin root ${toPosix2(pluginRoot.root)}.`
   };
 }
 
@@ -5660,7 +5673,7 @@ function isCommandChannelTool(toolName) {
   return toolName === "Bash" || toolName === "PowerShell";
 }
 function namesStoreComponent(normalizedAbs) {
-  const win32 = sep2 === "\\";
+  const win32 = sep3 === "\\";
   const components = normalizedAbs.split(win32 ? /[\\/]+/ : /\/+/);
   return components.some(
     (component) => (win32 ? component.replace(/[. ]+$/, "") : component).toLowerCase() === ".sterling"
@@ -5670,7 +5683,7 @@ function pathIsInside(parentAbs, childAbs) {
   const rel = relative2(parentAbs, childAbs);
   if (rel === "") return true;
   if (isAbsolute2(rel)) return false;
-  return rel !== ".." && !rel.startsWith(".." + sep2);
+  return rel !== ".." && !rel.startsWith(".." + sep3);
 }
 function pathIsInsideEitherCase(parentAbs, childAbs) {
   if (pathIsInside(parentAbs, childAbs)) return true;
@@ -5678,7 +5691,7 @@ function pathIsInsideEitherCase(parentAbs, childAbs) {
 }
 function ancestorExists(p) {
   try {
-    statSync2(p);
+    statSync3(p);
     return true;
   } catch (e) {
     const code = e && e.code || "UNKNOWN";
@@ -5696,7 +5709,7 @@ function canonicalViaNearestAncestor(absPath) {
     anchor = parent;
   }
   const suffix = relative2(anchor, absPath);
-  const real = realpathSync2(anchor);
+  const real = realpathSync3(anchor);
   return suffix === "" ? real : join3(real, suffix);
 }
 function storeDestinationDenial(toolName, field, submitted, evidence) {

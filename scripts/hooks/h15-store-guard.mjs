@@ -112,7 +112,12 @@ import { appendMissingSanctioned } from '../lib/store-remediation.mjs';
 // The exemption compares FILE IDENTITY, never spelling — see the invariant
 // paragraph at the head of that module, which is the authority for this file's
 // sanctioned-script branch.
-import { resolveActivePluginRoot, sanctionedProvenance } from './lib/sanctioned-provenance.mjs';
+// R3: resolveActivePluginRoot moved to plugin-root.mjs as the ONE canonical
+// module (decision r3-plugin-root-resolver-canonical-module-win32-forward-
+// slash-drive-word-backslash-provisional) — sanctioned-provenance.mjs no
+// longer re-exports it.
+import { resolveActivePluginRoot } from './lib/plugin-root.mjs';
+import { sanctionedProvenance } from './lib/sanctioned-provenance.mjs';
 
 // THE INPUT BOUNDARY IS ITSELF A GATE — same F5 class as the preprocessing
 // wrap below (board 01afa03e; the fix H17 already carries for its own

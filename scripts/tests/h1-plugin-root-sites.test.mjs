@@ -43,7 +43,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync, existsSync, readFileSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname, normalize } from 'node:path';
+import { join, dirname, normalize, delimiter } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
 
@@ -229,8 +229,13 @@ function gitOk(args, cwd) {
 // avoid a second shell-out dependency) — the shim script execs THIS absolute
 // path, never the literal name `git`, so it never recurses into itself once
 // its own directory is prepended to PATH.
+//
+// PATH is split on the PLATFORM delimiter from node:path (`;` on win32 —
+// splitting on `:` there would shred every `C:\...` entry into garbage). This
+// is the one piece of the REVERTED cross-platform-shim attempt that was kept:
+// it is correct on both platforms and costs nothing on POSIX.
 function resolveRealGitBinary() {
-  const dirs = String(process.env.PATH || '').split(':').filter(Boolean);
+  const dirs = String(process.env.PATH || '').split(delimiter).filter(Boolean);
   for (const dir of dirs) {
     const candidate = join(dir, 'git');
     if (existsSync(candidate)) return candidate;
@@ -244,6 +249,20 @@ function resolveRealGitBinary() {
 // real binary. This is the mechanism REPAIR 1(a) recommends: it observes every
 // git call, so a subcommand change (the defeat that voided the fsmonitor trap)
 // cannot silently void it again.
+//
+// POSIX-ONLY, DELIBERATELY — a cross-platform Node shim was written for R3
+// step (D) and REVERTED on review (Codex thread 01a07ab0, 2026-09-07). Two
+// independent reasons, both measured against how this harness actually invokes
+// git: (1) ON WIN32 IT WOULD NOT WORK — every caller here spawns the bare name
+// `git` through spawnSync, which cannot launch the `git.cmd` wrapper the way a
+// shell would; resolution runs past it to the real `git.exe` (or ENOENTs), so
+// un-skipping the arms would fail on a normal Windows install for a harness
+// reason and say nothing about H1. A harness cannot ship a `.exe`. (2) ON POSIX
+// IT IS STRICTLY WORSE — a Node wrapper loses `exec` semantics: a signal to the
+// shim leaves an ORPHANED git child, and the caller sees an exit code where the
+// shell shim would have died by the signal. So the shell shim stays, the three
+// C1 arms stay SKIPPED on win32, and the Windows behaviour is
+// MEASUREMENT-OWED on native hardware (board cbe93c31 names the arms).
 function makeGitShimWorld() {
   const base = mkdtempSync(join(tmpdir(), 'sterling-h1-gitshim-'));
   const shimDir = join(base, 'shim-bin');
@@ -259,7 +278,7 @@ function makeGitShimWorld() {
     shimDir,
     logPath,
     cleanup,
-    shimmedPath: () => `${shimDir}:${process.env.PATH}`,
+    shimmedPath: () => `${shimDir}${delimiter}${process.env.PATH}`,
     readLoggedCwds: () =>
       readFileSync(logPath, 'utf8')
         .split('\n')
@@ -304,7 +323,13 @@ async function makeCurrencyEnabledWalkUpFixture(base) {
   return fixtureRoot;
 }
 
-test('C1-shim-control (CONTROL, NON-VACUITY, expect GREEN today and after): the git-invocation shim logs a directly-invoked git call\'s exact cwd', { skip: process.platform === 'win32' && 'git-shim harness is POSIX-only (shebang script); C1 needs a Windows-native shim to port' }, () => {
+// The ONE skip reason, stated once and shared by all three C1 arms so their
+// wording cannot drift apart. See makeGitShimWorld's docstring for WHY the
+// cross-platform Node shim was written and then reverted.
+const WIN32_SHIM_SKIP =
+  'no executable git shim exists for win32 from this harness (Node cannot launch a .cmd via spawnSync(\'git\') and cannot ship a .exe); the arms are measurement-owed on native Windows — board cbe93c31';
+
+test('C1-shim-control (CONTROL, NON-VACUITY, expect GREEN today and after): the git-invocation shim logs a directly-invoked git call\'s exact cwd AND forwards to the real git', { skip: process.platform === 'win32' && WIN32_SHIM_SKIP }, () => {
   const shim = makeGitShimWorld();
   const probeDir = mkdtempSync(join(tmpdir(), 'sterling-h1-shimprobe-'));
   try {
@@ -315,16 +340,34 @@ test('C1-shim-control (CONTROL, NON-VACUITY, expect GREEN today and after): the 
       logged.includes(normalize(probeDir)),
       `FIXTURE VALIDITY, checked before it is trusted as evidence: a directly-invoked \`git status\` with cwd=${probeDir}, run through the shim, must be logged with that exact cwd — without this, C1's absence claim below would be meaningless, because the shim might simply never log anything in this environment. logged=${JSON.stringify(logged)}`
     );
+    // FORWARDING, not merely LOGGING. The assertion above proves the shim RAN;
+    // only the real binary's own output proves it EXEC'D anything. A shim that
+    // logged and then exited 0 satisfies everything above while turning every
+    // git call in C1's fixture into a silent no-op — and C1's fixture BUILDS
+    // its planted repo with git (`gitOk`), so a non-forwarding shim would make
+    // C1 pass for the wrong reason yet again, which is the exact defect class
+    // this whole section was rebuilt to eliminate.
+    const fwd = spawnSync('git', ['--version'], { cwd: probeDir, encoding: 'utf8', env: { ...process.env, PATH: shim.shimmedPath() } });
+    assert.match(
+      String(fwd.stdout ?? ''),
+      /git version/i,
+      `the shim must EXEC the real git, not just log and exit: \`git --version\` through the shimmed PATH must carry the real binary's own version banner on stdout. code=${fwd.status} stdout=${flat(fwd.stdout)} stderr=${flat(fwd.stderr)}`
+    );
   } finally {
     shim.cleanup();
     rmSync(probeDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
-// SABOTAGE: none — this is the shim-mechanism-validity control, not a claim
-// about H1. If this is ever red, neither C1-probe-engaged-control nor C1 below
-// proves anything, and the finding is about the SHIM, not the hook.
+// SABOTAGE for the LOGGING half: none — that half is the shim-mechanism-validity
+// control, not a claim about H1. If it is ever red, neither
+// C1-probe-engaged-control nor C1 below proves anything, and the finding is
+// about the SHIM, not the hook.
+// SABOTAGE for the FORWARDING half: replace the shim's `exec "<realGit>" "$@"`
+// line with `exit 0` — the `git version` assertion goes red while the logging
+// assertion above STAYS GREEN, which is precisely the blind spot the second
+// assertion closes (a shim can log perfectly and forward nothing).
 
-test('C1-probe-engaged-control (CONTROL, NON-VACUITY, expect GREEN today and after): H1\'s currency probe, spawned from a non-authoring walk-up root, invokes at least one git command', { skip: process.platform === 'win32' && 'git-shim harness is POSIX-only (shebang script); C1 needs a Windows-native shim to port' }, async () => {
+test('C1-probe-engaged-control (CONTROL, NON-VACUITY, expect GREEN today and after): H1\'s currency probe, spawned from a non-authoring walk-up root, invokes at least one git command', { skip: process.platform === 'win32' && WIN32_SHIM_SKIP }, async () => {
   const shim = makeGitShimWorld();
   const base = mkdtempSync(join(tmpdir(), 'sterling-h1-currencyworld-'));
   const { dir: project, cleanup: cleanupProject } = makeH1Project();
@@ -348,7 +391,7 @@ test('C1-probe-engaged-control (CONTROL, NON-VACUITY, expect GREEN today and aft
 // non-authoring walk-up fixture makes the currency probe ENGAGE at all; C1 is
 // the pin that isolates WHICH cwd the engaged probe's git calls used.
 
-test('C1 (board fb7c43fb N-3, THE SECURITY CORE, expect RED today): the currency probe never spawns git with cwd inside a STERLING_PLUGIN_ROOT-named planted tree', { skip: process.platform === 'win32' && 'git-shim harness is POSIX-only (shebang script); C1 needs a Windows-native shim to port' }, async () => {
+test('C1 (board fb7c43fb N-3, THE SECURITY CORE, expect RED today): the currency probe never spawns git with cwd inside a STERLING_PLUGIN_ROOT-named planted tree', { skip: process.platform === 'win32' && WIN32_SHIM_SKIP }, async () => {
   const shim = makeGitShimWorld();
   const base = mkdtempSync(join(tmpdir(), 'sterling-h1-currencyworld-'));
   const planted = makePlantedMarkerRoot(base, 'planted-attacker-root');
