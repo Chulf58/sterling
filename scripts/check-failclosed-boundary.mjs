@@ -454,7 +454,7 @@ const BASELINE = {
     // TAGGED in-flight error from inside the try (no module-scope sentinel — the
     // ratchet refused that shape); still one entry, the catch still reaches
     // warnNonBlocking, no unguarded top-level statement added.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #c652bea3" },
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #29b87e67" }, // hash rotated 2026-09-07: decision ee8ab1f5 (spend-after-delivery helper inside the same try)
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },

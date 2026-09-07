@@ -6,9 +6,9 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { randomUUID as randomUUID3, createHash as createHash2 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, writeSync, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
 import { join as join5, basename as basename3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -8648,6 +8648,29 @@ try {
   })();
   const spendDelegationMarker = () => writeFileSync2(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const delegationPart = () => `H10 delegation watch: hand-read ${delegation.hand_reads} file(s), ${delegation.searches} search(es), ${delegation.dispatches} dispatch(es) (max batch ${delegation.max_batch}, solo ${delegation.solo_dispatches}), ${delegation.article_writes} hand-run article write(s) \u2192 delegate reads/sweeps/mechanical work (opus judgment / sonnet mechanical). (once per session)`;
+  const writeThenSpend = (text, spends) => {
+    let delivered = false;
+    try {
+      const buf = Buffer.from(text, "utf8");
+      let off = 0;
+      while (off < buf.length) {
+        const n = writeSync(2, buf, off, buf.length - off);
+        if (!(n > 0)) throw new Error("fd 2 wrote nothing");
+        off += n;
+      }
+      delivered = true;
+    } catch {
+    }
+    if (delivered) {
+      for (const spend of spends) {
+        try {
+          spend();
+        } catch {
+        }
+      }
+    }
+    process.exit(2);
+  };
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
       const parts = [];
@@ -8667,10 +8690,12 @@ try {
         spendGaugeMarker();
         parts.push(gaugePart());
       }
-      if (parts.length) deny([...disclosureParts, ...parts].join("\n\n"));
+      if (parts.length) writeThenSpend([...disclosureParts, ...parts].join("\n\n"), [spendDispatchUnknownKeys]);
     }
     if (disclosureParts.length) {
-      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }), 0);
+      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }), 0, {
+        onWritten: spendDispatchUnknownKeys
+      });
       throw Object.assign(new Error("h10-release-in-flight"), { h10ReleaseInFlight: true });
     }
     allow();
@@ -8766,17 +8791,45 @@ try {
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));
   const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
+  const dispatchUnknownNotedPath = join5(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
+  const dispatchUnknownNotedKeys = (() => {
+    if (!hasSession) return /* @__PURE__ */ new Set();
+    try {
+      const raw = JSON.parse(readFileSync4(dispatchUnknownNotedPath, "utf8"));
+      if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
+      if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
+      return new Set(raw.keys);
+    } catch {
+      return /* @__PURE__ */ new Set();
+    }
+  })();
+  const dispatchUnknownKey = (row) => createHash2("sha256").update(JSON.stringify([row.entry.agent_id, row.entry.round ?? null, row.entry.at ?? null])).digest("hex");
+  const pendingDispatchUnknownKeys = [];
   for (const row of bitingUnknown) {
+    const key = dispatchUnknownKey(row);
+    if (dispatchUnknownNotedKeys.has(key)) continue;
+    pendingDispatchUnknownKeys.push(key);
     disclosureParts.push(
       render(
         disclosure(
           "dispatch_status_unknown",
           { agent_id: row.entry.agent_id, reason: row.reason },
-          `ownership uncertain (dispatch ${formatDispatchRef(row)}) \u2014 settle with TaskStop or an explicit abandonment`
+          `${formatDispatchRef(row)} \u2014 settle via SubagentStop/TaskStop (unknown ownership excludes nothing)`
         )
       )
     );
   }
+  const spendDispatchUnknownKeys = () => {
+    if (!hasSession) return;
+    if (!pendingDispatchUnknownKeys.length) return;
+    try {
+      const merged = new Set(dispatchUnknownNotedKeys);
+      for (const k of pendingDispatchUnknownKeys) merged.add(k);
+      writeFileSync2(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
+    } catch {
+    }
+  };
   if (classified.availability === "corrupt") {
     disclosureParts.push(
       render(
@@ -9089,36 +9142,88 @@ try {
       integrityNote = ` Test-integrity vs HEAD: modified ${JSON.stringify(ti.modified)}, deleted ${JSON.stringify(ti.deleted)} \u2014 review before capture.`;
     }
   }
-  const H10_HEADER = "H10 \u25B8 duties before this session ends \u2014 act, then Stop again:";
+  const H10_HEADER = "H10 \u25B8 act, then Stop again:";
   if (!input.stop_hook_active && !existsSync5(nagMarker)) {
-    writeFileSync2(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
-    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
-    if (hasCaptureDuty && !captured && !pendingDetail) {
-      const hasDebug = activeDebugEvents.length > 0;
-      const declareLine = `no_capture (${noCaptureCmd} --reason "<why>") if nothing durable, or capture_pending if riding an in-flight commit/agent \u2014 a false declaration is drift`;
-      if (hasDebug) {
+    const hasDebug = activeDebugEvents.length > 0;
+    const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
+    const researchLaneOpen = hasResearchDuty && !researchSatisfied;
+    const hhmm = (iso) => {
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? "??:??" : d.toISOString().slice(11, 16);
+    };
+    const REMEDY_VERSION = 1;
+    const conceptLaneOpen = !conceptSatisfied;
+    const articleLaneOpen = Boolean(articleDemand);
+    const openLanes = [];
+    if (captureLaneOpen) openLanes.push("capture");
+    if (researchLaneOpen) openLanes.push("research");
+    if (conceptLaneOpen) openLanes.push("concept");
+    if (articleLaneOpen) openLanes.push("articles");
+    openLanes.sort();
+    const laneVariant = (lane) => {
+      if (lane === "capture") return hasDebug ? "debug_scope" : integrityNote ? "test-integrity" : "touch";
+      if (lane === "research") return "research";
+      if (lane === "concept") return "concept_family";
+      return "article_demand";
+    };
+    const fingerprint = createHash2("sha256").update(
+      JSON.stringify({
+        remedy_version: REMEDY_VERSION,
+        lanes: openLanes,
+        lane_variants: openLanes.map(laneVariant),
+        concept_families: [...unmetFamilies].sort(),
+        article_demand: Boolean(articleDemand),
+        deferral_owners: [...deferredAgents].sort()
+      })
+    ).digest("hex");
+    const dutyNaggedMarker = join5(input.cwd, ".sterling", "transient", "duty-nagged.json");
+    const priorDutyNag = (() => {
+      if (!input.session_id) return null;
+      try {
+        const raw = JSON.parse(readFileSync4(dutyNaggedMarker, "utf8"));
+        if (raw.session_id !== input.session_id) return null;
+        if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
+        return raw;
+      } catch {
+        return null;
+      }
+    })();
+    const compact = openLanes.length > 0 && !!priorDutyNag && priorDutyNag.fingerprint === fingerprint;
+    const dutyNagAt = compact ? priorDutyNag.at : now;
+    const captureToken = "knowledge_create | no_capture --reason | capture_pending";
+    const researchToken = "research_finding | no_capture --lane research";
+    const conceptToken = "knowledge_create feature_article (concept_family)";
+    const articleToken = "knowledge_create feature_article | reference_material";
+    const tokenFor = (lane) => {
+      if (lane === "capture") return captureToken;
+      if (lane === "research") return researchToken;
+      if (lane === "concept") return conceptToken;
+      return articleToken;
+    };
+    if (compact) {
+      const segs = openLanes.map((lane) => `${lane}\u2192${tokenFor(lane)}`);
+      parts.push(`H10 \u25B8 ${openLanes.length} duty(ies) unchanged since ${hhmm(dutyNagAt)}: ${segs.join("; ")}`);
+    } else {
+      if (captureLaneOpen) {
+        const count = hasDebug ? activeDebugEvents.length : activePaths.length;
+        const unit = hasDebug ? "debug event(s)" : "file(s)";
+        const token = hasDebug ? `knowledge_create (disconfirmed_hypothesis/anti_pattern) | no_capture --reason | capture_pending` : captureToken;
+        parts.push(`\u2022 capture \xB7 ${count} ${unit} \xB7 since ${hhmm(earliest)} \xB7 nothing was captured \u2192 ${token}${integrityNote}`);
+      }
+      if (researchLaneOpen) {
+        const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(", ");
         parts.push(
-          `\u2022 capture: debug investigation since ${earliest}, nothing was captured \u2192 knowledge_create (disconfirmed_hypothesis for disproven theories, anti_pattern for bad patterns), or ${declareLine}` + integrityNote
-        );
-      } else {
-        parts.push(
-          `\u2022 capture: touched ${activePaths.length} file(s), nothing was captured since ${earliest} \u2192 knowledge_create (decision/anti_pattern/research_finding), or ${declareLine}` + integrityNote
+          `\u2022 research \xB7 ${activeResearchEvents.length} querie(s)/agent(s) (${queryTexts}) \xB7 since ${hhmm(earliestResearch)} \xB7 ${researchToken}`
         );
       }
     }
-    if (hasResearchDuty && !researchSatisfied) {
-      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(", ");
-      parts.push(
-        `\u2022 research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) \u2192 knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool with lane "research" (${noCaptureCmd} --reason "<why>" --lane research) \u2014 a BARE declaration covers the capture lane only`
-      );
-    }
-    if (!conceptSatisfied) {
+    if (!compact && conceptLaneOpen) {
       parts.push(
         `\u2022 concept: famil${unmetFamilies.length === 1 ? "y" : "ies"} ${JSON.stringify(unmetFamilies)} settled, no concept article since \u2192 knowledge_create/knowledge_update type feature_article with concept_family set (intent + interactions; members inside the family article)`
       );
     }
-    if (articleDemand) {
+    if (!compact && articleLaneOpen) {
       const capList = (arr) => arr.length > 5 ? `${arr.slice(0, 5).join(", ")} +${arr.length - 5} more` : arr.join(", ");
       const ownerEvidence = unowned.slice(0, 5).map((p) => `${p} \u2192 owners seen: ${ownerRowsNote(p)}`);
       parts.push(
@@ -9135,8 +9240,19 @@ try {
       parts.push(delegationPart());
     }
     releaseTouchesClaim();
-    deny(`${H10_HEADER}
-${parts.join("\n\n")}`);
+    const dutyText = compact ? parts.join("\n\n") : `${H10_HEADER}
+${parts.join("\n\n")}`;
+    writeThenSpend(dutyText, [
+      () => writeFileSync2(nagMarker, JSON.stringify({ at: now })),
+      // FIX 2: never persist a sessionless duty-nagged marker — the reader
+      // above (priorDutyNag) already refuses to compact without a session;
+      // this is the matching guard on the WRITE side.
+      () => {
+        if (!hasSession) return;
+        writeFileSync2(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
+      },
+      spendDispatchUnknownKeys
+    ]);
   }
   if (hasCaptureDuty && !captured) {
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");

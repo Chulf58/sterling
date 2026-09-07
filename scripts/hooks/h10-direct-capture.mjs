@@ -27,9 +27,9 @@
 // (feature_article.concept_family) → shared nag, then one
 // concept_article_missing item per family on release.
 // All terminal paths clear both registers + the nag marker together (P4).
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
+import { readFileSync, writeFileSync, writeSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import { join, basename } from 'node:path';
 import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
@@ -485,6 +485,52 @@ try {
    * emitted as a systemMessage on the exit-0 release — a deferral is a fact to
    * disclose, never a reason to block (P5).
    */
+  // SPEND AFTER DELIVERY, shared (point D, decision ee8ab1f5; Fix 1 review
+  // round): write stderr synchronously; ONLY on a successful write run the
+  // given spend callbacks, each independently try/caught (a marker WRITE
+  // failure is caught and ignored, point E) — then exit 2 either way. A
+  // throw off the write itself spends nothing. This is the ONE sequence
+  // both blocking `[dispatch_status_unknown]` delivery paths use: the
+  // pressure/delegation/gauge deny below (spends only the unknown-note
+  // keys — no duty rendered there, so capture-nagged/duty-nagged are never
+  // touched) and the duty-nag deny further down (spends all three).
+  const writeThenSpend = (text, spends) => {
+    let delivered = false;
+    try {
+      // FIX 3 (Codex review, verified against Node semantics): Claude Code
+      // gives hooks a PIPE for stderr, and on a pipe process.stderr.write's
+      // failure (EPIPE/EBADF) surfaces through the write callback or the
+      // stream's 'error' event — NEVER as a synchronous throw — so a plain
+      // try/catch around it never actually catches anything and "delivered"
+      // would always read true. writeSync(2, ...) is the synchronous
+      // syscall and DOES throw synchronously on those errors, which is what
+      // makes this catch real.
+      const buf = Buffer.from(text, 'utf8');
+      let off = 0;
+      while (off < buf.length) {
+        // FIX (Codex, review round): a zero-length write is a legal return
+        // from writeSync — looping on it would spin forever instead of
+        // failing loud, so treat it exactly like a throw.
+        const n = writeSync(2, buf, off, buf.length - off);
+        if (!(n > 0)) throw new Error('fd 2 wrote nothing');
+        off += n;
+      }
+      delivered = true;
+    } catch {
+      // nothing is spent — the next Stop repeats the same text, louder, never silent
+    }
+    if (delivered) {
+      for (const spend of spends) {
+        try {
+          spend();
+        } catch {
+          // best-effort — a marker write failure costs only itself
+        }
+      }
+    }
+    process.exit(2);
+  };
+
   const releaseWithPressure = () => {
     if (!input.stop_hook_active) {
       const parts = [];
@@ -505,14 +551,27 @@ try {
         parts.push(gaugePart());
       }
       // Disclosures never CAUSE a block — they only ride one that is already due.
-      if (parts.length) deny([...disclosureParts, ...parts].join('\n\n'));
+      // FIX 1 (review round): this is a THIRD `[dispatch_status_unknown]`
+      // delivery path — a pressure/delegation/gauge block can carry the same
+      // disclosureParts the duty-nag and exit-0 releases carry, so it must
+      // spend the unknown-note keys too (never duty-nagged/capture-nagged —
+      // no duty is rendered on this path).
+      if (parts.length) writeThenSpend([...disclosureParts, ...parts].join('\n\n'), [spendDispatchUnknownKeys]);
     }
     // R0: the payload and the exit are ONE state machine — a bare
     // process.stdout.write() followed by a separate allow() can exit before
     // the pipe drains (decision hook-stdout-exit-after-write-callback-bound-
     // exit-deny-stays-synchronous).
     if (disclosureParts.length) {
-      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join('\n\n') }), 0);
+      // dispatch-unknown-noted.json is spent here too (point C, decision
+      // ee8ab1f5): these rows ride disclosureParts, which leaves through BOTH
+      // this exit-0 systemMessage release AND the duty-nag deny below — a
+      // deny-only spend cannot guarantee once-per-session (Codex round 2,
+      // adopted). Spent only inside onWritten, i.e. after the payload is
+      // actually handed off.
+      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join('\n\n') }), 0, {
+        onWritten: spendDispatchUnknownKeys,
+      });
       // This write's exit is async, so a bare `return` here would let the
       // top-level caller fall through into later duty code. Throw a TAGGED
       // error to unwind past every enclosing top-level `if` to the founding
@@ -754,20 +813,64 @@ try {
   // UNKNOWN — disclosed WITHOUT excluding. Only named when it actually bites
   // something this Stop touched: an unknown owner of an untouched file changes
   // no outcome and would repeat byte-identically every Stop (board cac61a95
-  // noise shape, P1).
+  // noise shape, P1) — decision ee8ab1f5 governs FREQUENCY and WORDING only,
+  // never which entries qualify, so this qualification is unchanged. The
+  // once-per-session key dedup (point C) applies ON TOP of biting: a note
+  // fires only when the row bites AND its key is not yet spent this session.
   const touchedKeys = new Set(touchedExisting.map(joinKey));
   const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  // FIX 2 (review round, re-applied): `raw.session_id !== input.session_id`
+  // passes when BOTH are undefined, so an absent session_id was never
+  // actually excluded — hasSession gates the reader, the writer AND the
+  // duty-nagged spend callback below, all off this ONE check.
+  const hasSession = typeof input.session_id === 'string' && input.session_id.length > 0;
+  const dispatchUnknownNotedPath = join(input.cwd, '.sterling', 'transient', 'dispatch-unknown-noted.json');
+  const dispatchUnknownNotedKeys = (() => {
+    if (!hasSession) return new Set(); // absent session_id: never salvaged (point E), read skipped entirely
+    try {
+      const raw = JSON.parse(readFileSync(dispatchUnknownNotedPath, 'utf8'));
+      if (raw.session_id !== input.session_id) return new Set(); // foreign session: never salvaged (point E)
+      if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === 'string')) return new Set();
+      return new Set(raw.keys);
+    } catch {
+      return new Set();
+    }
+  })();
+  // key = sha256([agent_id, round, registered_at]) — never a raw '|' concatenation.
+  const dispatchUnknownKey = (row) =>
+    createHash('sha256')
+      .update(JSON.stringify([row.entry.agent_id, row.entry.round ?? null, row.entry.at ?? null]))
+      .digest('hex');
+  const pendingDispatchUnknownKeys = [];
   for (const row of bitingUnknown) {
+    const key = dispatchUnknownKey(row);
+    if (dispatchUnknownNotedKeys.has(key)) continue;
+    pendingDispatchUnknownKeys.push(key);
     disclosureParts.push(
       render(
         disclosure(
           'dispatch_status_unknown',
           { agent_id: row.entry.agent_id, reason: row.reason },
-          `ownership uncertain (dispatch ${formatDispatchRef(row)}) — settle with TaskStop or an explicit abandonment`
+          `${formatDispatchRef(row)} — settle via SubagentStop/TaskStop (unknown ownership excludes nothing)`
         )
       )
     );
   }
+  // Spent only AFTER the disclosure has actually been delivered (point D) —
+  // called from the exit-0 systemMessage release above and the duty-nag deny
+  // below, never before either write. Self-catching: a marker WRITE failure
+  // is caught and ignored (point E), never escalated.
+  const spendDispatchUnknownKeys = () => {
+    if (!hasSession) return; // FIX 2: never persist a sessionless note
+    if (!pendingDispatchUnknownKeys.length) return;
+    try {
+      const merged = new Set(dispatchUnknownNotedKeys);
+      for (const k of pendingDispatchUnknownKeys) merged.add(k);
+      writeFileSync(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
+    } catch {
+      // best-effort — the next Stop simply re-notes the same key
+    }
+  };
   // A11: 'absent' is anomalous only after H1 has run (which now writes `[]`
   // instead of deleting) and today's un-rebuilt fixtures still exercise a
   // genuinely-missing file — silence is the byte-identical posture; only
@@ -1831,74 +1934,140 @@ try {
     }
   }
 
-  // Presentation only (decision h10-subtle-stop-output): a compact header on the
-  // deny path — the terminal blob does not need to re-teach the contract H1
-  // already covers; the terse duty+remedy lines below carry the outcome-changing
-  // part.
-  const H10_HEADER = 'H10 ▸ duties before this session ends — act, then Stop again:';
+  // Presentation only (decision h10-stop-flood-shorter-and-fewer-repeat-
+  // compaction-once-per-session-unknown-note, ee8ab1f5): a short header, one
+  // line per open duty carrying only its executable remedy tokens (points
+  // A/B) — and, on the NEXT nag cycle carrying the identical semantic shape,
+  // ONE compacted line instead of the full bullets. The prose this replaces
+  // (why a false declaration matters, why a bare declaration is capture-only)
+  // is dropped — CLAUDE.md and H1 carry it; only the lane/count/remedy is
+  // outcome-changing here (P1).
+  const H10_HEADER = 'H10 ▸ act, then Stop again:';
 
   if (!input.stop_hook_active && !existsSync(nagMarker)) {
-    writeFileSync(nagMarker, JSON.stringify({ at: now }));
+    // capture-nagged.json's write MOVED below, behind a SUCCESSFUL stderr
+    // delivery (point D) — writing it here, before the text is shown, was the
+    // pre-existing hazard: a failed write would convert an unseen duty
+    // straight into queued debt with the nag never having been shown.
     // Any fan-out deferral/staleness leads the block: the demands that follow are
     // exactly the ones the deferral did NOT cover (decision ec9eacaa).
     const parts = [...disclosureParts];
 
-    // The conductor's shell cwd is the TARGET project, where scripts/no-capture.mjs
-    // does not exist — it lives in the plugin clone. The platform sets
-    // CLAUDE_PLUGIN_ROOT for hook processes, so resolve the ABSOLUTE path here
-    // and print THAT; a relative fallback only when the env var is absent
-    // (2026-08-09 consuming project: the relative path cost two failed node
-    // invocations and a Glob hunt for the real location).
-    const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT
-      ? `node "${join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts', 'no-capture.mjs')}"`
-      : 'node scripts/no-capture.mjs';
+    const hasDebug = activeDebugEvents.length > 0;
+    const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
+    const researchLaneOpen = hasResearchDuty && !researchSatisfied;
 
-    // Capture duty nag (touches or debug events present, nothing captured).
-    // Reviewer advice is NOT this hook's business (board cac61a95): it repeated
-    // identically on every firing and had gone unread; H2's selection-inject
-    // surface is the place for that, not a capture-demand message.
-    // A capture_pending declaration suppresses the capture nag — the deferral
-    // block above owns that lane end-to-end (other unmet duties still nag).
-    if (hasCaptureDuty && !captured && !pendingDetail) {
-      const hasDebug = activeDebugEvents.length > 0;
-      const declareLine = `no_capture (${noCaptureCmd} --reason "<why>") if nothing durable, or capture_pending if riding an in-flight commit/agent — a false declaration is drift`;
-      if (hasDebug) {
+    const hhmm = (iso) => {
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? '??:??' : d.toISOString().slice(11, 16);
+    };
+
+    // CANONICAL SEMANTIC FINGERPRINT (point B): the open lane SET, each lane's
+    // qualitative variant, the concept-family set, article-demand presence,
+    // the deferral owner set, and a version constant — deliberately NEVER
+    // counts, paths or rendered text (those would make compaction inert
+    // during active work, defeating the flood reduction it exists for).
+    const REMEDY_VERSION = 1;
+    const conceptLaneOpen = !conceptSatisfied;
+    const articleLaneOpen = Boolean(articleDemand);
+    const openLanes = [];
+    if (captureLaneOpen) openLanes.push('capture');
+    if (researchLaneOpen) openLanes.push('research');
+    if (conceptLaneOpen) openLanes.push('concept');
+    if (articleLaneOpen) openLanes.push('articles');
+    openLanes.sort();
+    // FIX 4 (review round): concept/article compact too — only DEFERRAL lines
+    // (disclosureParts, already outside this compact/full decision) stay as
+    // full lines beside the one-liner; they carry live ownership evidence
+    // (decision ee8ab1f5 (2)) that a token can't stand in for.
+    const laneVariant = (lane) => {
+      if (lane === 'capture') return hasDebug ? 'debug_scope' : integrityNote ? 'test-integrity' : 'touch';
+      if (lane === 'research') return 'research';
+      if (lane === 'concept') return 'concept_family';
+      return 'article_demand';
+    };
+    const fingerprint = createHash('sha256')
+      .update(
+        JSON.stringify({
+          remedy_version: REMEDY_VERSION,
+          lanes: openLanes,
+          lane_variants: openLanes.map(laneVariant),
+          concept_families: [...unmetFamilies].sort(),
+          article_demand: Boolean(articleDemand),
+          deferral_owners: [...deferredAgents].sort(),
+        })
+      )
+      .digest('hex');
+
+    const dutyNaggedMarker = join(input.cwd, '.sterling', 'transient', 'duty-nagged.json');
+    const priorDutyNag = (() => {
+      if (!input.session_id) return null; // absent session_id: never compact (points B/E)
+      try {
+        const raw = JSON.parse(readFileSync(dutyNaggedMarker, 'utf8'));
+        if (raw.session_id !== input.session_id) return null;
+        if (typeof raw.fingerprint !== 'string' || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
+        return raw;
+      } catch {
+        return null; // unreadable/malformed marker is never salvaged (point E)
+      }
+    })();
+    const compact = openLanes.length > 0 && !!priorDutyNag && priorDutyNag.fingerprint === fingerprint;
+    const dutyNagAt = compact ? priorDutyNag.at : now;
+
+    const captureToken = 'knowledge_create | no_capture --reason | capture_pending';
+    const researchToken = 'research_finding | no_capture --lane research';
+    const conceptToken = 'knowledge_create feature_article (concept_family)';
+    const articleToken = 'knowledge_create feature_article | reference_material';
+    const tokenFor = (lane) => {
+      if (lane === 'capture') return captureToken;
+      if (lane === 'research') return researchToken;
+      if (lane === 'concept') return conceptToken;
+      return articleToken;
+    };
+
+    if (compact) {
+      // ONE line replaces the duty bullets below (capture/research AND, since
+      // FIX 4, concept/article) — tokens stay executable in the repeat
+      // (context compaction can evict CLAUDE.md mid-session).
+      const segs = openLanes.map((lane) => `${lane}→${tokenFor(lane)}`);
+      parts.push(`H10 ▸ ${openLanes.length} duty(ies) unchanged since ${hhmm(dutyNagAt)}: ${segs.join('; ')}`);
+    } else {
+      // Capture duty nag (touches or debug events present, nothing captured).
+      // A capture_pending declaration suppresses the capture nag — the
+      // deferral block above owns that lane end-to-end.
+      if (captureLaneOpen) {
+        const count = hasDebug ? activeDebugEvents.length : activePaths.length;
+        const unit = hasDebug ? 'debug event(s)' : 'file(s)';
+        // The debug variant names its two capture TYPES (disconfirmed_hypothesis
+        // for disproven theories, anti_pattern for bad patterns) — narrower than
+        // the touch variant's plain knowledge_create, so it stays a distinct
+        // token string rather than folding into the shared constant above.
+        const token = hasDebug ? `knowledge_create (disconfirmed_hypothesis/anti_pattern) | no_capture --reason | capture_pending` : captureToken;
+        parts.push(`• capture · ${count} ${unit} · since ${hhmm(earliest)} · nothing was captured → ${token}${integrityNote}`);
+      }
+
+      // Research duty nag: cite queries/agents verbatim (interface slice 2;
+      // item 353416a9) — the route is LANE-SCOPED (decision
+      // no-capture-discharge-is-lane-scoped), hence '--lane research' stays.
+      if (researchLaneOpen) {
+        const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(', ');
         parts.push(
-          `• capture: debug investigation since ${earliest}, nothing was captured → knowledge_create (disconfirmed_hypothesis for disproven theories, anti_pattern for bad patterns), or ${declareLine}` +
-            integrityNote
-        );
-      } else {
-        parts.push(
-          `• capture: touched ${activePaths.length} file(s), nothing was captured since ${earliest} → knowledge_create (decision/anti_pattern/research_finding), or ${declareLine}` +
-            integrityNote
+          `• research · ${activeResearchEvents.length} querie(s)/agent(s) (${queryTexts}) · since ${hhmm(earliestResearch)} · ${researchToken}`
         );
       }
     }
 
-    // Research duty nag: cite queries/agents verbatim (interface slice 2).
-    // Item 353416a9: name the TOOL that actually discharges this lane instead of
-    // the vague "state nothing durable was learned", which named a route the
-    // check never consulted. The route is LANE-SCOPED (decision
-    // no-capture-discharge-is-lane-scoped) so the nag must print the lane too —
-    // a bare declaration discharges the capture lane only, and naming a command
-    // that cannot clear the duty it is offered for is exactly the false
-    // affordance this line was rewritten to remove.
-    if (hasResearchDuty && !researchSatisfied) {
-      const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join(', ');
-      parts.push(
-        `• research: ${activeResearchEvents.length} querie(s)/agent(s) uncaptured since ${earliestResearch} (${queryTexts}) → knowledge_create type research_finding (a decision/anti_pattern capturing it also satisfies), or declare it via the no_capture tool with lane "research" (${noCaptureCmd} --reason "<why>" --lane research) — a BARE declaration covers the capture lane only`
-      );
-    }
-
     // Concept demand nag (decision 7208729b): design settled, article owed NOW.
-    if (!conceptSatisfied) {
+    // FIX 4: full detail only when NOT compacted — the compact one-liner
+    // above already carries this lane's token.
+    if (!compact && conceptLaneOpen) {
       parts.push(
         `• concept: famil${unmetFamilies.length === 1 ? 'y' : 'ies'} ${JSON.stringify(unmetFamilies)} settled, no concept article since → knowledge_create/knowledge_update type feature_article with concept_family set (intent + interactions; members inside the family article)`
       );
     }
 
-    // Article demand nag.
-    if (articleDemand) {
+    // Article demand nag. FIX 4: full detail only when NOT compacted.
+    if (!compact && articleLaneOpen) {
       const capList = (arr) => (arr.length > 5 ? `${arr.slice(0, 5).join(', ')} +${arr.length - 5} more` : arr.join(', '));
       // OWNER ROWS THE JOIN SAW, per named path (issues log 2026-09-01): a demand
       // for a file the reader believes is owned is unfalsifiable without this —
@@ -1933,7 +2102,30 @@ try {
     // but the claim must still be released (see releaseTouchesClaim above)
     // or it would dangle forever with no next-Stop adoption ever triggered.
     releaseTouchesClaim();
-    deny(`${H10_HEADER}\n${parts.join('\n\n')}`);
+
+    // SPEND AFTER DELIVERY (point D, decision ee8ab1f5): this deliberately
+    // does NOT call deny() — deny() writes stderr and exits unconditionally,
+    // which is exactly the ordering hazard being closed (capture-nagged used
+    // to be written at :1841, before the text was ever shown). Every marker
+    // is written only once stderr has actually taken the payload; a throw
+    // spends nothing, and the next Stop repeats the nag, louder, never
+    // silent (point E). deny() itself is untouched — every OTHER call site
+    // in this file still uses it unchanged. Shares writeThenSpend with the
+    // pressure/delegation/gauge deny above (Fix 1) — this site alone also
+    // spends capture-nagged and duty-nagged, since only here is a duty
+    // actually rendered.
+    const dutyText = compact ? parts.join('\n\n') : `${H10_HEADER}\n${parts.join('\n\n')}`;
+    writeThenSpend(dutyText, [
+      () => writeFileSync(nagMarker, JSON.stringify({ at: now })),
+      // FIX 2: never persist a sessionless duty-nagged marker — the reader
+      // above (priorDutyNag) already refuses to compact without a session;
+      // this is the matching guard on the WRITE side.
+      () => {
+        if (!hasSession) return;
+        writeFileSync(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
+      },
+      spendDispatchUnknownKeys,
+    ]);
   }
 
   // Second pass: still owed — queue items and let the session end (P1: don't trap the human).
