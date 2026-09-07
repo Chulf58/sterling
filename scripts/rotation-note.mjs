@@ -11,22 +11,39 @@
 // Anchored to git HEAD + branch at write time so the restore can disclose drift.
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
+import { dirname } from 'node:path';
 import { liveDispatchesOrUnknown } from './lib/dispatch-register.mjs';
 import { readLock } from './hooks/lib/plan-lock.mjs';
+import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
+// Local wrappers preserve this script's existing exit code (2) and message
+// prefix while delegating all real parsing to the ONE shared, exact-token
+// parser (decision sanctioned-script-store-writes-one-containment-helper-one-
+// arg-parser, R5) — both spellings, duplicate refusal, flag-as-value refusal.
 function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i > -1 && process.argv[i + 1] !== undefined ? process.argv[i + 1] : null;
+  try {
+    return sharedArg(`--${name}`) ?? null;
+  } catch (e) {
+    fail(e.message);
+  }
 }
 
 function fail(msg) {
-  process.stderr.write(`rotation-note: ${msg}\n`);
-  process.exit(2);
+  sharedFail(`rotation-note: ${msg}`, 2);
 }
 
 const cwd = process.cwd();
-if (!existsSync(join(cwd, '.sterling'))) {
+// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
+// one-arg-parser, R5): even this existence probe derives its path through the
+// helper, so a symlinked `.sterling` is refused here rather than followed.
+let sterlingDirForCheck;
+try {
+  sterlingDirForCheck = resolveStoreWritePath(cwd, '.sterling');
+} catch (e) {
+  fail(e.message);
+}
+if (!existsSync(sterlingDirForCheck)) {
   fail(`${cwd} is not a Sterling project (.sterling/ missing) — run from the project root`);
 }
 
@@ -139,7 +156,7 @@ const liveDispatches =
 // is worse than a note with no plan.
 const planPath = (() => {
   try {
-    const read = readLock(join(cwd, '.sterling'));
+    const read = readLock(resolveStoreWritePath(cwd, '.sterling'));
     return read.lock ? read.lock.plan_path : null;
   } catch {
     return null; // a broken lock costs this field, never the note
@@ -161,9 +178,17 @@ const note = {
   at: new Date().toISOString(),
 };
 
-const dir = join(cwd, '.sterling', 'transient');
-mkdirSync(dir, { recursive: true });
-writeFileSync(join(dir, 'rotation-note.json'), JSON.stringify(note, null, 2) + '\n');
+// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
+// one-arg-parser, R5): refuses a symlink component beneath cwd on the way to
+// the note, naming both resolved paths, before anything is written.
+let notePath;
+try {
+  notePath = resolveStoreWritePath(cwd, '.sterling', 'transient', 'rotation-note.json');
+} catch (e) {
+  fail(e.message);
+}
+mkdirSync(dirname(notePath), { recursive: true });
+writeFileSync(notePath, JSON.stringify(note, null, 2) + '\n');
 process.stdout.write(
   `rotation note written (single slot — this supersedes any prior note).\n` +
     `next_slice: ${note.next_slice}\n` +

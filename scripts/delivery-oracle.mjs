@@ -95,6 +95,8 @@ import {
   extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, hasRecordCentralityHit, MAX_RANK_TERMS,
   decodeLiveRecordRow, classifyClaimPath,
 } from '@sterling/store';
+import { arg, hasFlag } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 export const ORACLE_VERSION = 1;
 
@@ -611,7 +613,11 @@ export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {
       // and feeding it by stdin would audit a channel the hook does not use.
       stdin.hook_event_name = c.event ?? 'Stop';
       sandbox_writes.push({
-        rel: join('.sterling', 'transient', 'touches.json'),
+        // A RELATIVE spec only — no root here, so this deliberately stays a
+        // plain literal rather than a join() call. It is materialized later
+        // by applyWrites()/sandboxPath(), which resolves and contains it
+        // against the actual sandboxDir at write time.
+        rel: '.sterling/transient/touches.json',
         json: [{ path: c.rel, at: new Date().toISOString() }],
       });
       break;
@@ -674,7 +680,17 @@ export function parseDelivery(hookResult, sandboxDir) {
   }
 
   const queued_by_kind = Object.fromEntries(QUEUE_KINDS.map((k) => [k, []]));
-  const pending = join(sandboxDir, '.sterling', 'transient', 'delivery', 'pending.json');
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): a thrown containment error here is scored the
+  // same as any other unreadable queue — the sandbox is this oracle's own
+  // fixture, so a throw means the fixture itself is broken, not a delivery
+  // finding.
+  let pending;
+  try {
+    pending = resolveStoreWritePath(sandboxDir, '.sterling', 'transient', 'delivery', 'pending.json');
+  } catch (e) {
+    return { rendered_ids: [], queued_ids: [], queued_by_kind, exit_code, channel: 'harness_error', denied: false, denied_ids: [], rendered_text: '', queued_text: '', queued_entries: 0, stderr_text: stderr, harness_error: `pending queue path: ${e.message}` };
+  }
   let queuedEntries = [];
   if (existsSync(pending)) {
     try {
@@ -868,7 +884,7 @@ export function metrics(cases = []) {
 // ---------------------------------------------------------------------------
 
 export function resetSandbox(sandboxDir, caseObj = {}) {
-  const dir = join(sandboxDir, '.sterling', 'transient');
+  const dir = resolveStoreWritePath(sandboxDir, '.sterling', 'transient');
   // An override case's prior denial (seed_ledger), or a deliberately-seeded
   // H23 output-axis guard (seed_output_axis_guard, board 5d462868 — mirrors
   // seed_ledger's own contract for this arm's guard), is written BEFORE this
@@ -961,13 +977,23 @@ export function loadProbes(dir) {
 // SessionStart, and a run history erased by the next session is not a history.
 // ---------------------------------------------------------------------------
 
+// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
+// one-arg-parser, R5): projectRoot is caller-supplied (--project), so this is
+// exactly the lexical-join-under-an-arbitrary-root shape the helper exists
+// for. A symlink component beneath projectRoot on the way to delivery-audit/
+// now refuses rather than redirecting the report.
 export function auditDir(projectRoot) {
-  return join(projectRoot, '.sterling', 'delivery-audit');
+  return resolveStoreWritePath(projectRoot, '.sterling', 'delivery-audit');
 }
 
 export function writeRunReport(projectRoot, report) {
-  const base = auditDir(projectRoot);
-  const runs = join(base, 'runs');
+  // CONTAINMENT (R5): auditDir() above only resolves the `.sterling/
+  // delivery-audit` PARENT — `runs` and the report filename were then joined
+  // onto it lexically and unchecked, so a pre-existing `delivery-audit/runs`
+  // symlink would redirect writeFileSync. Every write site below re-resolves
+  // its FULL path from projectRoot, never a plain join onto an already-
+  // validated parent.
+  const runs = resolveStoreWritePath(projectRoot, '.sterling', 'delivery-audit', 'runs');
   mkdirSync(runs, { recursive: true });
   const identity = runIdentity({
     snapshotDigest: report.identity?.snapshot_digest,
@@ -980,11 +1006,11 @@ export function writeRunReport(projectRoot, report) {
   // No ':' in the basename — illegal on Windows, and parity is standing. Still
   // lexicographically sortable by time.
   const stamp = String(report.at).replace(/[:.]/g, '-');
-  const run_path = join(runs, `${stamp}-${identity}.json`);
+  const run_path = resolveStoreWritePath(projectRoot, '.sterling', 'delivery-audit', 'runs', `${stamp}-${identity}.json`);
   writeFileSync(run_path, `${JSON.stringify(report, null, 2)}\n`);
 
   const cases = report.cases ?? [];
-  const history_path = join(base, 'history.jsonl');
+  const history_path = resolveStoreWritePath(projectRoot, '.sterling', 'delivery-audit', 'history.jsonl');
   appendFileSync(history_path, `${JSON.stringify({
     at: report.at,
     identity: report.identity ?? {},
@@ -1026,9 +1052,9 @@ function runHook(root, hook, stdin, sandboxDir) {
 
 function buildSandbox(snapshotDb, config) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-delivery-oracle-'));
-  mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
-  writeFileSync(join(dir, '.sterling', 'sterling.db'), readFileSync(snapshotDb));
+  mkdirSync(resolveStoreWritePath(dir, '.sterling'), { recursive: true });
+  writeFileSync(resolveStoreWritePath(dir, '.sterling', 'config.json'), JSON.stringify(config));
+  writeFileSync(resolveStoreWritePath(dir, '.sterling', 'sterling.db'), readFileSync(snapshotDb));
   const git = (args) => spawnSync('git', ['-c', 'user.email=oracle@example.invalid', '-c', 'user.name=oracle', ...args], { cwd: dir, encoding: 'utf8' });
   git(['init', '-q']);
   writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
@@ -1043,7 +1069,7 @@ function buildSandbox(snapshotDb, config) {
  *  mutated. WAL siblings go with it — a stale -wal would re-apply exactly the
  *  frames being discarded. */
 function restoreStore(sandboxDir, snapshotDb) {
-  const dest = join(sandboxDir, '.sterling', 'sterling.db');
+  const dest = resolveStoreWritePath(sandboxDir, '.sterling', 'sterling.db');
   for (const sib of ['-wal', '-shm']) rmSync(dest + sib, { force: true });
   writeFileSync(dest, readFileSync(snapshotDb));
 }
@@ -1059,11 +1085,14 @@ function restoreStore(sandboxDir, snapshotDb) {
 function seedPriorDenial(sandboxDir, recordIds) {
   const ids = [...new Set(recordIds ?? [])].sort();
   if (!ids.length) return null;
-  const dir = join(sandboxDir, '.sterling', 'transient', 'delivery');
+  const dir = resolveStoreWritePath(sandboxDir, '.sterling', 'transient', 'delivery');
   mkdirSync(dir, { recursive: true });
   const key = ids.join('|');
+  // CONTAINMENT (R5): the FULL leaf path, not a join() onto the already-
+  // validated parent — a pre-planted file symlink at exactly this filename
+  // would otherwise redirect the write even though `dir` itself was clean.
   writeFileSync(
-    join(dir, 'deny-ledger-conductor.json'),
+    resolveStoreWritePath(sandboxDir, '.sterling', 'transient', 'delivery', 'deny-ledger-conductor.json'),
     JSON.stringify({ entries: { [key]: { terms: [], recordIds: ids } }, overrides: [] })
   );
   return { key, recordIds: ids, terms_seeded: 0 };
@@ -1082,7 +1111,21 @@ function sandboxPath(sandboxDir, rel, who) {
   if (abs !== root && !abs.startsWith(root + sep)) {
     throw new Error(`${who}: '${rel}' resolves outside the sandbox (${abs}) — refusing to write`);
   }
-  return abs;
+  // CONTAINMENT (R5): the lexical escape check above is not a symlink check —
+  // this catches a symlink component ALREADY PRESENT on the way to `abs`
+  // (including the leaf itself), which a pre-planted in-sandbox file symlink
+  // at the exact target path would otherwise let a write follow. Re-derive
+  // the RELATIVE suffix from the already-validated `abs` — never pass the raw
+  // `rel` on to resolveStoreWritePath, which REFUSES an absolute segment
+  // outright, and `rel` may itself be absolute: path.resolve()'s own
+  // semantics let a later absolute argument override the base, and golden-
+  // fixture callers rely on exactly that (resolveGoldenStdin's comment).
+  const suffix = abs === root ? [] : [abs.slice(root.length + 1)];
+  try {
+    return resolveStoreWritePath(sandboxDir, ...suffix);
+  } catch (e) {
+    throw new Error(`${who}: '${rel}' ${e.message}`);
+  }
 }
 
 function materialize(sandboxDir, rel) {
@@ -1488,21 +1531,35 @@ function runOneGoldenFixture(fixture, { sandboxDir, snapshotDb, store }) {
 }
 
 async function main(argv) {
-  const arg = (name, fallback) => {
-    const i = argv.indexOf(name);
-    return i !== -1 ? argv[i + 1] : fallback;
-  };
-  const projectRoot = arg('--project', process.cwd());
-  const probeDir = arg('--probes', join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-probes'));
-  const goldenDir = arg('--golden', join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-golden'));
-  const dbPath = join(projectRoot, '.sterling', 'sterling.db');
+  // ONE shared, exact-token parser (decision sanctioned-script-store-writes-
+  // one-containment-helper-one-arg-parser, R5) — both spellings, duplicate
+  // refusal, flag-as-value refusal. `??` supplies this script's own defaults,
+  // same as the old fallback parameter.
+  let projectRoot, probeDir, goldenDir;
+  try {
+    projectRoot = arg('--project', argv) ?? process.cwd();
+    probeDir = arg('--probes', argv) ?? join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-probes');
+    goldenDir = arg('--golden', argv) ?? join(repoRoot, 'scripts', 'tests', 'fixtures', 'delivery-golden');
+  } catch (e) {
+    console.error(`delivery-oracle: ${e.message}`);
+    process.exit(2);
+  }
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): projectRoot is caller-supplied (--project),
+  // exactly the shape the helper exists for.
+  let dbPath, configPath;
+  try {
+    dbPath = resolveStoreWritePath(projectRoot, '.sterling', 'sterling.db');
+    configPath = resolveStoreWritePath(projectRoot, '.sterling', 'config.json');
+  } catch (e) {
+    console.error(`delivery-oracle: ${e.message}`);
+    process.exit(2);
+  }
   if (!existsSync(dbPath)) {
     console.error(`delivery-oracle: no Sterling store at ${dbPath} — not an initialized project`);
     process.exit(1);
   }
-  const config = existsSync(join(projectRoot, '.sterling', 'config.json'))
-    ? JSON.parse(readFileSync(join(projectRoot, '.sterling', 'config.json'), 'utf8'))
-    : {};
+  const config = existsSync(configPath) ? JSON.parse(readFileSync(configPath, 'utf8')) : {};
   const rung = config?.delivery?.injection_rung ?? 'prompt';
 
   const { SterlingStore } = await import(join(repoRoot, 'packages', 'store', 'dist', 'index.js'));
@@ -1630,7 +1687,7 @@ async function main(argv) {
       // Order matters: wipe transient WHOLESALE, then seed only what this case
       // needs. resetSandbox skips the wipe for a seed_ledger case, so the seed
       // is written first and survives.
-      if (seed_ledger) rmSync(join(sandbox, '.sterling', 'transient'), { recursive: true, force: true });
+      if (seed_ledger) rmSync(resolveStoreWritePath(sandbox, '.sterling', 'transient'), { recursive: true, force: true });
       const seeded = seed_ledger ? seedPriorDenial(sandbox, probe?.expect_deny_ids) : null;
       resetSandbox(sandbox, { seed_ledger });
       restoreStore(sandbox, snapshotDb);
@@ -1873,7 +1930,7 @@ async function main(argv) {
   // it is a finding ABOUT delivery, which is the thing being measured.
   const harnessErrors = [...scored.filter((c) => c.harness_error), ...golden.filter((g) => g.harness_error)];
 
-  if (argv.includes('--json')) {
+  if (hasFlag('--json', argv)) {
     console.log(JSON.stringify(report, null, 2));
   } else {
     console.log(`delivery-oracle: ${scored.length} case(s), ${exclusions.length} exclusion(s) — ${run_path}`);

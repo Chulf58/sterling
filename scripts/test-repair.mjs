@@ -32,13 +32,19 @@
 //   node scripts/test-repair.mjs --path <repo-relative test path> --evidence "<why the test was wrong>"
 //   node scripts/test-repair.mjs --append --path <repo-relative test path> --evidence "<what new behavior this case pins, and why it is additive>"
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import { dirname } from 'node:path';
 import { matchesGlob, normalizeRepoPath } from '@sterling/schemas';
-import { arg, fail } from './lib/project.mjs';
+import { arg, hasFlag, fail } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
-const isAppend = process.argv.includes('--append');
-const rawPath = arg('--path');
-const evidence = arg('--evidence');
+let isAppend, rawPath, evidence;
+try {
+  isAppend = hasFlag('--append');
+  rawPath = arg('--path');
+  evidence = arg('--evidence');
+} catch (e) {
+  fail(`test-repair: ${e.message}`);
+}
 const target = process.cwd();
 
 if (!rawPath || !rawPath.trim()) {
@@ -78,7 +84,16 @@ if (trimmedEvidence.startsWith('--') || OWN_FLAGS.includes(trimmedEvidence)) {
   );
 }
 
-const configPath = join(target, '.sterling', 'config.json');
+// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+// helper-one-arg-parser, R5): target is process.cwd() here (not caller-
+// controlled), but every .sterling path in a converted writer derives
+// through the helper regardless, per the manifest's zero-lexical-join bar.
+let configPath;
+try {
+  configPath = resolveStoreWritePath(target, '.sterling', 'config.json');
+} catch (e) {
+  fail(`test-repair: ${e.message}`);
+}
 if (!existsSync(configPath)) {
   fail('test-repair: no .sterling/config.json — no configured test_globs to verify the path against; failing closed (P5)');
 }
@@ -99,7 +114,12 @@ if (!matches) {
   );
 }
 
-const eventsPath = join(target, '.sterling', 'transient', 'session-events.json');
+let eventsPath;
+try {
+  eventsPath = resolveStoreWritePath(target, '.sterling', 'transient', 'session-events.json');
+} catch (e) {
+  fail(`test-repair: ${e.message}`);
+}
 mkdirSync(dirname(eventsPath), { recursive: true });
 const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
 const at = new Date().toISOString();

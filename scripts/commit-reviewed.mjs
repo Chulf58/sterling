@@ -158,7 +158,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { arg, fail } from './lib/project.mjs';
+import { arg, hasFlag, fail } from './lib/project.mjs';
 // READ ADAPTER (decision 57984926, campaign slice S2b-1): h22-dispatch-
 // register.mjs now promotes every NEW reviewer-* receipt as a v2 entry
 // (nested reviewer/identity/territory/content_evidence); pre-existing v1
@@ -212,14 +212,23 @@ if (!existsSync(join(target, '.sterling'))) {
   fail('commit-reviewed: not a Sterling project root — no .sterling/ directory under the current working directory');
 }
 
-const message = arg('-m') ?? arg('--message');
-const targetShaArg = arg('--target-sha');
-// PRESENCE, not truthiness (review fix): `-m ""` must still be treated as
-// -m HAVING BEEN GIVEN for the contradiction check below — `if (message)`
-// would silently let `--target-sha ... -m ""` through, since an empty string
-// is falsy. The main flow's own `if (!message)` requirement further down is
-// unaffected; only the contradiction check needed this.
-const messageArgProvided = process.argv.slice(2).includes('-m') || process.argv.slice(2).includes('--message');
+let message, targetShaArg, messageArgProvided;
+try {
+  message = arg('-m') ?? arg('--message');
+  targetShaArg = arg('--target-sha');
+  // PRESENCE, not truthiness (review fix): `-m ""` must still be treated as
+  // -m HAVING BEEN GIVEN for the contradiction check below — `if (message)`
+  // would silently let `--target-sha ... -m ""` through, since an empty string
+  // is falsy. The main flow's own `if (!message)` requirement further down is
+  // unaffected; only the contradiction check needed this. hasFlag(), not a
+  // bare argv.includes: the old exact-token-only check missed `-m=<msg>` /
+  // `--message=<msg>` entirely, so a --target-sha contradiction check could be
+  // bypassed by spelling the message with '=' — the same silent-narrowing
+  // shape board a506e9a7 measured for --lane.
+  messageArgProvided = hasFlag('-m') || hasFlag('--message');
+} catch (e) {
+  fail(`commit-reviewed: ${e.message}`);
+}
 
 // ===========================================================================
 // --waive-bytes "<reason>" (decision 57984926 §2) — the escape hatch the
@@ -248,8 +257,38 @@ const messageArgProvided = process.argv.slice(2).includes('-m') || process.argv.
 //       decision nobody made.
 // ===========================================================================
 const WAIVE_BYTES_REASON_MAX = 500; // adjudicated bound (decision 57984926 §2, conductor adjudication 2026-08-31)
-const waiveBytesProvided = process.argv.slice(2).includes('--waive-bytes');
-const waiveBytesRaw = arg('--waive-bytes');
+// hasFlag() (lib/project.mjs, R5), not a bare argv.includes: the old exact-
+// token-only presence test missed `--waive-bytes=<reason>` entirely — the
+// same silent-narrowing shape board a506e9a7 measured for --lane. hasFlag()
+// ALSO throws on a genuine DUPLICATE (`--waive-bytes a --waive-bytes b`), and
+// that throw is left to propagate as a loud, parser-worded refusal — a
+// duplicate waiver is exactly the ambiguity this script must never resolve
+// silently by picking one occurrence.
+let waiveBytesProvided;
+try {
+  waiveBytesProvided = hasFlag('--waive-bytes');
+} catch (e) {
+  fail(`commit-reviewed: ${e.message}`);
+}
+// arg() REFUSES a split-form value that looks like another flag by throwing
+// — correct in general, but this script already has its OWN, more specific
+// flag-shaped-reason check right below (naming the exact value, matching
+// against THIS CLI's own flag set). Without this catch, arg()'s generic
+// throw would fire first and mask that on-topic refusal with an unrelated
+// parser stack trace. Recovering the raw next-argv token here reproduces
+// arg()'s pre-R5 behavior for this ONE call site — safe to do UNCONDITIONALLY
+// in the catch because hasFlag() above already proved the flag occurs AT
+// MOST once (a duplicate would have thrown there and never reached this
+// line), so a throw here can only be the flag-as-value shape, never a
+// duplicate being silently resolved to first-wins.
+let waiveBytesRaw;
+try {
+  waiveBytesRaw = arg('--waive-bytes');
+} catch {
+  const argv = process.argv.slice(2);
+  const i = argv.indexOf('--waive-bytes');
+  waiveBytesRaw = i !== -1 ? argv[i + 1] : undefined;
+}
 let waiveBytesReason = null;
 if (waiveBytesProvided) {
   if (waiveBytesRaw === undefined) {

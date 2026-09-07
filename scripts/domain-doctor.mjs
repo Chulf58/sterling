@@ -172,15 +172,33 @@ import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore, resolveDomainMounts, droppedKeyPaths, renderCappedPathList } from '@sterling/store';
 import { parseConfig, validateRecord } from '@sterling/schemas';
 import { buildResolver } from './lib/citations.mjs';
+import { arg as sharedArg, hasFlag as sharedHasFlag } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 function fail(msg, code = 2) {
   console.error(`domain-doctor: ${msg}`);
   process.exit(code);
 }
 
+// ONE shared, exact-token parser (decision sanctioned-script-store-writes-one-
+// containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
+// flag-as-value refusal. Same bare-name convenience wrapper this script
+// already offered; `undefined` on absence preserves every existing `?? fail(...)`
+// call site unchanged.
 function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? undefined : process.argv[i + 1];
+  try {
+    return sharedArg(`--${name}`);
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
+function hasFlag(name) {
+  try {
+    return sharedHasFlag(`--${name}`);
+  } catch (e) {
+    fail(e.message);
+  }
 }
 
 const POSIX = (p) => p.replace(/\\/g, '/');
@@ -189,10 +207,19 @@ const POSIX = (p) => p.replace(/\\/g, '/');
  *  plus the Windows-side home when running under WSL (the machine's other
  *  launcher context — the flip between the two is the incident's leading cause). */
 function defaultRoots() {
-  const roots = [join(homedir(), '.sterling', 'domains')];
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): homedir() always exists, so the helper's
+  // realpath step never trips here. The alternate Windows-side home may not
+  // exist at all on this machine (not running under WSL) — existence is
+  // checked BEFORE the helper runs, because the helper's realpath step
+  // requires the root itself to exist.
+  const roots = [resolveStoreWritePath(homedir(), '.sterling', 'domains')];
   const user = basename(homedir());
-  const winHome = join('/mnt/c/Users', user, '.sterling', 'domains');
-  if (existsSync(winHome)) roots.push(winHome);
+  const winHomeRoot = join('/mnt/c/Users', user);
+  if (existsSync(winHomeRoot)) {
+    const winHome = resolveStoreWritePath(winHomeRoot, '.sterling', 'domains');
+    if (existsSync(winHome)) roots.push(winHome);
+  }
   return roots;
 }
 
@@ -651,7 +678,14 @@ function storeFilesUnder(rootList, { onInaccessible = null } = {}) {
 
 function projectContext(projectDir) {
   if (!projectDir) fail('--project <dir> is required');
-  const dotDir = join(projectDir, '.sterling');
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
+  let dotDir;
+  try {
+    dotDir = resolveStoreWritePath(projectDir, '.sterling');
+  } catch (e) {
+    fail(e.message);
+  }
   const configPath = join(dotDir, 'config.json');
   if (!existsSync(configPath)) fail(`no Sterling config at ${POSIX(configPath)} — is this an init'd project?`);
   // store.db is the standard name; fall back to the single *.db in .sterling so
@@ -917,7 +951,7 @@ function writeMigrateJournal(journalPath, journal, { beforeAnyWrite }) {
 function migrate() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
-  const apply = process.argv.includes('--apply');
+  const apply = hasFlag('apply');
   if (!existsSync(from)) fail(`no source store at ${from}`);
   // THE FIFTH REFUSAL PATH (outside-model review, 2026-08-27): this message
   // predates NO_OPERABLE_ROUTE and used to promise that "'adopt' creates a
@@ -1616,8 +1650,8 @@ function supersessionPointers(dbPath) {
 function adopt() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
-  const apply = process.argv.includes('--apply');
-  const createOnly = process.argv.includes('--create-only');
+  const apply = hasFlag('apply');
+  const createOnly = hasFlag('create-only');
   // THE TWO FLAGS ARE ONE GESTURE, and the pairing is required in both
   // directions. `--create-only` exists so nobody can reach a write by typing
   // the flag they already know: bare `--apply` is what an operator types when
@@ -2362,7 +2396,7 @@ function restore() {
   const { config, storePath } = projectContext(arg('project'));
   const tombstoneId = arg('tombstone') ?? fail('--tombstone <id> is required');
   const domain = arg('domain') ?? fail('--domain <name> is required');
-  const apply = process.argv.includes('--apply');
+  const apply = hasFlag('apply');
 
   const info = tombstoneInfo(storePath, tombstoneId);
   if (info.error) fail(info.error);
@@ -2418,7 +2452,23 @@ function restore() {
     );
   }
 
-  const domainDb = POSIX(config.domain_paths[domain] ?? join(homedir(), '.sterling', 'domains', domain, 'sterling.db'));
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5) for the DEFAULT path only: an admin-configured
+  // config.domain_paths[domain] is an explicit, already-trusted absolute path
+  // with no fixed root to validate against, so it passes through unchanged.
+  // The default join was previously a bare lexical join of `domain` (a CLI
+  // argument) under the user's home directory — vulnerable to both a `..`
+  // segment in --domain and a pre-positioned symlink under
+  // ~/.sterling/domains, the same class of bug board a416e276 measured in
+  // no-capture.mjs.
+  let domainDb;
+  try {
+    domainDb = POSIX(
+      config.domain_paths[domain] ?? resolveStoreWritePath(homedir(), '.sterling', 'domains', domain, 'sterling.db')
+    );
+  } catch (e) {
+    fail(e.message);
+  }
   const now = new Date().toISOString();
   // content verbatim from the tombstone body; envelope rebuilt exactly as
   // knowledge_promote builds it, except the id is the DANGLING one — restoring
@@ -2544,7 +2594,14 @@ function storePresence(dbPath) {
  * then a lone `*.db`, matching projectContext's older fallback.
  */
 function scopeAuditProjectContext(projectDir) {
-  const dotDir = join(projectDir, '.sterling');
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
+  let dotDir;
+  try {
+    dotDir = resolveStoreWritePath(projectDir, '.sterling');
+  } catch (e) {
+    fail(e.message);
+  }
   const configPath = join(dotDir, 'config.json');
   if (!existsSync(configPath)) fail(`no Sterling config at ${POSIX(configPath)} — is this an init'd project?`);
   const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
@@ -2833,7 +2890,7 @@ function scopeAuditStore(target) {
 }
 
 function scopeAudit() {
-  const asJson = process.argv.includes('--json');
+  const asJson = hasFlag('json');
   const { targets: declaredTargets, rootList, strandedScan, projectDir, projectStorePath, projectStoreNote } = scopeAuditTargets();
 
   // ONE FILE DECLARED TWICE UNDER THE SAME NAME IS ONE STORE, NOT AN AMBIGUITY.

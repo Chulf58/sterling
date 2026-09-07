@@ -29,30 +29,39 @@
 // cover. H10's printed remedy only ever used the bare form, so nothing
 // documented relied on it. The event is written to the invoking project only.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
-import { join, dirname } from 'node:path';
-import { arg, fail } from './lib/project.mjs';
+import { dirname } from 'node:path';
+import { arg, hasFlag, fail } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 import { NO_CAPTURE_LANES } from '@sterling/schemas';
 
-const reason = arg('--reason');
-// Presence in EITHER word form: `--target <dir>` and `--target=<dir>`. The old
-// parser (arg(), lib/project.mjs) only ever recognized the split form, so the
-// equals form never redirected anything — but an exact-token check would let it
-// pass SILENTLY, and a silent accept is the outcome this refusal exists to
-// prevent (board 5e36fae1 asked for a loud refusal, not merely a safe one).
-if (process.argv.slice(2).some((a) => a === '--target' || a.startsWith('--target='))) {
-  fail('no-capture: --target was removed: the event is written to the invoking project only.');
+let reason, laneGiven, laneArg;
+try {
+  reason = arg('--reason');
+  // Presence in EITHER word form: `--target <dir>` and `--target=<dir>`.
+  // hasFlag() (lib/project.mjs) recognizes both spellings by construction now,
+  // so this is no longer a bespoke scan — an exact-token check would let the
+  // equals form pass SILENTLY, and a silent accept is the outcome this
+  // refusal exists to prevent (board 5e36fae1 asked for a loud refusal, not
+  // merely a safe one).
+  if (hasFlag('--target')) {
+    fail('no-capture: --target was removed: the event is written to the invoking project only.');
+  }
+  // Presence, not value: `--lane` with a missing or unrecognized value is a
+  // refusal, not a silent fall-through to the bare default — a mistyped lane
+  // must never be read as a narrower OR a broader claim than the one intended
+  // (P5: the refusal names its discriminator). Absence of the flag entirely is
+  // the bare declaration, which H10 reads as the capture lane. hasFlag()
+  // recognizes `--lane=research` as GIVEN (board a506e9a7 — the old bare
+  // `argv.includes('--lane')` presence test missed the equals form entirely).
+  laneGiven = hasFlag('--lane');
+  laneArg = arg('--lane');
+} catch (e) {
+  fail(`no-capture: ${e.message}`);
 }
 if (!reason || !reason.trim()) {
   fail('no-capture: --reason "<why>" is required (a false declaration is drift, so say why there is nothing durable)');
 }
 
-// Presence, not value: `--lane` with a missing or unrecognized value is a
-// refusal, not a silent fall-through to the bare default — a mistyped lane must
-// never be read as a narrower OR a broader claim than the one intended (P5: the
-// refusal names its discriminator). Absence of the flag entirely is the bare
-// declaration, which H10 reads as the capture lane.
-const laneGiven = process.argv.slice(2).includes('--lane');
-const laneArg = arg('--lane');
 if (laneGiven && (laneArg === undefined || !NO_CAPTURE_LANES.includes(laneArg))) {
   fail(
     `no-capture: --lane ${laneArg === undefined ? '(missing value)' : `'${laneArg}'`} is not a valid duty lane — use one of ${NO_CAPTURE_LANES.join(' | ')}. ` +
@@ -62,7 +71,16 @@ if (laneGiven && (laneArg === undefined || !NO_CAPTURE_LANES.includes(laneArg)))
 }
 const lane = laneGiven ? laneArg : undefined;
 
-const eventsPath = join(process.cwd(), '.sterling', 'transient', 'session-events.json');
+let eventsPath;
+try {
+  // CONTAINMENT (board a416e276): a pre-positioned symlink at `.sterling`,
+  // `.sterling/transient`, or the file itself no longer redirects this write —
+  // resolveStoreWritePath refuses any symlink component beneath cwd on the way
+  // to the target, naming both resolved paths, before anything is written.
+  eventsPath = resolveStoreWritePath(process.cwd(), '.sterling', 'transient', 'session-events.json');
+} catch (e) {
+  fail(`no-capture: ${e.message}`);
+}
 mkdirSync(dirname(eventsPath), { recursive: true });
 const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
 const at = new Date().toISOString();

@@ -40,7 +40,7 @@
 // the plan file still says what it said at approval (that is exactly what
 // MODIFIED discloses).
 import { existsSync, rmSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import {
   LOCK_FILE,
   PATH_MAX,
@@ -58,23 +58,35 @@ import {
   writeLock,
   writeMarker,
 } from './hooks/lib/plan-lock.mjs';
+import { arg as sharedArg, hasFlag, fail as sharedFail } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 const argv = process.argv.slice(2);
 
-// Same shape as scripts/rotation-note.mjs / scripts/lib/project.mjs: a flag's
-// value is the next argv entry, absent is null. No new parser.
+// ONE shared, exact-token parser (decision sanctioned-script-store-writes-one-
+// containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
+// and a split-form value that is itself a flag is never read as a value. Same
+// bare-name convenience wrapper this script already offered; the value is
+// null when absent (this script's existing null-check convention), never
+// undefined, so no downstream comparison needed to change.
 function arg(name) {
-  const i = argv.indexOf(`--${name}`);
-  return i > -1 && argv[i + 1] !== undefined && !String(argv[i + 1]).startsWith('--') ? argv[i + 1] : null;
+  try {
+    return sharedArg(`--${name}`, argv) ?? null;
+  } catch (e) {
+    refuse(e.message);
+  }
 }
 
 function has(name) {
-  return argv.includes(`--${name}`);
+  try {
+    return hasFlag(`--${name}`, argv);
+  } catch (e) {
+    refuse(e.message);
+  }
 }
 
 function refuse(message) {
-  process.stderr.write(`plan-lock: ${message}\n`);
-  process.exit(2);
+  sharedFail(`plan-lock: ${message}`, 2);
 }
 
 const cwd = process.cwd();
@@ -84,7 +96,17 @@ if (!isSterlingProject(cwd)) {
   refuse(`${cwd} is not an initialized Sterling project (no .sterling/sterling.db) — run from the project root`);
 }
 const sterlingDir = sterlingDirOf(cwd);
-const lockPath = join(sterlingDir, LOCK_FILE);
+// CONTAINMENT (decision sanctioned-script-store-writes-one-containment-helper-
+// one-arg-parser, R5): this is the ONE path scripts/plan-lock.mjs itself
+// writes to directly (the --release rmSync below) — the shared read/write
+// primitives in ./hooks/lib/plan-lock.mjs (writeLock/writeMarker, keyed off
+// sterlingDir) are that module's own locked machinery and stay untouched here.
+let lockPath;
+try {
+  lockPath = resolveStoreWritePath(cwd, '.sterling', LOCK_FILE);
+} catch (e) {
+  refuse(e.message);
+}
 
 /**
  * Current lock bytes as a comparable token — null when ABSENT — refusing when
@@ -180,6 +202,11 @@ if (verb === 'release') {
   // was changed" — the refusal must state exactly what landed and what did not,
   // or the operator repairs the wrong half.
   try {
+    // CONTAINMENT (R5): the FULL leaf path — writeMarker only takes
+    // (sterlingDir, name) and joins them internally (out of this slice's
+    // territory, ./hooks/lib/plan-lock.mjs), so the leaf is validated here,
+    // immediately before the call, rather than left unchecked.
+    resolveStoreWritePath(cwd, '.sterling', 'transient', 'plan-lock-released.json');
     writeMarker(sterlingDir, 'plan-lock-released.json', {
       reason,
       released_title: sanitizeForContext(read.lock?.title, TITLE_MAX) || null,
@@ -277,6 +304,9 @@ try {
 const replaced = Boolean(existing.lock || existing.malformed);
 if (replaced) {
   try {
+    // CONTAINMENT (R5): same reasoning as the release marker above — validate
+    // the FULL leaf path here, immediately before the call.
+    resolveStoreWritePath(cwd, '.sterling', 'transient', 'plan-lock-previous.json');
     writeMarker(sterlingDir, 'plan-lock-previous.json', {
       title: sanitizeForContext(existing.lock?.title, TITLE_MAX) || (existing.malformed ? '(unusable lock record)' : '(untitled)'),
       plan_path: sanitizeForContext(existing.lock?.plan_path, PATH_MAX) || null,
