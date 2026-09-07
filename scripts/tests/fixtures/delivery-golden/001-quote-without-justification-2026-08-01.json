@@ -1,0 +1,10 @@
+{
+  "event": "PostToolUse",
+  "payload": { "tool_name": "Read", "tool_input": { "file_path": "CLAUDE.md" } },
+  "expected_ids": [
+    "921c4088-e70e-4648-a2ad-c5f827e0d1af",
+    "b10bfebd-688f-47ae-8260-2f62d75a0441"
+  ],
+  "expected_absent_ids": [],
+  "source_incident": "2026-08-01: H19 delivered a concept article that quoted a ruling WITHOUT its justification clause, reproducing at the delivery surface the exact gap the article existed to close (CLAUDE.md 'quote carries its why' clause). Fixed 2026-08-04 with decision 921c4088 and anti_pattern b10bfebd, both keyed to CLAUDE.md — this fixture pins that a Read of CLAUDE.md still delivers both."
+}

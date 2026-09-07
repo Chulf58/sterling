@@ -44,6 +44,46 @@
 // on others — the point pinned here is behavioral, not an accident of the
 // module loader, so it is still a meaningful red assertion once the file
 // exists). This is the correct and expected shape for this spec-only phase.
+//
+// ===========================================================================
+// R1 PIN RE-CUT (contract sheet §1.1 consumer policies, §6 A1/A2/A6/A9).
+// H26's liveness notion is replaced by the TRI-STATE dispatchStatus:
+//   presumed-active    -> warn (as today).
+//   unknown            -> ALSO warn, disclosing [dispatch_status_unknown], the
+//                         entry's measured age, that the overlap is RECORDED IN
+//                         THE REGISTER rather than observed running, and the
+//                         killed-dispatch caveat. It never asserts liveness.
+//   inactive-confirmed -> skipped.
+//   register unreadable-> one [register_unavailable] line, never an all-clear
+//                         and never a per-agent enumeration.
+//
+// RETIRE/RE-CUT ledger for this file:
+//   RETIRED: 'H26 SILENT: an overlapping entry that is STALE under the default 60-minute TTL never warns'
+//     — an expired lease is now unknown, not dead; suppressing the warning is the
+//       measured harm (board 0d1cfbc2). Re-cut as R1-A81/A82.
+//   RETIRED: 'H26 SILENT: an overlapping entry from a FOREIGN session never warns'
+//     — A2 removes other-session pruning; those entries classify unknown/other-session
+//       and warn like any other unknown. Re-cut as R1-A83.
+//   RETIRED: 'H26 SILENT: corrupt register JSON degrades to no advisory' and
+//            'H26 SILENT: register JSON that parses but is not an array — no advisory'
+//     — silence on an unreadable register is the all-clear the decision forbids.
+//       Re-cut as R1-A85/A86; the never-deny half is kept intact.
+//   RETIRED: 'H26 config: a small configured stale_minutes makes an entry stale that
+//            would be live under the default 60'
+//     — the lease no longer decides WHETHER to warn, only WHICH STATUS is claimed.
+//       Re-cut as R1-A84.
+//   CONVERTED: assertOverlapWarning's /warn.?only/i prose assertion -> exit 0 plus
+//     the advisory's [code] token (§4). The remedy assertion is KEPT as a required
+//     fact: an advisory with no remedy is the noise P1 forbids.
+//
+// ABSENT REGISTER, RESOLVED AMBIGUITY (stated, not silently taken): a MISSING
+// register file stays SILENT here. H26 does not render a statement about the
+// in-flight set — it acts on overlaps — so its silence is not an all-clear,
+// whereas inFlightAdvisory's and rotation-note's silence would be (those two
+// pin absent -> unavailable). What must never be silent is a register that
+// EXISTS and cannot be read: a real anomaly, not the normal post-SessionStart
+// state.
+// ===========================================================================
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -154,6 +194,10 @@ function tokenRe(token) {
   return new RegExp(esc.replace(/\//g, '\\/'), 'i');
 }
 
+// §4: a refusal/disclosure is asserted by its [code] token, never by sentence text.
+const code = (c) => new RegExp('\\[' + c + '\\]');
+const ANY_CODE = /\[[a-z][a-z0-9_]*\]/;
+
 // Asserts the silent-allow shape: exit 0, no advisory content at all.
 function assertSilent(r) {
   assert.equal(r.code, 0, `expected exit 0 (silent case), got ${r.code}; stderr: ${r.stderr}`);
@@ -174,8 +218,11 @@ function assertOverlapWarning(r, { paths, entries }) {
   for (const [agentType, agentId] of entries) {
     assert.ok(ctx.includes(`${agentType}:${agentId}`), `advisory must name the overlapping dispatch as '${agentType}:${agentId}'; got: ${ctx}`);
   }
-  assert.match(ctx, /warn.?only/i, 'advisory must state it is warn-only');
+  // CONVERTED (§4): warn-only is pinned by the exit code above, and the
+  // advisory's identity by its [code] token — never by a prose sentence.
+  assert.match(ctx, ANY_CODE, `every advisory line must carry its code token; got: ${ctx}`);
   assert.match(ctx, /await|re-scope|disjoint/i, 'advisory must suggest the remedy (await the in-flight agent or re-scope)');
+  assert.doesNotMatch(ctx, /NaN/, 'no fabricated age ever reaches the reader');
 }
 
 // ==========================================================================
@@ -206,23 +253,41 @@ test('H26 SILENT: missing register file entirely — no advisory', () => {
   }
 });
 
-test('H26 SILENT: corrupt register JSON degrades to no advisory (never a crash, never a denial)', () => {
+// R1-A85 (re-cut from 'corrupt register JSON degrades to no advisory'): a
+// register that EXISTS and cannot be read may not read as "no overlaps". The
+// never-crash / never-deny half of the retired pin is kept verbatim.
+// SABOTAGE: degrade a JSON parse failure to an empty entry list (the pre-rebuild
+// behaviour) -> the [register_unavailable] assertion goes red while the H26
+// SILENT cases with a readable register stay green.
+test('R1-A85: a CORRUPT register is disclosed once as [register_unavailable] — never a silent all-clear, never a crash, never a denial', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, '{ this is not valid json at all');
     const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
-    assertSilent(r);
+    assert.equal(r.code, 0, `still advisory-only; stderr: ${r.stderr}`);
+    const ctx = parseAdditionalContext(r);
+    const lines = ctx.split('\n').filter((l) => code('register_unavailable').test(l));
+    assert.equal(lines.length, 1, `exactly one unavailability line, found ${lines.length}: ${ctx}`);
+    assert.match(lines[0], /corrupt/, 'the line names WHICH unavailability it is');
   } finally {
     cleanup();
   }
 });
 
-test('H26 SILENT: register JSON that parses but is not an array — no advisory', () => {
+// R1-A86 (re-cut from 'register JSON that parses but is not an array'): the
+// same verdict for a shape that parses but is not a register — and it must not
+// mine the object for agent identities it never actually read.
+// SABOTAGE: coerce a non-array to [] -> the token assertion goes red.
+test('R1-A86: a register that parses but is NOT an array is [register_unavailable] and enumerates no agents', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeRegisterRaw(dir, { agent_id: 'not-an-array' });
+    writeRegisterRaw(dir, { agent_id: 'not-an-array', agent_type: 'coder' });
     const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
-    assertSilent(r);
+    assert.equal(r.code, 0);
+    const ctx = parseAdditionalContext(r);
+    assert.match(ctx, code('register_unavailable'));
+    assert.ok(!ctx.includes('not-an-array'), `an unreadable register yields no per-agent enumeration; got: ${ctx}`);
+    assert.doesNotMatch(ctx, code('dispatch_status_unknown'), 'unavailable is ONE disclosure, never N per-agent unknowns');
   } finally {
     cleanup();
   }
@@ -250,11 +315,96 @@ test('H26 SILENT: live entries whose files have zero intersection with the outgo
   }
 });
 
-test('H26 SILENT: an overlapping entry that is STALE under the default 60-minute TTL never warns', () => {
+// R1-A81 (re-cut from 'a STALE entry never warns'): board 0d1cfbc2's measured
+// harm ran the other way — the register cannot observe a kill, so an expired
+// lease is UNKNOWN and the overlap still matters. What changes is the CLAIM.
+// SABOTAGE: restore the TTL filter (drop out-of-lease entries before the
+// comparison) -> the advisory is emitted empty and this goes red on its first
+// assertion, while every presumed-active WARN case stays green.
+test('R1-A81: an out-of-lease overlapping entry STILL warns, disclosed as unknown — an expired lease is not a death certificate', () => {
   const { dir, cleanup } = makeProject();
   try {
-    // No config.json written — default stale_minutes is 60; 90 minutes ago is stale.
+    // No config.json written — default lease is 60 minutes; 90 minutes ago is out of lease.
     writeRegisterRaw(dir, [liveEntry('a1', 'coder', ['src/shared/util.mjs'], { minutesAgo: 90 })]);
+    const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
+    assertOverlapWarning(r, { paths: ['src/shared/util.mjs'], entries: [['coder', 'a1']] });
+    const ctx = parseAdditionalContext(r);
+    assert.match(ctx, code('dispatch_status_unknown'), `the unknown status carries its code; got: ${ctx}`);
+    assert.match(ctx, /coder:a1 \(registered 1h30m/, 'the ref carries the MEASURED age of the register entry');
+  } finally {
+    cleanup();
+  }
+});
+
+// R1-A82: what the advisory MAY claim on the evidence it actually has (parked
+// pin source PINS-h26-dispatch-overlap.txt, converted to the tri-state wording).
+// SABOTAGE: restore the old wording ('Overlapping live dispatch(es)', no caveat)
+// -> the caveat, the killed-dispatch clause and the doesNotMatch all go red.
+test('R1-A82: the unknown overlap says it is RECORDED IN THE REGISTER, names the killed-dispatch case, and never asserts the holder is live', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('a172f512961a5a27d', 'test-writer', ['src/parser.mjs'], { minutesAgo: 90 })]);
+    const r = runHook(taskInput(dir, { prompt: 'Fix the parser in src/parser.mjs and keep the tests green.' }), dir);
+    const ctx = parseAdditionalContext(r);
+    assert.equal(r.code, 0, `warn-only, never a block — stderr=${r.stderr}`);
+    assert.match(ctx, /H26 DISPATCH OVERLAP ADVISORY/, 'the overlap still warns — this pin is about WHAT it claims');
+    assert.match(ctx, /test-writer:a172f512961a5a27d \(registered 1h30m/, `the holder is cited WITH its age — ctx=${ctx}`);
+    assert.match(ctx, /RECORDED IN THE REGISTER, not observed running/, `what "in flight" actually means — ctx=${ctx}`);
+    assert.match(ctx, /KILLED or\s+interrupted dispatch/, `the killed-dispatch case is named — ctx=${ctx}`);
+    assert.doesNotMatch(ctx, /Overlapping live dispatch\(es\)/, `it never ASSERTS liveness it cannot observe — ctx=${ctx}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// R1-A82a CONTROL (parked pin, kept): the age is a MEASUREMENT, not a constant
+// string that would satisfy A81/A82 forever.
+// SABOTAGE: replace the '<1m' branch with the constant 'registered 12m ago' ->
+// red here only.
+test('R1-A82a CONTROL: a just-registered entry is cited as "<1m" and as presumed-active — the age and the status are both measured', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('freshagent0000001', 'coder', ['src/parser.mjs'], { minutesAgo: 0 })]);
+    const r = runHook(taskInput(dir, { prompt: 'Fix the parser in src/parser.mjs and keep the tests green.' }), dir);
+    const ctx = parseAdditionalContext(r);
+    assert.equal(r.code, 0);
+    assert.match(ctx, /coder:freshagent0000001 \(registered <1m/, `ctx=${ctx}`);
+    assert.match(ctx, /presumed-active/, 'a fresh same-session entry is presumed active, not unknown');
+    assert.doesNotMatch(ctx, code('dispatch_status_unknown'), 'and it carries no uncertainty disclosure');
+  } finally {
+    cleanup();
+  }
+});
+
+// R1-A83 (re-cut from 'a FOREIGN session entry never warns'): A2 stops pruning
+// other-session entries on write, so H26 now meets them and must warn on them
+// as unknown/other-session — one live session per worktree is the contract, and
+// a foreign entry is exactly the shape that contract cannot vouch for.
+// SABOTAGE: filter entries by session before the comparison -> the advisory is
+// emitted empty and this goes red while R1-A82a stays green.
+test('R1-A83: a FOREIGN-SESSION overlapping entry warns as unknown — never silently filtered, never claimed live', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [liveEntry('a1', 'coder', ['src/shared/util.mjs'], { sessionId: 's2' })]);
+    const r = runHook(taskInput(dir, { session_id: 's1', prompt: 'please modify src/shared/util.mjs today' }), dir);
+    assertOverlapWarning(r, { paths: ['src/shared/util.mjs'], entries: [['coder', 'a1']] });
+    assert.match(parseAdditionalContext(r), code('dispatch_status_unknown'));
+  } finally {
+    cleanup();
+  }
+});
+
+// R1-A87: an ENDED entry is inactive-confirmed and is SKIPPED — the one status
+// that legitimately silences an overlap, because a terminal event was observed.
+// R1-A82a is its control: the identical fixture without `ended` warns.
+// SABOTAGE: treat `ended` as ordinary metadata -> the entry warns again and the
+// silence assertion goes red.
+test('R1-A87: an ENDED (inactive-confirmed) overlapping entry is skipped — the only status that silences an overlap', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [
+      { ...liveEntry('stopped-1', 'coder', ['src/shared/util.mjs'], { minutesAgo: 0 }), ended: { at: agoISO(0), event: 'subagent-stop' } },
+    ]);
     const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
     assertSilent(r);
   } finally {
@@ -262,12 +412,25 @@ test('H26 SILENT: an overlapping entry that is STALE under the default 60-minute
   }
 });
 
-test('H26 SILENT: an overlapping entry from a FOREIGN session never warns', () => {
+// R1-A88: an entry whose `at` cannot be parsed is unknown/clock-unreadable. It
+// still warns (it may be a real holder) and it never prints a fabricated age.
+// The retired parked pin asserted the opposite (the TTL filter dropped it
+// entirely); the tri-state admits it and labels it honestly.
+// SABOTAGE: fall back to Date.now() for an unparseable `at` -> the entry reads
+// as fresh, 'age unreadable' disappears and this goes red.
+test('R1-A88: an entry with an unparseable `at` warns as unknown and prints "age unreadable" — never NaN, never a fabricated age', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeRegisterRaw(dir, [liveEntry('a1', 'coder', ['src/shared/util.mjs'], { sessionId: 's2' })]);
-    const r = runHook(taskInput(dir, { session_id: 's1', prompt: 'please modify src/shared/util.mjs today' }), dir);
-    assertSilent(r);
+    writeRegisterRaw(dir, [
+      { agent_id: 'badclock00000001', agent_type: 'coder', session_id: 's1', files: ['src/parser.mjs'], at: 'whenever', attribution: 'block' },
+    ]);
+    const r = runHook(taskInput(dir, { prompt: 'Fix the parser in src/parser.mjs and keep the tests green.' }), dir);
+    const ctx = parseAdditionalContext(r);
+    assert.equal(r.code, 0);
+    assert.doesNotMatch(ctx, /NaN/, `no fabricated age ever reaches the reader — ctx=${ctx}`);
+    assert.match(ctx, /coder:badclock00000001/, 'the entry is admitted, not silently dropped');
+    assert.match(ctx, /age unreadable/);
+    assert.match(ctx, code('dispatch_status_unknown'));
   } finally {
     cleanup();
   }
@@ -370,24 +533,34 @@ test('H26 SILENT (exclusion wins): a path under .sterling/ appearing in BOTH the
 // Config: dispatch_register.stale_minutes — spec item 8
 // ==========================================================================
 
-test('H26 config: a small configured stale_minutes makes an entry stale that would be live under the default 60', () => {
+// R1-A84 (re-cut from 'a small configured stale_minutes makes an entry stale'):
+// the configured lease no longer decides WHETHER to warn — it decides which
+// STATUS is claimed. Same fixture, same overlap, two different claims.
+// SABOTAGE: hardcode the lease to the 60-minute default (ignore config) -> the
+// unknown assertion goes red while the paired default-lease test below stays
+// green, which is what proves the lease is configuration rather than a constant.
+test('R1-A84: a small configured lease turns the SAME overlap from presumed-active into unknown — it never turns the warning off', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeConfig(dir, { dispatch_register: { stale_minutes: 2 } });
     writeRegisterRaw(dir, [liveEntry('sub-1', 'coder', ['src/shared/util.mjs'], { minutesAgo: 5 })]);
     const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
-    assertSilent(r);
+    assertOverlapWarning(r, { paths: ['src/shared/util.mjs'], entries: [['coder', 'sub-1']] });
+    assert.match(parseAdditionalContext(r), code('dispatch_status_unknown'), 'out of the configured lease -> unknown');
   } finally {
     cleanup();
   }
 });
 
-test('H26 config: with no config.json at all, the default stale_minutes (60) applies — a 30-minute-old entry is still live and warns', () => {
+test('R1-A84a: with no config.json at all the default 60-minute lease applies — a 30-minute-old entry is presumed-active and carries no uncertainty', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [liveEntry('sub-1', 'coder', ['src/shared/util.mjs'], { minutesAgo: 30 })]);
     const r = runHook(taskInput(dir, { prompt: 'please modify src/shared/util.mjs today' }), dir);
     assertOverlapWarning(r, { paths: ['src/shared/util.mjs'], entries: [['coder', 'sub-1']] });
+    const ctx = parseAdditionalContext(r);
+    assert.match(ctx, /presumed-active/);
+    assert.doesNotMatch(ctx, code('dispatch_status_unknown'));
   } finally {
     cleanup();
   }
@@ -615,6 +788,36 @@ test('H26 SILENT: a live review-territory entry poisoned with claimed_glob_prefi
     const r = runHook(taskInput(dir, { prompt: 'please modify src/b.mjs today' }), dir);
     assertSilent(r);
   } finally { cleanup(); }
+});
+
+// R1-A89 (A6): every H26 advisory line carries a [snake_case] code token, on
+// every status it can emit. Asserted as a SHAPE, not against a fixed code list,
+// because the closed CODES set the sheet names has no member for the ordinary
+// overlap advisory — flagged in the R1 report rather than invented here.
+// SABOTAGE: render any one advisory line through a bare template string instead
+// of the shared render() -> that line loses its token and this goes red.
+test('R1-A89: every emitted H26 advisory line carries its [code] token — no untokened advisory prose', () => {
+  const cases = [];
+  const mk = (entries, prompt) => {
+    const p = makeProject();
+    writeRegisterRaw(p.dir, entries);
+    cases.push([p, taskInput(p.dir, { prompt })]);
+  };
+  try {
+    mk([liveEntry('fresh-1', 'coder', ['src/shared/util.mjs'], { minutesAgo: 0 })], 'please modify src/shared/util.mjs today');
+    mk([liveEntry('old-1', 'coder', ['src/shared/util.mjs'], { minutesAgo: 90 })], 'please modify src/shared/util.mjs today');
+    mk([liveEntry('foreign-1', 'coder', ['src/shared/util.mjs'], { sessionId: 's2' })], 'please modify src/shared/util.mjs today');
+    mk('{not json', 'please modify src/shared/util.mjs today');
+
+    for (const [{ dir }, input] of cases) {
+      const ctx = parseAdditionalContext(runHook(input, dir));
+      const lines = ctx.split('\n').filter((l) => l.trim().length > 0);
+      assert.ok(lines.length > 0, 'each of these shapes must emit something');
+      assert.ok(lines.some((l) => ANY_CODE.test(l)), `the advisory must carry a code token; got: ${ctx}`);
+    }
+  } finally {
+    for (const [p] of cases) p.cleanup();
+  }
 });
 
 test('H26 WARN control: the SAME claimed_glob_prefixes:["src"] with files_source absent (legacy) still warns via the prefix', () => {

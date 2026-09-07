@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, isAbsolute, join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { parseConfig, RECORD_TYPES } from '@sterling/schemas';
@@ -76,6 +76,11 @@ const SERVED_TOOLS = [
   'run_escalate',
   'agent_exit',
   'run_signal',
+  // enforcement-taint front door: clears the taint latch (or, with the
+  // default adopt:false, reports why there is nothing to discharge). A FRONT
+  // DOOR, not an authority boundary — the MCP server has no authenticated
+  // caller identity (see enforcement-reconcile-tool.test.ts).
+  'enforcement_reconcile',
   // maintenance_enqueue deliberately unregistered — decision 6269b714:
   // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
@@ -125,6 +130,94 @@ test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom st
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('main.ts (board b8639752): a RELATIVE --store argument resolves to an ABSOLUTE storePath', () => {
+  // WHITE-BOX BY DESIGN: board b8639752 states main.ts now derives
+  // `storePath = resolve(storePathArg)`. Importing main.js runs the stdio
+  // entry (per the dispatch brief), so this pin cannot spawn a child that
+  // just runs main.js and inspect its stdout the way a black-box test would —
+  // and a black-box observation of WHERE files land would not discriminate
+  // this fix anyway: Node's fs layer resolves a relative path against cwd
+  // transparently regardless of whether resolve() was ever called on the
+  // JS-level string first, so "the db file ended up in the right place" is
+  // true under BOTH the buggy and the fixed implementation. The only
+  // observable that actually discriminates is the exported binding's VALUE.
+  //
+  // A tiny wrapper script (not main.js itself) is spawned instead: under ESM
+  // top-level await, if main.js's top level does `await server.connect(...)`,
+  // the wrapper's own `import { storePath } from ...` line does NOT resume
+  // until that await settles — so the export is read AFTER connect(),
+  // not before it. This pin works anyway for the reason stated below (b):
+  // the stdio transport's connect() resolves once it starts listening,
+  // without waiting on an actual client handshake, so that await settles
+  // quickly and the wrapper still reads the export, prints it, and exits
+  // promptly, never exchanging a real MCP message with the transport.
+  //
+  // ASSUMPTIONS THIS PIN CANNOT VERIFY WITHOUT READING main.ts (H4 read
+  // wall) — stated here rather than silently relied on: (a) main.ts parses
+  // `--store <path>` from `process.argv` positionally (slice(2)-shaped),
+  // not keyed to `process.argv[1]` naming main.js specifically — the sibling
+  // '${...}' refusal test above spawns main.js directly and never exercises
+  // this, so it does not cover the assumption either; (b) the stdio
+  // transport's connect() resolves once it starts listening, without
+  // blocking on an actual client handshake (standard MCP SDK behavior) — if
+  // either assumption is wrong, this pin will hang until its timeout and
+  // fail loud (never silently pass for the wrong reason).
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-relstore-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    // A real, valid sqlite file at the relative path's target, so whatever
+    // early store-open main.ts performs succeeds rather than throwing before
+    // the export is ever populated.
+    new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
+
+    const mainJs = join(dirname(fileURLToPath(import.meta.url)), '..', 'main.js');
+    const mainJsUrl = pathToFileURL(mainJs).href;
+    const probePath = join(dir, 'probe.mjs');
+    writeFileSync(
+      probePath,
+      `import { storePath } from ${JSON.stringify(mainJsUrl)};\n` +
+        `process.stdout.write(JSON.stringify({ storePath }));\n` +
+        `process.exit(0);\n`
+    );
+    const relStorePath = join('.sterling', 'sterling.db');
+    const r = spawnSync(process.execPath, [probePath, '--store', relStorePath], {
+      cwd: dir,
+      encoding: 'utf8',
+      timeout: 15_000,
+    });
+    assert.equal(
+      r.signal,
+      null,
+      `probe must not be killed by the timeout — a hang here means one of this pin's stated assumptions about main.ts's shape does not hold, not that the fix is absent. stdout=${r.stdout} stderr=${r.stderr}`
+    );
+    assert.equal(r.status, 0, `probe must exit cleanly — stderr=${r.stderr}`);
+    let parsed: { storePath?: string } = {};
+    try {
+      parsed = JSON.parse(r.stdout || '{}');
+    } catch {
+      assert.fail(`probe did not print parseable JSON — stdout=${r.stdout} stderr=${r.stderr}`);
+    }
+    assert.ok(parsed.storePath, 'main.ts must export a non-empty storePath');
+    assert.ok(
+      isAbsolute(parsed.storePath!),
+      `main.ts must resolve a RELATIVE --store argument to an ABSOLUTE storePath (board b8639752) — got ${parsed.storePath}`
+    );
+    assert.equal(
+      parsed.storePath,
+      join(dir, relStorePath),
+      'the absolute storePath must resolve against the SERVER PROCESS cwd it was spawned with'
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// Named sabotage: revert main.ts to `storePath = storePathArg` (drop the
+// resolve() call) — the exported value stays the literal relative string
+// '.sterling/sterling.db', `isAbsolute(parsed.storePath)` goes false, and
+// this pin goes red on that assertion specifically (the earlier
+// non-empty-export and clean-exit assertions stay green, proving the probe
+// itself still runs correctly under the sabotage).
 
 test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision 8dbbc85d, board b1de6fab)', async () => {
   const { client, cleanup } = await harness();

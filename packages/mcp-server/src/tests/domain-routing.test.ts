@@ -7,18 +7,28 @@ import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
 import { MountedStores, resolveDomainMounts } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
+import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-harness.js';
 
 // The §10 tool surface over a MountedStores (project + one mounted domain): the
 // tools are agnostic to mounting, so this pins that scope routing, cross-store
 // retrieval, holding-store updates, and PROJECT-LOCAL run state all hold when
 // the conductor drives them through SterlingTools (§3.3 / §3.4).
+// CONSOLIDATED 2026-09-06 (board R4; decision scope-drift-closed-by-column-
+// authoritative-reads-not-format-change): this body moved VERBATIM into
+// ./test-helpers/mounted-harness.ts, shared with resolves-append-join.test.ts
+// and knowledge-extract.test.ts. BEHAVIOUR-NEUTRAL: same 'sterling-domain-'
+// prefix, same frozen clock, same randomUUID, same single 'genesys' mount,
+// same return shape including `domainDb`. The 'genesys' literal stays spelled
+// out here on purpose — it is load-bearing in this file's asserted scope
+// strings, knowledgePromote targets and resolveDomainMounts arms, and must
+// NOT be parameterized away. Conductor hand-edit under H5's frozen-test wall
+// (anti_pattern 985e1266); counts verified independently afterwards.
 function harness() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-domain-'));
-  const domainDb = join(dir, 'domains', 'genesys', 'sterling.db');
-  const store = new MountedStores(join(dir, '.sterling', 'sterling.db'), [{ name: 'genesys', dbPath: domainDb }]);
-  const config = parseConfig({ stack_tags: ['genesys'] });
-  const tools = new SterlingTools({ store, config, now: () => '2026-06-16T12:00:00.000Z', newId: randomUUID });
-  return { dir, domainDb, store, tools, cleanup: () => { store.close(); rmSync(dir, { recursive: true, force: true }); } };
+  const h = harnessMountedShared(['genesys'], {
+    now: '2026-06-16T12:00:00.000Z',
+    prefix: 'sterling-domain-',
+  });
+  return { dir: h.dir, domainDb: h.domainDbPath('genesys'), store: h.store, tools: h.tools, cleanup: h.cleanup };
 }
 
 const refFields = (scope: string) => ({

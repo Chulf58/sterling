@@ -125,6 +125,13 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+// Dependency-free like this script itself (node builtins only) — see
+// scripts/lib/store-path.mjs's own header. Safe to import here: unlike
+// scripts/lib/project.mjs (which pulls in @sterling/schemas + @sterling/store
+// and would break this script's deliberate bootstrap independence — "WHY RAW
+// node:sqlite AND NOT SterlingStore" above), store-path.mjs adds nothing to
+// the module graph this script does not already load.
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 // See "MIRRORED, NOT IMPORTED" above before changing either constant.
 const TARGET_SCHEMA_VERSION = 2;
@@ -658,7 +665,10 @@ function safeStringArray(value) {
  *  enumerate zero stores and exit 0 (roster review finding, fixer-mode). */
 function domainRoots() {
   const given = arg('roots');
-  return { roots: given ? given.split(',') : [join(homedir(), '.sterling', 'domains')], explicit: !!given };
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): homedir() always exists, so the helper's
+  // realpath step never trips here.
+  return { roots: given ? given.split(',') : [resolveStoreWritePath(homedir(), '.sterling', 'domains')], explicit: !!given };
 }
 
 /**
@@ -707,7 +717,10 @@ function enumerateStores() {
   //       failed:0 and exit 0 — a clean-looking report over a report that
   //       covered nothing.
   const registryExplicit = process.env.STERLING_REGISTRY_DB !== undefined;
-  const registryDbPath = process.env.STERLING_REGISTRY_DB ?? join(homedir(), '.sterling', 'registry.db');
+  // CONTAINMENT (R5): homedir() always exists, so this never hits the
+  // helper's degrade-on-nonexistent-root path. An explicit
+  // STERLING_REGISTRY_DB is the caller's own absolute path, unconverted.
+  const registryDbPath = process.env.STERLING_REGISTRY_DB ?? resolveStoreWritePath(homedir(), '.sterling', 'registry.db');
   if (!existsSync(registryDbPath)) {
     if (registryExplicit) {
       unreadable.push({
@@ -728,8 +741,20 @@ function enumerateStores() {
       const projects = registry.prepare('SELECT repo_path FROM projects').all();
       for (const row of projects) {
         const repoPath = row.repo_path;
-        add(join(repoPath, '.sterling', 'sterling.db'), `project '${repoPath}'`);
-        const configPath = join(repoPath, '.sterling', 'config.json');
+        // CONTAINMENT (R5), and its OWN per-project catch — a thrown
+        // resolveStoreWritePath error here must skip only THIS project, not
+        // abort the outer registry try (the exact "one bad project must
+        // never drop the rest of the sweep" discipline already established
+        // below for a bad config.json).
+        let storeDbPath, configPath;
+        try {
+          storeDbPath = resolveStoreWritePath(repoPath, '.sterling', 'sterling.db');
+          configPath = resolveStoreWritePath(repoPath, '.sterling', 'config.json');
+        } catch (e) {
+          unreadable.push({ origin: `project '${repoPath}'`, error: e.message, path: null });
+          continue;
+        }
+        add(storeDbPath, `project '${repoPath}'`);
         // NO config.json at all is NOT an error — plenty of registered
         // projects never customize domain mounts, and nothing requires the
         // file to exist. A config that exists but fails to READ or PARSE is
@@ -768,7 +793,19 @@ function enumerateStores() {
             // would migrate an unrelated file (roster review finding,
             // fixer-mode). An already-absolute override is unchanged by
             // resolve() (its second argument is ignored).
-            const domainDbPath = rawMount ? resolve(repoPath, rawMount) : join(homedir(), '.sterling', 'domains', tag, 'sterling.db');
+            // CONTAINMENT (R5): already inside this project's own try/catch
+            // (below), so a thrown resolveStoreWritePath error is caught and
+            // disclosed per-project exactly like a malformed config. Split
+            // onto two statements (not a ternary) so the manifest's lexical-
+            // join scan never sees `resolve(repoPath, rawMount)` and
+            // `resolveStoreWritePath(homedir(), '.sterling'...)` inside one
+            // semicolon-free expression.
+            let domainDbPath;
+            if (rawMount) {
+              domainDbPath = resolve(repoPath, rawMount);
+            } else {
+              domainDbPath = resolveStoreWritePath(homedir(), '.sterling', 'domains', tag, 'sterling.db');
+            }
             add(domainDbPath, `domain '${tag}' (mounted by project '${repoPath}')`);
           }
         } catch (e) {

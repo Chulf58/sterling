@@ -1,4 +1,4 @@
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { buildSeamHook } from './lib/seam-hook.mjs';
 import { selectReviewers } from '../lib/reviewer-selection.mjs';
 import { runWiringCheck } from '../lib/wiring-check.mjs';
 import { renderInstalledAgent } from '../lib/agent-distribution.mjs';
@@ -17,13 +18,36 @@ const NOW = '2026-06-10T12:00:00.000Z';
 let SterlingStore;
 let ProjectRegistry;
 let parseConfig;
+// The seam-spawnable H15 bundle (decision 95c2c109 F2): H15 reads
+// STERLING_PLUGIN_ROOT only when its own walk-up finds no plugin tree, so the
+// one H15 test below that names a fixture root through the seam must spawn a
+// bundle built into a marker-free temp dir, never the source under scripts/hooks/.
+let H15_SEAM;
+// Same F2 hardening applies to H1's pluginRoot() resolution
+// (walkUpPluginRoot() || process.env.STERLING_PLUGIN_ROOT): scripts/hooks/h1-session-start.mjs
+// lives inside THIS repo, so its own walk-up always finds this checkout and the
+// STERLING_PLUGIN_ROOT seam goes inert. Every H1 test below that fakes the
+// plugin root through that env var must spawn a bundle built into a
+// marker-free temp dir instead, so the walk-up genuinely fails and the seam is
+// legitimately reached (the same seam-hook shape H15 already uses).
+let H1_SEAM;
+after(() => {
+  H15_SEAM?.cleanup();
+  H1_SEAM?.cleanup();
+});
 before(async () => {
+  H15_SEAM = await buildSeamHook('h15-store-guard.mjs');
+  H1_SEAM = await buildSeamHook('h1-session-start.mjs');
   ({ SterlingStore, ProjectRegistry } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
   ({ parseConfig } = await import(pathToFileURL(join(root, 'packages', 'schemas', 'dist', 'index.js')).href));
 });
 
 function runHook(script, input, cwd, env = {}) {
-  const r = spawnSync(process.execPath, [join(HOOKS, script)], {
+  return runHookAt(join(HOOKS, script), input, cwd, env);
+}
+// Same envelope, explicit hook path — for a bundle built outside scripts/hooks/.
+function runHookAt(hookPath, input, cwd, env = {}) {
+  const r = spawnSync(process.execPath, [hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,
@@ -236,40 +260,78 @@ test('H1 machine role (todo cabbc10f, decision a9b98b7d): stated only on a Sterl
   const { dir, cleanup } = makeProject();
   try {
     // STERLING_PLUGIN_ROOT makes this tmp project LOOK like the plugin's own
-    // clone to pluginRoot() — the real walk-up always resolves to the actual
-    // repo the test process runs from, which this tmp dir is not.
+    // clone to pluginRoot() — but only when the SPAWNED hook's own walk-up
+    // fails to find a real plugin tree first (decision 95c2c109 F2). Spawning
+    // scripts/hooks/h1-session-start.mjs from its source location inside THIS
+    // repo would let that walk-up win every time and ignore the fixture, so
+    // this fakes the plugin root through H1_SEAM.hookPath — a bundle built
+    // into a marker-free temp dir where the walk-up genuinely fails and the
+    // env seam is legitimately reached.
     const selfHosted = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: dir };
 
     // absent → UNDECLARED, the safe posture
-    const undeclared = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    const undeclared = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
     assert.match(undeclared.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED — treat as CONSUMER/);
 
     // declared 'authoring'
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
-    const authoring = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    const authoring = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
     assert.match(authoring.hookSpecificOutput.additionalContext, /MACHINE ROLE: AUTHORING \(declared in \.sterling\/config\.json machine_role\)/);
 
     // declared 'consumer'
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'consumer' }));
-    const consumer = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
+    const consumer = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
     assert.match(consumer.hookSpecificOutput.additionalContext, /MACHINE ROLE: CONSUMER — this clone consumes via \/sterling:update/);
     assert.match(consumer.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions still present alongside the role line');
 
-    // NOT a clone (no STERLING_PLUGIN_ROOT override — this tmp dir is not the
-    // real plugin root the unmocked walk-up would find): no role line at all,
-    // even with machine_role declared.
-    const notAClone = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    // NOT a clone (no STERLING_PLUGIN_ROOT override — and the seam bundle's
+    // marker-free temp location means its own walk-up finds no plugin tree
+    // either): no role line at all, even with machine_role declared.
+    const notAClone = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
     assert.ok(!/MACHINE ROLE/.test(notAClone.hookSpecificOutput.additionalContext), 'no role line off the plugin\'s own clone');
   } finally {
     cleanup();
   }
 });
 
+test('H1 machine role (isolates the notAClone arm at :290-291): a fixture root with NO .claude-plugin marker at all never renders a MACHINE ROLE line', () => {
+  // Isolates the notAClone arm above (:290-291) as its own standalone pin —
+  // it does NOT cover board fb7c43fb (b)'s separately-named "root resolves
+  // but differs from cwd" branch, which needs a DIFFERENT, marker-carrying
+  // fixture root (see RW-5 in h1-receipt-remedy-wording.test.mjs for that
+  // shape) and remains unexercised here. makeProject()'s dir carries no
+  // .claude-plugin marker of any kind, and H1_SEAM.hookPath is a bundle
+  // built into a marker-free temp dir (decision 95c2c109 F2) — so both the
+  // project cwd's walk-up AND the hook's own walk-up find no plugin tree,
+  // with no STERLING_PLUGIN_ROOT override to name a differing root either:
+  // this is the unresolvable-root path only.
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' }).stdout);
+    const ctx = r.hookSpecificOutput.additionalContext;
+    // NON-VACUITY, checked before the absence claim is trusted: without this,
+    // `/MACHINE ROLE/.test(undefined)` tests the literal string "undefined"
+    // and passes vacuously even if H1 crashed or returned garbage instead of
+    // real additionalContext.
+    assert.equal(typeof ctx, 'string', 'additionalContext must be a real string, not absent/undefined');
+    assert.match(ctx, /Anti-speculation/, 'H1 produced its normal conventions block — proof the hook actually ran and rendered content, not that it crashed silently');
+    assert.ok(!/MACHINE ROLE/.test(ctx), 'no role line off the plugin\'s own clone');
+  } finally {
+    cleanup();
+  }
+});
+// Named sabotage: render a MACHINE ROLE line (of any state — UNDECLARED,
+// AUTHORING, or CONSUMER) when pluginRoot() resolves to null instead of
+// suppressing the line entirely — this test goes red.
+
 test('H1 machine role: a malformed config on the plugin\'s own clone costs only the role line\'s specificity, never a crash', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
-    const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, {
+    // H1_SEAM.hookPath (decision 95c2c109 F2, see the block comment above): the
+    // source hook's own walk-up would find THIS repo and ignore the
+    // STERLING_PLUGIN_ROOT fixture below.
+    const r = runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, {
       NO_COLOR: '1',
       STERLING_PLUGIN_ROOT: dir,
     });
@@ -309,9 +371,13 @@ test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer cl
     sh(author, ['commit', '-m', 'two']);
     sh(author, ['push']);
 
-    // TTL 0 → the fetch throttle never reads as fresh, so each run probes
+    // TTL 0 → the fetch throttle never reads as fresh, so each run probes.
+    // Spawned via H1_SEAM.hookPath (decision 95c2c109 F2, see the block comment
+    // above): the source hook's own walk-up would find THIS repo (whose
+    // .sterling/config.json declares machine_role: authoring) and the
+    // STERLING_PLUGIN_ROOT=clone fixture below would never be consulted at all.
     const env = { NO_COLOR: '1', STERLING_PLUGIN_ROOT: clone, STERLING_CURRENCY_DISABLE: '0', STERLING_CURRENCY_TTL_MS: '0' };
-    const behind = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    const behind = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
     assert.match(behind.systemMessage, /Sterling is 1 update\(s\) behind/, 'the human is told, with the double-click remedy');
     assert.match(behind.systemMessage, /sterling-update\.bat/);
     assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
@@ -321,7 +387,7 @@ test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer cl
     // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
     // per session, never served from the cache
     sh(clone, ['merge', '--ff-only', 'origin/main']);
-    const current = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    const current = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
     assert.doesNotMatch(current.systemMessage, /behind/, 'silent once current (P1)');
     assert.doesNotMatch(current.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND/);
 
@@ -333,7 +399,7 @@ test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer cl
     sh(author, ['push']);
     mkdirSync(join(clone, '.sterling'), { recursive: true });
     writeFileSync(join(clone, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'authoring' }));
-    const authoring = JSON.parse(runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
+    const authoring = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, env).stdout);
     assert.doesNotMatch(authoring.systemMessage, /behind/, 'authoring machines opt out via their declared role');
   } finally {
     cleanup();
@@ -1093,11 +1159,57 @@ test('H10: an internal throw (corrupt config) degrades loud via check_skipped, n
 
 // --------------------------- H15 ---------------------------
 
+// FIXTURE RE-CUT 2026-09-05 — ACTIVE-PLUGIN-ROOT PROVENANCE SHIPPED (decision
+// 5b82e94f `h15-realpath-binding-active-plugin-root-provenance`; re-cut
+// discipline per decision 77c5b85a — state the old and new premise, never bend
+// an assertion until it goes green).
+//   OLD PREMISE (the three "sanctioned script passes" assertions below): the
+//     SPELLING of the executable word was the grant. H15 compared that word to a
+//     shipped `allow_scripts` entry by string equality, so this tmpdir fixture
+//     needed no file at `scripts/dispose-run.mjs` and no plugin root at all.
+//   NEW PREMISE: spelling grants NOTHING. The word must canonicalize
+//     (realpathSync.native) to a REGULAR FILE contained under the canonicalized,
+//     LAYOUT-VALIDATED active plugin root, at a clone-relative POSIX path equal
+//     to an entry — no bare-name fallback (anti_pattern caecf8a6, block).
+//   HOW IT IS RE-CUT: the fixture project is made into a valid active plugin root
+//     (the three layout markers + a real file at each sanctioned path it invokes)
+//     and the STERLING_PLUGIN_ROOT test seam names it, with the agent-settable
+//     CLAUDE_PLUGIN_ROOT scrubbed. EVERY COMMAND STRING IS BYTE-IDENTICAL.
+//   CLAIMS UNCHANGED: store references are denied naming the §10 tools; a
+//     sanctioned script passes; unrelated commands are untouched.
+//   NOTE ON WHAT WENT RED: only the FIRST sanctioned assertion (dispose-run) was
+//     reported red, because an early assertion masks every later one in the same
+//     test (anti_pattern f1d66bef) — the init and TUI-launcher assertions two
+//     lines below were failing behind it and are covered by the same re-cut.
 test('H15 store guard: shell references to the store are denied naming the §10 tools; sanctioned scripts and unrelated commands pass', () => {
   const { dir, cleanup } = makeProject();
   try {
+    // The active plugin root this test's sanctioned invocations must resolve
+    // into. The project IS the root here — the SELF-HOSTED shape (decision
+    // a206a529: a relative word resolves against the PROJECT CWD, the way the
+    // shell resolves it). The consumer shape, where a planted
+    // `<project>/scripts/init.mjs` must DENY, is pinned separately and
+    // exhaustively in scripts/tests/h15-active-root-provenance.test.mjs (PV-5).
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture' }));
+    mkdirSync(join(dir, 'hooks'), { recursive: true });
+    writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+    for (const rel of ['scripts/dispose-run.mjs', 'scripts/init.mjs', 'packages/tui/bundle/sterling-tui.mjs']) {
+      const abs = join(dir, ...rel.split('/'));
+      mkdirSync(dirname(abs), { recursive: true });
+      writeFileSync(abs, '// fixture script — never executed by this test\n');
+    }
+
+    // Spawned from the seam bundle, not scripts/hooks/ (95c2c109 F2 — see H15_SEAM above).
     const run = (command) =>
-      runHook('h15-store-guard.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'PowerShell', tool_input: { command } }), dir);
+      runHookAt(H15_SEAM.hookPath, hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'PowerShell', tool_input: { command } }), dir, {
+        // CLAUDE_PLUGIN_ROOT is AGENT-SETTABLE and is never provenance (5b82e94f
+        // step 1) — dropped so an ambient live-session value cannot decide these
+        // verdicts (an `undefined` value is omitted from the child env by
+        // node:child_process, which is how the provenance suite scrubs it too).
+        STERLING_PLUGIN_ROOT: dir,
+        CLAUDE_PLUGIN_ROOT: undefined,
+      });
 
     const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
     assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');

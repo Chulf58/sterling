@@ -1,0 +1,9 @@
+{
+  "event": "PostToolUse",
+  "payload": { "tool_name": "Read", "tool_input": { "file_path": "packages/mcp-server/src/tools.ts" } },
+  "expected_ids": [
+    "26e8f8ac-e0c7-4206-b0ee-640583eb9e87"
+  ],
+  "expected_absent_ids": [],
+  "source_incident": "2026-09-01 issues log: H10 and H19 both reported a file as unowned despite an owning article existing, suspected cause the capped cap:25 ownership window (h10-direct-capture.mjs:1117). Fixed in slice 3 (commit 8f58f1c, 2026-09-06): the append-join discharge and H10's ownership join were rebuilt atomically (decision 26e8f8ac) — H10's join is no longer a cap:25 window. POSITIVE CASE: this fixture pins that touching the rebuilt owner-lookup surface (packages/mcp-server/src/tools.ts) still delivers the decision documenting the fix."
+}

@@ -115,6 +115,61 @@ const liveTestRefItemSchema = z.object({ ac_id: z.string().min(1), test_paths: z
 type CurrentAcArray = Array<z.infer<typeof currentAcItemSchema>>;
 type LiveTestRefsArray = Array<z.infer<typeof liveTestRefItemSchema>>;
 
+/**
+ * R9 ATTESTATION PROVENANCE (board 8c8b6d78) — the sibling map to
+ * `file_baselines`, defined ONCE and carried by BOTH baseline-bearing types
+ * (feature_article and repo-located reference_material), because settlement
+ * mints `reconcile_needed` items against either owner and an attested close
+ * stamps whichever one the item names.
+ *
+ * IT IS ON reference_material FOR A MEASURED REASON. It was on the article
+ * alone, and a reference_material-owned item was therefore unclosable in a way
+ * NOTHING reported: the attested close wrote both maps, the reference_material
+ * parse silently DROPPED the unknown `baseline_attestations` key, and the item
+ * was removed having stamped a naked baseline — exactly the "three readers read
+ * 'content-reconciled' from a stamp no content reconcile produced" failure this
+ * map exists to prevent. A missing optional field degrades to silent loss here,
+ * not to a refusal, so the field's ABSENCE was the defect.
+ *
+ * Closing a `reconcile_needed` item as ALREADY-PAID re-stamps `file_baselines`
+ * for exactly that item's file_keys — otherwise H7's settlement predicate, which
+ * compares live bytes against the UNCHANGED baseline, re-mints the item on the
+ * next touch of the same bytes (consumer-measured 2026-09-05: 90 items drained,
+ * five re-minted by the next commit that touched none of their files). A NAKED
+ * baseline write was rejected because three readers would then read "last
+ * reconciled against exactly this content" from a stamp that no content
+ * reconcile produced. This map is what keeps the two claims distinguishable: a
+ * baseline entry WITHOUT an attestation entry means content-reconciled; WITH one
+ * it means "the close of item <item_id> attested that the prose already
+ * describes these bytes, observed against commit <head_commit>".
+ *
+ * `sha256` IS DUPLICATED HERE DELIBERATELY — it is the hash that was attested,
+ * and a reader must not have to join to the sibling `file_baselines` map (which
+ * any later content reconcile overwrites wholesale) to learn what this
+ * attestation covered. `head_commit` is NAMED for what it is: a baseline is
+ * sha256 of the file's BYTES while HEAD is a COMMIT identity, and one name for
+ * both invites comparing a content hash against a git object id (which hashes an
+ * object header too, and may be SHA-1).
+ *
+ * SERVER-OWNED, exactly like file_baselines: it is in WRITE_REFUSED_FIELDS
+ * (packages/mcp-server/src/tools.ts), so a caller cannot forge provenance
+ * through knowledge_update. An ordinary knowledge_update CLEARS THE WHOLE MAP
+ * beside recomputing file_baselines — for BOTH types — so every resulting
+ * baseline belongs to that content generation even where a hash coincidentally
+ * matched.
+ */
+const baselineAttestationsSchema = z
+  .record(
+    z.string(),
+    z.object({
+      attested_at: z.string().min(1),
+      item_id: z.string().min(1),
+      head_commit: z.string().min(1),
+      sha256: z.string().min(1),
+    })
+  )
+  .optional();
+
 // §3.2.3 — versioned body + append-only history.
 export const featureArticleSchema = base
   .extend({
@@ -138,6 +193,9 @@ export const featureArticleSchema = base
     // git merge/checkout that only resets mtimes no longer raises false
     // reconcile_needed items (decision 65222971 → its baseline successor).
     file_baselines: z.record(z.string(), z.string()).optional(),
+    // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+    // above, which reference_material shares so the shape is defined once.
+    baseline_attestations: baselineAttestationsSchema,
     // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
     // axis, subsuming concept_family's role there — concept_family itself is
     // untouched, kept for compatibility (see below).
@@ -302,6 +360,14 @@ export const referenceMaterialSchema = base
     // change before raising refresh_reference, so an mtime-only bump (a merge) is
     // not mistaken for an out-of-band edit. url/pdf locations carry none.
     file_baselines: z.record(z.string(), z.string()).optional(),
+    // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+    // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+    // kind:doc joins the reconcile economy through its `location`, so settlement
+    // mints reconcile_needed items against it and an attested close stamps it —
+    // without this field that stamp was silently dropped by the parse, leaving a
+    // naked baseline whose provenance lied about which write produced it. Shape
+    // shared with featureArticleSchema, never re-declared.
+    baseline_attestations: baselineAttestationsSchema,
     // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
     // unchanged (field_baselines optional-field precedent); a catalog-bearing record
     // carries a validated modelsCatalogSchema payload.

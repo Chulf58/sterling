@@ -11,14 +11,17 @@
 // packages/store/src/tests/stable-identity-write-path.test.ts and
 // stable-identity-hardening.test.ts.
 //
-// TODAY (pre-S3), every knowledge_update/append/edit-shaped tool call still
+// AUTHORED PRE-S3, red-first; S3 (decision stable-identity-design-v2) has since
+// landed and the pins below are green. The block that follows is the ORIGINAL
+// authoring rationale, kept as history.
+// At authoring (pre-S3), every knowledge_update/append/edit-shaped tool call still
 // routes through the OLD auto-supersede ("re-mint") path for decision /
 // anti_pattern / research_finding / feature_article / attestation alike: a
 // successful write MINTS A NEW id and marks the addressed record
 // 'superseded'. That is the single root cause behind almost every RED below
 // (S3-1, S3-3, S3-4, S3-9's "same id after success" half). record_aliases /
 // record_relations tables and the store-level primitives exist, but the
-// TOOLS layer (SterlingTools) does not yet consult or drive them — that is
+// TOOLS layer (SterlingTools) at that time did not consult or drive them — that was
 // the root cause of S3-5 and S3-6's REDs (knowledge_get/knowledge_update
 // silently ignore the version param / never resolve an alias row at all).
 //

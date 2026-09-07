@@ -48,6 +48,33 @@
 // scripts/tests/h1-session-residue.test.mjs (temp project + store fixtures,
 // runHook/hookInput/envelope/makeProject), reused without modifying either
 // file.
+//
+// ===========================================================================
+// R1 PIN RE-CUT (contract sheet §1.1/§2.1, §6 A1/A2/A4/A6). Sections (A) and
+// (B) of the spec above are superseded where they conflict with this ledger:
+//   RETIRED: 'H22: two SubagentStart calls (same session) produce two distinct entries;
+//            SubagentStop removes exactly the matching one'
+//     — A1: Stop MARKS `ended {at, event}`; the entry is NOT deleted, because
+//       inactive-confirmed is only a real classifier output if its evidence
+//       survives on disk. Re-cut as R1-A90 (same two-Start setup, new verdict).
+//   RETIRED: 'H22: entries from a foreign session_id are pruned on every fire
+//            (start and stop alike)'
+//     — A2: concurrent live sessions in one worktree are OUT OF CONTRACT and H22
+//       no longer prunes on write; foreign entries die at the next SessionStart
+//       wipe and classify unknown/other-session until then. Re-cut as R1-A91.
+//   CONVERTED: 'H10 deferral: a STALE entry never defers ... staleness disclosed
+//     loudly' — the VERDICT is unchanged (an out-of-lease entry never defers), the
+//     DISCLOSURE becomes [dispatch_status_unknown] per §4. Kept here as R1-A92; the
+//     full H10 status policy lives in scripts/tests/h10-dispatch-status-policy.test.mjs.
+//   RE-CUT: corrupt register is preserved and disclosed, never reset (A24)
+//     — the old 'degrades to empty' pin required Start to overwrite the corrupt
+//       bytes with a fresh array, destroying both the availability signal
+//       R1-A49/A85/A86/A66 read and any unended round the file held. R1-A99.
+//   ADDED: R1-A93/A94 — registerStart's duplicate rule is UNENDED-scoped (A4,
+//     measured 2026-09-07: a resumed agent fires SubagentStart again with the
+//     SAME agent_id, so a blanket duplicate refusal would silently cost that
+//     round its receipt).
+// ===========================================================================
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -213,7 +240,7 @@ test('H22 SubagentStart: appends a correct entry, extracting repo-relative files
 //     removes exactly one.
 // ===========================================================================
 
-test('H22: two SubagentStart calls (same session) produce two distinct entries; SubagentStop removes exactly the matching one', () => {
+test('R1-A90: two SubagentStart calls (same session) produce two distinct entries; SubagentStop MARKS exactly the matching one ended and deletes nothing', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/one.mjs')])], 'p1.jsonl');
@@ -242,8 +269,12 @@ test('H22: two SubagentStart calls (same session) produce two distinct entries; 
     const stop = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'a1', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(stop.code, 0, stop.stderr);
     reg = readRegister(dir);
-    assert.equal(reg.length, 1, 'exactly the matching entry was removed');
-    assert.equal(reg[0].agent_id, 'b1', 'the non-matching entry survives untouched');
+    assert.equal(reg.length, 2, 'A1: Stop MARKS the entry ended — it never deletes it');
+    const stopped = reg.find((e) => e.agent_id === 'a1');
+    const other = reg.find((e) => e.agent_id === 'b1');
+    assert.equal(stopped.ended.event, 'subagent-stop', 'exactly the matching entry gains the terminal marker');
+    assert.ok(!Number.isNaN(Date.parse(stopped.ended.at)), 'ended.at is a parseable instant');
+    assert.equal(other.ended, undefined, 'the non-matching entry survives untouched and unmarked');
   } finally {
     cleanup();
   }
@@ -268,11 +299,16 @@ test('H22 SubagentStop: an unmatched agent_id is a clean no-op — exit 0, regis
 });
 
 // ===========================================================================
-// (4) Foreign-session entries are pruned on EVERY fire, start or stop.
+// (4) RE-CUT (A2): H22 no longer prunes foreign-session entries on write.
+// Pruning on write destroys evidence a classifier could have disclosed, and
+// H1's SessionStart wipe already removes the whole file — so the entry is left
+// alone and classified unknown/other-session by every consumer.
+// SABOTAGE: restore the prune pass on either fire -> the survival assertions go
+// red while every same-session pin in this file stays green.
 // ===========================================================================
 
-test('H22: entries from a foreign session_id are pruned on every fire (start and stop alike)', () => {
-  // (a) a Start for session s1 prunes a foreign (s2) entry while appending its own
+test('R1-A91: a foreign-session entry SURVIVES both a Start and a Stop — H22 never prunes on write (A2); the wipe is H1\'s job', () => {
+  // (a) a Start for session s1 appends its own entry and leaves the foreign (s2) one alone
   const started = makeProject();
   try {
     writeRegisterRaw(started.dir, [
@@ -283,8 +319,8 @@ test('H22: entries from a foreign session_id are pruned on every fire (start and
     const r = runHook('h22-dispatch-register.mjs', h22Input(started.dir, { agent_id: 'new1', agent_type: 'coder', session_id: 's1' }), started.dir);
     assert.equal(r.code, 0, r.stderr);
     const reg = readRegister(started.dir);
-    assert.equal(reg.length, 2, 'own1 preserved + new1 appended; foreign1 pruned');
-    assert.ok(!reg.some((e) => e.session_id === 's2'), 'no s2 entry survives');
+    assert.equal(reg.length, 3, 'own1 + foreign1 preserved, new1 appended');
+    assert.ok(reg.some((e) => e.agent_id === 'foreign1'), 'the foreign-session entry is left for the classifier, not destroyed');
     assert.ok(reg.some((e) => e.agent_id === 'own1'));
     const fresh = reg.find((e) => e.agent_id === 'new1');
     assert.ok(fresh, 'the new entry was appended');
@@ -293,25 +329,71 @@ test('H22: entries from a foreign session_id are pruned on every fire (start and
     started.cleanup();
   }
 
-  // (b) a Stop for session s1 with a non-matching agent_id still prunes the
-  // foreign (s2) entry — pruning is independent of whether a match occurred
+  // (b) a Stop with a non-matching agent_id mutates nothing at all
   const stopped = makeProject();
   try {
     writeRegisterRaw(stopped.dir, [
       { agent_id: 'other-agent', agent_type: 'coder', session_id: 's1', files: ['src/other.mjs'], at: new Date().toISOString() },
       { agent_id: 'foreign1', agent_type: 'coder', session_id: 's2', files: ['src/foreign.mjs'], at: new Date().toISOString() },
     ]);
+    const before = readFileSync(registerPath(stopped.dir), 'utf8');
     const r = runHook(
       'h22-dispatch-register.mjs',
       h22Input(stopped.dir, { agent_id: 'nonexistent', session_id: 's1', hook_event_name: 'SubagentStop' }),
       stopped.dir
     );
     assert.equal(r.code, 0, r.stderr);
-    const reg = readRegister(stopped.dir);
-    assert.equal(reg.length, 1, 'foreign1 pruned; other-agent survives (no agent_id match, but same session)');
-    assert.equal(reg[0].agent_id, 'other-agent');
+    assert.equal(readFileSync(registerPath(stopped.dir), 'utf8'), before, 'an unmatched Stop is byte-identical: no prune, no marker, no rewrite');
   } finally {
     stopped.cleanup();
+  }
+});
+
+// ===========================================================================
+// R1-A93/A94 (A4): the duplicate-agent_id rule is UNENDED-scoped. Measured
+// 2026-09-07: resuming an agent fires SubagentStart again with the SAME
+// agent_id, so a blanket refusal would leave round n+1 unregistered and cost it
+// its receipt; a refusal scoped to unended entries still stops a genuine
+// double-registration. The two arms are each other's controls — same agent_id,
+// same session, differing ONLY in whether the predecessor is ended.
+// ===========================================================================
+
+test('R1-A93: a Start whose agent_id matches an UNENDED same-session entry is refused with [register_agent_id_duplicate] — nothing is appended, exit 0', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [{ agent_id: 'dup-1', agent_type: 'coder', session_id: 's1', files: ['src/x.mjs'], at: new Date().toISOString(), attribution: 'block' }]);
+    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/y.mjs')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'dup-1', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, 'a register refusal never denies the spawn');
+    assert.match(out(r), /\[register_agent_id_duplicate\]/, `the refusal carries its code — out=${out(r)}`);
+    const reg = readRegister(dir);
+    assert.equal(reg.length, 1, 'the duplicate is not appended');
+    assert.deepEqual(reg[0].files, ['src/x.mjs'], 'and the incumbent entry is not overwritten');
+  } finally {
+    cleanup();
+  }
+});
+
+test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a new round — a resume is not a duplicate', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [{
+      agent_id: 'dup-1', agent_type: 'coder', session_id: 's1', files: ['src/x.mjs'],
+      at: new Date().toISOString(), attribution: 'block', round: 1,
+      ended: { at: new Date().toISOString(), event: 'subagent-stop' },
+    }]);
+    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/y.mjs')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'dup-1', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.doesNotMatch(out(r), /\[register_agent_id_duplicate\]/, 'an ended predecessor is not a duplicate');
+    const reg = readRegister(dir);
+    assert.equal(reg.length, 2, 'the new round is appended beside the ended one');
+    const unended = reg.filter((e) => !e.ended);
+    assert.equal(unended.length, 1, 'exactly one live round at a time');
+    assert.equal(unended[0].round, 2, 'round n+1, 1-based');
+    assert.ok(unended[0].files.includes('src/y.mjs'), 'the new round derives its own territory from the brief');
+  } finally {
+    cleanup();
   }
 });
 
@@ -333,28 +415,55 @@ test('H22: a non-Sterling cwd (no .sterling/) exits 0 and writes nothing at all'
 });
 
 // ===========================================================================
-// (6) Corrupt register JSON degrades to empty; hook never exits 2 and leaves
-//     a valid register behind.
+// RE-CUT: corrupt register is preserved and disclosed, never reset (A24)
+//
+// The previous pin required Start to overwrite a corrupt register with a fresh
+// array containing only its own entry. That DESTROYS the corrupt signal every
+// availability pin depends on (R1-A49/A85/A86/A66 all read 'corrupt' from the
+// bytes on disk) and, worse, silently discards whatever unended rounds the file
+// held — the exact lost-append harm board 673ca3f6 is about, performed
+// deliberately. The ruled contract is: read-only on an unreadable register.
+// SABOTAGE: restore the degrade-to-empty recovery (write a fresh array on a
+// parse failure) -> the byte-identical assertion goes red while the CONTROL
+// below stays green, which is what separates "corrupt is preserved" from
+// "Start never writes at all".
 // ===========================================================================
 
-test('H22: a corrupt dispatch-register.json degrades to empty — the hook never exits 2 and leaves a valid, parseable register behind', () => {
+test('R1-A99: a CORRUPT dispatch-register.json is left byte-identical — the Start writes NOTHING, discloses [register_unavailable] once, exits 0', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeRegisterRaw(dir, '{ this is not valid json at all');
+    const corrupt = '{ this is not valid json at all';
+    writeRegisterRaw(dir, corrupt);
     writeParentTranscript(dir, [taskLine([taskBlock('Task', 'fix up src/z.mjs please')])]);
     const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'c1', agent_type: 'coder' }), dir);
-    assert.notEqual(r.code, 2, 'the hook never denies a spawn, even recovering from corruption');
+    assert.notEqual(r.code, 2, 'the hook never denies a spawn, corruption included');
     assert.equal(r.code, 0, r.stderr);
 
-    const raw = readFileSync(registerPath(dir), 'utf8');
-    let reg;
-    assert.doesNotThrow(() => {
-      reg = JSON.parse(raw);
-    }, 'the register left behind must itself be valid JSON');
-    assert.ok(Array.isArray(reg), 'the recovered register is an array');
+    assert.equal(
+      readFileSync(registerPath(dir), 'utf8'),
+      corrupt,
+      'the corrupt bytes survive — resetting them destroys both the signal every availability pin reads and any unended round the file held'
+    );
+    const lines = out(r).split('\n').filter((l) => /\[register_unavailable\]/.test(l));
+    assert.equal(lines.length, 1, `exactly one unavailability disclosure, found ${lines.length}: ${out(r)}`);
+    assert.match(lines[0], /corrupt/, 'the line names WHICH unavailability it is');
+  } finally {
+    cleanup();
+  }
+});
+
+test('R1-A99 CONTROL: a VALID register still gets the entry appended, with its territory extracted as normal', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, []);
+    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'fix up src/z.mjs please')])]);
+    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'c1', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const reg = readRegister(dir);
     const entry = reg.find((e) => e.agent_id === 'c1');
-    assert.ok(entry, 'the hook proceeded past the corruption and appended its own entry');
-    assert.ok(entry.files.includes('src/z.mjs'), 'extraction still worked normally after recovering from corruption');
+    assert.ok(entry, 'a readable register is appended to as normal');
+    assert.ok(entry.files.includes('src/z.mjs'), 'extraction is unaffected');
+    assert.doesNotMatch(out(r), /\[register_unavailable\]/, 'and nothing is disclosed when there is nothing wrong');
   } finally {
     cleanup();
   }
@@ -460,9 +569,15 @@ test('H10 deferral: touches = [A, B], a live entry owns only A — B alone still
   }
 });
 
-// --------------------------- (10) stale entries never defer ---------------------------
+// --------------------------- (10) out-of-lease entries never defer ---------------------------
+// CONVERTED (§4): the VERDICT is unchanged — an out-of-lease entry never defers
+// a duty — and the DISCLOSURE becomes its code. The full H10 status policy is
+// pinned in scripts/tests/h10-dispatch-status-policy.test.mjs.
+// SABOTAGE: let an out-of-lease entry defer (drop the status test and exclude on
+// mere ownership) -> the exit-2 assertion goes red while case (7)'s
+// presumed-active deferral stays green.
 
-test('H10 deferral: a STALE entry (age >= configured stale_minutes) never defers — the nag fires despite it, and the staleness is disclosed loudly', () => {
+test('R1-A92: an OUT-OF-LEASE entry never defers — the nag fires despite it, and the uncertainty is disclosed as [dispatch_status_unknown]', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeConfig(dir, { dispatch_register: { stale_minutes: 5 } });
@@ -470,10 +585,10 @@ test('H10 deferral: a STALE entry (age >= configured stale_minutes) never defers
     writeRegisterRaw(dir, [{ agent_id: 'sub-stale', agent_type: 'coder', session_id: 's1', files: ['src/x.mjs'], at: agoISO(10) }]);
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
 
-    assert.equal(r.code, 2, 'a stale entry never defers — the capture duty fires normally');
+    assert.equal(r.code, 2, 'an expired lease never defers — the capture duty fires normally');
     assert.match(r.stderr, /nothing was captured/);
-    assert.match(out(r), /stale/i, 'the staleness is disclosed, not silently ignored');
-    assert.match(out(r), /sub-stale/, 'the disclosure names which entry was stale');
+    assert.match(out(r), /\[dispatch_status_unknown\]/, 'the uncertainty is disclosed with its code, not silently ignored');
+    assert.match(out(r), /sub-stale/, 'the disclosure names which dispatch is uncertain');
   } finally {
     cleanup();
   }

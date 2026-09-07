@@ -1,0 +1,18 @@
+{
+  "id": "probe-001-agent-positive",
+  "kind": "agent",
+  "note": "POSITIVE. A real Task dispatch about H15 sanctioned-script provenance. The store holds two live rulings on exactly this mechanism (realpath binding, and the clone-provenance requirement it extends), so an H20 mechanism-axis delivery that stays silent here is a MISS, not a taste difference. Written by hand 2026-09-05 from the rulings' subject matter, NOT from their titles: the prompt deliberately uses the working vocabulary a coder would use ('copy of a sanctioned script outside the clone', 'allowlist entry') rather than echoing the record titles back at the matcher.",
+  "tool_input": {
+    "subagent_type": "coder",
+    "description": "Bind H15 sanctioned-script matching to realpath",
+    "prompt": "Change how the store guard decides that a script is sanctioned. Today the allowlist entry is compared against the path string the command names, so a copy of a sanctioned script placed outside the plugin clone still satisfies the exemption and gets write access to the store. Resolve both the active plugin root and the candidate script through realpath and require the candidate to sit inside the clone root before granting the exemption; a symlink that points back into the clone must not launder an outside script. Keep the documented remedies runnable. REVIEW-TERRITORY: [\"scripts/hooks/h15-store-guard.mjs\"]"
+  },
+  "expected_ids": [
+    "5b82e94f-3f42-415b-b8d1-983b78e50095",
+    "a206a529-28fe-4271-b7a1-dd40593e2401"
+  ],
+  "expected_absent_ids": [
+    "68332e4b-da25-474e-a973-7cb53a0da40b"
+  ],
+  "expect_deny": false
+}

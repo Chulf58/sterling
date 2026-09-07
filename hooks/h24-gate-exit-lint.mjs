@@ -4185,6 +4185,12 @@ var currentAcItemSchema = external_exports.object({
   }).strict().optional()
 });
 var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
+var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1),
+  sha256: external_exports.string().min(1)
+})).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4206,6 +4212,9 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+  // above, which reference_material shares so the shape is defined once.
+  baseline_attestations: baselineAttestationsSchema,
   // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
@@ -4342,6 +4351,14 @@ var referenceMaterialSchema = base.extend({
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+  // kind:doc joins the reconcile economy through its `location`, so settlement
+  // mints reconcile_needed items against it and an attested close stamps it —
+  // without this field that stamp was silently dropped by the parse, leaving a
+  // naked baseline whose provenance lied about which write produced it. Shape
+  // shared with featureArticleSchema, never re-declared.
+  baseline_attestations: baselineAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -5058,11 +5075,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5080,7 +5102,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5210,13 +5232,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function deny(message) {
-  process.stderr.write(message);
-  process.exit(2);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function allow() {
-  process.exit(0);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -5334,7 +5455,7 @@ for (const { segment, sep } of items) {
   deny(
     `H24: gate invocation masked \u2014 '${gate}' is followed at top level by '${sep}', which swallows the gate's real exit code.
 Command: ${command}
-Never append ';' or '||' after a gate \u2014 a red suite must never read green. Run the gate as the last command, or chain with '&&' \u2014 a red exit propagates. Decision 6cdd1b02-4d4f-4d7d-b9cd-2887265e7f90.`
+Never append ';' or '||' after a gate \u2014 a red suite must never read green. Run the gate as the last command, or chain with '&&' \u2014 a red exit propagates. THE '&&' REMEDY IS ADDRESSED TO THE CONDUCTOR: H24 is registered globally, so this text also reaches SUBAGENTS. A ROSTER subagent that holds Bash (coder, debugger) registers H14 on its own frontmatter, and H14's single-command allowlist denies chaining before any prefix match \u2014 so for those two the only remedy is to run the gate as ONE command on its own. H14 rides frontmatter, NOT global registration, so a Bash-bearing agent spawned OUTSIDE the roster is not confined by it and '&&' may work there; do not read this line as a promise about your own sandbox. Decision 6cdd1b02-4d4f-4d7d-b9cd-2887265e7f90.`
   );
 }
 var SET_PIPEFAIL_RE = /^set\b.*\bpipefail\b/;

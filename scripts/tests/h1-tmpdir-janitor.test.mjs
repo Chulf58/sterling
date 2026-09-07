@@ -122,11 +122,19 @@ function makeProject() {
   return { dir, store, projectTag, cleanup };
 }
 
-function h1(dir, source) {
+// tmpRoot (when given) is an ISOLATED per-test directory that H1's own
+// os.tmpdir() must resolve to — via TMPDIR/TMP/TEMP — so the janitor's sweep
+// can never see a sibling test's or a sibling suite's concurrently-created
+// files in the real SHARED os.tmpdir() (board 17a4d20b: cross-suite
+// interference over shared tmpdir state was the measured cause of this
+// suite's intermittent failures under a wide parallel `node --test` run).
+function h1(dir, source, tmpRoot) {
+  const tmpdirEnv = tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {};
   const r = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart', source }), dir, {
     NO_COLOR: '1',
     STERLING_NO_BANNER: '1',
     STERLING_PLUGIN_ROOT: root,
+    ...tmpdirEnv,
   });
   let out = null;
   try {
@@ -135,6 +143,14 @@ function h1(dir, source) {
     // caller asserts on r.out when parseability matters
   }
   return { ...r, out };
+}
+
+// A private, per-test tmpdir root — never the real SHARED os.tmpdir() — that
+// every fixture file in a test is planted inside, and that h1() points H1's
+// own os.tmpdir() resolution at (board 17a4d20b). Cleaned up by the caller
+// alongside its other per-test state.
+function makeIsolatedTmpRoot() {
+  return mkdtempSync(join(tmpdir(), 'sterling-h1jan-root-'));
 }
 
 // -------------------------- tmpdir fixture helpers --------------------------
@@ -153,9 +169,10 @@ function shapes(b) {
   return [`${b}.json`, `${b}.dirty.json`, `${b}.baseline.json`];
 }
 
-// write a tmpdir file, backdate its mtime by ageMs, and track it for cleanup
-function makeTmp(created, name, ageMs) {
-  const p = join(tmpdir(), name);
+// write a tmpdir file INSIDE the given isolated root, backdate its mtime by
+// ageMs, and track it for cleanup
+function makeTmp(created, root, name, ageMs) {
+  const p = join(root, name);
   writeFileSync(p, '{}');
   const when = new Date(Date.now() - ageMs);
   utimesSync(p, when, when); // backdate atime + mtime
@@ -188,18 +205,19 @@ function sweepCreated(created) {
 test('AC1 (reclaim): stale per-call files of ALL THREE shapes for THIS project tag are reclaimed on SessionStart', () => {
   const { dir, projectTag, cleanup } = makeProject();
   const created = [];
+  const tmpRoot = makeIsolatedTmpRoot();
   try {
     const runId = 'run-' + randomUUID();
 
     // CONTROL (opposite reason, evaluated first): a RECENT in-scope file must
     // survive — its survival proves any absence below is age-selective, not a
     // blanket tmpdir wipe. Passes now (nothing runs) and under the real impl.
-    const recent = makeTmp(created, `${base(projectTag, runId, validKey())}.json`, RECENT_MS);
+    const recent = makeTmp(created, tmpRoot, `${base(projectTag, runId, validKey())}.json`, RECENT_MS);
 
-    const stale = shapes(base(projectTag, runId, validKey())).map((n) => makeTmp(created, n, STALE_MS));
+    const stale = shapes(base(projectTag, runId, validKey())).map((n) => makeTmp(created, tmpRoot, n, STALE_MS));
     for (const f of stale) assert.equal(existsSync(f), true, `PRECONDITION: stale fixture written: ${f}`);
 
-    const r = h1(dir, 'startup');
+    const r = h1(dir, 'startup', tmpRoot);
     assert.equal(r.code, 0, oneLine(r.stderr));
 
     assert.equal(existsSync(recent), true, 'CONTROL: a recent in-scope file survives — reclamation is age-selective, not a blanket tmpdir wipe');
@@ -208,6 +226,7 @@ test('AC1 (reclaim): stale per-call files of ALL THREE shapes for THIS project t
     }
   } finally {
     sweepCreated(created);
+    rmSync(tmpRoot, { recursive: true, force: true });
     cleanup();
   }
 });
@@ -222,16 +241,18 @@ test('AC1 (reclaim): stale per-call files of ALL THREE shapes for THIS project t
 test('AC2 (TTL control): a RECENT correctly-named per-call file for this project SURVIVES the sweep', () => {
   const { dir, projectTag, cleanup } = makeProject();
   const created = [];
+  const tmpRoot = makeIsolatedTmpRoot();
   try {
     const runId = 'run-' + randomUUID();
-    const recent = makeTmp(created, `${base(projectTag, runId, validKey())}.json`, RECENT_MS);
+    const recent = makeTmp(created, tmpRoot, `${base(projectTag, runId, validKey())}.json`, RECENT_MS);
 
-    const r = h1(dir, 'startup');
+    const r = h1(dir, 'startup', tmpRoot);
     assert.equal(r.code, 0, oneLine(r.stderr));
 
     assert.equal(existsSync(recent), true, 'a per-call file younger than the 1h TTL (now-5min) must survive — it may belong to a live concurrent session');
   } finally {
     sweepCreated(created);
+    rmSync(tmpRoot, { recursive: true, force: true });
     cleanup();
   }
 });
@@ -245,19 +266,21 @@ test('AC2 (TTL control): a RECENT correctly-named per-call file for this project
 test('AC3 (project-scope control): a STALE correctly-shaped file under a DIFFERENT projectTag SURVIVES', () => {
   const { dir, projectTag, cleanup } = makeProject();
   const created = [];
+  const tmpRoot = makeIsolatedTmpRoot();
   try {
     const runId = 'run-' + randomUUID();
     const otherTag = createHash('sha256').update('other-' + randomUUID()).digest('hex').slice(0, 16);
     assert.notEqual(otherTag, projectTag, 'PRECONDITION: the other project tag genuinely differs from this one');
 
-    const otherFile = makeTmp(created, `${base(otherTag, runId, validKey())}.json`, STALE_MS);
+    const otherFile = makeTmp(created, tmpRoot, `${base(otherTag, runId, validKey())}.json`, STALE_MS);
 
-    const r = h1(dir, 'startup');
+    const r = h1(dir, 'startup', tmpRoot);
     assert.equal(r.code, 0, oneLine(r.stderr));
 
     assert.equal(existsSync(otherFile), true, "another project's stale per-call file must NOT be swept — the janitor is scoped to THIS project's tag");
   } finally {
     sweepCreated(created);
+    rmSync(tmpRoot, { recursive: true, force: true });
     cleanup();
   }
 });
@@ -276,15 +299,16 @@ test('AC3 (project-scope control): a STALE correctly-shaped file under a DIFFERE
 test('AC4 (shape control): STALE near-miss files that are not the per-call shape SURVIVE', () => {
   const { dir, projectTag, cleanup } = makeProject();
   const created = [];
+  const tmpRoot = makeIsolatedTmpRoot();
   try {
     const runId = 'run-' + randomUUID();
 
-    const noCall = makeTmp(created, `sterling-enforce-${projectTag}-${runId}-nocall-${validKey()}.json`, STALE_MS);
-    const shortKey = makeTmp(created, `sterling-enforce-${projectTag}-${runId}-call-${'a'.repeat(16)}.json`, STALE_MS);
-    const nonHexKey = makeTmp(created, `sterling-enforce-${projectTag}-${runId}-call-${'g'.repeat(32)}.json`, STALE_MS);
-    const notJson = makeTmp(created, `${base(projectTag, runId, validKey())}.log`, STALE_MS);
+    const noCall = makeTmp(created, tmpRoot, `sterling-enforce-${projectTag}-${runId}-nocall-${validKey()}.json`, STALE_MS);
+    const shortKey = makeTmp(created, tmpRoot, `sterling-enforce-${projectTag}-${runId}-call-${'a'.repeat(16)}.json`, STALE_MS);
+    const nonHexKey = makeTmp(created, tmpRoot, `sterling-enforce-${projectTag}-${runId}-call-${'g'.repeat(32)}.json`, STALE_MS);
+    const notJson = makeTmp(created, tmpRoot, `${base(projectTag, runId, validKey())}.log`, STALE_MS);
 
-    const r = h1(dir, 'startup');
+    const r = h1(dir, 'startup', tmpRoot);
     assert.equal(r.code, 0, oneLine(r.stderr));
 
     assert.equal(existsSync(noCall), true, 'a name without the -call- segment is not the per-call shape and must survive');
@@ -293,6 +317,7 @@ test('AC4 (shape control): STALE near-miss files that are not the per-call shape
     assert.equal(existsSync(notJson), true, 'a name not ending .json is not the per-call shape and must survive');
   } finally {
     sweepCreated(created);
+    rmSync(tmpRoot, { recursive: true, force: true });
     cleanup();
   }
 });
@@ -308,16 +333,18 @@ test('AC4 (shape control): STALE near-miss files that are not the per-call shape
 test('AC5 (liveness): H1 still exits 0 and emits parseable JSON with the janitor present and stale files to sweep', () => {
   const { dir, projectTag, cleanup } = makeProject();
   const created = [];
+  const tmpRoot = makeIsolatedTmpRoot();
   try {
     const runId = 'run-' + randomUUID();
-    makeTmp(created, `${base(projectTag, runId, validKey())}.json`, STALE_MS);
-    makeTmp(created, `${base(projectTag, runId, validKey())}.dirty.json`, STALE_MS);
+    makeTmp(created, tmpRoot, `${base(projectTag, runId, validKey())}.json`, STALE_MS);
+    makeTmp(created, tmpRoot, `${base(projectTag, runId, validKey())}.dirty.json`, STALE_MS);
 
-    const r = h1(dir, 'startup');
+    const r = h1(dir, 'startup', tmpRoot);
     assert.equal(r.code, 0, `H1 must exit 0 with the janitor active — stderr: ${oneLine(r.stderr)}`);
     assert.ok(r.out, `H1's stdout must remain parseable JSON — the janitor must not write to stdout. stdout: ${oneLine(r.stdout)}`);
   } finally {
     sweepCreated(created);
+    rmSync(tmpRoot, { recursive: true, force: true });
     cleanup();
   }
 });

@@ -4226,6 +4226,12 @@ var currentAcItemSchema = external_exports.object({
   }).strict().optional()
 });
 var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
+var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1),
+  sha256: external_exports.string().min(1)
+})).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4247,6 +4253,9 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+  // above, which reference_material shares so the shape is defined once.
+  baseline_attestations: baselineAttestationsSchema,
   // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
@@ -4383,6 +4392,14 @@ var referenceMaterialSchema = base.extend({
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+  // kind:doc joins the reconcile economy through its `location`, so settlement
+  // mints reconcile_needed items against it and an attested close stamps it —
+  // without this field that stamp was silently dropped by the parse, leaving a
+  // naked baseline whose provenance lied about which write produced it. Shape
+  // shared with featureArticleSchema, never re-declared.
+  baseline_attestations: baselineAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -5099,11 +5116,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5121,7 +5143,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5248,13 +5270,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -5720,64 +5841,96 @@ This does not claim the cited lines are wrong \u2014 only that the file's bytes 
     return null;
   }
 }
-var input;
-try {
-  input = readStdin();
-} catch {
-  allow();
-}
-function emit(additionalContext) {
-  recordAdvisoryFire(input.cwd, "h25", input.session_id);
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
-    })
-  );
-}
-try {
-  let finish = function(capabilityMessage) {
-    const parts = [];
-    if (capabilityMessage) parts.push(capabilityMessage);
-    if (commandShapeMsg) parts.push(commandShapeMsg);
-    if (taAdvisory) parts.push(taAdvisory);
-    if (citeAdvisory) parts.push(citeAdvisory);
-    if (parts.length) emit(parts.join("\n\n"));
-    allow();
-  };
-  const subagentType = input.tool_input?.subagent_type;
-  if (!subagentType) allow();
-  const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
-  let commandShapeMsg;
-  const agentPath = join4(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
-  if (!existsSync4(agentPath)) {
-    if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
-    finish(
-      `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
+var MUTATION_WORD_RE = /\b(mutation|sabotage|mutant)\b/i;
+function tddPostureAdvisory(subagentType, prompt, cwd) {
+  let config;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    return null;
+  }
+  const parts = [];
+  if (subagentType === "test-writer" && config?.tdd?.enabled === false) {
+    parts.push(
+      `H25 TDD POSTURE ADVISORY \u2014 tests-first is OFF in this project; dispatch a test-writer only on an explicit ask (config.tdd.enabled, TUI System tab).`
     );
   }
-  let content;
-  try {
-    content = readFileSync4(agentPath, "utf8");
-  } catch (e) {
-    warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
+  if (config?.mutation_verification?.enabled === false && MUTATION_WORD_RE.test(String(prompt ?? ""))) {
+    parts.push(
+      `H25 MUTATION-VERIFICATION POSTURE ADVISORY \u2014 mutation verification is OFF in this project (config.mutation_verification.enabled, TUI System tab): the automatic verify-by-mutation default does not apply here \u2014 proceed only on an explicit ask.`
+    );
   }
-  const toolsRaw = parseToolsLine(content);
-  if (toolsRaw === void 0) finish();
-  const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!grantList.length) finish();
-  if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
-  const mentioned = findMentionedTools(input.tool_input?.prompt);
-  if (!mentioned.length) finish();
-  const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
-  if (!missing.length) finish();
-  const missingLines = missing.map((tool) => `  - '${tool}' \u2014 not held by this agent's grant`).join("\n");
-  finish(
-    `H25 DISPATCH CAPABILITY ADVISORY \u2014 you are about to dispatch '${subagentType}', and the brief mentions tool(s) its installed grant does not hold:
+  return parts.length ? parts.join("\n\n") : null;
+}
+function readInputOrAllow() {
+  try {
+    return readStdin();
+  } catch {
+    return allow();
+  }
+}
+var input = readInputOrAllow();
+function emit(additionalContext) {
+  return exitAfterWrite(
+    JSON.stringify({
+      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
+    }),
+    0,
+    {
+      onWritten: () => recordAdvisoryFire(input.cwd, "h25", input.session_id)
+      // expiring campaign scaffolding — see lib/advisory-counter.mjs
+    }
+  );
+}
+function main(input2) {
+  try {
+    let finish = function(capabilityMessage) {
+      const parts = [];
+      if (capabilityMessage) parts.push(capabilityMessage);
+      if (commandShapeMsg) parts.push(commandShapeMsg);
+      if (taAdvisory) parts.push(taAdvisory);
+      if (citeAdvisory) parts.push(citeAdvisory);
+      if (tddAdvisory) parts.push(tddAdvisory);
+      if (parts.length) return emit(parts.join("\n\n"));
+      return allow();
+    };
+    const subagentType = input2.tool_input?.subagent_type;
+    if (!subagentType) return allow();
+    const taAdvisory = testAuthoringAdvisory(subagentType, input2.tool_input?.prompt, input2.cwd);
+    const citeAdvisory = citationStalenessAdvisory(input2.tool_input?.prompt, input2.cwd);
+    const tddAdvisory = tddPostureAdvisory(subagentType, input2.tool_input?.prompt, input2.cwd);
+    let commandShapeMsg;
+    const agentPath = join4(input2.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
+    if (!existsSync4(agentPath)) {
+      if (BUILTIN_AGENT_TYPES.has(subagentType)) return finish();
+      return finish(
+        `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
+      );
+    }
+    let content;
+    try {
+      content = readFileSync4(agentPath, "utf8");
+    } catch (e) {
+      return warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
+    }
+    const toolsRaw = parseToolsLine(content);
+    if (toolsRaw === void 0) return finish();
+    const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!grantList.length) return finish();
+    if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input2.tool_input?.prompt);
+    const mentioned = findMentionedTools(input2.tool_input?.prompt);
+    if (!mentioned.length) return finish();
+    const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
+    if (!missing.length) return finish();
+    const missingLines = missing.map((tool) => `  - '${tool}' \u2014 not held by this agent's grant`).join("\n");
+    return finish(
+      `H25 DISPATCH CAPABILITY ADVISORY \u2014 you are about to dispatch '${subagentType}', and the brief mentions tool(s) its installed grant does not hold:
 ${missingLines}
 Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}
 This is the warn-only dispatch-capability preflight (decision dc6c1afb) \u2014 never a block, and it intentionally reports ungranted mentions even though a mention is not proof of a requirement (a prohibition or passing context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(", ")}, re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
-  );
-} catch (e) {
-  warnNonBlocking(`H25: dispatch-capability advisory failed: ${e && e.message || e}`);
+    );
+  } catch (e) {
+    return warnNonBlocking(`H25: dispatch-capability advisory failed: ${e && e.message || e}`);
+  }
 }
+main(input);

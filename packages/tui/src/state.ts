@@ -638,6 +638,14 @@ function catalogBanner(catalog: CatalogStatusView, width: number): string[] {
  * MODEL ROW: shows sparringPartner.model, or '(CLI default)' when unset. While
  * ui.sparringModelEdit is defined AND this row is under the cursor, the row
  * shows the live edit buffer with a caret instead of the committed value.
+ *
+ * The label says DEFAULT (board 7423f7a2 slice 5, decision 8b329d57 as
+ * corrected forward): since H20's PreToolUse arm fills this value into a codex
+ * consult that names no model, the value is exactly a DEFAULT — a model named
+ * on the call itself still wins, and a running codex-reply thread keeps its
+ * opener's model because that tool's schema has no model field. A bare 'Model'
+ * label promised more than the mechanism delivers, which is how "it just says
+ * default and doesnt work" was reported.
  */
 function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorBase: number): SystemRow[] {
   const clip = (s: string): string => clipEllipsis(s, width);
@@ -661,7 +669,7 @@ function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: numb
       : '(CLI default)';
   const modelRow: SystemRow = {
     id: 'sys:sparring_model',
-    lines: [{ text: clip(`${modelMarker}Model: ${modelText}`), kind: 'title', selected: modelSelected }],
+    lines: [{ text: clip(`${modelMarker}Default Codex model: ${modelText}`), kind: 'title', selected: modelSelected }],
   };
   return [toggleRow, modelRow];
 }
@@ -1072,8 +1080,19 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
               // commit the free-text model edit — empty clears back to unset
               // (CLI default). No ^claude- floor here: the model is a FREE
               // string, codex validates server-side with a loud 400.
-              effects.push({ type: 'sparring_model', model: (ui.sparringModelEdit ?? '').trim() });
-              return { ui: { ...ui, sparringModelEdit: undefined, notice: undefined }, effects };
+              const committedModel = (ui.sparringModelEdit ?? '').trim();
+              effects.push({ type: 'sparring_model', model: committedModel });
+              // WHAT THE VALUE ACTUALLY GOVERNS, said at the moment it is set
+              // (board 7423f7a2 slice 5): H20 injects it only into a consult
+              // that names NO model, so an explicit call-site model overrides
+              // it, and codex-reply carries no model field at all — an
+              // already-open thread keeps its opener's model however this row
+              // is changed. Stating both limits here is the repair for "it
+              // just says default and doesnt work".
+              const sparringNotice = committedModel
+                ? `Default Codex model set to '${committedModel}' — a model named on the call itself overrides it, and existing Codex threads keep their opener's model until a new consult starts.`
+                : `Default Codex model cleared — consults now take the Codex CLI default. A model named on the call itself still overrides it, and existing Codex threads keep their opener's model.`;
+              return { ui: { ...ui, sparringModelEdit: undefined, notice: sparringNotice }, effects };
             }
             if (cursor === sysKeys.length) {
               // sparring-partner toggle row: an immediate flip, no picker

@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
@@ -214,8 +215,39 @@ test('refusal: resolves naming an id that does not exist at all refuses before w
   }
 });
 
+// SETUP NOTE (R9, board 8c8b6d78 / decision
+// attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence):
+// this test used to close its reconcile_needed setup item through a ROOTLESS
+// harness (`harness()` above constructs SterlingTools with no `repoRoot`).
+// Under R9, closing a reconcile_needed item is now an ATTESTED close, and a
+// rootless SterlingTools instance HARD-REFUSES one — a missing repoRoot is
+// UNAVAILABLE EVIDENCE (this process cannot identify the correct bytes), not
+// an AFFIRMATIVE EXEMPTION from the re-mint predicate, so it fails closed
+// rather than falling through to ordinary removal (settlement runs hook-side
+// with its own independently-derived root and would re-mint the debt a bare
+// rootless removal only pretended to close). The PINNED BEHAVIOR here — a
+// resolves claim naming an already-removed id refuses, because it is not
+// open — is UNCHANGED and asserted exactly as before. Only the setup's
+// incidental assumption (that closing reconcile debt needs no root) was
+// invalidated, so the setup moves to a git-backed, repoRoot-bearing fixture
+// with the owned file present and matching HEAD — a VALID R9 close — rather
+// than reworking the assertion. This is not a green-making edit to the pin.
 test('refusal: resolves naming an already-removed id refuses — it is not open, so it cannot be re-claimed', () => {
-  const { tools, cleanup } = harness();
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-resolves-git-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const git = (...a: string[]) => {
+    const r = spawnSync('git', ['-C', dir, ...a], { encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${a.join(' ')} failed: ${r.stderr}`);
+  };
+  git('init', '-q', '-b', 'main');
+  git('config', 'user.email', 't@t.t');
+  git('config', 'user.name', 't');
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'thing.ts'), 'export const t = 1;\n');
+  git('add', '-A');
+  git('commit', '-qm', 'seed');
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  const tools = new SterlingTools({ store, now: () => NOW, repoRoot: dir });
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
     const { record: item } = tools.maintenanceEnqueue({
@@ -224,7 +256,10 @@ test('refusal: resolves naming an already-removed id refuses — it is not open,
       file_keys: ['src/thing.ts'],
       feature_link: article.id,
     });
-    tools.maintenanceRemove(item.id); // closed a moment earlier — e.g. a concurrent librarian
+    // closed a moment earlier — e.g. a concurrent librarian. repoRoot is
+    // present and src/thing.ts is committed, unchanged, and owned solely by
+    // this item's file_keys, so this is a VALID R9 attested close.
+    tools.maintenanceRemove(item.id);
 
     const before = tools.knowledgeGet(article.id) as unknown as { version: number };
     assert.throws(
@@ -238,7 +273,8 @@ test('refusal: resolves naming an already-removed id refuses — it is not open,
     const after = tools.knowledgeGet(article.id) as unknown as { version: number };
     assert.equal(after.version, before.version, 'no version minted by the refused call');
   } finally {
-    cleanup();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync as rmSync3, existsSync as existsSync4, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
+import { join as join5, basename as basename3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4219,6 +4219,12 @@ var currentAcItemSchema = external_exports.object({
   }).strict().optional()
 });
 var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
+var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1),
+  sha256: external_exports.string().min(1)
+})).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4240,6 +4246,9 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+  // above, which reference_material shares so the shape is defined once.
+  baseline_attestations: baselineAttestationsSchema,
   // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
@@ -4376,6 +4385,14 @@ var referenceMaterialSchema = base.extend({
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+  // kind:doc joins the reconcile economy through its `location`, so settlement
+  // mints reconcile_needed items against it and an attested close stamps it —
+  // without this field that stamp was silently dropped by the parse, leaving a
+  // naked baseline whose provenance lied about which write produced it. Shape
+  // shared with featureArticleSchema, never re-declared.
+  baseline_attestations: baselineAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -5230,11 +5247,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5252,7 +5274,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5357,7 +5379,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync, realpathSync } from "node:fs";
+import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, basename, join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -5365,6 +5387,14 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+function decodeLiveRecordRow(op, row) {
+  const record = JSON.parse(row.body);
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -5997,17 +6027,80 @@ var SterlingStore = class _SterlingStore {
       };
     });
   }
-  /** The server-owned identity columns of a live row — the CAS + lifecycle source. */
+  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
+   *
+   *  `scope` joins them (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
+   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
+   *  routing decision that chose this physical store — while the JSON body's own
+   *  `scope` is caller-writable and can drift away from it (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
+   *  supersession below pins the candidate's scope FROM HERE, so the field is
+   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
   identityOf(id) {
-    const row = this.db.prepare("SELECT version, lifecycle, freshness, body FROM records WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?").get(id);
     if (!row)
       return void 0;
     return {
       version: row.version,
       lifecycle: row.lifecycle === "retired" ? "retired" : "live",
       freshness: row.freshness === "flagged_stale" ? "flagged_stale" : "fresh",
+      scope: row.scope,
       body: row.body
     };
+  }
+  /**
+   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
+   * `records` row becomes a DurableRecord (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
+   *
+   * Every live materializing read selects `body, scope` and comes through here,
+   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
+   * before any caller sees it. Body/column disagreement is therefore
+   * unrepresentable on read: column authoritative on disk, and now on read too
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
+   * read path added later is hard to write wrongly because there is no other
+   * body→record parse to copy.
+   *
+   * TOTAL by construction — both drifted shapes normalize to the column with no
+   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
+   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
+   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
+   * visible, and it read zero of either across all four stores before this
+   * activated.
+   *
+   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
+   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
+   * every write funnels through via validateRecord, together with insertRecord
+   * writing the column from that validated record.scope: no store write can
+   * produce an empty or whitespace column. `records.scope` being NOT NULL is
+   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
+   * comment previously said it was (corrected 2026-09-06 on independent
+   * review; a comment that misattributes its own guarantee is how the real one
+   * gets removed later by someone who reads only the comment). If an empty or
+   * non-string column is nonetheless read, refuse loudly naming the row rather
+   * than inventing 'project' — a default here would re-create exactly the
+   * guess this decoder exists to delete.
+   *
+   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
+   * from identityOf's column in applyInPlace/supersede (part 3) — except that
+   * supersede takes an optional `authoritativeScope` from the layer that knows
+   * about MOUNTS (MountedStores), because the column is authoritative over the
+   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
+   * must be labelled for the mount it is physically inserted into.
+   *
+   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
+   */
+  static decodeLiveRecord(op, row) {
+    return decodeLiveRecordRow(op, row);
+  }
+  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
+  static decodeLiveRecords(op, rows) {
+    return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
   }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
   insertRelation(sourceId, rel, targetId, at) {
@@ -6121,6 +6214,56 @@ var SterlingStore = class _SterlingStore {
     }, opts);
   }
   /**
+   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
+   * closed list is what makes that method NARROW rather than a second content
+   * write path that happens to skip the clock: anything outside it is refused by
+   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
+   * neither is ever caller-supplied.
+   */
+  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations"];
+  /**
+   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
+   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
+   * record's `updated_at`.
+   *
+   * It bumps `version`, archives the prior body and honours `expected_version`
+   * exactly like every other in-place write: the baselines live in the record
+   * BODY and the body is authoritative, so a same-version body mutation would
+   * evade the CAS and version signal entirely. (addLink's precedent does NOT
+   * apply — its body copy of links[] is non-authoritative and re-hydrated from
+   * record_relations.)
+   *
+   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
+   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
+   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
+   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
+   * re-stamping only SOME owned paths therefore masks real, already-standing
+   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
+   * T1; a metadata write for `a` alone advances the clock to T2; a later read
+   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
+   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
+   * judged against exactly the instant its own baseline was taken.
+   *
+   * `activity_at` is the REAL time, recorded on the activity row (and used for
+   * any `resolves` drain) so the chronology stays true — see applyInPlace's
+   * `internal.activityAt`. It is required in practice for every caller; it
+   * defaults to now rather than to the preserved clock, because silently
+   * back-dating an activity row is the failure this parameter exists to prevent.
+   */
+  updateRecordMetadata(id, fields, opts = {}) {
+    const refused = Object.keys(fields).filter((k) => !_SterlingStore.METADATA_WRITE_FIELDS.includes(k));
+    if (refused.length) {
+      throw new Error(`updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(", ")} ${refused.length === 1 ? "is" : "are"} not a server-owned metadata field \u2014 this write PRESERVES updated_at, so it must never carry content. The writable set is ${_SterlingStore.METADATA_WRITE_FIELDS.join(", ")}; use updateRecord for anything else. Nothing was written.`);
+    }
+    return this.applyInPlace("updateRecordMetadata", id, (current) => ({
+      ...current,
+      ...fields,
+      // From the IN-TRANSACTION read, never a caller's copy: the whole point is
+      // that the stored clock does not move.
+      updated_at: current.updated_at
+    }), opts, { activityAt: opts.activity_at ?? (/* @__PURE__ */ new Date()).toISOString() });
+  }
+  /**
    * knowledge_append-shaped write: grow an ARRAY field in place (history,
    * files, current_ac, …) without retransmitting the existing entries. One
    * transaction, one version bump, prior array archived.
@@ -6163,6 +6306,17 @@ var SterlingStore = class _SterlingStore {
    * tombstone: renameFileKey, whose contract is that a move orphans no owning
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
+   *
+   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
+   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
+   * caller that deliberately preserves the stored `updated_at` — see
+   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
+   * content clock. The activity row must NOT inherit that preserved value: the
+   * activity log is a chronology of when things actually happened, and
+   * back-dating an entry to the previous write's timestamp makes it false. So
+   * the metadata write passes the REAL time here while the body keeps the old
+   * one. Absent (every ordinary write), behaviour is exactly as before: the
+   * activity row is stamped from the body's own updated_at.
    */
   applyInPlace(op, id, buildPatch, opts, internal = {}) {
     this.assertWritable(op);
@@ -6184,6 +6338,7 @@ var SterlingStore = class _SterlingStore {
       candidate.id = id;
       candidate.type = current.type;
       candidate.created_at = current.created_at;
+      candidate.scope = identity.scope;
       const freshness = candidate.freshness === "fresh" || candidate.freshness === "flagged_stale" ? candidate.freshness : candidate.status === "flagged_stale" ? "flagged_stale" : identity.freshness;
       const supersededBy = identity.lifecycle === "retired" ? current.superseded_by ?? null : null;
       const nextVersion = identity.version + 1;
@@ -6221,7 +6376,7 @@ var SterlingStore = class _SterlingStore {
       for (const link of validated.links)
         this.insertRelation(id, link.rel, link.target_id, now);
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
-      this.logActivity("updated", validated, stored.updated_at ?? now);
+      this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
         this.drainResolves(op, opts.resolves, now);
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
@@ -6313,9 +6468,9 @@ var SterlingStore = class _SterlingStore {
     let existing;
     let textUpdated = false;
     this.tx(() => {
-      const rows = this.db.prepare("SELECT body FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
       for (const r of rows) {
-        const t = JSON.parse(r.body);
+        const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
         if (t.source !== "system")
           continue;
         if (keyOf(t) !== wantKey)
@@ -6348,10 +6503,77 @@ var SterlingStore = class _SterlingStore {
     };
   }
   get(id) {
-    const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
     if (!row)
       return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body)])[0]);
+    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+  }
+  /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id) {
+    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
+  }
+  /**
+   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
+   * projectStoreHolds (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
+   * all an atomicity or an H10-parity question needs. A caller that has to
+   * SUPPLY a scope — the replacement minted by a supersession, the new record an
+   * extraction creates — needs the mount NAMED, and until this existed there was
+   * no way to get one: both call sites reconstructed it as
+   * `heldByProject ? 'project' : record.scope`, which is physically derived for
+   * the project case and straight back to the body for every DOMAIN case. In a
+   * design whose whole thesis is that the body is not the routing key, that is
+   * the trap itself (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]).
+   *
+   * CONTRACT (both implementations):
+   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
+   *  - an id NO store holds THROWS, naming the id. It never falls back to
+   *    'project': "probably project" is exactly the fail-open the anti-pattern
+   *    forbids, and a caller that cannot locate its own record must not go on to
+   *    label a new one;
+   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
+   *    storeHolding there): one id names one row, and every routing guarantee in
+   *    this design assumes a single holder.
+   *
+   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
+   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
+   * decision that chose this store, and never touched by an in-place update
+   * (see identityOf). It is the same value column-authoritative reads already
+   * serve, so a bare-store caller sees no behaviour change; what changes is that
+   * the value now arrives from the column BY CONSTRUCTION rather than by a body
+   * parse that happens to have been corrected. MountedStores overrides this with
+   * the MOUNT the record actually lives in, which is strictly stronger: the
+   * column can still contradict the mount (the third drift class
+   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
+   * is the physical fact and the column is a label.
+   */
+  scopeOfHolder(id) {
+    const identity = this.identityOf(id);
+    if (!identity) {
+      throw new Error(`scopeOfHolder: no record '${id}' in this store \u2014 the scope of a record's holder cannot be derived from a record that is not held. Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`);
+    }
+    return identity.scope;
   }
   /**
    * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
@@ -6391,6 +6613,10 @@ var SterlingStore = class _SterlingStore {
    * Every active feature_article's slug + relies_on, in ONE scan — shared by
    * withDerivedReliedBy across a whole query() result so a capped list of N
    * articles costs one table scan, not N.
+   *
+   * NOT a materializing read, so it does not go through decodeLiveRecord: it
+   * projects two fields out of each body and never yields a DurableRecord to a
+   * caller. Nothing here reads or reports `scope`.
    */
   activeArticleRelations() {
     const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
@@ -6444,10 +6670,10 @@ var SterlingStore = class _SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(rows.map((r) => JSON.parse(r.body)));
+    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
     if (!records.length)
       return records;
     const relations = this.activeArticleRelations();
@@ -6464,10 +6690,10 @@ var SterlingStore = class _SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
@@ -6480,10 +6706,10 @@ var SterlingStore = class _SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC, rowid DESC`).all(slug);
-    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
    * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
@@ -6625,11 +6851,11 @@ var SterlingStore = class _SterlingStore {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
         const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
+        const sql2 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(rows2.map((x) => JSON.parse(x.body)));
+        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
       }
     }
     const orderBy = [];
@@ -6639,10 +6865,10 @@ var SterlingStore = class _SterlingStore {
       overlapParams.push(...fileKeys);
     }
     orderBy.push("r.updated_at DESC", "r.id DESC");
-    const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -6659,13 +6885,15 @@ var SterlingStore = class _SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId, newInput) {
+  supersede(oldId, newInput, authoritativeScope) {
     this.assertWritable("supersede");
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
     const oldIdentity = this.identityOf(oldId);
-    if (oldIdentity?.lifecycle === "retired" || oldRecord.status === "superseded") {
+    if (!oldIdentity)
+      throw new Error(`supersede: no record '${oldId}'`);
+    if (oldIdentity.lifecycle === "retired" || oldRecord.status === "superseded") {
       throw new Error(`supersede: record '${oldId}' is already superseded (retired) \u2014 one successor maximum`);
     }
     const candidate = { ...newInput };
@@ -6677,6 +6905,7 @@ var SterlingStore = class _SterlingStore {
       links.push({ rel: "supersedes", target_id: oldId });
     }
     candidate.links = links;
+    candidate.scope = authoritativeScope ?? oldIdentity.scope;
     const prepared = _SterlingStore.resolveIdentity(candidate, { lifecycle: "live", freshness: "fresh", version: 1 });
     const newRecord = validateRecord(prepared.input);
     if (newRecord.type !== oldRecord.type) {
@@ -7368,15 +7597,22 @@ var SterlingStore = class _SterlingStore {
     return result;
   }
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
+   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
+   * PHYSICAL IDENTITY rather than by a label (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
+   * label-routed transaction opens on the store the label NAMES while every
+   * record mutation independently opens on the store that HOLDS the id, so a
+   * drifted label put the transaction on the wrong database; routing by the
+   * holder makes the two agree by construction. On a plain SterlingStore there
+   * is only ONE physical store, so this is a straight alias for withTransaction
+   * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
-  withTransactionForScope(_scope, fn) {
+  withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);
   }
 };
@@ -7398,17 +7634,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function deny(message) {
-  process.stderr.write(message);
-  process.exit(2);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function allow() {
-  process.exit(0);
-}
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join2(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -7447,83 +7778,321 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
-// scripts/hooks/lib/dispatch-register-lock.mjs
-import { mkdirSync as mkdirSync2, rmSync, renameSync, statSync, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
-var DEFAULT_RETRY_MS = 1e3;
-var DEFAULT_STALE_MS = 1e4;
-var POLL_MS = 20;
-var OWNER_FILE = "owner";
-function registerLockDir(projectRoot2) {
-  return join3(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2 } from "node:fs";
+import { hostname } from "node:os";
+import { join as join3, basename as basename2, dirname as dirname3 } from "node:path";
+import { randomBytes } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
 }
-function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+function refusal(code, facts = {}, message = code) {
+  assertCode(code);
+  const err = new Error(message);
+  err.kind = "refusal";
+  err.code = code;
+  err.facts = facts;
+  return err;
 }
-function readOwnerNonce(lockDir) {
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.json");
+}
+function registerLockDir(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  let raw;
   try {
-    return readFileSync2(join3(lockDir, OWNER_FILE), "utf8");
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var LOCK_CODE_BY_BASENAME = {
+  "dispatch-register.lock": "register_lock_held",
+  "review-ledger.lock": "ledger_lock_held"
+};
+function lockCodeFor(lockDir) {
+  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readOwner(lockDir) {
+  try {
+    return JSON.parse(readFileSync2(join3(lockDir, "owner.json"), "utf8"));
   } catch {
     return null;
   }
 }
-function tombAndRemove(lockDir) {
-  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID2()}`;
-  renameSync(lockDir, tomb);
+function looksDeadOwner(o) {
+  return !!o && o.host === hostname() && !isPidAlive(o.pid);
+}
+function statIno(p) {
   try {
-    rmSync(tomb, { recursive: true, force: true });
+    return statSync2(p).ino;
   } catch {
+    return null;
   }
 }
-function makeLock(lockDir, nonce) {
-  return {
-    nonce,
-    release() {
-      try {
-        if (readOwnerNonce(lockDir) !== nonce) return;
-        tombAndRemove(lockDir);
-      } catch {
-      }
-    }
-  };
+function sleepAsync(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
-async function acquireLock(lockDir, opts = {}) {
-  const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
-  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
-  const nonce = randomUUID2();
-  const deadline = Date.now() + retryMs;
-  const ownerPath = join3(lockDir, OWNER_FILE);
+async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 1e3;
+  const start = Date.now();
   for (; ; ) {
-    mkdirSync2(lockDir, { recursive: true });
     try {
-      writeFileSync(ownerPath, nonce, { flag: "wx" });
-      return makeLock(lockDir, nonce);
+      mkdirSync2(dirname3(lockDir), { recursive: true });
+      mkdirSync2(lockDir);
+      break;
     } catch (e) {
-      if (e.code === "ENOENT") continue;
-      if (e.code !== "EEXIST") throw e;
-    }
-    let ageMs = null;
-    try {
-      ageMs = Date.now() - statSync(ownerPath).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (ageMs >= staleMs) {
-      try {
-        tombAndRemove(lockDir);
-      } catch {
+      if (e?.code !== "EEXIST") throw e;
+      const owner = readOwner(lockDir);
+      if (looksDeadOwner(owner)) {
+        const examinedIno = statIno(lockDir);
+        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
+        let renamed = false;
+        try {
+          renameSync(lockDir, tombstone);
+          renamed = true;
+        } catch {
+        }
+        if (renamed) {
+          const tombstoneOwner = readOwner(tombstone);
+          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
+          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+            try {
+              rmSync(tombstone, { recursive: true, force: true });
+            } catch {
+            }
+          } else {
+            try {
+              renameSync(tombstone, lockDir);
+            } catch (restoreErr) {
+              if (restoreErr?.code === "EEXIST") {
+                process.stderr.write(
+                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
+`
+                );
+                throw refusal(
+                  lockCodeFor(lockDir),
+                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
+                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
+                );
+              }
+            }
+          }
+        }
       }
-      continue;
+      if (Date.now() - start >= timeoutMs) {
+        throw refusal(
+          lockCodeFor(lockDir),
+          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
+          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+        );
+      }
+      await sleepAsync(retryMs);
     }
-    if (Date.now() >= deadline) return null;
-    await sleep(POLL_MS);
   }
+  writeFileSync(
+    join3(lockDir, "owner.json"),
+    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
+  );
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function withRegisterLock(root, fn, opts = {}) {
+  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
+  });
+  return { availability: "ok", entries: rows };
+}
+function formatAge(ageMs) {
+  if (ageMs === null || ageMs === void 0 || Number.isNaN(ageMs)) return "age unreadable";
+  const mins = Math.floor(ageMs / 6e4);
+  if (mins < 1) return "<1m";
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h${m}m`;
+}
+function formatDispatchRef(row) {
+  const { entry, status, ageMs } = row;
+  return `${entry.agent_type}:${entry.agent_id} (registered ${formatAge(ageMs)}; ${status})`;
 }
 
 // scripts/hooks/lib/settlement.mjs
-import { createHash, randomUUID as randomUUID3 } from "node:crypto";
-import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
@@ -7543,7 +8112,7 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
+        if (Date.now() - statSync3(lockPath).mtimeMs > LOCK_STALE_MS) {
           console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
           rmSync2(lockPath, { recursive: true, force: true });
           continue;
@@ -7619,7 +8188,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now) {
   return {
-    id: randomUUID3(),
+    id: randomUUID2(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -7679,10 +8248,10 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync3, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync3(path)) return null;
+  if (!existsSync4(path)) return null;
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -7716,7 +8285,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync3(path).size > TAIL_BYTES;
+  const exhausted = statSync4(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
@@ -7819,56 +8388,37 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 
 // scripts/hooks/h10-direct-capture.mjs
 async function computeDeadDispatchResidue(cwd, sessionId) {
-  const registerPath = join5(cwd, ".sterling", "transient", "dispatch-register.json");
-  let raw = [];
-  try {
-    if (existsSync4(registerPath)) {
-      const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
-      if (Array.isArray(parsed)) raw = parsed;
-    }
-  } catch {
-    raw = [];
-  }
-  if (!raw.length) return [];
+  const registerPath2 = registerPath(cwd);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const { availability, entries: registerEntries } = readRegister(cwd);
+  if (availability !== "ok" || !registerEntries.length) return [];
   let staleMinutes = 60;
   try {
     staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
   } catch {
   }
-  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const nowMs = Date.parse(nowIso);
   const lines = [];
   const stampIds = /* @__PURE__ */ new Set();
-  for (const entry of raw) {
+  for (const entry of registerEntries) {
     if (!entry || entry.session_id !== sessionId) continue;
+    if (entry.ended) continue;
     if (!isOrphan(entry, staleMinutes, nowMs)) continue;
     if (entry.residue_reported_at) continue;
     const probe = probeDirtyPaths(cwd, entry.files);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue;
-    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
     stampIds.add(entry.agent_id);
   }
   if (stampIds.size) {
-    const lockDir = registerLockDir(cwd);
     try {
       mkdirSync4(join5(cwd, ".sterling", "transient"), { recursive: true });
-      const lock = await acquireLock(lockDir, { retryMs: 1e3, staleMs: 1e4 });
-      if (!lock) {
-        process.stderr.write(
-          "H10: register lock timed out \u2014 SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop\n"
-        );
-      } else {
-        try {
-          let fresh = [];
-          try {
-            if (existsSync4(registerPath)) {
-              const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
-              if (Array.isArray(parsed)) fresh = parsed;
-            }
-          } catch {
-            fresh = [];
-          }
+      await withRegisterLock(
+        cwd,
+        () => {
+          const freshRead = readRegister(cwd);
+          const fresh = freshRead.availability === "ok" ? freshRead.entries : [];
           for (const entry of fresh) {
             if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
               entry.residue_reported_at = nowIso;
@@ -7876,14 +8426,19 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
           }
           const transient = join5(cwd, ".sterling", "transient");
           mkdirSync4(transient, { recursive: true });
-          const tmpPath = join5(transient, `dispatch-register.json.tmp-${process.pid}`);
+          const tmpPath = join5(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
           writeFileSync2(tmpPath, JSON.stringify(fresh));
-          renameSync2(tmpPath, registerPath);
-        } finally {
-          lock.release();
-        }
+          renameSync2(tmpPath, registerPath2);
+        },
+        { retryMs: 1e3, timeoutMs: 1e4 }
+      );
+    } catch (e) {
+      if (e?.code === "register_lock_held") {
+        process.stderr.write(
+          `${render(e)} \u2014 SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop
+`
+        );
       }
-    } catch {
     }
   }
   return lines;
@@ -8024,7 +8579,7 @@ try {
       if (delegationSpent()) return null;
       const dw = config.delegation_watch;
       const tPath = input.transcript_path ?? "";
-      if (!tPath || !existsSync4(tPath)) {
+      if (!tPath || !existsSync5(tPath)) {
         store.recordCheckSkipped("delegation-watch", "transcript_missing", void 0, now);
         return null;
       }
@@ -8114,7 +8669,10 @@ try {
       }
       if (parts.length) deny([...disclosureParts, ...parts].join("\n\n"));
     }
-    if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }));
+    if (disclosureParts.length) {
+      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }), 0);
+      throw Object.assign(new Error("h10-release-in-flight"), { h10ReleaseInFlight: true });
+    }
     allow();
   };
   const touchesClaimPath = `${touchesPath}.claim`;
@@ -8123,7 +8681,7 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync4(touchesClaimPath)) {
+      if (existsSync5(touchesClaimPath)) {
         try {
           orphanedTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
         } catch {
@@ -8153,7 +8711,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync4(touchesClaimPath) && !existsSync4(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
+        if (existsSync5(touchesClaimPath) && !existsSync5(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -8161,7 +8719,7 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync4(eventsPath)) {
+    if (existsSync5(eventsPath)) {
       const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
@@ -8169,38 +8727,27 @@ try {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync4(join5(input.cwd, p))
+    (p) => existsSync5(join5(input.cwd, p))
   );
-  let dispatchEntries = [];
-  try {
-    const registerPath = join5(input.cwd, ".sterling", "transient", "dispatch-register.json");
-    if (existsSync4(registerPath)) {
-      const raw = JSON.parse(readFileSync4(registerPath, "utf8"));
-      if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
-    }
-  } catch {
-    dispatchEntries = [];
-  }
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
-  const ageMs = (e) => {
-    const t = Date.parse(e.at ?? "");
-    return Number.isNaN(t) ? Infinity : nowMs - t;
-  };
-  const isLive = (e) => {
-    const a = ageMs(e);
-    return a >= 0 && a < staleMinutes * 6e4;
-  };
-  const liveDispatches = dispatchEntries.filter(isLive);
-  const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+  const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
+  const liveDispatches = classified.availability === "ok" ? classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) : [];
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const deferredOwners = /* @__PURE__ */ new Map();
-  for (const e of liveDispatches) {
-    for (const f of Array.isArray(e.files) ? e.files : []) {
-      const k = joinKey(f);
-      if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
-      deferredOwners.get(k).add(e.agent_id);
+  const unknownRows = [];
+  if (classified.availability === "ok") {
+    for (const row of classified.entries) {
+      if (row.status === "presumed-active") {
+        for (const f of Array.isArray(row.entry.files) ? row.entry.files : []) {
+          const k = joinKey(f);
+          if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
+          deferredOwners.get(k).add(row.entry.agent_id);
+        }
+      } else if (row.status === "unknown") {
+        unknownRows.push(row);
+      }
     }
   }
   const isDeferred = (p) => deferredOwners.has(joinKey(p));
@@ -8218,10 +8765,27 @@ try {
     );
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
-  if (staleBiting.length) {
+  const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  for (const row of bitingUnknown) {
     disclosureParts.push(
-      `\u2022 stale dispatch: ${staleBiting.length} entry/entries [${staleBiting.map((e) => e.agent_id).join(", ")}] stale (>${staleMinutes}m) \u2192 defers nothing; H1 sweeps at next session start`
+      render(
+        disclosure(
+          "dispatch_status_unknown",
+          { agent_id: row.entry.agent_id, reason: row.reason },
+          `ownership uncertain (dispatch ${formatDispatchRef(row)}) \u2014 settle with TaskStop or an explicit abandonment`
+        )
+      )
+    );
+  }
+  if (classified.availability === "corrupt") {
+    disclosureParts.push(
+      render(
+        disclosure(
+          "register_unavailable",
+          { availability: classified.availability },
+          `dispatch register unavailable (${classified.availability}) \u2014 nothing excluded, no holder can be judged`
+        )
+      )
     );
   }
   const clearRegisters = () => {
@@ -8296,7 +8860,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join5(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync5(join5(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -8304,7 +8868,35 @@ try {
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
-  const isUnowned = (p) => !store.query({ types: ["feature_article", "reference_material"], file_keys: [p], cap: 25 }).some((r) => !r.working_tree);
+  const ownersSeen = /* @__PURE__ */ new Map();
+  const ownerRows = (p) => {
+    if (ownersSeen.has(p)) return ownersSeen.get(p);
+    const filter = { types: ["feature_article", "reference_material"], file_keys: [p] };
+    const total = store.count(filter);
+    const rows = total === 0 ? [] : store.query({ ...filter, cap: total });
+    ownersSeen.set(p, rows);
+    return rows;
+  };
+  const isUnowned = (p) => !ownerRows(p).some((r) => !r.working_tree);
+  const ownerRowsNote = (p) => {
+    const rows = ownerRows(p);
+    if (!rows.length) return "none";
+    return rows.map((r) => `${r.slug ?? r.title ?? r.type} (${String(r.id).slice(0, 8)}${r.working_tree ? `, working_tree=${r.working_tree}` : ""})`).join("; ");
+  };
+  const gitKnowsNow = (list, cwd) => {
+    const clean = (list ?? []).filter(Boolean);
+    if (!clean.length) return /* @__PURE__ */ new Set();
+    const seen = /* @__PURE__ */ new Set();
+    for (const argv of [
+      ["ls-files", "-z", "--", ...clean],
+      ["ls-tree", "-r", "-z", "HEAD", "--name-only", "--", ...clean]
+    ]) {
+      const res = spawnSync4("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
+      if (res.status !== 0) return null;
+      for (const p of (res.stdout || "").split("\0").filter(Boolean)) seen.add(p);
+    }
+    return seen;
+  };
   let unowned = paths.filter(isUnowned);
   if (unowned.length) {
     const ignored = gitIgnored(unowned, input.cwd);
@@ -8352,7 +8944,7 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync4(join5(input.cwd, p))));
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync5(join5(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);
@@ -8456,7 +9048,7 @@ try {
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    if (!existsSync4(nagMarker)) {
+    if (!existsSync5(nagMarker)) {
       writeFileSync2(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
       releaseTouchesClaim();
       releaseWithPressure();
@@ -8468,7 +9060,7 @@ try {
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8498,7 +9090,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 duties before this session ends \u2014 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync4(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync5(nagMarker)) {
     writeFileSync2(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
@@ -8528,8 +9120,10 @@ try {
     }
     if (articleDemand) {
       const capList = (arr) => arr.length > 5 ? `${arr.slice(0, 5).join(", ")} +${arr.length - 5} more` : arr.join(", ");
+      const ownerEvidence = unowned.slice(0, 5).map((p) => `${p} \u2192 owners seen: ${ownerRowsNote(p)}`);
       parts.push(
-        `\u2022 articles: article demand \u2014 ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} new)` : ""}: ${capList(unowned)} \u2192 knowledge_create type feature_article (reference_material kind doc for a governing document)`
+        `\u2022 articles: article demand \u2014 ${unowned.length} touched file(s) no owner (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} new)` : ""}: ${capList(unowned)} \u2192 knowledge_create type feature_article (reference_material kind doc for a governing document)
+  ownership join (uncapped, types feature_article+reference_material, excluding records that declare a working_tree): ${ownerEvidence.join(" | ")}${unowned.length > 5 ? ` | +${unowned.length - 5} more path(s) not detailed` : ""}`
       );
     }
     if (pressure.level === "soft" || pressure.level === "hard") {
@@ -8548,7 +9142,7 @@ ${parts.join("\n\n")}`);
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8567,28 +9161,37 @@ ${parts.join("\n\n")}`);
   }
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
-    const demandKeys = overlapping ? overlapping.file_keys ?? [] : unowned;
-    store.enqueueSystemTodo({
-      id: randomUUID4(),
-      type: "todo",
-      created_at: now,
-      updated_at: now,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
-      source: "system",
-      system_reason: "article_missing",
-      file_keys: demandKeys
-    });
+    const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
+    const vanished = demandKeysRaw.filter((p) => !existsSync5(join5(input.cwd, p)));
+    let demandKeys = demandKeysRaw;
+    if (vanished.length) {
+      const known = gitKnowsNow(vanished, input.cwd);
+      if (known === null) skipRow("article-demand-vanished-tracked", "no_git");
+      else demandKeys = demandKeysRaw.filter((p) => !vanished.includes(p) || known.has(p));
+    }
+    if (demandKeys.length) {
+      store.enqueueSystemTodo({
+        id: randomUUID3(),
+        type: "todo",
+        created_at: now,
+        updated_at: now,
+        author: "system",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
+        source: "system",
+        system_reason: "article_missing",
+        file_keys: demandKeys
+      });
+    }
   }
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8609,7 +9212,7 @@ ${parts.join("\n\n")}`);
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8629,9 +9232,12 @@ ${parts.join("\n\n")}`);
   clearRegisters();
   releaseWithPressure();
 } catch (e) {
-  try {
-    store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
-  } catch {
+  if (e?.h10ReleaseInFlight === true) {
+  } else {
+    try {
+      store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
+    } catch {
+    }
+    warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (check_skipped h10-stop-duties; fix & re-run)`);
   }
-  warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (check_skipped h10-stop-duties; fix & re-run)`);
 }

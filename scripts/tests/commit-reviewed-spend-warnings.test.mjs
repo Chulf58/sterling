@@ -1,53 +1,25 @@
-// COMMIT-REVIEWED SPEND-WARNING ADVISORIES (board 09e03d76, branch
-// sterling/board-fanout-aug25) — authored from the dispatch SPEC, not from
-// scripts/commit-reviewed.mjs's internals (H4 read wall: this file's author
-// never read that script). The implementation is reported as already landed
-// on this branch, so these pins are expected to run GREEN today; a failure
-// is reported as a finding against the spec below, not "fixed" here.
+// COMMIT-REVIEWED — THE DISCLOSURE CHANNEL (R1 pin re-cut, group D).
 //
-// Spec under test (as given by the launching agent):
-//   Three advisory classes, evaluated over the un-consumed review-ledger
-//   entries at commit-reviewed time. NONE of them ever refuses the commit —
-//   they are advisory-only. Each firing warning:
-//     (a) prints to stderr, and
-//     (b) is pushed into a NEW `spend_warnings[]` array key in the stdout
-//         summary JSON.
-//   Classes:
-//     1. MULTI-SPEND: more than 3 un-consumed receipts are about to be
-//        stamped/consumed in this one commit.
-//     2. NO FILE OVERLAP: a receipt's `files` share zero paths with the
-//        currently staged diff (both sides path-normalized — forward
-//        slashes, matching non-ASCII bytes — before comparing). ANY overlap
-//        (even partial, mixed with unstaged paths) suppresses this warning
-//        for that receipt.
-//     3. STALENESS: a receipt whose `at` is more than 12h in the past, OR
-//        whose `at` cannot be parsed into an age at all (the literal string
-//        'n/a', or the `at` key missing entirely) — the latter reported as
-//        "RECEIPT AGE UNVERIFIABLE" quoting the offending value, distinct
-//        from the >12h "STALE RECEIPT" case.
-//   None of the three classes filters entries out of the stamp/consume path:
-//   every valid entry still gets exactly one Reviewed-By-Agent trailer and
-//   is still consumed from the ledger, warnings or not.
+// AUTHORITY: contract sheet §3.2 — "Disclosures printed (never refuse): receipt_stale,
+// receipt_age_unverifiable, receipt_deferred, receipt_no_overlap, multi_spend (>3),
+// receipt_unattributable, receipt_foreign, receipt_identity_unknown, legacy_entries_present"
+// — and §1.4 `render(x)` → `NOTE [<code>] <message>`, with `disclosures[].code` in --json.
 //
-// Fixture idiom copied from scripts/tests/commit-reviewed.test.mjs
-// (makeRepo/writeLedger/stageChange/runCommitReviewed conventions), adapted
-// with a flatten() helper for interpolating child stderr into assertion
-// messages per anti-pattern ee89c3fd (never interpolate raw multi-line
-// stderr into an assertion message — flatten it to one line first).
+// RE-CUT: stale horizon per A11 (14 days default) — R1-D22's stale receipt is aged 400 days,
+//   and its unverifiable-age receipt uses an unparseable STRING (a non-string finished_at is
+//   [ledger_entry_malformed] per A11, which would be a different class in the wall).
 //
-// Timestamps are always Date.now()-relative ISO strings (never hardcoded
-// dates) so the staleness pins do not rot as the calendar moves.
-//
-// STRENGTHENING PASS (coordinator-directed, post-review): the spend_warnings[]
-// element shape is now confirmed as plain strings carrying the SAME text as
-// the corresponding stderr line, so P1/P3/P5/P7 now assert BOTH channels
-// against the same marker regex (a class that only console.errors, or pushes
-// a placeholder string, goes red). P7 also now proves the 'n/a' and the
-// missing-`at` entries produce two DISTINCT warnings, not two identical ones.
-// P2 additionally pins spend_warnings deep-equals [] on a clean run. Two new
-// pins were added from freshly-landed implementation fixes: P10 (a JSON-valid
-// but hostile, non-string `at`) and P11 (a RECORDS NO FILES advisory for
-// empty/absent `files`).
+// RETIRED: P3/P4/P9 (the DO-NOT-OVERLAP advisory and its path-normalization arm) — that class
+//   is [receipt_no_overlap] and is pinned in commit-reviewed-file-scoping.test.mjs R1-D13/D17.
+// RETIRED: P5/P6/P7/P10 (STALE RECEIPT, RECEIPT AGE UNVERIFIABLE and the hostile `at`) —
+//   pinned in commit-reviewed-completed-at.test.mjs R1-D62..R1-D66 on the v2 finished_at field.
+// RETIRED: P11 (RECORDS NO FILES) — an empty territory is no longer stamped at all; the
+//   consequence is pinned in commit-reviewed-file-scoping.test.mjs R1-D16.
+// RETIRED: the `spend_warnings[]` field name and every ALL-CAPS banner assertion
+//   (MULTI-SPEND — 4 review receipts, DEFERRED RECEIPT, ADVISORY ONLY) — the channel is
+//   `disclosures[]` with a `code` per entry (§3.2), asserted by code, never by text or count
+//   embedded in prose.
+// RETIRED: every v1 (flat) fixture except the ONE legacy_entries_present arm inside R1-D22.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -64,6 +36,12 @@ const GIT_SKIP = (() => {
   const r = spawnSync('git', ['--version'], { encoding: 'utf8' });
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
+
+const token = (c) => new RegExp('\\[' + c + '\\]');
+const SESSION = 'this-session';
+const ENV_SESSION = { STERLING_SESSION_ID: SESSION };
+const flat = (s) => String(s ?? '').replace(/\r?\n/g, ' | ');
+const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
 
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
@@ -86,355 +64,181 @@ function makeRepo() {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function ledgerPath(dir) {
-  return join(dir, '.sterling', 'review-ledger.json');
-}
-function writeLedger(dir, entries) {
-  writeFileSync(ledgerPath(dir), JSON.stringify(entries));
-}
-function readLedger(dir) {
-  return existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null;
-}
+const ledgerPath = (dir) => join(dir, '.sterling', 'review-ledger.json');
+const writeLedger = (dir, entries) => writeFileSync(ledgerPath(dir), JSON.stringify(entries));
+const readLedger = (dir) => (existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null);
+const entryById = (dir, id) => (readLedger(dir) ?? []).find((e) => e.entry_id === id);
 
-function stageChange(dir, relPath = 'src/feature.mjs', content = 'export const f = 1;\n') {
+function stageChange(dir, relPath, content = 'export const f = 1;\n') {
   const abs = join(dir, relPath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
   git(dir, ['add', '-A']);
 }
-
-function runCommitReviewed(dir, args = []) {
-  const r = spawnSync(process.execPath, [CLI_PATH, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+function indexBlob(dir, relPath) {
+  const out = git(dir, ['ls-files', '-s', '--', relPath]);
+  const m = out.match(/^\d+ ([0-9a-f]{40}) \d+\t/);
+  assert.ok(m, `fixture guard: ${relPath} must be staged in the index — got ${out}`);
+  return m[1];
+}
+function runCommitReviewed(dir, args = [], env = ENV_SESSION) {
+  const r = spawnSync(process.execPath, [CLI_PATH, ...args], {
+    cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
+  });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
-
-function readTrailerValues(dir, sha = 'HEAD') {
-  const out = git(dir, ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha]);
+function trailerValues(dir, key, sha = 'HEAD') {
+  const out = git(dir, ['log', '-1', `--format=%(trailers:key=${key},valueonly,unfold)`, sha]);
   return out.split('\n').filter((l) => l.trim() !== '');
 }
+const reviewedByTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Reviewed-By-Agent', sha);
+const receiptTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Review-Receipt', sha);
+function soleJson(r) {
+  let parsed;
+  assert.doesNotThrow(() => { parsed = JSON.parse(r.stdout); },
+    `--json must print exactly ONE JSON object on stdout — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+  return parsed;
+}
+const codesOf = (out) => (out.disclosures ?? []).map((d) => d.code);
 
-// Anti-pattern ee89c3fd guard: flatten before interpolating into a message.
-const flat = (s) => (s ?? '').replace(/\r?\n/g, ' | ');
+function v2({
+  entry_id, agent_type, files, blobs = {}, base_sha, at = isoAgo(60_000),
+  finished_at, session_id = SESSION,
+}) {
+  return {
+    schema_version: 2, entry_id, kind: 'roster_receipt', status: 'active',
+    started_at: at, finished_at: finished_at ?? at,
+    reviewer: { agent_type, model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
+    identity: { session_id, branch: 'main', base_sha, agent_id: `agent-${entry_id.slice(0, 8)}` },
+    territory: { files, source: 'review-territory', attribution: 'block' },
+    content_evidence: {
+      basis: 'stop-time-worktree-snapshot', status: 'complete', blobs,
+      absent_paths: [], truncated_of: null, failure_reason: null,
+    },
+    disposition: null,
+  };
+}
 
-// Date.now()-relative ISO timestamps, never hardcoded dates.
-const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+// ===========================================================================
+// R1-D20 — CONTROL, PLACED FIRST. Establishes both the threshold boundary and the
+// present-as-empty channel; without it, "multi_spend fired" is indistinguishable
+// from "this channel emits something on every run".
+// ===========================================================================
 
-// ---------------------------------------------------------------------------
-// MULTI-SPEND: P2 (CONTROL, placed first) then P1.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P2 (CONTROL): exactly 3 fresh, overlapping receipts is AT the multi-spend threshold, not over it — no MULTI-SPEND warning', { skip: GIT_SKIP }, () => {
+// EXPECTED: RED today — there is no `disclosures` key (today's field is `spend_warnings`), so
+// the deepEqual on an empty array fires.
+// SABOTAGE: emit multi_spend at `>= 3` instead of `> 3` -> the doesNotMatch and the empty
+// deepEqual both red. The boundary is the whole content of this arm.
+test('R1-D20 (CONTROL, first): exactly 3 selected receipts is AT the multi-spend threshold, not over it — no [multi_spend], and disclosures is present-as-EMPTY, never absent', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-b', files: ['src/feature.mjs'], at: isoAgo(2_000) },
-      { agent_type: 'reviewer-c', files: ['src/feature.mjs'], at: isoAgo(3_000) },
-    ]);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    const ids = ['20000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000003'];
+    writeLedger(dir, ids.map((id, i) => v2({ entry_id: id, agent_type: `reviewer-${i}`, files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base })));
 
-    const r = runCommitReviewed(dir, ['-m', 'spend P2 control']);
-    assert.equal(r.code, 0, `3 receipts must still succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /MULTI-SPEND/, `3 receipts is the control boundary, not over it — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    assert.deepEqual(summary.spend_warnings, [], `a clean run must expose spend_warnings as an EMPTY array (the key is present-as-empty, not absent) — got ${JSON.stringify(summary.spend_warnings)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D20 three receipts', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.doesNotMatch(r.stderr, token('multi_spend'), `three is the boundary, not over it — stderr=${flat(r.stderr)}`);
+    assert.deepEqual(soleJson(r).disclosures, [], `a clean run reports disclosures as an EMPTY array — got ${flat(r.stdout)}`);
+  } finally { cleanup(); }
 });
 
-test('spend-warnings P1: 4 fresh, overlapping receipts trip MULTI-SPEND — warned on stderr AND in spend_warnings[], commit still succeeds and ledger is fully consumed', { skip: GIT_SKIP }, () => {
+// EXPECTED: RED today — no [multi_spend] code, no disclosures[], no Review-Receipt trailers.
+// SABOTAGE: promote multi_spend from disclosure to refusal -> exit 1 and the four-trailer /
+// consumed assertions red. A crowded commit is a smell, never an error.
+// SECOND SABOTAGE: count the LEDGER's entries instead of the SELECTED ones -> a ledger with
+// four entries of which two are withheld would fire the disclosure wrongly; this fixture
+// cannot see that, which is why R1-D22 keeps a withheld receipt beside four selected ones.
+test('R1-D21: 4 selected receipts disclose [multi_spend] with facts.count — the commit still succeeds, all four are stamped, bound and consumed', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-b', files: ['src/feature.mjs'], at: isoAgo(2_000) },
-      { agent_type: 'reviewer-c', files: ['src/feature.mjs'], at: isoAgo(3_000) },
-      { agent_type: 'reviewer-d', files: ['src/feature.mjs'], at: isoAgo(4_000) },
-    ]);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    const ids = ['21000000-0000-4000-8000-000000000001', '21000000-0000-4000-8000-000000000002', '21000000-0000-4000-8000-000000000003', '21000000-0000-4000-8000-000000000004'];
+    writeLedger(dir, ids.map((id, i) => v2({ entry_id: id, agent_type: `reviewer-${i}`, files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base })));
 
-    const r = runCommitReviewed(dir, ['-m', 'spend P1']);
-    assert.equal(r.code, 0, `4 receipts must not refuse — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /MULTI-SPEND — 4 review receipts/, `stderr must name the count — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    assert.ok(Array.isArray(summary.spend_warnings) && summary.spend_warnings.length >= 1, `spend_warnings[] must carry the MULTI-SPEND entry — got ${JSON.stringify(summary.spend_warnings)}`);
-    assert.ok(summary.spend_warnings.some((w) => /MULTI-SPEND/.test(w)), `spend_warnings[] must contain the SAME MULTI-SPEND text as stderr, not an unrelated placeholder — got ${JSON.stringify(summary.spend_warnings)}`);
-
-    const trailers = readTrailerValues(dir);
-    assert.equal(trailers.length, 4, 'one trailer per entry regardless of the advisory');
-
-    assert.deepEqual(readLedger(dir), [], 'the ledger is still fully consumed — advisory only, never a refusal');
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D21 four receipts', '--json']);
+    assert.equal(r.code, 0, `a crowded commit is disclosed, never refused — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    const multi = (out.disclosures ?? []).filter((d) => d.code === 'multi_spend');
+    assert.equal(multi.length, 1, `exactly one multi-spend disclosure per invocation — got ${JSON.stringify(out.disclosures)}`);
+    assert.equal(multi[0].facts?.count, 4, `the count is a FACT, not a number embedded in prose — got ${JSON.stringify(multi[0])}`);
+    assert.match(r.stderr, token('multi_spend'), `and the human channel carries the same code — stderr=${flat(r.stderr)}`);
+    assert.equal(reviewedByTrailers(dir).length, 4, 'one roster trailer per receipt regardless of the disclosure');
+    assert.deepEqual(receiptTrailers(dir).sort(), [...ids].sort(), 'and one Review-Receipt trailer per receipt');
+    for (const id of ids) assert.equal(entryById(dir, id).status, 'consumed', `${id} consumed`);
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// FILE OVERLAP: P4 (CONTROL) then P3.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P4 (CONTROL): a receipt whose files include the staged path (mixed with an unstaged path) has PARTIAL overlap — no DO-NOT-OVERLAP warning', { skip: GIT_SKIP }, () => {
+// THE NEVER-A-REFUSAL WALL: every simultaneously-reachable disclosure class firing in ONE run.
+// EXPECTED: RED today — four of the five codes do not exist, and a v1 entry would be spent
+// rather than listed.
+// SABOTAGE: let any single disclosure class set a non-zero exit -> the exit-0 assertion reds
+// while the code assertions stay green, which is exactly the regression this wall exists for:
+// the classes are individually harmless and collectively tempting to treat as a refusal.
+test('R1-D22 (THE WALL): multi_spend + receipt_stale + receipt_age_unverifiable + receipt_no_overlap + legacy_entries_present all firing at once still exits 0, stamps every selected receipt and leaves every withheld one ACTIVE', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir, 'src/feature.mjs');
+    stageChange(dir, 'src/laneB.mjs');
+    git(dir, ['commit', '-m', 'seed lane B']);
+    const laneBBlob = git(dir, ['rev-parse', 'HEAD:src/laneB.mjs']);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    const selected = ['22000000-0000-4000-8000-000000000001', '22000000-0000-4000-8000-000000000002', '22000000-0000-4000-8000-000000000003', '22000000-0000-4000-8000-000000000004'];
+    const idNoOverlap = '22000000-0000-4000-8000-000000000005';
     writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs', 'src/unstaged-other.mjs'], at: isoAgo(1_000) },
+      v2({ entry_id: selected[0], agent_type: 'reviewer-a', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: selected[1], agent_type: 'reviewer-b', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base, at: isoAgo(401 * 86_400_000), finished_at: isoAgo(400 * 86_400_000) }), // stale, past the 14-day default horizon (A11)
+      v2({ entry_id: selected[2], agent_type: 'reviewer-c', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base, finished_at: 'whenever' }),                                // age unverifiable: an unparseable STRING, which A11 admits
+      v2({ entry_id: selected[3], agent_type: 'reviewer-d', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: idNoOverlap, agent_type: 'reviewer-e', files: ['src/laneB.mjs'], blobs: { 'src/laneB.mjs': laneBBlob }, base_sha: base }),                                                     // no overlap
+      { agent_type: 'reviewer-legacy', files: ['src/laneA.mjs'], at: isoAgo(60_000), session_id: SESSION, branch: 'main' },                                                                          // v1 legacy
     ]);
 
-    const r = runCommitReviewed(dir, ['-m', 'spend P4 control']);
-    assert.equal(r.code, 0, `partial overlap must still succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /DO NOT OVERLAP/, `any overlap at all suppresses the warning — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D22 every class at once', '--json']);
+    assert.equal(r.code, 0, `no combination of disclosures may refuse — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    for (const code of ['multi_spend', 'receipt_stale', 'receipt_age_unverifiable', 'receipt_no_overlap', 'legacy_entries_present']) {
+      assert.ok(codesOf(out).includes(code), `[${code}] must be disclosed — got ${JSON.stringify(out.disclosures)}`);
+    }
+    assert.equal(reviewedByTrailers(dir).length, 4, 'exactly the four SELECTED receipts are stamped — the withheld and legacy entries contribute none');
+    for (const id of selected) assert.equal(entryById(dir, id).status, 'consumed', `${id} consumed`);
+    assert.equal(entryById(dir, idNoOverlap).status, 'active', 'the withheld receipt stays spendable');
+    assert.ok((readLedger(dir) ?? []).some((e) => e.agent_type === 'reviewer-legacy'), 'and the v1 entry is left exactly where it was');
+  } finally { cleanup(); }
 });
 
-test('spend-warnings P3: a receipt whose files share NOTHING with the staged diff is warned by name, marked advisory-only, and still commits/consumes', { skip: GIT_SKIP }, () => {
+// EXPECTED: RED today — the two channels carry different shapes today (prose on stderr, a
+// `spend_warnings` string array on stdout), so no code-set comparison is possible.
+// SABOTAGE: emit a disclosure into --json only (or into stderr only) -> the set comparison
+// reds. Both channels are consumed by different readers — the operator and the merge
+// surfaces — and a disclosure visible to only one of them is invisible to the other.
+test('R1-D23: every disclosure reaches BOTH channels — the [code] tokens on stderr are exactly the set of disclosures[].code in --json', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir, 'src/feature.mjs');
+    stageChange(dir, 'src/laneB.mjs');
+    git(dir, ['commit', '-m', 'seed lane B']);
+    const laneBBlob = git(dir, ['rev-parse', 'HEAD:src/laneB.mjs']);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
     writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/elsewhere.mjs'], at: isoAgo(1_000) },
-    ]);
-    const beforeHead = git(dir, ['rev-parse', 'HEAD']);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P3']);
-    assert.equal(r.code, 0, `zero-overlap receipt must not refuse — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /RECEIPT FILES DO NOT OVERLAP THIS DIFF/, `stderr must carry the overlap warning — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /src\/elsewhere\.mjs/, `the warning must name the offending file — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /ADVISORY ONLY/, `the warning must mark itself advisory-only — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    assert.ok(summary.spend_warnings.some((w) => /DO NOT OVERLAP/.test(w)), `spend_warnings[] must contain the SAME overlap-warning text as stderr, not an unrelated placeholder — got ${JSON.stringify(summary.spend_warnings)}`);
-
-    const afterHead = git(dir, ['rev-parse', 'HEAD']);
-    assert.notEqual(afterHead, beforeHead, 'a commit was still created despite the advisory');
-    assert.deepEqual(readLedger(dir), [], 'the entry was still consumed despite the advisory');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// STALENESS (>12h): P6 (CONTROL) then P5.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P6 (CONTROL): a receipt only seconds old is not stale — no STALE RECEIPT warning', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: isoAgo(5_000) },
+      // Aged past the 14-day default horizon (A11) so this fixture really does produce
+      // receipt_stale — at 30h it produced nothing, and the code-set comparison below would
+      // then have been satisfied by receipt_no_overlap alone.
+      v2({ entry_id: '23000000-0000-4000-8000-000000000001', agent_type: 'reviewer-a', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base, at: isoAgo(401 * 86_400_000), finished_at: isoAgo(400 * 86_400_000) }),
+      v2({ entry_id: '23000000-0000-4000-8000-000000000002', agent_type: 'reviewer-b', files: ['src/laneB.mjs'], blobs: { 'src/laneB.mjs': laneBBlob }, base_sha: base }),
     ]);
 
-    const r = runCommitReviewed(dir, ['-m', 'spend P6 control']);
-    assert.equal(r.code, 0, `a fresh receipt must succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /STALE RECEIPT/, `a 5-second-old receipt must not be flagged stale — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-test('spend-warnings P5: a receipt 30 hours old trips STALE RECEIPT, names its age and the 12h horizon, and still commits/consumes', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: isoAgo(30 * 3_600_000) },
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P5']);
-    assert.equal(r.code, 0, `a stale receipt must not refuse — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /STALE RECEIPT/, `stderr must carry the stale-receipt warning — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /30\.0h old/, `stderr must name the receipt's age in hours — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /12h/, `stderr must name the 12h staleness horizon — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    assert.ok(summary.spend_warnings.some((w) => /STALE RECEIPT/.test(w)), `spend_warnings[] must contain the SAME stale-receipt text as stderr, not an unrelated placeholder — got ${JSON.stringify(summary.spend_warnings)}`);
-
-    assert.deepEqual(readLedger(dir), [], 'the stale entry was still consumed');
-    assert.equal(readTrailerValues(dir).length, 1, 'the stale entry still gets its trailer');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// AGE UNVERIFIABLE: P7 (at:'n/a' and at absent, both flagged distinctly).
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P7: an unparseable `at` ("n/a") and a missing `at` key trip TWO DISTINCT RECEIPT AGE UNVERIFIABLE warnings (never two identical ones) in both channels, and both entries are still stamped and consumed', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: 'n/a' },
-      { agent_type: 'reviewer-b', files: ['src/feature.mjs'] }, // `at` key entirely absent -> undefined
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P7']);
-    assert.equal(r.code, 0, `unverifiable-age receipts must not refuse — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-
-    const unverifiableCount = (r.stderr.match(/RECEIPT AGE UNVERIFIABLE/g) ?? []).length;
-    assert.ok(unverifiableCount >= 2, `both the 'n/a' and the missing-'at' entry must be flagged unverifiable — saw ${unverifiableCount} — stderr=${flat(r.stderr)}`);
-
-    // The two warnings must be DISTINCT: one quotes 'n/a' verbatim, a
-    // SEPARATE one names the absent key's actual value (undefined) — a naive
-    // implementation that defaults a missing `at` to the string 'n/a' before
-    // formatting would produce two IDENTICAL "n/a" lines and fail the second
-    // assertion below red.
-    assert.match(r.stderr, /RECEIPT AGE UNVERIFIABLE[^\n]*["']n\/a["']/, `one warning must quote the 'n/a' value verbatim — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /RECEIPT AGE UNVERIFIABLE[^\n]*<absent>/, `a SEPARATE warning must identify the missing-'at' entry via the '<absent>' label, distinct from the 'n/a' one — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    assert.ok(summary.spend_warnings.some((w) => /RECEIPT AGE UNVERIFIABLE/.test(w) && /["']n\/a["']/.test(w)), `spend_warnings[] must carry the 'n/a' warning, same text as stderr — got ${JSON.stringify(summary.spend_warnings)}`);
-    assert.ok(summary.spend_warnings.some((w) => /RECEIPT AGE UNVERIFIABLE/.test(w) && /<absent>/.test(w)), `spend_warnings[] must carry a SEPARATE warning for the missing-'at' entry via '<absent>', same text as stderr — got ${JSON.stringify(summary.spend_warnings)}`);
-
-    assert.deepEqual(readLedger(dir), [], 'both entries were still consumed despite unverifiable age');
-    assert.equal(readTrailerValues(dir).length, 2, 'both entries still get their trailer despite unverifiable age');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// P8: the never-a-refusal wall. RE-CUT BY RULING, not by accident (board
-// 51d93c34 requirement 2 — file-scoped stamping). The old P8 stamped a receipt
-// naming 'src/elsewhere.mjs' onto a commit staging 'src/feature.mjs', which is
-// precisely the false attestation the new ruling removes; it must not be
-// "repaired" back to that expectation.
-// THE CLASS LIST CHANGED FOR A REASON: DO-NOT-OVERLAP is now reachable ONLY in
-// the no-receipt-matches fallback, and DEFERRED only when some receipt DOES
-// match, so the two are structurally mutually exclusive and can never fire in
-// one run. P3 (unchanged) keeps the overlap-advisory arm; file-scoping S5 keeps
-// the fallback arm. What P8 still owns is its real subject: no combination of
-// advisories may refuse a commit.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P8: every simultaneously-reachable advisory class firing at once still never refuses — exit is not 1, each stamped entry gets one trailer, and the file-scope-deferred entry survives', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/feature.mjs');
-    const deferred = { agent_type: 'reviewer-b', files: ['src/elsewhere.mjs'], at: isoAgo(120_000) };
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src/feature.mjs'], at: isoAgo(60_000) },
-      deferred,                                                                        // DEFERRED (file scope)
-      { agent_type: 'reviewer-c', files: ['src/feature.mjs'], at: isoAgo(30 * 3_600_000) }, // STALE RECEIPT
-      { agent_type: 'reviewer-d', files: ['src/feature.mjs'], at: 'n/a' },              // AGE UNVERIFIABLE
-      { agent_type: 'reviewer-e', files: [], at: isoAgo(90_000) },                      // RECORDS NO FILES
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P8']);
-    assert.notEqual(r.code, 1, `no combination of advisories may refuse the commit — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.equal(r.code, 0, `the wall is a full success, not merely a non-1 exit — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-
-    assert.match(r.stderr, /MULTI-SPEND — 4 review receipts/, `4 stamped (a,c,d,e) is over the threshold — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /STALE RECEIPT/, `stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /RECEIPT AGE UNVERIFIABLE/, `stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /RECORDS NO FILES/, `stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /DEFERRED RECEIPT/, `the file-scoped withholding is disclosed — stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /DO NOT OVERLAP/, `the overlap advisory is structurally unreachable once a receipt matches — stderr=${flat(r.stderr)}`);
-
-    assert.equal(readTrailerValues(dir).length, 4, 'one trailer per STAMPED entry; the deferred one contributes none');
-    assert.deepEqual(readLedger(dir), [deferred], 'the deferred receipt survives un-consumed; every stamped one is gone');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// P9: path normalization on the overlap check — non-ASCII + backslash paths.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P9: a receipt file path using backslashes still overlaps a staged non-ASCII path once normalized — no DO-NOT-OVERLAP warning', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/café.mjs');
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: ['src\\café.mjs'], at: isoAgo(1_000) },
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P9']);
-    assert.equal(r.code, 0, `normalized-overlap receipt must succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(
-      r.stderr,
-      /DO NOT OVERLAP/,
-      `a backslash-separated path must normalize to the same forward-slash, matching-bytes path as the staged file — stderr=${flat(r.stderr)}`
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// P10: a JSON-valid but HOSTILE `at` value must not crash the pipeline.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P10: a JSON-valid but hostile `at` ({toString:null}) must not crash the advisory pipeline — still commits, stamps, consumes, and warns age-unverifiable in both channels', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/feature.mjs');
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/elsewhere.mjs'], at: { toString: null } },
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P10']);
-    // EXPECTED FAILURE SHAPE under the named sabotage (interpolating raw
-    // `${e.at}` into any advisory template): the object's own `toString` is
-    // `null` and it inherits no primitive-producing `valueOf`, so template
-    // coercion throws `TypeError: Cannot convert object to primitive value` —
-    // the process crashes before (or instead of) emitting valid JSON on
-    // stdout, `r.code` is nonzero, and every assertion below fails red.
-    assert.equal(r.code, 0, `a hostile-but-JSON-valid 'at' must not crash the CLI — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /TypeError/, `no raw-interpolation crash may leak into stderr — stderr=${flat(r.stderr)}`);
-
-    let summary;
-    assert.doesNotThrow(() => { summary = JSON.parse(r.stdout); }, `stdout must remain valid JSON even for a hostile 'at' — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-
-    assert.match(r.stderr, /RECEIPT AGE UNVERIFIABLE/, `an age-unverifiable-style warning must still fire on stderr for a non-string, unserializable 'at' — stderr=${flat(r.stderr)}`);
-    assert.ok(summary.spend_warnings.some((w) => /RECEIPT AGE UNVERIFIABLE/.test(w)), `spend_warnings[] must carry the same age-unverifiable warning as stderr — got ${JSON.stringify(summary.spend_warnings)}`);
-
-    assert.equal(readTrailerValues(dir).length, 1, 'the hostile entry still gets its trailer');
-    assert.deepEqual(readLedger(dir), [], 'the hostile entry was still consumed');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// P11: RECORDS NO FILES — an entry with an empty or entirely absent `files`.
-// ---------------------------------------------------------------------------
-
-test('spend-warnings P11: a receipt with files:[] and a receipt with files entirely absent both trip RECORDS NO FILES in both channels, and still commit/consume', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/feature.mjs');
-    writeLedger(dir, [
-      { agent_type: 'reviewer-a', files: [], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-b', at: isoAgo(2_000) }, // `files` key entirely absent
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'spend P11']);
-    // EXPECTED FAILURE SHAPE under the named sabotage (an `entryFiles.length >
-    // 0` guard that silently SKIPS the no-files case instead of warning):
-    // neither count below reaches 2 (both stay at 0), and the two `>= 2`
-    // assertions fail red — while the commit/consume assertions stay green,
-    // isolating exactly the guard being pinned.
-    assert.equal(r.code, 0, `a files-less receipt must not refuse — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-
-    const stderrCount = (r.stderr.match(/RECORDS NO FILES/g) ?? []).length;
-    assert.ok(stderrCount >= 2, `both the empty-array and the absent-'files' entry must be flagged — saw ${stderrCount} — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    const arrayCount = summary.spend_warnings.filter((w) => /RECORDS NO FILES/.test(w)).length;
-    assert.ok(arrayCount >= 2, `spend_warnings[] must carry both RECORDS NO FILES entries, same text as stderr — got ${JSON.stringify(summary.spend_warnings)}`);
-
-    assert.equal(readTrailerValues(dir).length, 2, 'both files-less entries still get their trailer');
-    assert.deepEqual(readLedger(dir), [], 'both files-less entries were still consumed');
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D23 both channels', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const jsonCodes = new Set(codesOf(soleJson(r)));
+    assert.ok(jsonCodes.size > 0, `fixture guard: this run must produce at least one disclosure — got ${flat(r.stdout)}`);
+    const stderrCodes = new Set([...r.stderr.matchAll(/\[([a-z_]+)\]/g)].map((m) => m[1]));
+    assert.deepEqual([...jsonCodes].sort(), [...stderrCodes].sort(), `the two channels must carry the SAME code set — json=${JSON.stringify([...jsonCodes])} stderr=${JSON.stringify([...stderrCodes])}`);
+  } finally { cleanup(); }
 });

@@ -1,74 +1,29 @@
-// COMMIT-REVIEWED — completed_at RANGE-CHECK + CONTENT-EVIDENCE advisories.
+// COMMIT-REVIEWED — RECEIPT AGE DISCLOSURES (R1 pin re-cut, group D).
 //
-// Authored from the dispatch SPEC (an independent reviewer found `grep` over
-// scripts/tests/ returns ZERO hits for `COMPLETED_AT OUT OF RANGE`, `NO
-// CONTENT EVIDENCE`, `REVIEWED BYTES CHANGED`), NOT from
-// scripts/commit-reviewed.mjs's internals — H4 read wall: this file's author
-// never read that script. The spec below is as given by the launching agent,
-// who reports having run all five arms green locally against the landed
-// implementation.
+// AUTHORITY: contract sheet §3.2 "Disclosures printed (never refuse): receipt_stale,
+// receipt_age_unverifiable, …" and §1.2 (ReceiptV2 carries `started_at` / `finished_at`;
+// there is no `at` and no `reviewed_state.completed_at`). Decision 24dc4c63: age never
+// decides spendability — `receiptIsSpendable` has no age code — so every arm here is a
+// DISCLOSURE beside a successful spend.
 //
-// Spec under test:
-//   1. COMPLETED_AT RANGE CHECK: a ledger entry's `completed_at`, when
-//      present, must fall between its `at` and "now". An out-of-range
-//      `completed_at` (e.g. hundreds of hours in the future) is DISCARDED
-//      entirely — the staleness horizon then falls back to `at` — rather than
-//      clamped to `now`. (Clamping was tried first and MEASURED NOT TO WORK:
-//      a 30h-old receipt with a future `completed_at` clamped to `now` read
-//      as 0.0h fresh, silently hiding real staleness — this is why discard,
-//      not clamp, is the correct fix, and why arm (a) below is load-bearing.)
-//      When `completed_at` legitimately falls inside [`at`, now], neither the
-//      COMPLETED_AT OUT OF RANGE nor the STALE RECEIPT (12h horizon, per the
-//      spend-warnings suite) warning fires for a fresh receipt.
-//   2. CONTENT-EVIDENCE CHECK: a ledger entry's `reviewed_state.blobs` records
-//      the git blob shas of files the reviewer actually read content for. An
-//      entry whose `blobs` is present-but-empty, OR whose every blob value
-//      fails a 40-hex-character filter (i.e. carries no USABLE sha), trips a
-//      NO CONTENT EVIDENCE warning. Aggregated across a ledger, the warning
-//      names the count ("1 of the 2") and identifies ONLY the offending
-//      entries by name — never the entries that do carry usable content
-//      evidence.
+// RE-CUT: stale horizon per A11 (14 days default)
+// RE-CUT: finished_at admission per A11 — parseReceipt REQUIRES a string; an unparseable
+//   STRING is admitted and surfaces as [receipt_age_unverifiable], a NON-STRING (including an
+//   absent field) is [ledger_entry_malformed].
 //
-// Fixture idiom copied VERBATIM from
-// scripts/tests/commit-reviewed-spend-warnings.test.mjs (makeRepo/writeLedger/
-// stageChange/runCommitReviewed/readTrailerValues/flat/isoAgo conventions),
-// reproduced standalone per the same convention
-// scripts/tests/commit-reviewed-file-scoping.test.mjs uses relative to its own
-// base spec, plus a new `isoIn` helper (the mirror of `isoAgo` into the
-// future) needed for arm (a)'s "+400h" fixture.
-//
-// Every ledger entry below stages and names the SAME file it claims to
-// review, so file-scoping (board 51d93c34) can never defer it out of this
-// run — the advisories under test here fire over entries that ARE eligible
-// to be stamped/consumed this run, exactly like the spend-warnings suite.
-//
-// ---------------------------------------------------------------------------
-// FIXTURE REVISION 2026-08-31 — decision 57984926 (slug review-ledger-v2-
-// lifecycle-refuse-flip-and-external-review-design) §2 REFUSE FLIP, which
-// executes the REFUSE-LATER half of user ruling b0ad640d. §2 verbatim:
-//   "a mismatch on any staged/target path the receipt covers REFUSES ...
-//    nothing consumed; a covered path whose evidence is partial/truncated/
-//    INCONSISTENT also refuses ... v1 receipts with usable blobs are ENFORCED
-//    (grandfather only genuinely absent evidence — schema absence does not
-//    imply blob absence)".
-// NOTHING ABOUT THIS SUITE'S SUBJECT CHANGED — it still specifies the
-// completed_at range check and the content-evidence advisories. What changed
-// is that its FIXTURES used to trip the new refusal INCIDENTALLY: a
-// placeholder blob value ('a'.repeat(40)) is a USABLE-BUT-MISMATCHING sha, so
-// under the flip it is a byte mismatch on a covered staged path and refuses
-// the commit before the advisory under test can be judged. The placeholder
-// constant is therefore GONE; arms (b), (a) and (e) now record the REAL blob
-// sha of the staged bytes via `git hash-object` (the
-// commit-reviewed-bytes-refuse.test.mjs idiom), which is what "the reviewer
-// read exactly these bytes" actually looks like and keeps each arm's own
-// assertions reachable. Arm (d) records an UNUSABLE value, which §2's
-// inconsistent-evidence clause now refuses, so its expectation is inverted
-// (see its header). Arm (c) is untouched: genuinely absent evidence
-// (blobs:{}) is grandfathered by §2 clause 3 and still commits.
-// The refusal behaviour ITSELF is pinned by scripts/tests/
-// commit-reviewed-bytes-refuse.test.mjs (22/22 green) and is deliberately NOT
-// re-specified here — this suite only has to survive it.
-// ---------------------------------------------------------------------------
+// RETIRED: the whole `reviewed_state.completed_at` field contract — v2 has no such field;
+//   the range check is re-cut onto finished_at vs started_at (R1-D65).
+// RETIRED: the `COMPLETED_AT OUT OF RANGE` / `STALE RECEIPT` / `RECEIPT AGE UNVERIFIABLE` /
+//   `NO CONTENT EVIDENCE` banner assertions and the "30.0h old" / "12h" / "1 of the 2"
+//   literal-count assertions — converted to [code] tokens and --json `disclosures[].code`.
+//   The horizon VALUE is deliberately not pinned: the sheet does not name one, and pinning a
+//   number the spec does not state would freeze an implementation detail as a contract.
+// RETIRED: arms (c), (d) and (e) (the NO CONTENT EVIDENCE advisory family) — under §6 A9 a
+//   path with no usable blob is UNCOVERED, so the verdict is [coverage_incomplete], pinned in
+//   commit-reviewed-bytes-refuse.test.mjs R1-D34 and commit-reviewed-bytes-v2-malformed.test.mjs
+//   R1-D56/R1-D60. `receipt_bytes_no_evidence` is REMOVED from CODES by sheet amendment A13
+//   (unreachable: a path without evidence is uncovered, never mismatched).
+// RETIRED: every v1 (flat `at` + `reviewed_state`) fixture — v1 receipts are never spendable.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -86,6 +41,25 @@ const GIT_SKIP = (() => {
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
 
+const token = (c) => new RegExp('\\[' + c + '\\]');
+const SESSION = 'this-session';
+const ENV_SESSION = { STERLING_SESSION_ID: SESSION };
+const flat = (s) => String(s ?? '').replace(/\r?\n/g, ' | ');
+const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+const isoIn = (msFuture) => new Date(Date.now() + msFuture).toISOString();
+const DAY = 86_400_000;
+// A11: the staleness horizon is `config.review_ledger.stale_days` if present, else 14 days.
+// Fixtures age past the DEFAULT (400 days) so no arm depends on the exact default; R1-D63b is
+// the only arm that measures the horizon itself.
+const PAST_DEFAULT_HORIZON = 400 * DAY;
+
+const CONFIG_BASE = {
+  toolchains: [{ adapter: 'node', path_globs: ['**/*.mjs'], test_globs: ['tests/**', '**/*.test.mjs'], run_commands: { test: 'node --test' } }],
+  caps: { dispatch_per_agent_type: 25, inner_loop_n: 3, outer_loop_m: 2, research_resume_per_phase: 2, phase_death_cap: 1 },
+  context_watch: { windows: { default: 200_000, 'claude-fable-5': 200_000 } },
+};
+const writeConfig = (dir, extra) => writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG_BASE, ...extra }));
+
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
@@ -93,7 +67,7 @@ function git(cwd, args) {
 }
 
 function makeRepo() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-commit-reviewed-completed-at-'));
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-commit-reviewed-age-'));
   git(dir, ['init', '-b', 'main']);
   git(dir, ['config', 'user.email', 'test@sterling.local']);
   git(dir, ['config', 'user.name', 'Sterling Test']);
@@ -107,319 +81,237 @@ function makeRepo() {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function ledgerPath(dir) {
-  return join(dir, '.sterling', 'review-ledger.json');
-}
-function writeLedger(dir, entries) {
-  writeFileSync(ledgerPath(dir), JSON.stringify(entries));
-}
-function readLedger(dir) {
-  return existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null;
-}
+const ledgerPath = (dir) => join(dir, '.sterling', 'review-ledger.json');
+const writeLedger = (dir, entries) => writeFileSync(ledgerPath(dir), JSON.stringify(entries));
+const readLedger = (dir) => (existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null);
+const readLedgerRaw = (dir) => (existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null);
+const entryById = (dir, id) => (readLedger(dir) ?? []).find((e) => e.entry_id === id);
 
-function stageChange(dir, relPath = 'src/feature.mjs', content = 'export const f = 1;\n') {
+function stageChange(dir, relPath, content) {
   const abs = join(dir, relPath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
   git(dir, ['add', '-A']);
 }
-
-// The REAL blob sha of a path as it currently sits in the index/worktree
-// (stageChange writes then `git add -A`, so the two always agree here).
-// Idiom copied from commit-reviewed-bytes-refuse.test.mjs's `stagedBlob`.
-// USING THIS INSTEAD OF A PLACEHOLDER IS LOAD-BEARING under decision
-// 57984926 §2: a 40-hex placeholder is USABLE evidence that MISMATCHES, which
-// now refuses the commit and makes every advisory assertion in the arm
-// unreachable. The fixture guard below is what keeps a silent git change from
-// turning this helper into another placeholder.
-function stagedBlob(dir, relPath) {
-  const sha = git(dir, ['hash-object', relPath]);
-  assert.match(sha, /^[0-9a-f]{40}$/, `fixture guard: hash-object must produce a usable 40-hex sha for ${relPath}, got ${sha}`);
-  return sha;
+function indexBlob(dir, relPath) {
+  const out = git(dir, ['ls-files', '-s', '--', relPath]);
+  const m = out.match(/^\d+ ([0-9a-f]{40}) \d+\t/);
+  assert.ok(m, `fixture guard: ${relPath} must be staged in the index — got ${out}`);
+  return m[1];
 }
-
-function runCommitReviewed(dir, args = []) {
-  const r = spawnSync(process.execPath, [CLI_PATH, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+function runCommitReviewed(dir, args = [], env = ENV_SESSION) {
+  const r = spawnSync(process.execPath, [CLI_PATH, ...args], {
+    cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
+  });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
+function trailerValues(dir, key, sha = 'HEAD') {
+  const out = git(dir, ['log', '-1', `--format=%(trailers:key=${key},valueonly,unfold)`, sha]);
+  return out.split('\n').filter((l) => l.trim() !== '');
+}
+const reviewedByTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Reviewed-By-Agent', sha);
+function soleJson(r) {
+  let parsed;
+  assert.doesNotThrow(() => { parsed = JSON.parse(r.stdout); },
+    `--json must print exactly ONE JSON object on stdout — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+  return parsed;
+}
+const codesOf = (out) => (out.disclosures ?? []).map((d) => d.code);
+const disclosuresFor = (out, code, id) => (out.disclosures ?? []).filter((d) => d.code === code && JSON.stringify(d).includes(id));
 
-// Anti-pattern ee89c3fd guard: flatten before interpolating into a message.
-const flat = (s) => (s ?? '').replace(/\r?\n/g, ' | ');
+// `OMIT` removes finished_at entirely; a non-string value is passed through verbatim.
+const OMIT = Symbol('omit-the-key');
+function v2({
+  entry_id, agent_type, files, blobs = {}, base_sha,
+  started_at = isoAgo(60_000), finished_at = isoAgo(60_000),
+}) {
+  const e = {
+    schema_version: 2, entry_id, kind: 'roster_receipt', status: 'active',
+    started_at, finished_at,
+    reviewer: { agent_type, model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
+    identity: { session_id: SESSION, branch: 'main', base_sha, agent_id: 'agent-fixture' },
+    territory: { files, source: 'review-territory', attribution: 'block' },
+    content_evidence: {
+      basis: 'stop-time-worktree-snapshot', status: 'complete', blobs,
+      absent_paths: [], truncated_of: null, failure_reason: null,
+    },
+    disposition: null,
+  };
+  if (finished_at === OMIT) delete e.finished_at;
+  return e;
+}
 
-// Date.now()-relative ISO timestamps, never hardcoded dates — both directions.
-const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
-const isoIn = (msFuture) => new Date(Date.now() + msFuture).toISOString();
+const CODE = 'export const f = 1;\n';
 
-// (The former `VALID_SHA = 'a'.repeat(40)` placeholder is deliberately gone —
-// see the FIXTURE REVISION header. Under decision 57984926 §2 it is not a
-// harmless stand-in but a usable blob sha that mismatches the staged bytes,
-// i.e. exactly the shape the flip refuses. Use `stagedBlob(dir, path)`.)
+// ===========================================================================
+// R1-D62 — CONTROL, PLACED FIRST. Rules out "the age checker discloses on every
+// receipt" as the explanation for any green arm below.
+// ===========================================================================
 
-// ---------------------------------------------------------------------------
-// (b) CONTROL, placed first: a legitimate completed_at between `at` and now,
-// on a fresh (well under the 12h horizon) receipt — neither warning fires.
-// This is the arm that rules out "the checker warns on every receipt
-// carrying a completed_at at all" as an explanation for (a) going green.
-// FIELD PLACEMENT IS LOAD-BEARING (corrected after a real run — see (a)'s
-// header): the CLI reads `reviewed_state.completed_at`, a nested field, NOT
-// a top-level ledger-entry `completed_at`. A top-level `completed_at` parses
-// to NaN internally and is silently skipped, which would make this control
-// pass VACUOUSLY (neither warning fires because the field was never read at
-// all, not because it was legitimately in range) — the exact same trap (a)
-// fell into. It must be a STRING (`.toISOString()`), not a Date object.
-// FIXTURE UPDATED for decision 57984926 §2 (the expectation is UNCHANGED):
-// the recorded blob is now the REAL staged blob sha, not a placeholder. With
-// a placeholder this control refused (exit 1) on a byte mismatch and could no
-// longer rule anything out — a control that dies for an unrelated reason is
-// worse than no control. Matching bytes are also what a genuine in-range
-// review looks like, so the arm is now honest end to end.
-// SABOTAGE: change the in-range branch to ALSO emit COMPLETED_AT OUT OF RANGE
-// unconditionally (or widen the >12h STALE horizon check to fire on any
-// completed_at) — the COMPLETED_AT / STALE RECEIPT `doesNotMatch` assertions
-// below go red. The third `doesNotMatch` (REVIEWED BYTES) has its OWN
-// sabotage and is not defence in depth for those two: invert the blob
-// comparison so a MATCHING sha refuses (the same one-liner
-// commit-reviewed-bytes-refuse.test.mjs X0 names) — only that assertion, plus
-// the exit-0 one, goes red. Two assertions, two distinct guards.
-// ---------------------------------------------------------------------------
-test('completed_at (b) CONTROL: a completed_at legitimately between at and now, on a fresh receipt with matching reviewed bytes, trips NEITHER warning', { skip: GIT_SKIP }, () => {
+// EXPECTED: RED today only on the consumed-status assertion; the two doesNotMatch assertions
+// pass today under the old banner-free path as well, so this arm's value is as a control.
+// SABOTAGE: widen the staleness horizon check to fire on any receipt carrying a finished_at
+// -> both doesNotMatch assertions red, and every "still commits" arm below becomes
+// unattributable.
+test('R1-D62 (CONTROL, first): a receipt finished seconds ago discloses NEITHER receipt_stale NOR receipt_age_unverifiable, and spends normally', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir);
-    writeLedger(dir, [
-      {
-        agent_type: 'reviewer-control',
-        files: ['src/feature.mjs'],
-        at: isoAgo(5 * 3_600_000),
-        reviewed_state: {
-          completed_at: isoAgo(2 * 3_600_000),
-          blobs: { 'src/feature.mjs': stagedBlob(dir, 'src/feature.mjs') },
-        },
-      },
-    ]);
+    stageChange(dir, 'src/laneA.mjs', CODE);
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '62000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-fresh', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base, started_at: isoAgo(10_000), finished_at: isoAgo(5_000) })]);
 
-    const r = runCommitReviewed(dir, ['-m', 'completed_at control']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /REVIEWED BYTES/, `the reviewed bytes MATCH the staged bytes, so decision 57984926 §2's refusal must never fire here — if it does, this control is dead and (a) proves nothing — stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /COMPLETED_AT OUT OF RANGE/, `a legitimately in-range completed_at must not be flagged — stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /STALE RECEIPT/, `a receipt completed 2h ago is well under the 12h horizon — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D62 fresh receipt', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    assert.ok(!codesOf(out).includes('receipt_stale'), `got ${JSON.stringify(out.disclosures)}`);
+    assert.ok(!codesOf(out).includes('receipt_age_unverifiable'), `got ${JSON.stringify(out.disclosures)}`);
+    assert.equal(entryById(dir, id).status, 'consumed');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// (a) THE LOAD-BEARING ARM: an out-of-range completed_at (+400h future) is
-// DISCARDED, so the staleness horizon falls back to `at` (30h ago) — both
-// COMPLETED_AT OUT OF RANGE and STALE RECEIPT (naming ~30.0h) must fire.
-// FIELD PLACEMENT + TYPE ARE LOAD-BEARING (found by a real run, not by
-// reading the code — H4 denies that): the CLI reads `reviewed_state.
-// completed_at` (nested), and only when it is a STRING `Date.parse` accepts
-// — commit-reviewed.mjs:860-862 collapses a Date object, a number, or a
-// missing/top-level field to NaN and SILENTLY skips the out-of-range guard
-// (:888 is gated on `!Number.isNaN(rawCompletedMs)`). A first draft of this
-// arm put `completed_at` at the TOP LEVEL of the ledger entry; it passed 2 of
-// 3 assertions (STALE RECEIPT, 30.0h) while COMPLETED_AT OUT OF RANGE never
-// fired — a HOLLOW pin on the very property this arm exists to specify,
-// because `completed_at` was never read at all and the "fallback" it
-// exercised was actually "there was never anything to discard". Fixed here
-// to nest it under `reviewed_state` as `.toISOString()`.
-// ALL THREE ASSERTIONS BELOW ARE LOAD-BEARING TOGETHER, NOT INDEPENDENTLY:
-// STALE RECEIPT + 30.0h alone are satisfiable by an implementation that never
-// reads completed_at at all (that is exactly the bug just described); only
-// the COMPLETED_AT OUT OF RANGE assertion proves the discard path itself ran.
-// Do not "simplify" this arm down to the staleness pair — that reintroduces
-// the hollow shape this comment exists to prevent.
-// SABOTAGE (implementer-stated): change `completedMs = NaN` to `completedMs =
-// rawCompletedMs` at the point completed_at is validated — the out-of-range
-// value is no longer discarded, the staleness horizon reads from the future
-// completed_at instead of `at`, computes ~0h fresh, and the STALE RECEIPT
-// assertion below goes red (this was MEASURED: clamping to `now` produces the
-// identical failure, since clamped-to-now is also ~0h fresh).
-// FIXTURE UPDATED for decision 57984926 §2 (the expectation is UNCHANGED, and
-// deliberately so): the recorded blob is now the REAL staged blob sha. The
-// placeholder made this arm refuse on a BYTE mismatch, which is a different
-// subject entirely — and a refusal that fires before the horizon is computed
-// would have made the exit-0 assertion red for a reason having nothing to do
-// with completed_at. Keeping exit 0 here is itself load-bearing: a STALE
-// receipt is a WARNING, never a refusal (§2 flips only the reviewed-BYTES
-// verdict), so this arm also pins that the flip did not silently promote the
-// staleness advisory into a refusal.
-// ---------------------------------------------------------------------------
-test('completed_at (a): an out-of-range completed_at (+400h future) is discarded — horizon falls back to `at` (30h ago), both warnings fire, and staleness still WARNS rather than refusing (decision 57984926 §2 flips bytes only)', { skip: GIT_SKIP }, () => {
+// EXPECTED: RED today — there is no [receipt_stale] code and no disclosures[] array; today's
+// STALE RECEIPT text is prose only.
+// SABOTAGE (the never-a-refusal half): promote staleness from disclosure to refusal -> exit 1
+// and the stamped/consumed assertions red while the code assertion stays green. Age is
+// advisory by construction: a stale receipt is still a real review.
+test('R1-D63: a receipt finished 400 days ago — well past the 14-day default horizon — discloses [receipt_stale] naming the entry and STILL spends; age never refuses', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir);
-    writeLedger(dir, [
-      {
-        agent_type: 'reviewer-outofrange',
-        files: ['src/feature.mjs'],
-        at: isoAgo(30 * 3_600_000),
-        reviewed_state: {
-          completed_at: isoIn(400 * 3_600_000),
-          blobs: { 'src/feature.mjs': stagedBlob(dir, 'src/feature.mjs') },
-        },
-      },
-    ]);
+    stageChange(dir, 'src/laneA.mjs', CODE);
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '63000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-stale', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base, started_at: isoAgo(PAST_DEFAULT_HORIZON + DAY), finished_at: isoAgo(PAST_DEFAULT_HORIZON) })]);
 
-    const r = runCommitReviewed(dir, ['-m', 'completed_at out of range']);
-    assert.equal(r.code, 0, `neither an out-of-range completed_at nor a 30h-stale receipt may refuse the commit — only a reviewed-BYTES mismatch does that (decision 57984926 §2) — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /COMPLETED_AT OUT OF RANGE/, `stderr must flag the discarded completed_at — this is the assertion that proves the field was actually READ, not silently skipped — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /STALE RECEIPT/, `stderr must still carry the staleness warning, computed from the fallback horizon — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /30\.0h/, `the staleness must be computed from \`at\` (30h ago), not the discarded future completed_at (which would read ~0.0h) — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D63 stale receipt', '--json']);
+    assert.equal(r.code, 0, `a stale receipt must not refuse — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    assert.equal(disclosuresFor(out, 'receipt_stale', id).length, 1, `exactly one staleness disclosure, naming the entry — got ${JSON.stringify(out.disclosures)}`);
+    assert.match(r.stderr, token('receipt_stale'), `and it reaches the human channel too — stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-stale'], 'the stale receipt still stamps');
+    assert.equal(entryById(dir, id).status, 'consumed', 'and is still consumed');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// (c) NO CONTENT EVIDENCE: reviewed_state present but blobs:{} (empty).
-// UNCHANGED by decision 57984926 §2 — an empty blobs map is GENUINELY ABSENT
-// evidence, which clause 3 grandfathers, so this arm still commits (exit 0)
-// with the advisory. IT IS ALSO (d)'s CONTROL, and (d) says so: (c) commits
-// and (d) refuses through the same harness on the same staged file, which is
-// what proves (d)'s refusal comes from PRESENT-but-unusable evidence rather
-// than from "this CLI refuses anything it cannot verify". Do not delete or
-// weaken this arm without re-reading (d).
-// SABOTAGE (inferred, not implementer-verified — the exact call site was not
-// disclosed for this arm): change the "no usable blob shas" guard from
-// `Object.keys(usableBlobs).length === 0` to `false` (never fires on an empty
-// blobs object) — the `/NO CONTENT EVIDENCE/` match below goes red.
-// ---------------------------------------------------------------------------
-test('completed_at (c): reviewed_state.blobs present but empty trips NO CONTENT EVIDENCE', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [
-      {
-        agent_type: 'reviewer-emptyblobs',
-        files: ['src/feature.mjs'],
-        at: isoAgo(1_000),
-        reviewed_state: { blobs: {} },
-      },
-    ]);
+// THE HORIZON IS MEASURED HERE, NOT ASSUMED (A11: `config.review_ledger.stale_days` if
+// present, else 14 days). ONE fixture, TWO configurations, OPPOSITE verdicts: with
+// `stale_days: 1` a 2-day-old receipt is stale; the SAME receipt with no config at all is not,
+// because 2 days is inside the 14-day default. Neither arm carries the verdict alone — the
+// pair is what proves the config is read rather than a constant being satisfied by luck.
+// EXPECTED: RED today — there is no [receipt_stale] code and no configurable horizon.
+// SABOTAGE (the hardcode): ignore config.review_ledger.stale_days and always use the default
+// -> the override arm goes green-to-red (no disclosure at 2 days) while the default arm stays
+// green. SABOTAGE (the inversion): read the config but apply it as hours, or default to 1 day
+// -> the default arm reds while the override arm stays green. The two arms fail under
+// different one-liners, which is what makes them a measurement and not a restatement.
+test('R1-D63b (A11 horizon): config.review_ledger.stale_days OVERRIDES the default — a 2-day-old receipt is [receipt_stale] under stale_days:1 and NOT stale with no config, same fixture both times', { skip: GIT_SKIP }, () => {
+  const verdicts = {};
+  for (const [label, config] of [['override-1-day', { review_ledger: { stale_days: 1 } }], ['default-14-days', null]]) {
+    const { dir, cleanup } = makeRepo();
+    try {
+      if (config) writeConfig(dir, config);
+      stageChange(dir, 'src/laneA.mjs', CODE);
+      const base = git(dir, ['rev-parse', 'HEAD']);
+      const id = '63b00000-0000-4000-8000-000000000001';
+      writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-twodays', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base, started_at: isoAgo(2 * DAY + 1_000), finished_at: isoAgo(2 * DAY) })]);
 
-    const r = runCommitReviewed(dir, ['-m', 'empty blobs']);
-    assert.equal(r.code, 0, `an empty-blobs receipt must not refuse — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /NO CONTENT EVIDENCE/, `stderr must flag the empty reviewed_state.blobs — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
+      const r = runCommitReviewed(dir, ['-m', `D63b ${label}`, '--json']);
+      assert.equal(r.code, 0, `[${label}] age never refuses — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+      assert.equal(entryById(dir, id).status, 'consumed', `[${label}] and the receipt still spends`);
+      verdicts[label] = disclosuresFor(soleJson(r), 'receipt_stale', id).length;
+    } finally { cleanup(); }
   }
+  assert.equal(verdicts['override-1-day'], 1, `a 2-day-old receipt is stale under stale_days:1 — got ${JSON.stringify(verdicts)}`);
+  assert.equal(verdicts['default-14-days'], 0, `and the SAME receipt is not stale under the 14-day default — got ${JSON.stringify(verdicts)}`);
 });
 
-// ---------------------------------------------------------------------------
-// (d) PRESENT-BUT-UNUSABLE EVIDENCE ON A COVERED STAGED PATH NOW REFUSES.
-// EXPECTATION INVERTED by decision 57984926 §2 (was: commits with a NO
-// CONTENT EVIDENCE warning). §2's inconsistent-evidence clause — "a covered
-// path whose evidence is partial/truncated/INCONSISTENT also refuses" —
-// governs a value that is RECORDED for a staged path but carries no usable
-// sha: §2 grandfathers "only genuinely ABSENT evidence", and 'not-a-sha' is
-// present, not absent. (commit-reviewed-bytes-refuse.test.mjs C2 pinned this
-// same shape as an either-reading AMBIGUITY at authoring time; the launching
-// conductor adjudicated it to the refuse reading, and that suite's C2 stays
-// green under it because its refuse branch is the one that runs.)
-// THE ARM'S SUBJECT IS UNCHANGED — present-but-unusable content evidence is
-// NEVER SILENTLY ACCEPTED AS VERIFIED. Only the sanction moved, from warn to
-// refuse, so the pin follows it rather than being deleted.
-// ITS CONTROL IS ARM (c), IMMEDIATELY ABOVE, and it is load-bearing: (c)
-// stages the same file through the same harness with `blobs: {}` and COMMITS
-// (exit 0). So a green refusal here cannot be explained by "this CLI refuses
-// every receipt it cannot verify" — genuinely absent evidence still commits;
-// only PRESENT-but-unusable evidence refuses. Read (c) and (d) as one pair.
-// WHAT IS DELIBERATELY NOT ASSERTED: the exact refusal wording, and which
-// internal branch produced it. An unusable value can never equal a real blob
-// sha, so no exit code can distinguish "refused because the value is
-// unusable" from "refused because it compared unequal" — that discrimination
-// lives in the message, and message wording for this class is the
-// bytes-refuse suite's territory (C2), not this suite's. The disclosure
-// assertion below therefore accepts either vocabulary while still forbidding
-// the one outcome that matters: a silent refusal that says nothing about the
-// evidence at all.
-// SABOTAGE: grandfather any receipt whose covered staged path has no USABLE
-// sha (i.e. treat present-but-unusable as absent, routing 'not-a-sha' down
-// clause 3's genuinely-absent path) — the commit lands, exit 0, and the
-// `r.code === 1` / HEAD-unmoved / ledger-byte-identical assertions all go red.
-// SECOND SABOTAGE (disclosure half): refuse but print nothing about the
-// evidence (drop both the NO CONTENT EVIDENCE advisory and the REVIEWED BYTES
-// anchor for this class) — exit stays 1 and only the disclosure assertion
-// goes red, which is the half that pins "never SILENTLY".
-// ---------------------------------------------------------------------------
-test('completed_at (d): reviewed_state.blobs present with a non-40-hex value on a STAGED covered path REFUSES and discloses the unusable evidence — decision 57984926 §2 inconsistent-evidence clause (was: NO CONTENT EVIDENCE warning + commit)', { skip: GIT_SKIP }, () => {
+// A11 SPLITS WHAT AN EARLIER DRAFT TREATED AS ONE CLASS: parseReceipt REQUIRES a string, so an
+// unparseable STRING is ADMITTED (evidence recorded as captured) and only surfaces at spend as
+// a disclosure. R1-D66 pins the other half — a NON-STRING is malformed.
+// EXPECTED: RED today — the code does not exist and today's warning is prose.
+// SABOTAGE: treat an unparseable age as an unspendable receipt -> exit 1 and the consumed
+// assertion reds; an unreadable clock is not evidence of a bad review, and refusing on it
+// would strand every receipt whose Stop-time clock write was interrupted.
+// SECOND SABOTAGE: admit the string but emit no disclosure -> only the disclosure assertion
+// reds, which is the half pinning that an unmeasurable age is never silently treated as fresh.
+test('R1-D64 (A11): an UNPARSEABLE STRING finished_at ("whenever") is ADMITTED — the receipt spends and discloses [receipt_age_unverifiable]', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir);
-    const head = git(dir, ['rev-parse', 'HEAD']);
-    writeLedger(dir, [
-      {
-        agent_type: 'reviewer-badsha',
-        files: ['src/feature.mjs'],
-        at: isoAgo(1_000),
-        reviewed_state: { blobs: { 'src/feature.mjs': 'not-a-sha' } },
-      },
-    ]);
-    const before = readFileSync(ledgerPath(dir), 'utf8');
+    stageChange(dir, 'src/laneA.mjs', CODE);
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '64000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-badclock', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base, finished_at: 'whenever' })]);
 
-    const r = runCommitReviewed(dir, ['-m', 'non-hex blob sha']);
-    assert.doesNotMatch(r.stderr, /TypeError|ReferenceError/, `an unusable blob value must never crash the CLI — stderr=${flat(r.stderr)}`);
-    assert.equal(r.code, 1, `present-but-unusable evidence on a covered staged path must REFUSE (decision 57984926 §2) — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.equal(git(dir, ['rev-parse', 'HEAD']), head, 'no commit was created');
-    assert.equal(readFileSync(ledgerPath(dir), 'utf8'), before, 'NOTHING consumed — the ledger file is byte-identical after the refusal');
-    assert.match(
-      r.stderr,
-      /NO CONTENT EVIDENCE|REVIEWED BYTES/,
-      `the unusability must be DISCLOSED, never a bare refusal — this is the half that pins "present-but-unusable evidence is never silently accepted" — stderr=${flat(r.stderr)}`
-    );
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D64 unparseable string clock', '--json']);
+    assert.equal(r.code, 0, `an unreadable age must not refuse — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    assert.equal(disclosuresFor(out, 'receipt_age_unverifiable', id).length, 1, `got ${JSON.stringify(out.disclosures)}`);
+    assert.ok(!codesOf(out).includes('ledger_entry_malformed'), `a STRING that will not parse as a date is admitted evidence, not a malformed entry — got ${JSON.stringify(out.disclosures)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-badclock'], 'the receipt still stamps');
+    assert.equal(entryById(dir, id).status, 'consumed', 'and is consumed');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// (e) AGGREGATION: two receipts, one carrying a valid 40-hex blob and one
-// with no reviewed_state at all — the warning names the count ("1 of the 2")
-// and identifies ONLY the second (offending) receipt.
-// FIXTURE UPDATED for decision 57984926 §2 (the expectation is UNCHANGED):
-// the good receipt's blob is now the REAL staged blob sha instead of a
-// placeholder, so it is genuinely "the reviewer read these bytes" and the
-// commit still succeeds. The grandfathered half is untouched — §2 clause 3
-// grandfathers "only genuinely absent evidence", and reviewer-noevidence
-// carries no reviewed_state at all, so it still commits and is still the one
-// receipt the advisory names. THAT PAIRING IS ALSO THE ARM'S CONTROL: one
-// receipt with usable+matching evidence and one with none both pass through
-// the same run, so "1 of the 2" cannot be produced by a mode that refuses or
-// flags everything.
-// SABOTAGE (inferred, not implementer-verified): report the raw entry count
-// instead of the offending subset (e.g. always print "2 of the 2", or name
-// both agent_types instead of only the offending one) — the `/1 of the 2/`
-// match, or the exclusivity check that reviewer-goodblob is absent from the
-// warning, goes red.
-// ---------------------------------------------------------------------------
-test('completed_at (e): of two receipts, one with a valid blob and one with no reviewed_state, the warning says "1 of the 2" and names ONLY the offending one', { skip: GIT_SKIP }, () => {
+// THE LOAD-BEARING ARM (carried over from the retired completed_at family, re-cut onto v2):
+// an out-of-range finished_at is DISCARDED, never clamped to `now`, so the age falls back to
+// started_at and the receipt still reads as stale.
+// EXPECTED: RED today — the field does not exist on v2 fixtures today and neither code does.
+// SABOTAGE (measured on the retired arm, and it is why this arm exists): clamp an
+// out-of-range finished_at to `now` instead of discarding it -> the age computes as ~0h
+// fresh, the [receipt_stale] disclosure disappears, and only that assertion reds. The
+// [receipt_age_unverifiable] assertion alone cannot see it, and the pair is what makes the
+// discard path observable at all — do not "simplify" this arm to one code.
+test('R1-D65: a finished_at OUTSIDE [started_at, now] is DISCARDED, not clamped — [receipt_age_unverifiable] fires AND the age falls back to started_at, so a 400-day-old receipt is still [receipt_stale]', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir);
-    writeLedger(dir, [
-      {
-        agent_type: 'reviewer-goodblob',
-        files: ['src/feature.mjs'],
-        at: isoAgo(1_000),
-        reviewed_state: { blobs: { 'src/feature.mjs': stagedBlob(dir, 'src/feature.mjs') } },
-      },
-      {
-        agent_type: 'reviewer-noevidence',
-        files: ['src/feature.mjs'],
-        at: isoAgo(2_000),
-        // no reviewed_state key at all
-      },
-    ]);
+    stageChange(dir, 'src/laneA.mjs', CODE);
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '65000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({
+      entry_id: id, agent_type: 'reviewer-outofrange', files: ['src/laneA.mjs'],
+      blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base,
+      started_at: isoAgo(PAST_DEFAULT_HORIZON), finished_at: isoIn(400 * 3_600_000),
+    })]);
 
-    const r = runCommitReviewed(dir, ['-m', 'one good, one missing reviewed_state']);
-    assert.equal(r.code, 0, `usable+matching evidence beside genuinely ABSENT evidence must still commit under decision 57984926 §2 (grandfathering clause) — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /NO CONTENT EVIDENCE/, `stderr must carry the aggregated warning — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /1 of the 2/, `the warning must name the count of offending receipts out of the total — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /reviewer-noevidence/, `the warning must name the offending receipt — stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /NO CONTENT EVIDENCE[^\n]*reviewer-goodblob/, `the receipt WITH usable content evidence must never be named by this warning — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
+    const r = runCommitReviewed(dir, ['-m', 'D65 out-of-range finished_at', '--json']);
+    assert.equal(r.code, 0, `neither an out-of-range clock nor staleness may refuse — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    assert.equal(disclosuresFor(out, 'receipt_age_unverifiable', id).length, 1, `the discard itself is disclosed — this is the assertion proving the field was READ, not silently skipped — got ${JSON.stringify(out.disclosures)}`);
+    assert.equal(disclosuresFor(out, 'receipt_stale', id).length, 1, `and the age falls back to started_at (400 days), which a clamp-to-now would have read as ~0 fresh — got ${JSON.stringify(out.disclosures)}`);
+    assert.equal(entryById(dir, id).status, 'consumed');
+  } finally { cleanup(); }
+});
+
+// THE OTHER HALF OF A11's SPLIT: a NON-STRING finished_at is [ledger_entry_malformed] and is
+// never spent. Two shapes, one code — an ABSENT field and a JSON-valid hostile object — kept
+// together because they are the same distinct failure and because the object shape is also the
+// crash probe: `{toString: null}` has no primitive conversion at all.
+// EXPECTED: RED today — neither shape is rejected today and there is no code.
+// SABOTAGE (the admission half): coerce a non-string with `String(finished_at)` before
+// classifying -> the entry is admitted as merely age-unverifiable, spends, and the malformed
+// assertions red — which is precisely the difference A11 draws between "recorded oddly" and
+// "not a receipt".
+// SABOTAGE (the crash half): interpolate the raw value into any message template -> the object
+// arm throws `TypeError: Cannot convert object to primitive value` before printing valid JSON,
+// and the no-crash assertion reds first, before any verdict can be read.
+test('R1-D66 (A11): a NON-STRING finished_at — absent, or a hostile {toString:null} object — is [ledger_entry_malformed], never spent, and never crashes the CLI', { skip: GIT_SKIP }, () => {
+  for (const [label, finished_at] of [['absent', OMIT], ['hostile-object', { toString: null }]]) {
+    const { dir, cleanup } = makeRepo();
+    try {
+      stageChange(dir, 'src/laneA.mjs', CODE);
+      const base = git(dir, ['rev-parse', 'HEAD']);
+      const id = '66000000-0000-4000-8000-000000000001';
+      writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-noclock', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base, finished_at })]);
+      const before = readLedgerRaw(dir);
+
+      const r = runCommitReviewed(dir, ['-m', `D66 ${label}`]);
+      assert.doesNotMatch(r.stderr, /TypeError|ReferenceError/, `[${label}] no raw-interpolation crash may leak — stderr=${flat(r.stderr)}`);
+      assert.equal(r.code, 1, `[${label}] a malformed entry is not a candidate, and it is the only entry — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+      const combined = `${r.stdout}\n${r.stderr}`;
+      assert.match(combined, token('ledger_entry_malformed'), `[${label}] the shape defect is NAMED — stderr=${flat(r.stderr)}`);
+      assert.doesNotMatch(combined, token('receipt_age_unverifiable'), `[${label}] a non-string clock is not an unreadable clock — different code, different remedy — stderr=${flat(r.stderr)}`);
+      assert.equal(git(dir, ['rev-parse', 'HEAD']), base, `[${label}] no commit`);
+      assert.equal(readLedgerRaw(dir), before, `[${label}] ledger byte-identical`);
+    } finally { cleanup(); }
   }
 });

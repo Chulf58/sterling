@@ -17,6 +17,16 @@
 // expected to fail against current HEAD — see the per-test comment for the
 // expected failure shape (empty stdout where a payload is required, or a
 // payload missing the new header clause / still-guarded content).
+//
+// REPAIR NOTE (this dispatch): arms b, e, f and g originally asserted
+// `stdout === ''` for their negative cases. Since commit 593787f
+// (2026-08-31) h19-dispatch-staging.mjs ALWAYS emits the STERLING DEFAULT
+// RETURN CONTRACT envelope for a non-exempt agent_type (the absorbed H28),
+// so an empty-stdout assertion is stale and would fail for a reason
+// unrelated to what each arm is actually pinning. Each of the four arms now
+// asserts the envelope is present AND that no delivery/pointer content
+// beyond it is emitted — the original NEGATIVE intent (no subject-matched
+// payload) is unchanged, only the "silent" shape it was expressed through.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -201,22 +211,34 @@ test('a. no path in the prompt, but the prompt matches a stored anti_pattern\'s 
 
 // --- b. centrality floor holds through the composed hook -----------------
 
-test('b. no path, prompt hits only the record\'s PERIPHERAL (non-central) words: stays silent, exit 0', () => {
+// REPAIRED (this dispatch): since commit 593787f (2026-08-31) H19 always
+// emits the STERLING DEFAULT RETURN CONTRACT envelope for a non-exempt
+// agent_type (the absorbed H28), so `stdout === ''` is stale — it is now
+// contract-only, never empty. The arm's original negative intent (no
+// subject-matched delivery on a peripheral-only overlap) is preserved via
+// the doesNotMatch assertions below.
+test('b. no path, prompt hits only the record\'s PERIPHERAL (non-central) words: contract-only, no subject-matched payload', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
     const transcript = writeTranscript(dir, [assistantLine([taskBlock(PERIPHERAL_PROMPT)])]);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(
-      r.stdout,
-      '',
-      'peripheral-only overlap must not count as a subject match, mirroring the 2026-08-09 Blender case'
-    );
+    const out = JSON.parse(r.stdout);
+    const ctx = out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'the absorbed H28 contract always fires for a non-exempt agent_type, even with nothing to stage');
+    assert.doesNotMatch(ctx, new RegExp(CENTRAL_TITLE), 'peripheral-only overlap must not count as a subject match, mirroring the 2026-08-09 Blender case');
+    assert.doesNotMatch(ctx, /STERLING KNOWLEDGE DELIVERY/, 'no knowledge-staging payload when nothing was staged');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: widen the centrality/hit floor so a peripheral-only overlap
+// counts as a subject match — the CENTRAL_TITLE match then appears in ctx
+// and the `doesNotMatch(ctx, new RegExp(CENTRAL_TITLE))` assertion goes red.
+// (A cruder sabotage — dropping the unconditional contract emit — fails the
+// `STERLING DEFAULT RETURN CONTRACT` match instead, which is exactly the
+// stale property this repair stops asserting via an empty-stdout check.)
 
 // --- c. composition: one payload, both channels present -------------------
 
@@ -265,7 +287,13 @@ test('d. a record reachable through BOTH the path channel (owns the named file) 
 
 // --- e. guard dedup on a second identical dispatch -------------------------
 
-test('e. a second identical SubagentStart after a subject-only delivery yields empty stdout (guard dedup)', () => {
+// REPAIRED (this dispatch): the second call is contract-only, not empty —
+// the absorbed H28 contract carries no staging guard (decision 04982f45),
+// so it fires again on the repeat call even while the KNOWLEDGE DELIVERY
+// payload stays guarded. The arm's original negative intent (no re-delivery
+// of the subject-matched record) is preserved via the doesNotMatch
+// assertions below.
+test('e. a second identical SubagentStart after a subject-only delivery is contract-only (guard dedup on staging, not on the contract)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
@@ -276,15 +304,29 @@ test('e. a second identical SubagentStart after a subject-only delivery yields e
 
     const second = runHook(subagentStart(dir, transcript), dir);
     assert.equal(second.code, 0, second.stderr);
-    assert.equal(second.stdout, '', 'nothing fresh to stage — the guard already marked this record for this agent');
+    const secondCtx = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    assert.match(secondCtx, /STERLING DEFAULT RETURN CONTRACT/, 'the absorbed contract still fires on the second call — it is not gated by the staging guard');
+    assert.doesNotMatch(secondCtx, /STERLING KNOWLEDGE DELIVERY/, 'nothing fresh to stage — the guard already marked this record for this agent');
+    assert.doesNotMatch(secondCtx, new RegExp(CENTRAL_TITLE), 'the subject-matched record is not re-delivered');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: reuse the STAGING guard to also suppress the contract on repeat
+// calls (or otherwise gate the contract emit behind "something fresh was
+// staged") — the `STERLING DEFAULT RETURN CONTRACT` match on secondCtx goes
+// red. A second, opposite sabotage — dropping the staging guard so the
+// record is re-delivered every call — fails the CENTRAL_TITLE
+// doesNotMatch assertion instead.
 
 // --- f. pre-existing floors still govern the subject channel --------------
 
-test('f. floors preserved: a prompt sharing only ONE distinct term with the record\'s narrow text stays silent even though centrality trivially scales down', () => {
+// REPAIRED (this dispatch): the composed hook is always contract-only for a
+// non-exempt agent_type, so `stdout === ''` is stale here too. The arm's
+// original negative intent (AXIS_MIN_HITS silences a single-shared-term
+// overlap regardless of the scaled-down centrality floor) is preserved via
+// the doesNotMatch assertions below.
+test('f. floors preserved: a prompt sharing only ONE distinct term with the record\'s narrow text is contract-only, no subject-matched payload', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     // TERSE record has exactly one extractable own term ('quaternion'), so
@@ -297,19 +339,25 @@ test('f. floors preserved: a prompt sharing only ONE distinct term with the reco
     ]);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(
-      r.stdout,
-      '',
-      'only one distinct shared term — AXIS_MIN_HITS must silence this regardless of the centrality floor'
-    );
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'the absorbed contract always fires for a non-exempt agent_type');
+    assert.doesNotMatch(ctx, /STERLING KNOWLEDGE DELIVERY/, 'only one distinct shared term — AXIS_MIN_HITS must silence this regardless of the centrality floor');
+    assert.doesNotMatch(ctx, new RegExp(TERSE_TITLE), 'the record must not be delivered on a single shared term');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: drop or relax the pre-existing AXIS_MIN_HITS (>=2 distinct hits)
+// floor so a single shared term becomes sufficient — the STERLING KNOWLEDGE
+// DELIVERY / TERSE_TITLE doesNotMatch assertions above go red.
 
 // --- g. (requirement 2, second half) neither channel matches --------------
 
-test('g. no path candidates AND no subject match in the prompt: stays silent under the composed hook, exit 0', () => {
+// REPAIRED (this dispatch): "stays silent" is stale — the composed hook is
+// always contract-only for a non-exempt agent_type. The arm's original
+// negative intent (neither channel delivers anything, never a throw/crash)
+// is preserved via the doesNotMatch assertions below.
+test('g. no path candidates AND no subject match in the prompt: contract-only under the composed hook, exit 0', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
@@ -319,11 +367,21 @@ test('g. no path candidates AND no subject match in the prompt: stays silent und
     ]);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(r.stdout, '', 'neither channel matches — composed hook must still go silent, never a throw/crash');
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'neither channel matches, but the absorbed contract still fires — never a throw/crash, never empty');
+    assert.doesNotMatch(ctx, /STERLING KNOWLEDGE DELIVERY/, 'no knowledge-staging payload when neither channel matches');
+    assert.doesNotMatch(ctx, /alpha does the alpha thing/, 'the unmatched article is not delivered');
+    assert.doesNotMatch(ctx, new RegExp(CENTRAL_TITLE), 'the unmatched anti_pattern is not delivered');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: let a non-matching prompt fall through to delivering EITHER
+// fixture record anyway (e.g. a path/subject matcher that defaults to "match"
+// on no signal instead of "no match") — one of the two content
+// doesNotMatch assertions above goes red. A cruder sabotage — dropping the
+// unconditional contract emit — fails the STERLING DEFAULT RETURN CONTRACT
+// match instead.
 
 // --- h. per-prompt matching: a long sibling prompt cannot dilute a short one
 //        (review finding 5, commit follows 45bb722) -------------------------

@@ -263,3 +263,250 @@ test('(4): the exactly-once contract is UNCHANGED — two elements that genuinel
     cleanup();
   }
 });
+
+// ===========================================================================
+// LITERAL REPLACEMENT + exactly-once COUNTING (board-less side finding, fixed
+// by the tools.ts lane; extends this file rather than a new file per that
+// lane's recommendation — this is the file that already owns the
+// arr[key=value].sub selector path, and the plain-field arms below share the
+// SAME knowledgeEdit(id, field, find, replace) call shape).
+//
+// knowledge_edit no longer runs `current.replace(find, replace)` (native JS
+// String.replace, which treats `$&`, `$$`, `$1`... specially in the
+// REPLACEMENT string even for a plain string search pattern) — replacement
+// text is now spliced in LITERALLY. And the exactly-once occurrence count is
+// no longer `current.split(find).length - 1` (which UNDERCOUNTS OVERLAPPING
+// matches: 'aaa'.split('aa') = ['', 'a'], length-1 = 1, missing the second
+// occurrence at offset 1) — it is now a char-by-char-advancing scan that
+// finds both offsets 0 and 1 in 'aaa' against find 'aa'.
+//
+// Two call shapes exercised, both going through knowledgeEdit: the PLAIN
+// FIELD path (tools.ts ~:3355) and the files[path=...].role ARRAY-SELECTOR
+// path (tools.ts ~:3311) — independent guards, per their own named sabotage
+// below.
+// ===========================================================================
+
+function mkDecisionWithStatement(tools: SterlingTools, statement: string, slugSuffix: string): Loose {
+  return tools.knowledgeCreate('decision', {
+    title: `literal-replace fixture ${slugSuffix}`,
+    statement,
+    alternatives_rejected: [],
+    rationale: 'fixture for the literal-replace / occurrence-counting pins',
+    file_keys: [],
+  }).record as unknown as Loose;
+}
+
+// --- PLAIN FIELD (tools.ts ~:3355) -----------------------------------------
+
+// CONTROL, PLACED FIRST: a NON-overlapping single match ('aa' inside 'aab')
+// still edits normally on the plain-field path. Without this, the AMBIGUITY
+// pin right after it could be satisfied by an implementation that refuses
+// every find/replace outright.
+// No dedicated sabotage — this is the control the ambiguity pin needs to mean
+// anything, not a claim of its own.
+test('CONTROL (plain field, first): find "aa" in "aab" (one match, no overlap) still edits successfully', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const d = mkDecisionWithStatement(tools, 'aab', 'control-plain');
+    const id = d.id as string;
+    const edited = tools.knowledgeEdit(id, 'statement', 'aa', 'Z');
+    assert.equal((edited.record as unknown as { statement: string }).statement, 'Zb', 'the one non-overlapping match is replaced');
+    const after = tools.knowledgeGet(id) as unknown as Loose;
+    assert.equal(after.statement, 'Zb', 'persisted, not merely echoed');
+  } finally {
+    cleanup();
+  }
+});
+
+// THE PIN: 'aaa' against find 'aa' has TWO overlapping matches (offset 0 and
+// offset 1) — a char-by-char scan finds both; a split-based count
+// ('aaa'.split('aa') = ['', 'a'], length-1 = 1) sees only one and would
+// wrongly let this succeed.
+// Sabotage: restore `current.split(find).length - 1` as the occurrence count
+// at the plain-field site (tools.ts ~:3355) — this pin's `assert.throws`
+// goes red ("Missing expected exception"), while the CONTROL above and the
+// array-selector arms below stay green (each site is an independent guard;
+// all four reddening together would mean the harness itself is wrong, not
+// this one site).
+test('AMBIGUITY (plain field): find "aa" in "aaa" (overlapping matches at offset 0 and 1) is refused, naming the count; record unchanged', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const d = mkDecisionWithStatement(tools, 'aaa', 'ambiguous-plain');
+    const id = d.id as string;
+    const before = tools.knowledgeGet(id) as unknown as Loose;
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'statement', 'aa', 'Z'),
+      /appears 2 times/,
+      'the overlapping-match count (2) is named, not silently 1'
+    );
+    const after = tools.knowledgeGet(id) as unknown as Loose;
+    assert.deepEqual(after, before, 'nothing was written by the refused call');
+  } finally {
+    cleanup();
+  }
+});
+
+// CONTROL: an ordinary replacement carrying no `$`-patterns behaves exactly
+// as it always has — proves the literal-splice pins below are not merely
+// passing because the field happened to be untouched.
+test('CONTROL (plain field, dollar-free): an ordinary replacement with no $-patterns behaves as before', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const d = mkDecisionWithStatement(tools, 'the widget was old', 'control-dollar-free');
+    const id = d.id as string;
+    const edited = tools.knowledgeEdit(id, 'statement', 'old', 'new');
+    assert.equal((edited.record as unknown as { statement: string }).statement, 'the widget was new');
+  } finally {
+    cleanup();
+  }
+});
+
+// THE PIN: replacement text containing `$&` and `$$` is spliced in LITERALLY
+// — native String.prototype.replace treats `$&` as "the matched substring"
+// and `$$` as a literal `$` even when the search pattern is a plain string,
+// which is exactly the historical bug.
+// Sabotage: restore `current.replace(find, replace)` at the plain-field site
+// (tools.ts ~:3305/:3348) — MEASURED: the record reads back
+// "KEEP cost $5 and ORIG and $ TAIL" instead of the literal replacement text
+// (`$&` expands to the matched text 'ORIG', `$$` collapses to a single `$`),
+// so this assertion goes red.
+test('LITERAL REPLACE (plain field): replace text containing $& and $$ is stored LITERALLY, not native-String.replace-expanded', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const d = mkDecisionWithStatement(tools, 'KEEP ORIG TAIL', 'literal-plain');
+    const id = d.id as string;
+    const edited = tools.knowledgeEdit(id, 'statement', 'ORIG', 'cost $5 and $& and $$');
+    assert.equal(
+      (edited.record as unknown as { statement: string }).statement,
+      'KEEP cost $5 and $& and $$ TAIL',
+      'the replacement text is spliced in literally — $& is not expanded to the matched text, $$ is not collapsed to a single $'
+    );
+    const after = tools.knowledgeGet(id) as unknown as Loose;
+    assert.equal(after.statement, 'KEEP cost $5 and $& and $$ TAIL', 'persisted literally, not merely echoed literally');
+  } finally {
+    cleanup();
+  }
+});
+
+// Real newline vs the two literal characters backslash+n: knowledge_edit
+// never escapes or unescapes replacement text — whatever character(s) the
+// caller sends land verbatim.
+test('NEWLINE (plain field): a REAL newline in replace stores a real newline; the two literal characters backslash+n store verbatim', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // ONE constant per replace text, and every expected value is BUILT from
+    // it (never retyped as a separate literal) — so the base fixture and the
+    // expectation cannot diverge the way a hand-retyped expected string did
+    // (conductor-caught: 'line1 \nline2' silently dropped the space between
+    // MARK and 'line2' that the base fixture actually carries).
+    const BASE = 'line1 MARK line2';
+    const REAL_NEWLINE = '\n'; // one actual newline CHARACTER (code 10)
+    const LITERAL_BACKSLASH_N = '\\n'; // the TWO literal characters backslash, n
+
+    const realNl = mkDecisionWithStatement(tools, BASE, 'newline-real');
+    const realNlId = realNl.id as string;
+    const editedReal = tools.knowledgeEdit(realNlId, 'statement', 'MARK', REAL_NEWLINE);
+    const expectedReal = BASE.replace('MARK', REAL_NEWLINE);
+    assert.equal((editedReal.record as unknown as { statement: string }).statement, expectedReal, 'a real newline character is stored as a real newline, byte-equal to the exact replace text');
+    assert.equal(((editedReal.record as unknown as { statement: string }).statement.match(/\n/g) ?? []).length, 1, 'exactly one real newline character present');
+
+    const literalBackslashN = mkDecisionWithStatement(tools, BASE, 'newline-literal');
+    const literalId = literalBackslashN.id as string;
+    // replace is the TWO literal characters backslash, n — never an escape
+    // sequence that gets unescaped into a real newline
+    const editedLiteral = tools.knowledgeEdit(literalId, 'statement', 'MARK', LITERAL_BACKSLASH_N);
+    const literalStatement = (editedLiteral.record as unknown as { statement: string }).statement;
+    const expectedLiteral = BASE.replace('MARK', LITERAL_BACKSLASH_N);
+    assert.equal(literalStatement, expectedLiteral, 'the two literal characters backslash+n are stored verbatim, byte-equal to the exact replace text');
+    assert.equal((literalStatement.match(/\n/g) ?? []).length, 0, 'no real newline character was introduced by unescaping');
+  } finally {
+    cleanup();
+  }
+});
+
+// --- ARRAY SELECTOR files[path=...].role (tools.ts ~:3311) ------------------
+
+function mkArticleWithRole(tools: SterlingTools, role: string, slugSuffix: string): Loose {
+  return tools.knowledgeCreate('feature_article', {
+    slug: `literal-replace-selector-${slugSuffix}`,
+    title: `literal-replace selector fixture ${slugSuffix}`,
+    what_it_does: 'x',
+    intended_behavior: 'x',
+    files: [
+      { path: 'src/a.ts', role },
+      { path: 'src/b.ts', role: 'the untouched sibling role' },
+    ],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+  }).record as unknown as Loose;
+}
+
+// CONTROL, PLACED FIRST: same non-overlapping-match shape as the plain-field
+// control above, but through the array-selector path.
+// No dedicated sabotage — this is the control the array-selector AMBIGUITY
+// pin needs to mean anything.
+test('CONTROL (array selector, first): find "aa" in files[path=src/a.ts].role = "aab" (one match, no overlap) still edits successfully, sibling untouched', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticleWithRole(tools, 'aab', 'control');
+    const id = article.id as string;
+    const edited = tools.knowledgeEdit(id, 'files[path=src/a.ts].role', 'aa', 'Z');
+    const files = (edited.record as unknown as { files: FileEntry[] }).files;
+    assert.equal(files.find((f) => f.path === 'src/a.ts')?.role, 'Zb', 'the one non-overlapping match is replaced');
+    assert.equal(files.find((f) => f.path === 'src/b.ts')?.role, 'the untouched sibling role', 'sibling byte-untouched');
+  } finally {
+    cleanup();
+  }
+});
+
+// THE PIN: same overlapping-match shape as the plain-field pin above,
+// through the array-selector path — an INDEPENDENT guard at a different call
+// site (tools.ts ~:3311), not the same code path as the plain-field pin.
+// Sabotage: restore `current.split(find).length - 1` at the array-selector
+// site specifically — THIS pin's `assert.throws` goes red while the
+// plain-field AMBIGUITY pin above (a different site) stays green.
+test('AMBIGUITY (array selector): find "aa" in files[path=src/a.ts].role = "aaa" (overlapping matches at offset 0 and 1) is refused, naming the count; record unchanged', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticleWithRole(tools, 'aaa', 'ambiguous');
+    const id = article.id as string;
+    const before = getArticle(tools, id);
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'files[path=src/a.ts].role', 'aa', 'Z'),
+      /appears 2 times/,
+      'the overlapping-match count (2) is named, not silently 1'
+    );
+    const after = getArticle(tools, id);
+    assert.deepEqual(after.files, before.files, 'nothing was written by the refused call');
+  } finally {
+    cleanup();
+  }
+});
+
+// THE PIN: same $&/$$ literal-splice shape as the plain-field pin above,
+// through the array-selector path.
+// Sabotage: restore `current.replace(find, replace)` at the array-selector
+// site (tools.ts ~:3311) — the role would read back
+// "the cost $5 and ORIG and $ role" instead of the literal replacement text.
+test('LITERAL REPLACE (array selector): replace text containing $& and $$ is stored LITERALLY in files[path=...].role', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticleWithRole(tools, 'the ORIG role', 'literal');
+    const id = article.id as string;
+    const edited = tools.knowledgeEdit(id, 'files[path=src/a.ts].role', 'ORIG', 'cost $5 and $& and $$');
+    const files = (edited.record as unknown as { files: FileEntry[] }).files;
+    assert.equal(
+      files.find((f) => f.path === 'src/a.ts')?.role,
+      'the cost $5 and $& and $$ role',
+      'the replacement text is spliced in literally in the selected array element'
+    );
+    const after = getArticle(tools, id);
+    assert.deepEqual(after.files, files, 'persisted literally, not merely echoed literally');
+  } finally {
+    cleanup();
+  }
+});

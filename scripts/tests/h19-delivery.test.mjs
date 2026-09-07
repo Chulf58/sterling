@@ -592,6 +592,197 @@ test('H19: decisions render as CAPPED POINTERS, never bodies, and the overflow i
   }
 });
 
+// ---------------------------------------------------------------------------
+// RANKED DECISION POINTERS (rankFileDecisionPointers, lib/delivery.mjs
+// ~1340-1400): before the cap is applied, file-touch delivery ranks
+// candidate decisions by (1) authority rung — standing 0, unstated/
+// unrecognised 1, session_scoped 2, one_off 3 — then (2) FEWER file_keys
+// first, then (3) updated_at DESC, then (4) id DESC. Ranked ONCE at
+// h19-knowledge-delivery.mjs ~111-121 where freshDecisions is born, so the
+// guard slice (~153) and the renderer (~216) see the identical array — never
+// re-derived independently by either consumer.
+//
+// CONTROL (unchanged, not duplicated here): the existing cap test above
+// ('H19: decisions render as CAPPED POINTERS...') already proves 11
+// decisions -> exactly 8 pointers with the drop disclosed and a widening
+// query named. It stays green, unedited, and is this section's baseline —
+// every PIN below only adds a SHAPE to the candidate set (authority, file
+// breadth, ties) and checks how that shape moves through the SAME cap.
+// ---------------------------------------------------------------------------
+
+test('H19 (rank PIN 1): a standing-authority decision renders ahead of ten same-recency unstated decisions — recency never beats the authority rung', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const RECENT = '2026-09-05T12:00:00.000Z';
+    for (let i = 0; i < 10; i += 1) {
+      store.create(decisionRecord(`recent choice ${i}`, ['src/a.mjs'], { updated_at: RECENT }));
+    }
+    // No authority field at all -> rung 1 (unstated), and dated far NEWER
+    // than the standing ruling below — a recency-only sort would evict it.
+    store.create(decisionRecord('the old standing ruling', ['src/a.mjs'], { authority: 'standing', updated_at: '2026-01-01T00:00:00.000Z' }));
+
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /the old standing ruling/, 'the standing ruling — despite being dated over eight months OLDER than every rival — must render within the cap of 8');
+    assert.equal(ctx.match(/\(knowledge_get [0-9a-f-]{36}\)/g).length, 8, 'exactly the cap renders as pointers');
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: drop the authority rung from the sort key (sort by updated_at
+// DESC alone, or by authority-then-nothing) — the standing ruling, dated
+// 2026-01-01, sorts LAST among the 11 candidates and is evicted by the cap;
+// the `/the old standing ruling/` match above goes red.
+
+test('H19 (rank PIN 2): FEWER file_keys renders first even when the BROAD decision is strictly MORE RECENT — breadth outranks recency, not merely ties with it', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    // Deliberately NOT tied: the broad decision is strictly NEWER than the
+    // narrow one. If the file_keys-count rung is dropped, the sort falls
+    // through to updated_at DESC — which would then DETERMINISTICALLY put
+    // the (newer) broad decision first, flipping this assertion every run
+    // rather than merely going coin-flip-flaky on two random ids at a tie.
+    const NARROW_AT = '2026-08-01T00:00:00.000Z';
+    const BROAD_AT = '2026-08-02T00:00:00.000Z'; // strictly newer than NARROW_AT
+    const broadPaths = ['src/a.mjs', ...Array.from({ length: 9 }, (_, i) => `src/b${i}.mjs`)];
+    store.create(decisionRecord('the narrow one', ['src/a.mjs'], { updated_at: NARROW_AT }));
+    store.create(decisionRecord('the broad one', broadPaths, { updated_at: BROAD_AT }));
+
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(
+      ctx.indexOf('the narrow one') < ctx.indexOf('the broad one'),
+      'at equal authority, the decision naming FEWER files must render before the one naming more, EVEN THOUGH the broad one is more recent'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: drop the file_keys-count tiebreak (fall straight through to
+// updated_at DESC at equal authority) — the broad decision is strictly
+// NEWER, so it deterministically sorts FIRST under updated_at DESC, and the
+// `ctx.indexOf('the narrow one') < ctx.indexOf('the broad one')` assertion
+// above goes red on every run, not merely sometimes.
+
+test('H19 (rank PIN 2, CONTROL — breadth reversed): swapping which statement is narrow reverses the render order — the ordering follows BREADTH, not statement identity or recency', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    const NARROW_AT = '2026-08-01T00:00:00.000Z';
+    const BROAD_AT = '2026-08-02T00:00:00.000Z'; // strictly newer than NARROW_AT
+    const broadPaths = ['src/a.mjs', ...Array.from({ length: 9 }, (_, i) => `src/b${i}.mjs`)];
+    // Same two labels as PIN 2, but breadth (and its date) SWAPPED: here
+    // "the narrow one" is the decision naming ALL 10 files (and gets the
+    // NEWER date), while "the broad one" names only one file (and gets the
+    // OLDER date) — the actually-narrow decision must still win despite
+    // being the older of the two, exactly mirroring PIN 2's own asymmetry.
+    store.create(decisionRecord('the narrow one', broadPaths, { updated_at: BROAD_AT }));
+    store.create(decisionRecord('the broad one', ['src/a.mjs'], { updated_at: NARROW_AT }));
+
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(
+      ctx.indexOf('the broad one') < ctx.indexOf('the narrow one'),
+      'CONTROL BROKEN if not reversed: with breadth (and its date) swapped, the decision that ACTUALLY names fewer files (labeled "the broad one" in this fixture, and the OLDER of the two) must still render first — proving PIN 2\'s order came from the file_keys COUNT, not from label identity, creation order, or recency'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: drop the file_keys-count tiebreak here too — the actually-broad
+// decision (labeled "the narrow one", holding the NEWER date) then sorts
+// first under updated_at DESC, and the assertion above goes red
+// deterministically, on every run.
+
+test('H19 (rank PIN 3): three decisions identical except id render in id-DESC order — deterministic, never insertion-order-dependent', () => {
+  // ASSUMPTION, stated plainly (the read wall forbids checking it directly):
+  // a caller-supplied `id` in the decisionRecord/envelope payload may or may
+  // not be honored verbatim by store.create() (ids are server-managed per
+  // decision stable-identity-design-v2). Rather than assume either way, this
+  // arm reads the ACTUAL id off store.create()'s OWN return value for every
+  // record — which is correct regardless of override behaviour — and proves
+  // determinism as a property that holds INDEPENDENTLY in two projects
+  // seeded via differently-shaped insertion loops, rather than by forcing
+  // two projects to share one literal id set.
+  function seed(order) {
+    const { dir, store, cleanup } = makeProject({ rung: 'read' });
+    try {
+      store.create(article('alpha', ['src/a.mjs']));
+      const ids = order.map(() => store.create(decisionRecord('identical tie statement', ['src/a.mjs'])).id);
+      const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+      assert.equal(r.code, 0);
+      const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+      const rendered = [...ctx.matchAll(/\(knowledge_get ([0-9a-f-]{36})\)/g)].map((m) => m[1]);
+      assert.equal(rendered.length, 3, 'FIXTURE LIVENESS: all three identical-tie decisions must render (well under the cap)');
+      return { ids, rendered };
+    } finally {
+      cleanup();
+    }
+  }
+
+  const a = seed([0, 1, 2]);
+  assert.deepEqual(a.rendered, [...a.ids].sort().reverse(), 'the pointer-id sequence equals the three minted ids sorted DESC as strings');
+
+  const b = seed([2, 1, 0]); // a differently-shaped insertion loop; still yields its OWN fresh ids
+  assert.deepEqual(b.rendered, [...b.ids].sort().reverse(), 'a second project, seeded via a different insertion-loop shape, ALSO renders its own ids in DESC order — the tiebreak is a pure function of id value, never of insertion/creation sequence');
+});
+// SABOTAGE: break ties by insertion/creation order (or leave them dependent
+// on an unstable sort) instead of id DESC — either project's rendered
+// sequence would then diverge from ITS OWN ids sorted DESC, failing the
+// corresponding deepEqual assertion above.
+
+test('H19 (rank PIN 4): a second touch of the SAME file delivers the remaining ranked decisions, none repeated, in the SAME ranked order computed once at the birth point', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
+  try {
+    store.create(article('alpha', ['src/a.mjs']));
+    for (let i = 0; i < 11; i += 1) store.create(decisionRecord(`choice ${i}`, ['src/a.mjs']));
+    const allCreated = store.query({ types: ['decision'], rank_terms: ['choice'], cap: 20 }).map((d) => d.id);
+    assert.equal(allCreated.length, 11, 'FIXTURE LIVENESS: all 11 decisions are queryable before touching anything');
+
+    const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(first.code, 0);
+    const firstCtx = JSON.parse(first.stdout).hookSpecificOutput.additionalContext;
+    const firstIds = [...firstCtx.matchAll(/\(knowledge_get ([0-9a-f-]{36})\)/g)].map((m) => m[1]);
+    assert.equal(firstIds.length, 8, 'the cap holds on the first touch');
+
+    const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(second.code, 0);
+    const secondCtx = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    const secondIdsClean = [...secondCtx.matchAll(/\(knowledge_get ([0-9a-f-]{36})\)/g)].map((m) => m[1]);
+    assert.equal(secondIdsClean.length, 3, 'the remaining 3 render on the SAME-file second touch');
+    assert.deepEqual(
+      firstIds.filter((id) => secondIdsClean.includes(id)),
+      [],
+      'none of the first 8 reappear on the second touch of the same file'
+    );
+
+    // All 11 decisions here are tied on authority (none), updated_at (the
+    // shared envelope NOW) and file_keys (all name exactly ['src/a.mjs']),
+    // so the only remaining tiebreak is id DESC — the ranked order is the
+    // full 11-id set sorted DESC, sliced at the birth point into an
+    // 8-then-3 rotation.
+    const rankedDesc = [...allCreated].sort().reverse();
+    assert.deepEqual(
+      secondIdsClean,
+      rankedDesc.slice(8),
+      'the second batch renders in the SAME ranked order computed once at the birth point'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: re-sort inside the renderer (recompute a fresh order from
+// whatever decisions happen to still be unguarded at render time) instead of
+// ranking ONCE at the birth point (freshDecisions) that both the guard slice
+// and the renderer consume — the deepEqual(secondIdsClean, rankedDesc.slice(8))
+// assertion above goes red if the renderer's own re-derived order diverges
+// from the one the guard sliced against.
+
 test('H19: a decision pointer carries its rejected OPTIONS beneath the statement (decision 6a3b1a46)', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {

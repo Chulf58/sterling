@@ -59,5 +59,10 @@ for (const r of report) {
   }
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
-if (changed > 0) console.log('\n' + restartInstruction);
+if (changed > 0) {
+  console.log('\n' + restartInstruction);
+  console.error(
+    '\nthis changes the enforcement (B) surface; run enforcement_reconcile {adopt:true} from the MCP surface before the next agent Bash call (H17 latch).'
+  );
+}
 process.exit(refused > 0 ? 2 : 0);

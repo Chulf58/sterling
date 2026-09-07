@@ -41,6 +41,12 @@
         ]
       },
       {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h15-store-guard.mjs\"" }
+        ]
+      },
+      {
         "matcher": "Task|Agent",
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h8-dispatch-cap.mjs\"" },
@@ -102,6 +108,12 @@
         "matcher": "mcp__codex__codex|mcp__codex__codex-reply",
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h29-codex-consult-failure.mjs\"" }
+        ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h31-plan-lock.mjs\"" }
         ]
       }
     ],

@@ -36,6 +36,16 @@ function doctor(args, cwd) {
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
+// EVERY `sweep` CALL IN THIS FILE PASSES AN EXPLICIT `--roots`, AND MUST.
+// Without it the sweep's roots() falls back to defaultRoots(), which includes
+// this MACHINE's live ~/.sterling/domains — so a test opened real domain stores
+// it does not own. Under the concurrent full suite that produced 'database is
+// locked' and the sweep aborted with exit 2 instead of the expected exit (it
+// passed in isolation every time, which is what made it expensive to find).
+// Each fixture below therefore hands back a `domainsRoot` the test owns; where
+// an arm needs the sweep to resolve NOTHING, that root is simply empty, which
+// is the verdict the arm always intended.
+
 function mkRecord(id, answer) {
   return {
     id,
@@ -92,7 +102,7 @@ function desyncColumnFromRelation(dbPath, tombstoneId) {
 }
 
 test('sweep finds a dangling supersedes RELATION even when the superseded_by COLUMN has been desynced to NULL (v2 migration-runner shape)', () => {
-  const { projectDir, storePath, store } = projectFixture();
+  const { projectDir, domainsRoot, storePath, store } = projectFixture();
   const originalId = randomUUID();
   const lostId = randomUUID();
   store.create(mkRecord(originalId, 'the tenant facts'));
@@ -101,7 +111,7 @@ test('sweep finds a dangling supersedes RELATION even when the superseded_by COL
 
   desyncColumnFromRelation(storePath, originalId);
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(
     swept.code,
     3,
@@ -126,7 +136,7 @@ test('sweep reports CLEAN once the relation-only successor resolves, even with t
   domain.create({ ...mkRecord(targetId, 'the tenant facts'), scope: 'domain:genesys-cloud' });
   domain.close();
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(
     swept.code,
     0,
@@ -188,7 +198,7 @@ test('restore refuses cleanly on an ordinary v2 store when the tombstone is not 
 });
 
 test('sweep leaves no -wal/-shm sidecar litter beside any store it touches (idsIn must clean up conditionally, like readOnlyProbe)', () => {
-  const { projectDir, storePath, store } = projectFixture();
+  const { projectDir, domainsRoot, storePath, store } = projectFixture();
   const originalId = randomUUID();
   const lostId = randomUUID();
   store.create(mkRecord(originalId, 'x'));
@@ -198,7 +208,7 @@ test('sweep leaves no -wal/-shm sidecar litter beside any store it touches (idsI
   assert.equal(existsSync(`${storePath}-wal`), false, 'fixture precondition: cold store, no -wal before the call');
   assert.equal(existsSync(`${storePath}-shm`), false, 'fixture precondition: cold store, no -shm before the call');
 
-  doctor(['sweep', '--project', projectDir], projectDir);
+  doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
 
   assert.equal(existsSync(`${storePath}-wal`), false, 'sweep must not leave -wal litter beside the project store');
   assert.equal(existsSync(`${storePath}-shm`), false, 'sweep must not leave -shm litter beside the project store');
@@ -265,6 +275,10 @@ function mkArticleRecord(id, title) {
 function mkHalfMigratedProjectStore(rows, { userVersion = 2 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'doctor-halfmig-'));
   const projectDir = join(dir, 'proj');
+  // An EMPTY domains root the test owns, for `sweep --roots` (see the note
+  // above doctor()). This scenario declares no domain mounts.
+  const domainsRoot = join(dir, 'domains');
+  mkdirSync(domainsRoot, { recursive: true });
   mkdirSync(join(projectDir, '.sterling'), { recursive: true });
   writeFileSync(
     join(projectDir, '.sterling', 'config.json'),
@@ -302,7 +316,7 @@ function mkHalfMigratedProjectStore(rows, { userVersion = 2 } = {}) {
   } finally {
     db.close();
   }
-  return { dir, projectDir, storePath };
+  return { dir, projectDir, domainsRoot, storePath };
 }
 
 /** A GENUINELY pre-v2 `records` table: no 'lifecycle' column at all (the
@@ -313,6 +327,10 @@ function mkHalfMigratedProjectStore(rows, { userVersion = 2 } = {}) {
 function mkPreV2ProjectStore(rows) {
   const dir = mkdtempSync(join(tmpdir(), 'doctor-prev2-'));
   const projectDir = join(dir, 'proj');
+  // An EMPTY domains root the test owns, for `sweep --roots` (see the note
+  // above doctor()). This scenario declares no domain mounts.
+  const domainsRoot = join(dir, 'domains');
+  mkdirSync(domainsRoot, { recursive: true });
   mkdirSync(join(projectDir, '.sterling'), { recursive: true });
   writeFileSync(
     join(projectDir, '.sterling', 'config.json'),
@@ -343,7 +361,7 @@ function mkPreV2ProjectStore(rows) {
   } finally {
     db.close();
   }
-  return { dir, projectDir, storePath };
+  return { dir, projectDir, domainsRoot, storePath };
 }
 
 // --- Codex HIGH 1: v2-shaped without record_relations must fail loud -------
@@ -351,14 +369,14 @@ function mkPreV2ProjectStore(rows) {
 test('sweep FAILS LOUD on a v2-shaped records table with record_relations absent, rather than trusting the compatibility column alone (half-migrated)', () => {
   const originalId = randomUUID();
   const lostId = randomUUID();
-  const { projectDir } = mkHalfMigratedProjectStore([
+  const { projectDir, domainsRoot } = mkHalfMigratedProjectStore([
     {
       id: originalId, type: 'research_finding', status: 'superseded', superseded_by: lostId, lifecycle: 'retired',
       scope: 'project', created_at: NOW(), updated_at: NOW(), author: 'conductor', body: { id: originalId, type: 'research_finding' },
     },
   ]);
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(
     swept.code,
     2,
@@ -391,7 +409,7 @@ test('restore FAILS LOUD on a v2-shaped store with record_relations absent, rath
 test('sweep detects v2-SHAPEDness from the lifecycle COLUMN alone, even when the header user_version was never bumped to 2', () => {
   const originalId = randomUUID();
   const lostId = randomUUID();
-  const { projectDir } = mkHalfMigratedProjectStore(
+  const { projectDir, domainsRoot } = mkHalfMigratedProjectStore(
     [
       {
         id: originalId, type: 'research_finding', status: 'superseded', superseded_by: lostId, lifecycle: 'retired',
@@ -401,7 +419,7 @@ test('sweep detects v2-SHAPEDness from the lifecycle COLUMN alone, even when the
     { userVersion: 0 }
   );
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(
     swept.code,
     2,
@@ -498,7 +516,7 @@ test('sweep does NOT report a successor as dangling when it resolves only throug
     db.close();
   }
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(
     swept.code,
     0,
@@ -583,7 +601,7 @@ test('restore refuses --apply on a LIVE record id collision with a DIFFERENT mes
 test('sweep detects a dangling pointer from the compatibility COLUMN alone on a genuinely pre-v2 store (no lifecycle column, no record_relations)', () => {
   const originalId = randomUUID();
   const lostId = randomUUID();
-  const { projectDir } = mkPreV2ProjectStore([
+  const { projectDir, domainsRoot } = mkPreV2ProjectStore([
     {
       id: originalId, type: 'research_finding', status: 'superseded', superseded_by: lostId,
       scope: 'project', created_at: NOW(), updated_at: NOW(), author: 'conductor',
@@ -591,7 +609,7 @@ test('sweep detects a dangling pointer from the compatibility COLUMN alone on a 
     },
   ]);
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(
     swept.code,
     3,
@@ -624,7 +642,7 @@ test('scan leaves no -wal/-shm sidecar litter beside any store file it lists', (
 // --- LOW: a column/relation disagreement is its own reportable finding -----
 
 test('sweep emits a CONFLICT line when the column and record_relations disagree about a tombstone\'s successor', () => {
-  const { projectDir, storePath, store } = projectFixture();
+  const { projectDir, domainsRoot, storePath, store } = projectFixture();
   const originalId = randomUUID();
   const columnSuccessor = randomUUID();
   const relationSuccessor = randomUUID();
@@ -640,7 +658,7 @@ test('sweep emits a CONFLICT line when the column and record_relations disagree 
     db.close();
   }
 
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.match(swept.stdout, /CONFLICT/i, `a column/relation disagreement must be surfaced explicitly: ${swept.stdout}${swept.stderr}`);
   assert.match(swept.stdout, new RegExp(columnSuccessor));
   assert.match(swept.stdout, new RegExp(relationSuccessor));

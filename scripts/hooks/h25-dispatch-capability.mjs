@@ -45,7 +45,7 @@
 // authoring belongs to the test-writer role, and H5 will deny a test-path
 // edit mid-work if the dispatch proceeds anyway — this catches the
 // misdispatch before the spawn, exactly like the capability advisory above.
-import { readStdin, allow, warnNonBlocking, loadConfig, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, loadConfig, repoRel } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import {
   hasUnsuppressedMatch,
@@ -550,110 +550,180 @@ function citationStalenessAdvisory(prompt, cwd) {
   }
 }
 
-let input;
-try {
-  input = readStdin();
-} catch {
-  allow(); // malformed (non-JSON) stdin — nothing to check, never a crash
-}
-
-function emit(additionalContext) {
-  recordAdvisoryFire(input.cwd, 'h25', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-  process.stdout.write(
-    JSON.stringify({
-      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext },
-    })
-  );
-}
-
-try {
-  const subagentType = input.tool_input?.subagent_type;
-  if (!subagentType) allow(); // nothing to resolve capability against
-
-  // Computed once, independent of the capability checks below (neither needs
-  // an installed agent file nor a parsed grant) — combined with whichever
-  // capability-advisory text (if any) `finish` is called with, so no two of
-  // the (up to) four advisories ever clobber each other when several apply.
-  const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
-  // Assigned later, once the target agent's real grant is known to hold
-  // NEITHER shell tool — stays undefined on every branch that cannot know
-  // that (unknown agent, all-tools default, unevaluable grant), read by
-  // `finish` at call time via closure so every finish() call after that
-  // point picks it up automatically, exactly like taAdvisory/citeAdvisory.
-  let commandShapeMsg;
-  function finish(capabilityMessage) {
-    const parts = [];
-    if (capabilityMessage) parts.push(capabilityMessage);
-    if (commandShapeMsg) parts.push(commandShapeMsg);
-    if (taAdvisory) parts.push(taAdvisory);
-    if (citeAdvisory) parts.push(citeAdvisory);
-    if (parts.length) emit(parts.join('\n\n'));
-    allow();
+// ---------------------------------------------------------------------------
+// FOURTH ADVISORY: TDD / mutation-verification posture (decision 752caf98
+// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C). Same
+// warn-only posture as the three advisories above — never a block (decision
+// dc6c1afb: H25 is warn-only). Two independent triggers, either or both may
+// fire on the same dispatch: (1) a test-writer dispatched while
+// config.tdd.enabled is explicitly false — the automatic tests-first default
+// does not apply in this project, so an unexplained test-writer dispatch is
+// worth a nudge; (2) a brief mentioning mutation/sabotage/mutant while
+// config.mutation_verification.enabled is explicitly false. loadConfig is
+// read fresh here (review fix C4's own pattern, mirrored from hasPathTrigger
+// above) rather than shared with any other call site, so a present-but-
+// malformed config degrades only THIS advisory, never the others already
+// computed in this hook. Only an explicit `false` fires either arm — absent/
+// undefined reads as the documented default (true, decision 752caf98), never
+// treated as OFF.
+const MUTATION_WORD_RE = /\b(mutation|sabotage|mutant)\b/i;
+function tddPostureAdvisory(subagentType, prompt, cwd) {
+  let config;
+  try {
+    config = loadConfig(cwd);
+  } catch {
+    return null;
   }
-
-  const agentPath = join(input.cwd ?? '.', '.claude', 'agents', `${subagentType}.md`);
-  if (!existsSync(agentPath)) {
-    // Harness built-in (board a6b76e8c item 2): no definition file by
-    // design, not a capability gap — never fires the no-definition advisory.
-    if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
-    // DISTINCT shape from the missing-tool warning: capability cannot be
-    // checked at all, and this must not read like a claim about a specific
-    // grant it has no way to know.
-    finish(
-      `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked — no installed agent ` +
-        `definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct ` +
-        `before relying on this dispatch, or install the agent definition.`
+  const parts = [];
+  if (subagentType === 'test-writer' && config?.tdd?.enabled === false) {
+    parts.push(
+      `H25 TDD POSTURE ADVISORY — tests-first is OFF in this project; dispatch a test-writer only ` +
+        `on an explicit ask (config.tdd.enabled, TUI System tab).`
     );
   }
-
-  let content;
-  try {
-    content = readFileSync(agentPath, 'utf8');
-  } catch (e) {
-    warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${(e && e.message) || e}`);
+  if (config?.mutation_verification?.enabled === false && MUTATION_WORD_RE.test(String(prompt ?? ''))) {
+    parts.push(
+      `H25 MUTATION-VERIFICATION POSTURE ADVISORY — mutation verification is OFF in this project ` +
+        `(config.mutation_verification.enabled, TUI System tab): the automatic verify-by-mutation default ` +
+        `does not apply here — proceed only on an explicit ask.`
+    );
   }
-
-  const toolsRaw = parseToolsLine(content);
-  if (toolsRaw === undefined) finish(); // no tools: line — all-tools default, capability-silent
-
-  // Grant parsing (review D1): strip a flow-style [ ... ] wrapper so
-  // `tools: [Read, Bash]` grants Read and Bash rather than '[read'/'bash]'.
-  // A tools: value that parses to ZERO tokens (e.g. a YAML block list on the
-  // following lines, which this line-scoped parser cannot read) is
-  // UNEVALUABLE, not an empty grant — an advisory must never assert a grant
-  // it did not actually read, so it stays silent.
-  const grantList = toolsRaw
-    .replace(/^\[/, '')
-    .replace(/\]$/, '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (!grantList.length) finish();
-
-  // COMMAND-SHAPE ADVISORY (board 07deffab gap (3)): only evaluable now that
-  // a real, non-empty grant is known — fires only when it holds NEITHER
-  // shell-execution tool.
-  if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
-
-  const mentioned = findMentionedTools(input.tool_input?.prompt);
-  if (!mentioned.length) finish();
-
-  const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
-  if (!missing.length) finish();
-
-  const missingLines = missing.map((tool) => `  - '${tool}' — not held by this agent's grant`).join('\n');
-  finish(
-    `H25 DISPATCH CAPABILITY ADVISORY — you are about to dispatch '${subagentType}', and the brief mentions ` +
-      `tool(s) its installed grant does not hold:\n${missingLines}\n` +
-      `Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}\n` +
-      `This is the warn-only dispatch-capability preflight (decision dc6c1afb) — never a block, and it intentionally reports ` +
-      `ungranted mentions even though a mention is not proof of a requirement (a prohibition or passing ` +
-      `context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(', ')}, ` +
-      `re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
-  );
-} catch (e) {
-  // Advisory only, never a gate: loud but non-blocking (P5 without AC7 harm).
-  warnNonBlocking(`H25: dispatch-capability advisory failed: ${(e && e.message) || e}`);
+  return parts.length ? parts.join('\n\n') : null;
 }
-// no close: every path above exits the process, releasing the handle (board f81b1987)
+
+// Stdin, or a synchronous allow on malformed (non-JSON) input — nothing to
+// check, never a crash. It sits exactly where it always did, ahead of the body;
+// it is a FUNCTION only so its terminal allow() is `return`ed like every other
+// terminal call in this file. Nothing is pending on stdout at this point, so
+// allow() is still the immediate exit it has always been.
+function readInputOrAllow() {
+  try {
+    return readStdin();
+  } catch {
+    return allow();
+  }
+}
+const input = readInputOrAllow();
+
+// WRITE-THEN-EXIT (decision hook-stdout-exit-after-write-callback-bound-exit-
+// deny-stays-synchronous): the advisory is handed to stdout and the process
+// exits in the write callback, so a payload above the platform's synchronous
+// pipe window is never truncated by the exit. A FIRE IS A SUCCESSFUL HAND-OFF —
+// the counter therefore runs in onWritten, so a failed write records nothing
+// and the S5 verdict counts advisories that actually reached the reader.
+function emit(additionalContext) {
+  return exitAfterWrite(
+    JSON.stringify({
+      hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext },
+    }),
+    0,
+    {
+      onWritten: () => recordAdvisoryFire(input.cwd, 'h25', input.session_id), // expiring campaign scaffolding — see lib/advisory-counter.mjs
+    }
+  );
+}
+
+// THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL BELOW IS A `return`. The exit
+// now happens in a write callback rather than inside the helper call, so a bare
+// `finish()` would no longer stop the statements after it — the hard exit used
+// to do that structurally. Returning is what preserves it.
+function main(input) {
+  try {
+    const subagentType = input.tool_input?.subagent_type;
+    if (!subagentType) return allow(); // nothing to resolve capability against
+
+    // Computed once, independent of the capability checks below (neither needs
+    // an installed agent file nor a parsed grant) — combined with whichever
+    // capability-advisory text (if any) `finish` is called with, so no two of
+    // the (up to) four advisories ever clobber each other when several apply.
+    const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
+    const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
+    const tddAdvisory = tddPostureAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
+    // Assigned later, once the target agent's real grant is known to hold
+    // NEITHER shell tool — stays undefined on every branch that cannot know
+    // that (unknown agent, all-tools default, unevaluable grant), read by
+    // `finish` at call time via closure so every finish() call after that
+    // point picks it up automatically, exactly like taAdvisory/citeAdvisory.
+    let commandShapeMsg;
+    function finish(capabilityMessage) {
+      const parts = [];
+      if (capabilityMessage) parts.push(capabilityMessage);
+      if (commandShapeMsg) parts.push(commandShapeMsg);
+      if (taAdvisory) parts.push(taAdvisory);
+      if (citeAdvisory) parts.push(citeAdvisory);
+      if (tddAdvisory) parts.push(tddAdvisory);
+      if (parts.length) return emit(parts.join('\n\n'));
+      return allow();
+    }
+
+    const agentPath = join(input.cwd ?? '.', '.claude', 'agents', `${subagentType}.md`);
+    if (!existsSync(agentPath)) {
+      // Harness built-in (board a6b76e8c item 2): no definition file by
+      // design, not a capability gap — never fires the no-definition advisory.
+      if (BUILTIN_AGENT_TYPES.has(subagentType)) return finish();
+      // DISTINCT shape from the missing-tool warning: capability cannot be
+      // checked at all, and this must not read like a claim about a specific
+      // grant it has no way to know.
+      return finish(
+        `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked — no installed agent ` +
+          `definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct ` +
+          `before relying on this dispatch, or install the agent definition.`
+      );
+    }
+
+    let content;
+    try {
+      content = readFileSync(agentPath, 'utf8');
+    } catch (e) {
+      return warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${(e && e.message) || e}`);
+    }
+
+    const toolsRaw = parseToolsLine(content);
+    if (toolsRaw === undefined) return finish(); // no tools: line — all-tools default, capability-silent
+
+    // Grant parsing (review D1): strip a flow-style [ ... ] wrapper so
+    // `tools: [Read, Bash]` grants Read and Bash rather than '[read'/'bash]'.
+    // A tools: value that parses to ZERO tokens (e.g. a YAML block list on the
+    // following lines, which this line-scoped parser cannot read) is
+    // UNEVALUABLE, not an empty grant — an advisory must never assert a grant
+    // it did not actually read, so it stays silent.
+    const grantList = toolsRaw
+      .replace(/^\[/, '')
+      .replace(/\]$/, '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!grantList.length) return finish();
+
+    // COMMAND-SHAPE ADVISORY (board 07deffab gap (3)): only evaluable now that
+    // a real, non-empty grant is known — fires only when it holds NEITHER
+    // shell-execution tool.
+    if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
+
+    const mentioned = findMentionedTools(input.tool_input?.prompt);
+    if (!mentioned.length) return finish();
+
+    const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
+    if (!missing.length) return finish();
+
+    const missingLines = missing.map((tool) => `  - '${tool}' — not held by this agent's grant`).join('\n');
+    return finish(
+      `H25 DISPATCH CAPABILITY ADVISORY — you are about to dispatch '${subagentType}', and the brief mentions ` +
+        `tool(s) its installed grant does not hold:\n${missingLines}\n` +
+        `Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}\n` +
+        `This is the warn-only dispatch-capability preflight (decision dc6c1afb) — never a block, and it intentionally reports ` +
+        `ungranted mentions even though a mention is not proof of a requirement (a prohibition or passing ` +
+        `context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(', ')}, ` +
+        `re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
+    );
+  } catch (e) {
+    // Advisory only, never a gate: loud but non-blocking (P5 without AC7 harm).
+    // Pending-aware: if an advisory is already in flight on stdout, this
+    // discloses and returns rather than exiting 1 under a delivered payload.
+    return warnNonBlocking(`H25: dispatch-capability advisory failed: ${(e && e.message) || e}`);
+  }
+}
+
+main(input);
+// no close: every path above exits the process (in the write callback where a
+// payload was emitted), releasing the handle (board f81b1987)

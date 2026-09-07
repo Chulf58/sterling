@@ -75,24 +75,55 @@
 // merging the whole shipped list). Do not flip either one silently.
 //
 // ---------------------------------------------------------------------------
-// NOT DUPLICATED HERE — the sibling hardening item.
+// NOT DUPLICATED HERE — the sibling hardening item. ⚠ IT HAS NOW LANDED.
 // ---------------------------------------------------------------------------
-// Board 2ca5d977 (`h15-enforcement-hardening`) owns CLONE PROVENANCE: requiring
-// the matched path to resolve INSIDE the plugin clone. It is BUILT, REVIEWED
-// and PARKED IN A STASH on `sterling/board-burndown-aug27-a`, carrying 13 pins
-// in `scripts/tests/h15-clone-provenance.test.mjs`. Nothing here re-pins
-// resolution, `..` escapes, symlinks, drive letters, or planted-decoy shapes —
-// that is its territory and it must not be forked. EX-6a/EX-6b touch path SHAPE
-// only as a PARITY question (does the merge normalize both halves of the union
-// the same way), and they are written as a PAIR that moves together if the
-// parked work ever rules on a leading `./`.
-// CONSEQUENCE OF THE PARK, which the implementer must know: at HEAD the
-// sanctioned-script check is NAME-ONLY EQUALITY (no existence, identity or
-// provenance check), so the fixtures below deliberately do NOT create any file
-// at the sanctioned paths — planting `<project>/packages/tui/bundle/
-// sterling-tui.mjs` in a tmpdir project would be building the very decoy
-// 2ca5d977 closes. If clone provenance ever lands, EVERY pin in this file must
-// be re-cut to invoke through the clone path; that is a re-cut, not a bend.
+// Board 2ca5d977 (`h15-enforcement-hardening`) owned CLONE PROVENANCE: requiring
+// the matched path to resolve INSIDE the plugin clone. It was BUILT, REVIEWED and
+// PARKED IN A STASH, carrying 13 pins. THAT PARK IS OVER: decision 5b82e94f
+// (`h15-realpath-binding-active-plugin-root-provenance`, user-approved
+// 2026-09-05) made the outstanding realpath-binding ruling, the mechanism
+// shipped, and its pins live in scripts/tests/h15-active-root-provenance.test.mjs.
+// Nothing here re-pins resolution, `..` escapes, symlinks, drive letters, or
+// planted-decoy shapes — that is still its territory and it must not be forked.
+// EX-6a/EX-6b touch path SHAPE only as a PARITY question (does the merge
+// normalize both halves of the union the same way), and they still move as a
+// PAIR.
+//
+// FIXTURE RE-CUT 2026-09-05, EXECUTING THIS FILE'S OWN INSTRUCTION. The
+// paragraph that stood here said: "at HEAD the sanctioned-script check is
+// NAME-ONLY EQUALITY (no existence, identity or provenance check), so the
+// fixtures below deliberately do NOT create any file at the sanctioned paths …
+// If clone provenance ever lands, EVERY pin in this file must be re-cut to
+// invoke through the clone path; that is a re-cut, not a bend."
+//   OLD PREMISE: spelling was the grant; a fixture file at a sanctioned path
+//     would have been a decoy, so none was created.
+//   NEW PREMISE (5b82e94f): spelling grants NOTHING. A candidate must realpath
+//     to a REGULAR FILE inside the canonicalized, layout-validated ACTIVE PLUGIN
+//     ROOT at a clone-relative POSIX path equal to an entry. `allow_scripts`
+//     entries are therefore CLONE-RELATIVE (a206a529's closing paragraph).
+//   HOW IT IS RE-CUT: `makeProject()` builds the fixture project AS a valid
+//     active plugin root — the three layout markers, plus a real regular file at
+//     every SANCTIONED_SCRIPTS entry (read from the module, never copied) and at
+//     the two fixture-declared names — and `runHook()` points the
+//     STERLING_PLUGIN_ROOT test seam at it. EVERY COMMAND STRING BELOW IS
+//     BYTE-IDENTICAL. Planting the files is no longer building a decoy: the
+//     project IS the root, which is the SELF-HOSTED shape (project and clone are
+//     one tree) that decision a206a529 requires to keep working and that the
+//     provenance suite pins as PV-C3. The CONSUMER shape (project ≠ clone, where
+//     a planted `<project>/scripts/init.mjs` MUST deny) is pinned there, by
+//     PV-5, and is not forked here.
+//   WHY NOT "invoke through a separate clone path" instead: it would hollow the
+//     deny pins. EX-C2/EX-C4b/EX-4/EX-4b must deny for a LIST reason; if their
+//     subject resolved to nothing, the regular-file check would carry every one
+//     of those verdicts and their named sabotages would be inert.
+// ⚠ SEMANTIC CONSEQUENCE, SURFACED NOT BURIED: under 5b82e94f a project can no
+//   longer sanction a script that lives only in ITS OWN tree — `allow_scripts` is
+//   now a clone-relative allowlist, so PROJECT_SCRIPT below is a project-DECLARED
+//   entry that must still resolve inside the active plugin root. On the authoring
+//   machine those are the same tree and nothing is lost; in a consuming project
+//   the ability to allowlist a project-local tool is GONE. That is a real
+//   consequence of the ruling, reported to the conductor rather than settled by a
+//   test.
 //
 // ---------------------------------------------------------------------------
 // Related governing records, read before authoring: board 94d6368a (the
@@ -122,20 +153,33 @@
 // says which guard carries the verdict. NONE of them is executed here — this
 // file's author holds no Bash by design, and NO RED OUTPUT IS CLAIMED.
 
-import { test, before } from 'node:test';
+import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { buildSeamHook } from './lib/seam-hook.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 
 let SterlingStore;
+// The seam-spawnable H15 bundle (95c2c109 F2) — built once per suite.
+let SEAM;
+after(() => SEAM?.cleanup());
+// FIXTURE RE-CUT: the shipped list is IMPORTED, never copied, so this file still
+// cannot become a second rotting copy of it (the EX-3 convention). It is needed
+// at FIXTURE-BUILD time now, because every entry must exist as a real regular
+// file inside the fixture's plugin root. EX-3 keeps its OWN local import and its
+// own re-point message — that pin is byte-identical and deliberately shadows
+// this binding.
+let SHIPPED_SANCTIONED = [];
 before(async () => {
+  SEAM = await buildSeamHook('h15-store-guard.mjs');
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+  ({ SANCTIONED_SCRIPTS: SHIPPED_SANCTIONED } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'store-remediation.mjs')).href));
 });
 
 function runHook(command, cwd) {
@@ -148,13 +192,26 @@ function runHook(command, cwd) {
     tool_name: 'Bash',
     tool_input: { command },
   };
-  const r = spawnSync(process.execPath, [join(HOOKS, 'h15-store-guard.mjs')], {
+  // H1's clone-currency probe must never fire inside a hook unit test.
+  const childEnv = { ...process.env, STERLING_CURRENCY_DISABLE: '1' };
+  // FIXTURE RE-CUT (5b82e94f step 1): CLAUDE_PLUGIN_ROOT is AGENT-SETTABLE and is
+  // never provenance — scrubbed so an ambient live-session value cannot decide
+  // these verdicts. STERLING_PLUGIN_ROOT is the TEST-ONLY seam and names the
+  // fixture project, which IS the active plugin root.
+  delete childEnv.CLAUDE_PLUGIN_ROOT;
+  childEnv.STERLING_PLUGIN_ROOT = cwd;
+  // SPAWN LOCATION RE-CUT (decision 95c2c109 F2): the hook is a FRESH BUNDLE
+  // built from the live sources into a marker-free temp dir (see
+  // scripts/tests/lib/seam-hook.mjs). The active root PREFERS the running
+  // hook's own walk-up and reads STERLING_PLUGIN_ROOT only when that walk-up
+  // finds no plugin tree — so spawning the SOURCE hook from scripts/hooks/
+  // would resolve THIS repo as the root and silently ignore the seam.
+  const r = spawnSync(process.execPath, [SEAM.hookPath], {
     input: JSON.stringify(input),
     encoding: 'utf8',
     cwd,
     timeout: 60_000,
-    // H1's clone-currency probe must never fire inside a hook unit test.
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
+    env: childEnv,
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
@@ -165,8 +222,13 @@ function runHook(command, cwd) {
 // verb, so nothing but the exemption can produce an allow).
 const DB = '.sterling/sterling.db';
 
-// A script the PROJECT declares. Not shipped by Sterling; exists only in the
+// A script the PROJECT declares. Not shipped by Sterling; named only by the
 // fixture config. Its continued reachability is the no-regression half.
+// RE-CUT 2026-09-05: since 5b82e94f an `allow_scripts` entry is CLONE-RELATIVE
+// (a206a529's closing paragraph), so a project-DECLARED entry must ALSO resolve
+// inside the active plugin root — the fixture therefore creates this file there.
+// See the ⚠ SEMANTIC CONSEQUENCE note in the header: on a consuming machine a
+// genuinely project-local tool can no longer be allowlisted at all.
 const PROJECT_SCRIPT = 'scripts/project-local-tool.mjs';
 
 // A script in NEITHER set. The security control's subject.
@@ -200,6 +262,27 @@ function makeProject(storeGuard, tag = 'merge') {
     join(dir, '.sterling', 'config.json'),
     JSON.stringify({ toolchains: TOOLCHAINS, caps: CAPS, context_watch: CONTEXT_WATCH, store_guard: storeGuard })
   );
+  // FIXTURE RE-CUT (5b82e94f step 2): the three plugin-layout markers, validated
+  // BEFORE the root is trusted. Without them the marker-validated seam fails
+  // closed (a206a529) and every ALLOW pin here would be red for a fixture reason.
+  mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+  writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture' }));
+  mkdirSync(join(dir, 'hooks'), { recursive: true });
+  writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
+  // FIXTURE RE-CUT (5b82e94f step 4): every candidate must exist as a REGULAR
+  // FILE under the root. UNSANCTIONED is created deliberately — with the file
+  // PRESENT, EX-C2's and EX-C4b's denies are attributable to LIST MEMBERSHIP
+  // alone, which is the only thing they are meant to prove; absent, the
+  // regular-file check would carry those verdicts and both pins would be hollow.
+  assert.ok(
+    Array.isArray(SHIPPED_SANCTIONED) && SHIPPED_SANCTIONED.length > 0,
+    'FIXTURE PRECONDITION, not a behaviour: SANCTIONED_SCRIPTS must have imported (see the before() hook). An empty list would build a root holding none of the shipped scripts, and every ALLOW pin in this file would be red for a FIXTURE reason rather than a behavioural one — which is the false negative research_finding cc35e43c warns about'
+  );
+  for (const rel of [...SHIPPED_SANCTIONED, PROJECT_SCRIPT, UNSANCTIONED]) {
+    const abs = join(dir, ...rel.split('/'));
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, '// fixture script — never executed by these pins\n');
+  }
   // A REAL store db file, matching how every other hook test builds a project —
   // project-root resolution keys on .sterling/sterling.db actually existing.
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
@@ -277,6 +360,17 @@ test('EX-C2 (control, SECURITY ARM, expect GREEN today and after): a script in N
 // (deny 2 -> allow 0) while EX-C3 and EX-1 stay green. It is the sole
 // load-bearing pin for "the union did not become a blanket allow".
 
+// RE-CUT 2026-09-05 (decision 5b82e94f; discipline per 77c5b85a).
+// OLD PREMISE: the project's array entry `scripts/project-local-tool.mjs` was
+//   exempt by SPELLING, and no such file existed in the fixture.
+// NEW PREMISE: the word must resolve to a regular file inside the layout-
+//   validated active plugin root at exactly that clone-relative path — so the
+//   fixture creates it. See the ⚠ SEMANTIC CONSEQUENCE note in the header: a
+//   project-DECLARED entry is now also CLONE-relative.
+// CLAIM UNCHANGED: the project's own array stays authoritative for its own
+//   entries — the fix ADDS the shipped set and must never replace the project's
+//   array in the other direction. This is still the only pin catching that
+//   mirror-image defect.
 test('EX-C3 (control, NO-REGRESSION arm, expect GREEN today and after): the PROJECT-declared entry stays ALLOWED against the sealed db', () => {
   const { dir, cleanup } = makeProject(TUNED);
   try {
@@ -296,6 +390,15 @@ test('EX-C3 (control, NO-REGRESSION arm, expect GREEN today and after): the PROJ
 // green. That mutation is the mirror-image defect and this is the only pin that
 // catches it.
 
+// RE-CUT 2026-09-05 (decision 5b82e94f; discipline per 77c5b85a).
+// OLD PREMISE: `packages/tui/bundle/sterling-tui.mjs` was exempt by SPELLING
+//   under a defaulted config, with no file at that path in the fixture.
+// NEW PREMISE: it must resolve to a regular file inside the active plugin root
+//   at exactly that clone-relative path — created by the fixture from the
+//   IMPORTED shipped list, so this pin still cannot hardcode the list.
+// CLAIM UNCHANGED: with the key ABSENT the schema default applies, so the TUI
+//   launcher IS a genuinely sanctioned name — which is what makes EX-1's verdict
+//   attributable to the SHADOWING and to nothing else.
 test('EX-C4 (control, OPPOSITE-REASON arm, expect GREEN today and after): with allow_scripts ABSENT the shipped TUI launcher is ALLOWED against the sealed db', () => {
   const { dir, cleanup } = makeProject(DEFAULTED, 'dflt');
   try {
@@ -342,6 +445,17 @@ test('EX-C4b (control, the opposite reason for EX-C4, expect GREEN today and aft
 // omits the entry. One behaviour per test (anti_pattern f1d66bef).
 // =========================================================================
 
+// RE-CUT 2026-09-05 (decision 5b82e94f; discipline per 77c5b85a). Applies to
+// EX-1, EX-2, EX-2b, EX-3 and EX-5b alike — one shared premise change:
+// OLD PREMISE: a shipped entry merged into the effective allowlist was exempt by
+//   SPELLING, so the fixture created no file for it.
+// NEW PREMISE: the merge decides MEMBERSHIP; provenance decides IDENTITY, and
+//   BOTH must now hold. The fixture creates a real regular file inside the
+//   active plugin root for every imported shipped entry, so membership is the
+//   only variable left — which is exactly what these pins are about.
+// CLAIM UNCHANGED: an explicit array EXTENDS the shipped default rather than
+//   replacing it (decision 00867be9 / board 94d6368a). The named sabotage
+//   ("restore replace-semantics") stays live and load-bearing.
 test('EX-1 (expect RED today): with an explicit allow_scripts that omits it, the shipped TUI launcher is still ALLOWED against the sealed db', () => {
   const { dir, cleanup } = makeProject(TUNED);
   try {
@@ -363,6 +477,12 @@ test('EX-1 (expect RED today): with an explicit allow_scripts that omits it, the
 // green. WHICH GUARD CARRIES THE VERDICT: a SINGLE guard, the union itself.
 // There is no defense in depth here — this pin is load-bearing on its own.
 
+// RE-CUT 2026-09-05 — same premise change as EX-1 above (spelling -> identity;
+// the fixture now holds a real `scripts/migrate-stores.mjs` inside the active
+// plugin root). CLAIM UNCHANGED: the lockout trap. Note the trap got SHARPER
+// under 5b82e94f, not milder — a consumer's only exit from a refuse-until-
+// migrated store must satisfy BOTH the merge and provenance, so the absolute
+// clone form is now the one that matches (pinned in the provenance suite).
 test('EX-2 (expect RED today, THE LOCKOUT TRAP — verify this first): with an explicit allow_scripts that omits it, scripts/migrate-stores.mjs is still ALLOWED against the sealed db', () => {
   const { dir, cleanup } = makeProject(TUNED);
   try {
@@ -384,6 +504,10 @@ test('EX-2 (expect RED today, THE LOCKOUT TRAP — verify this first): with an e
 // launcher and the migration runner separately is what makes the difference
 // visible; EX-3 then closes the general case.
 
+// RE-CUT 2026-09-05 — same premise change as EX-1 above; the fixture now holds a
+// real `scripts/migration-preflight.mjs` inside the active plugin root. CLAIM
+// UNCHANGED: both migration scripts are the remediation path, pinned separately
+// because a curated merge could plausibly carry one and not the other.
 test('EX-2b (expect RED today, THE LOCKOUT TRAP, second half): with an explicit allow_scripts that omits it, scripts/migration-preflight.mjs is still ALLOWED against the sealed db', () => {
   const { dir, cleanup } = makeProject(TUNED);
   try {
@@ -402,13 +526,21 @@ test('EX-2b (expect RED today, THE LOCKOUT TRAP, second half): with an explicit 
 // (allow 0 -> deny 2). Same single-guard verdict as EX-1; its independent value
 // is COVERAGE of the second remediation script, not a second layer.
 
+// RE-CUT 2026-09-05 — same premise change as EX-1 above, with one addition that
+// matters: the fixture creates a regular file for EVERY entry of the IMPORTED
+// list (see makeProject), so this pin still covers the WHOLE list mechanically
+// and grows by itself when the list does. It grew on 2026-09-05: the list gained
+// `scripts/review-ledger.mjs` (board 891284a9, a single Ruling-6 disposition
+// under decision 1434cd54), so this loop now runs 10 entries, not 9 — with no
+// edit here, which is the property the mechanical derivation was for.
 test('EX-3 (expect RED today): EVERY entry of the shipped sanctioned list is reachable under an explicit allow_scripts that omits it', async () => {
   // The list is re-derived MECHANICALLY rather than copied, so this file cannot
   // become a second rotting copy of it. Decision 77c5b85a makes
   // `SANCTIONED_SCRIPTS` and the config.ts `allow_scripts` default
   // element-identical, and holds that invariant with a bidirectional drift pin
   // in scripts/tests/store-remediation.test.mjs — so reading either one names
-  // the same nine entries.
+  // the same entries (nine until 2026-09-05; ten since `scripts/review-ledger.mjs`
+  // was added, board 891284a9 — the count is deliberately not asserted here).
   let SANCTIONED_SCRIPTS;
   try {
     ({ SANCTIONED_SCRIPTS } = await import(pathToFileURL(join(root, 'scripts', 'lib', 'store-remediation.mjs')).href));
@@ -511,6 +643,11 @@ test('EX-4b (SPEC CHOICE, FLAGGED FOR RULING — expect GREEN today; a ruling ma
 
 const PARTIAL = { allow_scripts: [SHIPPED_INIT, PROJECT_SCRIPT] };
 
+// RE-CUT 2026-09-05 — same premise change as EX-1 above; `scripts/init.mjs` now
+// exists inside the active plugin root, so the verdict turns on the merge and not
+// on identity. CLAIM UNCHANGED: a duplicate between the project array and the
+// shipped list must not cancel out (the XOR-merge sabotage stays live and is
+// still the only pin catching it).
 test('EX-5a (control, expect GREEN today and after): an explicitly RE-LISTED shipped entry still works', () => {
   const { dir, cleanup } = makeProject(PARTIAL, 'part');
   try {
@@ -530,6 +667,9 @@ test('EX-5a (control, expect GREEN today and after): an explicitly RE-LISTED shi
 // (allow 0 -> deny 2) while EX-1 and EX-3 stay green. A plausible off-by-one in
 // a de-duplicating merge, and nothing else in this file catches it.
 
+// RE-CUT 2026-09-05 — same premise change as EX-1 above; `scripts/domain-doctor.mjs`
+// now exists inside the active plugin root, so an omitted-but-merged entry is
+// denied only if the MERGE dropped it. CLAIM UNCHANGED: omission is not removal.
 test('EX-5b (expect RED today): listing SOME shipped entries must not SUBTRACT the ones left out', () => {
   const { dir, cleanup } = makeProject(PARTIAL, 'part');
   try {
@@ -571,6 +711,22 @@ test('EX-5b (expect RED today): listing SOME shipped entries must not SUBTRACT t
 // the test.
 // =========================================================================
 
+// RE-CUT 2026-09-05 (decision 5b82e94f) — THE ONE PLACE WHERE THE MECHANISM
+// CARRYING THE CLAIM CHANGED, so read this before trusting the sabotage below.
+// OLD PREMISE: HEAD stripped a single leading `./` from the word as a STRING
+//   before comparing it to the entry, and this pin pinned that strip.
+// NEW PREMISE: nothing strips anything. `./x` and `x` resolve to the SAME path
+//   and therefore canonicalize to the same regular file, so the leading `./`
+//   is normalized by realpath rather than by a text rule.
+// CLAIM UNCHANGED: a leading `./` must not defeat the allowlist, and it must not
+//   defeat it differently for the two halves of the union (EX-6b).
+// ⚠ SABOTAGE RE-STATED, because the printed one is now INERT: "remove the
+//   leading-`./` strip from the allowlist comparison" no longer reddens this pin
+//   — there is no strip left to remove, and realpath handles the shape. THE
+//   SABOTAGE THAT NOW REDDENS EX-6a: compare the WORD AS TYPED against the entry
+//   instead of the CANONICAL clone-relative path (allow 0 -> deny 2), which
+//   reddens EX-6a and EX-6b together; the isolating one for EX-6b alone is still
+//   "normalize the config half but not the merged shipped half".
 test('EX-6a (control, expect GREEN today and after): a leading `./` does not defeat the allowlist for a PROJECT-declared entry', () => {
   const { dir, cleanup } = makeProject(TUNED);
   try {
@@ -590,6 +746,11 @@ test('EX-6a (control, expect GREEN today and after): a leading `./` does not def
 // together is how you tell "normalization was removed" apart from "the merge
 // normalizes only one half", which is EX-6b alone.
 
+// RE-CUT 2026-09-05 — the EX-6a premise change applies here identically (the
+// `./` shape is now normalized by realpath, not by a text strip), plus the shared
+// EX-1 change (the shipped entry now exists inside the active plugin root). CLAIM
+// UNCHANGED, INCLUDING THE PAIRING RULE: EX-6a and EX-6b move together; if EX-6a
+// is red, EX-6b is moot and the finding is reported, not "fixed".
 test('EX-6b (expect RED today): a leading `./` does not defeat the allowlist for a MERGED SHIPPED entry either', () => {
   const { dir, cleanup } = makeProject(TUNED);
   try {

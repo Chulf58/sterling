@@ -4203,6 +4203,12 @@ var currentAcItemSchema = external_exports.object({
   }).strict().optional()
 });
 var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
+var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1),
+  sha256: external_exports.string().min(1)
+})).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4224,6 +4230,9 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+  // above, which reference_material shares so the shape is defined once.
+  baseline_attestations: baselineAttestationsSchema,
   // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
@@ -4360,6 +4369,14 @@ var referenceMaterialSchema = base.extend({
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+  // kind:doc joins the reconcile economy through its `location`, so settlement
+  // mints reconcile_needed items against it and an attested close stamps it —
+  // without this field that stamp was silently dropped by the parse, leaving a
+  // naked baseline whose provenance lied about which write produced it. Shape
+  // shared with featureArticleSchema, never re-declared.
+  baseline_attestations: baselineAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -5076,11 +5093,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5098,7 +5120,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5225,13 +5247,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -5309,31 +5430,193 @@ function parseReviewTerritory(text) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { readFileSync as readFileSync3, existsSync as existsSync3 } from "node:fs";
-import { join as join3 } from "node:path";
-function liveDispatches(root) {
-  const path = join3(root, ".sterling", "transient", "dispatch-register.json");
-  if (!existsSync3(path)) return [];
-  let entries;
-  try {
-    entries = JSON.parse(readFileSync3(path, "utf8"));
-  } catch {
-    return [];
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync } from "node:fs";
+import { join as join3, basename, dirname as dirname2 } from "node:path";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
   }
-  if (!Array.isArray(entries)) return [];
-  let staleMinutes = 60;
-  try {
-    const cfg = JSON.parse(readFileSync3(join3(root, ".sterling", "config.json"), "utf8"));
-    if (Number.isInteger(cfg?.dispatch_register?.stale_minutes) && cfg.dispatch_register.stale_minutes > 0) {
-      staleMinutes = cfg.dispatch_register.stale_minutes;
-    }
-  } catch {
+}
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.json");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
   }
-  const now = Date.now();
-  return entries.filter((e) => {
-    const age = now - Date.parse(e?.at ?? "");
-    return Number.isFinite(age) && age >= 0 && age < staleMinutes * 6e4;
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync3(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
   });
+  return { availability: "ok", entries: rows };
+}
+function formatAge(ageMs) {
+  if (ageMs === null || ageMs === void 0 || Number.isNaN(ageMs)) return "age unreadable";
+  const mins = Math.floor(ageMs / 6e4);
+  if (mins < 1) return "<1m";
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h${m}m`;
+}
+function formatDispatchRef(row) {
+  const { entry, status, ageMs } = row;
+  return `${entry.agent_type}:${entry.agent_id} (registered ${formatAge(ageMs)}; ${status})`;
 }
 
 // scripts/hooks/lib/dispatch-advisory.mjs
@@ -5511,20 +5794,34 @@ try {
 }
 function emit(additionalContext) {
   recordAdvisoryFire(input.cwd, "h26", input.session_id);
-  process.stdout.write(
+  exitAfterWrite(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
-    })
+    }),
+    0
   );
 }
 try {
   let finish = function(fileAdvisory) {
     const parts = [fileAdvisory, resourceAdvisory].filter(Boolean);
-    if (parts.length) emit(parts.join("\n\n"));
+    if (parts.length) {
+      emit(parts.join("\n\n"));
+      return;
+    }
     allow();
   };
   const prompt = input.tool_input?.prompt;
-  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
+  const staleMinutes = (() => {
+    try {
+      const v = loadConfig(input.cwd)?.dispatch_register?.stale_minutes;
+      return typeof v === "number" && v > 0 ? v : 60;
+    } catch {
+      return 60;
+    }
+  })();
+  const classified = classifyRegister(input.cwd, { now: Date.now(), sessionId: input.session_id, staleMinutes });
+  const rows = classified.availability === "ok" ? classified.entries.filter((row) => row.status !== "inactive-confirmed") : [];
+  const live = rows.map((row) => row.entry);
   const cfg = loadConfig(input.cwd);
   const configuredNames = Array.isArray(cfg?.exclusive_resources) ? cfg.exclusive_resources.filter((n) => typeof n === "string" && n.trim()) : [];
   let resourceAdvisory = "";
@@ -5561,10 +5858,22 @@ try {
   }
   if (!files.length) finish();
   const candidateSet = new Set(files);
-  if (!live.length) finish();
+  if (classified.availability === "corrupt") {
+    finish(
+      render(
+        disclosure(
+          "register_unavailable",
+          { availability: classified.availability },
+          `dispatch register unavailable (${classified.availability}) \u2014 no overlap can be judged`
+        )
+      )
+    );
+  }
+  if (!rows.length) finish();
   const overlaps = [];
   const overlapPaths = /* @__PURE__ */ new Set();
-  for (const e of live) {
+  for (const row of rows) {
+    const e = row.entry;
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
     if (isReadOnlyDispatchType(e.agent_type)) continue;
     if (e.attribution !== "block") continue;
@@ -5575,16 +5884,35 @@ try {
     const matchedPrefix = entryPrefixes.length ? files.filter((f) => entryPrefixes.some((p) => f === p || f.startsWith(`${p}/`))) : [];
     const matched = [.../* @__PURE__ */ new Set([...matchedExact, ...matchedPrefix])];
     if (matched.length) {
-      overlaps.push({ agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
+      overlaps.push({ row, agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
       matched.forEach((f) => overlapPaths.add(f));
     }
   }
   if (!overlaps.length) finish();
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(", ");
-  const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(", ")})`).join("; ");
-  finish(
-    `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) \u2014 the prompt extraction only approximates write territory, and this hook compares only dispatches already present in the live register when this PreToolUse fires. It may repeat on further dispatches while the holding dispatch stays live, for the same reason. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
-  );
+  const entryList = overlaps.map((o) => `${formatDispatchRef({ ...o.row, entry: { ...o.row.entry, agent_type: o.agentType } })} (${o.files.join(", ")})`).join("; ");
+  const hasUnknown = overlaps.some((o) => o.row.status === "unknown");
+  const overlapLines = [
+    render(
+      disclosure(
+        "dispatch_overlap",
+        {},
+        `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap dispatch(es) already present in the live register when this PreToolUse fires: ${pathList}. Dispatch(es): ${entryList}. This is warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) \u2014 the prompt extraction only approximates write territory. It may repeat on further dispatches while the holding dispatch stays live, for the same reason. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
+      )
+    )
+  ];
+  if (hasUnknown) {
+    overlapLines.push(
+      render(
+        disclosure(
+          "dispatch_status_unknown",
+          {},
+          `status unknown for one or more of the dispatch(es) above \u2014 RECORDED IN THE REGISTER, not observed running; a KILLED or interrupted dispatch leaves this entry, so the overlap above cannot be confirmed live.`
+        )
+      )
+    );
+  }
+  finish(overlapLines.join("\n"));
 } catch (e) {
   warnNonBlocking(`H26: dispatch-overlap advisory failed: ${e && e.message || e}`);
 }

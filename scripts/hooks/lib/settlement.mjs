@@ -27,8 +27,9 @@
 // arm's fuller parked-on-ref/never-tracked git-probe machinery, which is out
 // of scope for a settlement predicate). Because the comparison always reads
 // the article's CURRENT baseline, an edit-then-revert and a path an
-// intervening knowledge_update already rebaselined both naturally fall out
-// as "no mint" — no separate bookkeeping needed for either case.
+// intervening knowledge_update — or an attested close (R9) — already
+// rebaselined both naturally fall out as "no mint" — no separate
+// bookkeeping needed for either case.
 //
 // NAMED HOLE (must stay explicit, per the board item's conductor caveat): a
 // session that DIES mid-work never reaches Stop-settlement (a) — its

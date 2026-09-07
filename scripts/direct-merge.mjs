@@ -22,6 +22,8 @@ import { SterlingStore } from '@sterling/store';
 // a-refusing-gate, 1f069af4 v2) — the SAME read-only inspector commit-reviewed
 // and merge-gate use; see the block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
+import { isRosterTrailerValue, verifyCommitReceiptBinding, readCommitTrailers } from './lib/review-trailers.mjs';
+import { readLedger } from './hooks/lib/review-ledger-entry.mjs';
 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
@@ -355,7 +357,7 @@ if (cleared.length > 0) {
       case 'all_exempt':
         return `every named path is a generated projection (config.generated_projections, ruling e1275166): ${v.exempt_paths.join(', ')}`;
       case 'baseline_match':
-        return `content now MATCHES the owning article's current baseline (already reconciled, or edited and reverted): ${v.matched.join(', ')}`;
+        return `content now MATCHES the owning article's current baseline (already reconciled, edited and reverted, or an attested close re-stamped it, R9): ${v.matched.join(', ')}`;
       case 'baseline_absent':
         return `UNVERIFIED, not clean — the owning article records NO baseline for ${v.unbaselined.join(', ')}, so there was nothing to compare (the settlement predicate abstains rather than inventing drift); this row cannot be cleared by a baseline re-stamp`;
       case 'baseline_match_and_absent':
@@ -526,7 +528,9 @@ const pathGlobs = (config.toolchains ?? []).flatMap((t) => t.path_globs ?? []);
 // exists to require. Unmatched values are DISCLOSED, never fatal and never
 // silently ignored — a junk receipt nobody meant as one otherwise keeps living
 // in commit messages unremarked.
-const ROSTER_TRAILER_VALUE = /^reviewer-[A-Za-z0-9_-]+(\s|$)/;
+// ROSTER_TRAILER_VALUE lives in scripts/lib/review-trailers.mjs (the ONE
+// trailer owner, R1 rebuild) — imported as isRosterTrailerValue rather than a
+// second copy of the regex here.
 const unreviewed = [];
 // Commits that PASS on a valid value while also carrying value(s) that do not
 // match — reported after the loop, never fatal.
@@ -550,25 +554,20 @@ for (const sha of branchCommits) {
   const files = filesRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
   const codeTouching = files.some((f) => pathGlobs.some((g) => matchesGlob(f, g)));
   if (!codeTouching) continue;
-  const trailerRaw = spawnSync(
-    'git',
-    ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha],
-    { cwd: target, encoding: 'utf8', timeout: 30_000 }
-  );
-  // A trailer with an EMPTY value is treated as ABSENT, deliberately (r-review F2,
-  // adjudicated by the conductor): a receipt naming nobody is not a receipt. An
-  // empty/whitespace-only value is dropped here and falls through to the
+  // M2: the trailer read goes through the ONE trailer owner
+  // (scripts/lib/review-trailers.mjs readCommitTrailers) — no hand-rolled
+  // `git log --format=%(trailers…)` here. A trailer with an EMPTY value is
+  // treated as ABSENT, deliberately (r-review F2, adjudicated by the
+  // conductor): a receipt naming nobody is not a receipt. An empty/
+  // whitespace-only value is dropped here and falls through to the
   // unreviewed list below, exactly as before — the roster-pattern check is a
   // NARROWING of what counts, never a widening.
   // The read stays KEYED to `Reviewed-By-Agent` (§4: external provenance uses a
   // DISTINCT `External-Review:` trailer, "never Reviewed-By-Agent"), so an
   // External-Review line is invisible here and can never satisfy this gate.
-  const trailerValues = (trailerRaw.stdout ?? '')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => l !== '');
-  const matched = trailerValues.filter((v) => ROSTER_TRAILER_VALUE.test(v));
-  const unmatched = trailerValues.filter((v) => !ROSTER_TRAILER_VALUE.test(v));
+  const trailerValues = readCommitTrailers(target, sha).roster.filter((l) => l.trim() !== '');
+  const matched = trailerValues.filter((v) => isRosterTrailerValue(v));
+  const unmatched = trailerValues.filter((v) => !isRosterTrailerValue(v));
   const short = () => spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
   const subject = () => spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
   if (matched.length > 0) {
@@ -622,6 +621,50 @@ if (unreviewed.length > 0) {
         unreviewed.map(renderUnreviewed).join('\n') +
         `\nRemedy: amend the commit(s) to record a 'Reviewed-By-Agent: <reviewer>' trailer, then rerun.\n` +
         `Or, to proceed anyway: rerun with --waive-reviews "<reason>" (never silent — the waiver is echoed at merge time).`
+    );
+  }
+}
+
+// ADDITIVE Review-Receipt BINDING GATE (contract sheet §3.3; decision
+// review-receipt-rebuild-invariant-three-owner-modules-tri-state-liveness-
+// receipt-bound-supersession). The roster-pattern rule above only checks a
+// Reviewed-By-Agent VALUE; a `Review-Receipt: <id>` trailer is a SPECIFIC
+// evidence claim, and the gate now checks that claim too — using the SAME
+// verifier review-ledger's superseded commit form uses (imported, never
+// copied), so a post-commit ledger failure is caught here rather than merged
+// as an unbound attestation. A commit with no Review-Receipt trailer at all
+// (pre-rebuild history) is judged by the roster rule alone — this rule is
+// purely ADDITIVE.
+//
+// R1-C92 FAILS CLOSED on an unreadable ledger: a claim the gate CANNOT CHECK
+// is not a claim it has checked. Skipping the check whenever readLedger's
+// availability !== 'ok' would make deleting .sterling/review-ledger.json the
+// cheapest way past the binding rule — the opposite of the property this gate
+// exists to hold. So the ledger is read ONCE per commit-with-a-trailer: if any
+// commit in range carries a Review-Receipt trailer and the ledger cannot be
+// read, the merge refuses naming the ledger state; a range with NO
+// Review-Receipt trailer anywhere is simply not this rule's business, and an
+// absent ledger there still merges by the roster rule alone.
+const receiptLedger = readLedger(target);
+{
+  const bindingFailures = [];
+  for (const sha of branchCommits) {
+    const receiptTrailers = readCommitTrailers(target, sha).receipt;
+    if (receiptTrailers.length === 0) continue;
+    if (receiptLedger.availability !== 'ok') {
+      bindingFailures.push({ sha, code: receiptLedger.availability === 'absent' ? 'ledger_absent' : 'ledger_corrupt', entry_id: receiptTrailers[0], facts: { entry_id: receiptTrailers[0] } });
+      continue;
+    }
+    const binding = verifyCommitReceiptBinding({ cwd: target, sha, ledgerEntries: receiptLedger.entries });
+    for (const r of binding.results) {
+      if (!r.ok) bindingFailures.push({ sha, code: r.code, facts: r.facts, entry_id: r.entry_id });
+    }
+  }
+  if (bindingFailures.length > 0) {
+    const short = (sha) => spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
+    fail(
+      `direct-merge: ${bindingFailures.length} Review-Receipt trailer(s) on this branch do not bind to their commit — an attestation that does not bind must not reach main:\n` +
+        bindingFailures.map((f) => `  - ${short(f.sha)}  [${f.code}] Review-Receipt: ${f.entry_id} — ${JSON.stringify(f.facts)}`).join('\n')
     );
   }
 }

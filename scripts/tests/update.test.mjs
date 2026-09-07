@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, stampSanctionedScriptsIfMissing } from '../lib/update.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, updateTemplateName, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
+import { SANCTIONED_SCRIPTS } from '../lib/store-remediation.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
 
@@ -992,17 +993,69 @@ test('the migration sweep attributes itself: migrate-stores.mjs is invoked with 
 // store-migration loop.
 //
 // The merge carries the SHIPPED SANCTIONED LIST (config.ts's allow_scripts
-// default), not a curated migration sublist — board 52c1d504. Expected arrays
-// below are spelled out literally, never derived from the module under test.
+// default), not a curated migration sublist — board 52c1d504.
+//
+// RE-CUT 2026-09-07 (re-cut discipline per decision 77c5b85a
+// `sanctioned-script-reach-carries-the-shipped-list`).
+//   OLD PREMISE: every expected array below spells the shipped list out as a
+//     9-entry literal, "never derived from the module under test".
+//   NEW PREMISE: the list is 15 entries and GROWS by individual disposition
+//     (commits 5a9fe39e, b93a096e). Re-spelling it in this file made these
+//     tests a SECOND contents pin that goes red on every sanctioned addition —
+//     which is exactly what happened.
+//   WHAT THESE TESTS ACTUALLY PIN, and what did not change: the MERGE — only
+//     the missing shipped entries are appended, after all existing entries, in
+//     SANCTIONED_SCRIPTS order; existing entries and their order are never
+//     touched; nothing is rewritten when nothing is missing; the primitive is
+//     cwd-scoped; the sweep reaches siblings and runs before migration.
+//   WHERE THE CONTENTS ARE PINNED: scripts/tests/store-remediation.test.mjs,
+//     which spells the literal out ONCE and goes red on any drift (including a
+//     corrupted or emptied export). So deriving here is not self-certification:
+//     the constant is independently frozen one file away, and the ANTI-VACUITY
+//     FLOOR below refuses a degenerate constant in this file too.
+assert.ok(
+  Array.isArray(SANCTIONED_SCRIPTS) && SANCTIONED_SCRIPTS.length >= 9,
+  `ANTI-VACUITY: every merge expectation in this file derives from SANCTIONED_SCRIPTS, so a degenerate constant would make them all pass vacuously — got ${JSON.stringify(SANCTIONED_SCRIPTS)}`
+);
+assert.ok(
+  SANCTIONED_SCRIPTS.every((s) => typeof s === 'string' && s.length > 0 && !s.startsWith('/') && !s.includes('\\')),
+  'ANTI-VACUITY: SANCTIONED_SCRIPTS must be repo-relative POSIX strings (path invariant) — a non-string element would silently weaken every derived deepEqual'
+);
+assert.equal(new Set(SANCTIONED_SCRIPTS).size, SANCTIONED_SCRIPTS.length, 'ANTI-VACUITY: a duplicate in the shipped list would make the merge/no-op expectations ambiguous');
+
+/** What the merge must produce from `preExisting`: the recorded entries in
+ *  their recorded order, then ONLY the shipped entries they lack, in
+ *  SANCTIONED_SCRIPTS order. Any wrong entry, any reorder of the existing
+ *  head, any duplicate re-append makes the deepEqual that uses this go red. */
+const sanctionedMergedWith = (preExisting) => [
+  ...preExisting,
+  ...SANCTIONED_SCRIPTS.filter((s) => !preExisting.includes(s)),
+];
+/** Exactly the entries the merge must append — and therefore exactly the names
+ *  its disclosure must contain (the shipped detail text lists them all,
+ *  comma-separated, untruncated). */
+const sanctionedAddedTo = (preExisting) => SANCTIONED_SCRIPTS.filter((s) => !preExisting.includes(s));
+/** A FULLY-COVERED fixture in deliberately NON-CANONICAL order (reversed, with
+ *  any `extra` entries sitting among them, never leading or trailing): presence
+ *  is checked by membership, never by position, so this array must be a no-op
+ *  for the merge. Derived, so a newly sanctioned script cannot leave the
+ *  fixture quietly incomplete — which is how it went stale before. */
+const sanctionedFullyCoveredNonCanonical = (extra = []) => {
+  const reversed = [...SANCTIONED_SCRIPTS].reverse();
+  return [reversed[0], ...extra, ...reversed.slice(1)];
+};
 
 test('stampSanctionedScriptsIfMissing: adds exactly the missing scripts, preserving existing allow_scripts entries/order and other config fields', () => {
   const dir = scratchCwd();
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     const configPath = join(dir, '.sterling', 'config.json');
+    // a recorded array carrying an unrelated admin entry FIRST and one shipped
+    // entry at index 1 — so a reorder-into-canonical-order is detectable.
+    const preExisting = ['scripts/some-other-script.mjs', 'scripts/migrate-stores.mjs'];
     writeFileSync(
       configPath,
-      JSON.stringify({ backup_path: '/tmp/backups', store_guard: { allow_scripts: ['scripts/some-other-script.mjs', 'scripts/migrate-stores.mjs'] } }, null, 2)
+      JSON.stringify({ backup_path: '/tmp/backups', store_guard: { allow_scripts: preExisting } }, null, 2)
     );
 
     const lines = [];
@@ -1011,23 +1064,21 @@ test('stampSanctionedScriptsIfMissing: adds exactly the missing scripts, preserv
     const written = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(
       written.store_guard.allow_scripts,
-      [
-        'scripts/some-other-script.mjs',
-        'scripts/migrate-stores.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migration-preflight.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExisting),
       'only the MISSING shipped sanctioned scripts are appended; the existing entries and their order survive (migrate-stores.mjs stays at index 1, it is not moved to canonical position)'
     );
     assert.equal(written.backup_path, '/tmp/backups', 'other fields survive the read-modify-write');
-    assert.ok(lines.some((l) => l.includes('scripts/migration-preflight.mjs')), 'the added script is disclosed via log');
-    assert.ok(lines.some((l) => l.includes('packages/tui/bundle/sterling-tui.mjs')), 'the TUI launcher — the false-deny board 52c1d504 was raised for — is disclosed by name');
+    // disclosure derived the same way: EVERY appended script is named in the log
+    // (the shipped detail lists them all, comma-separated). Joined, because the
+    // names may be spread over more than one log line.
+    const log = lines.join('\n');
+    for (const added of sanctionedAddedTo(preExisting)) {
+      assert.ok(log.includes(added), `every appended script is disclosed by name via log — '${added}' is missing from:\n${log}`);
+    }
+    assert.ok(
+      sanctionedAddedTo(preExisting).includes('packages/tui/bundle/sterling-tui.mjs'),
+      'the TUI launcher — the false-deny board 52c1d504 was raised for — is still one of the entries this fixture forces the merge to append and disclose'
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -1044,18 +1095,11 @@ test('stampSanctionedScriptsIfMissing: idempotent no-op (distinct log line, byte
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     const configPath = join(dir, '.sterling', 'config.json');
     // fully covered, deliberately in NON-canonical order: presence is checked
-    // by membership, never by position (board 52c1d504 re-cut).
-    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: [
-      'scripts/migrate-stores.mjs',
-      'packages/tui/bundle/sterling-tui.mjs',
-      'scripts/migration-preflight.mjs',
-      'scripts/commit-reviewed.mjs',
-      'scripts/domain-doctor.mjs',
-      'scripts/architecture-projection.mjs',
-      'scripts/consume-exit.mjs',
-      'scripts/init.mjs',
-      'scripts/dispose-run.mjs',
-    ] } }, null, 2));
+    // by membership, never by position (board 52c1d504 re-cut; derived from
+    // SANCTIONED_SCRIPTS since the 2026-09-07 re-cut, so a newly sanctioned
+    // script cannot leave this "fully covered" seed silently incomplete —
+    // which is precisely how this fixture went stale).
+    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: sanctionedFullyCoveredNonCanonical() } }, null, 2));
     const before = readFileSync(configPath, 'utf8');
 
     const lines = [];
@@ -1126,17 +1170,11 @@ test('stampSanctionedScriptsIfMissing: scoped to its own cwd parameter — a cal
 
     assert.equal(readFileSync(join(dirB, '.sterling', 'config.json'), 'utf8'), beforeB, 'a call scoped to dirA never writes a different directory\'s config');
     const writtenA = JSON.parse(readFileSync(join(dirA, '.sterling', 'config.json'), 'utf8'));
-    assert.deepEqual(writtenA.store_guard.allow_scripts, [
-      'scripts/dispose-run.mjs',
-      'scripts/init.mjs',
-      'scripts/consume-exit.mjs',
-      'scripts/architecture-projection.mjs',
-      'scripts/domain-doctor.mjs',
-      'scripts/commit-reviewed.mjs',
-      'scripts/migration-preflight.mjs',
-      'scripts/migrate-stores.mjs',
-      'packages/tui/bundle/sterling-tui.mjs',
-    ]);
+    assert.deepEqual(
+      writtenA.store_guard.allow_scripts,
+      sanctionedMergedWith([]),
+      'dirA gained the whole shipped list, in SANCTIONED_SCRIPTS order, from an empty recorded array'
+    );
   } finally {
     rmSync(dirA, { recursive: true, force: true });
     rmSync(dirB, { recursive: true, force: true });
@@ -1160,28 +1198,19 @@ test('stampSanctionedScriptsIfMissing: scoped to its own cwd parameter — a cal
 
 test('runUpdate: the project fan-out additively merges remediation scripts into EACH registered sibling\'s config, disclosed per-project; existing entries/order preserved; an already-current sibling is a no-op', async () => {
   const cwd = scratchCwd();
-  const projA = scratchCwd(); // frozen: missing migrate-stores.mjs only
+  const projA = scratchCwd(); // frozen: one admin entry + one shipped entry, the rest missing
   const projB = scratchCwd(); // already fully covered, non-canonical order — must be a no-op
   try {
+    const preExistingA = ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'];
     mkdirSync(join(projA, '.sterling'), { recursive: true });
     writeFileSync(
       join(projA, '.sterling', 'config.json'),
-      JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'] } }, null, 2)
+      JSON.stringify({ store_guard: { allow_scripts: preExistingA } }, null, 2)
     );
     mkdirSync(join(projB, '.sterling'), { recursive: true });
     writeFileSync(
       join(projB, '.sterling', 'config.json'),
-      JSON.stringify({ store_guard: { allow_scripts: [
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/init.mjs',
-        'scripts/dispose-run.mjs',
-      ] } }, null, 2)
+      JSON.stringify({ store_guard: { allow_scripts: sanctionedFullyCoveredNonCanonical() } }, null, 2)
     );
     const beforeB = readFileSync(join(projB, '.sterling', 'config.json'), 'utf8');
 
@@ -1200,18 +1229,7 @@ test('runUpdate: the project fan-out additively merges remediation scripts into 
     const afterA = JSON.parse(readFileSync(join(projA, '.sterling', 'config.json'), 'utf8'));
     assert.deepEqual(
       afterA.store_guard.allow_scripts,
-      [
-        'scripts/some-admin-script.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExistingA),
       'the sibling gains exactly the missing shipped sanctioned scripts; existing entries and their order survive'
     );
 
@@ -1234,8 +1252,9 @@ test('runUpdate: an already-current update (no --force) still sweeps remediation
   const dir = scratchCwd();
   const sibling = scratchCwd();
   try {
+    const preExistingClone = ['scripts/some-admin-script.mjs'];
     mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs'] } }));
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: preExistingClone } }));
     mkdirSync(join(sibling, '.sterling'), { recursive: true });
     writeFileSync(join(sibling, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: [] } }));
 
@@ -1256,35 +1275,14 @@ test('runUpdate: an already-current update (no --force) still sweeps remediation
     const cloneAfter = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.deepEqual(
       cloneAfter.store_guard.allow_scripts,
-      [
-        'scripts/some-admin-script.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExistingClone),
       'the clone still gains the missing shipped sanctioned scripts even though the update itself is a no-op'
     );
 
     const sibAfter = JSON.parse(readFileSync(join(sibling, '.sterling', 'config.json'), 'utf8'));
     assert.deepEqual(
       sibAfter.store_guard.allow_scripts,
-      [
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith([]),
       'the registered sibling also gains the whole shipped list on a no-op update'
     );
   } finally {
@@ -1307,7 +1305,8 @@ test('runUpdate: on the already-current no-op path, a throwing project-registry 
   const dir = scratchCwd();
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs'] } }));
+    const preExistingClone = ['scripts/some-admin-script.mjs'];
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_guard: { allow_scripts: preExistingClone } }));
 
     const { exec } = fakeExec({ behind: 0 });
     const lines = [];
@@ -1329,18 +1328,7 @@ test('runUpdate: on the already-current no-op path, a throwing project-registry 
     const cloneAfter = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.deepEqual(
       cloneAfter.store_guard.allow_scripts,
-      [
-        'scripts/some-admin-script.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExistingClone),
       'the clone config is still remediated even though the sibling registry resolution failed — no half-applied state'
     );
   } finally {
@@ -1406,7 +1394,8 @@ test('runUpdate stamps the sanctioned scripts BEFORE the first store-migration s
   try {
     mkdirSync(join(cwd, '.sterling'), { recursive: true });
     const configPath = join(cwd, '.sterling', 'config.json');
-    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: ['scripts/some-admin-script.mjs'] } }));
+    const preExisting = ['scripts/some-admin-script.mjs'];
+    writeFileSync(configPath, JSON.stringify({ store_guard: { allow_scripts: preExisting } }));
     const storePath = join(cwd, '.sterling', 'sterling.db');
     legacyStoreAt(storePath);
 
@@ -1421,25 +1410,25 @@ test('runUpdate stamps the sanctioned scripts BEFORE the first store-migration s
     const report = await runUpdate({ cwd, exec, log, projects: [], opts: {} });
     assert.equal(report.exit, 0, JSON.stringify(report));
 
-    const firstRemediationLog = events.findIndex((e) => e.t === 'log' && (e.line.includes('scripts/migration-preflight.mjs') || e.line.includes('scripts/migrate-stores.mjs')));
+    // the remediation disclosure is recognized by it naming a script the merge
+    // had to APPEND — derived, never a hardcoded pair of names. 'migrate-stores.mjs'
+    // is deliberately excluded from the probe set: the migration STEP's own log
+    // lines can carry that name, and matching one of those would let a
+    // remediation stamp that ran too late still look early.
+    const appendedNames = sanctionedAddedTo(preExisting).filter((s) => s !== 'scripts/migrate-stores.mjs');
+    assert.ok(appendedNames.length > 0, 'the fixture must force at least one append whose name is distinct from the migration step');
+    const firstRemediationLog = events.findIndex((e) => e.t === 'log' && appendedNames.some((s) => e.line.includes(s)));
     const firstMigrationStep = events.findIndex((e) => e.t === 'exec' && e.line.includes('migrate-stores.mjs') && e.line.includes(storePath));
     assert.ok(firstRemediationLog !== -1, 'the remediation stamp discloses the added scripts by name via log');
     assert.ok(firstMigrationStep !== -1, 'a store-migration step ran against the legacy store');
     assert.ok(firstRemediationLog < firstMigrationStep, 'the remediation stamp log line precedes the first migration step call');
 
     const written = JSON.parse(readFileSync(configPath, 'utf8'));
-    assert.deepEqual(written.store_guard.allow_scripts, [
-      'scripts/some-admin-script.mjs',
-      'scripts/dispose-run.mjs',
-      'scripts/init.mjs',
-      'scripts/consume-exit.mjs',
-      'scripts/architecture-projection.mjs',
-      'scripts/domain-doctor.mjs',
-      'scripts/commit-reviewed.mjs',
-      'scripts/migration-preflight.mjs',
-      'scripts/migrate-stores.mjs',
-      'packages/tui/bundle/sterling-tui.mjs',
-    ]);
+    assert.deepEqual(
+      written.store_guard.allow_scripts,
+      sanctionedMergedWith(preExisting),
+      'the stamp appended exactly the missing shipped entries, after the pre-existing admin entry, in SANCTIONED_SCRIPTS order'
+    );
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

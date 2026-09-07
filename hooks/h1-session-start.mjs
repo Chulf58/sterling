@@ -6,11 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash as createHash2 } from "node:crypto";
-import { readFileSync as readFileSync4, existsSync as existsSync4, mkdirSync as mkdirSync5, readdirSync as readdirSync2, renameSync as renameSync2, statSync as statSync3, writeFileSync as writeFileSync3, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
+import { randomUUID as randomUUID3, createHash as createHash4 } from "node:crypto";
+import { readFileSync as readFileSync5, existsSync as existsSync7, mkdirSync as mkdirSync7, readdirSync as readdirSync2, renameSync as renameSync4, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename as basename2, dirname as dirname5, join as join6 } from "node:path";
+import { basename as basename3, dirname as dirname6, join as join8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -4220,6 +4220,12 @@ var currentAcItemSchema = external_exports.object({
   }).strict().optional()
 });
 var liveTestRefItemSchema = external_exports.object({ ac_id: external_exports.string().min(1), test_paths: external_exports.array(repoPath) });
+var baselineAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1),
+  sha256: external_exports.string().min(1)
+})).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4241,6 +4247,9 @@ var featureArticleSchema = base.extend({
   // git merge/checkout that only resets mtimes no longer raises false
   // reconcile_needed items (decision 65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
+  // above, which reference_material shares so the shape is defined once.
+  baseline_attestations: baselineAttestationsSchema,
   // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
@@ -4377,6 +4386,14 @@ var referenceMaterialSchema = base.extend({
   // change before raising refresh_reference, so an mtime-only bump (a merge) is
   // not mistaken for an out-of-band edit. url/pdf locations carry none.
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  // R9 ATTESTATION PROVENANCE, on the SAME footing as the article's (board
+  // 8c8b6d78; owner-type parity, review finding 2026-09-06). A repo-located
+  // kind:doc joins the reconcile economy through its `location`, so settlement
+  // mints reconcile_needed items against it and an attested close stamps it —
+  // without this field that stamp was silently dropped by the parse, leaving a
+  // naked baseline whose provenance lied about which write produced it. Shape
+  // shared with featureArticleSchema, never re-declared.
+  baseline_attestations: baselineAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -5231,11 +5248,16 @@ var configSchema = external_exports.object({
   // denied unless they invoke one of these sanctioned scripts/launchers —
   // tunable, grows incident-by-incident (the reviewer-selection precedent)
   //
-  // EVERY ENTRY IS A REPO-RELATIVE PATH FROM THE PROJECT ROOT, because that is
-  // exactly what H15's isSanctionedScript compares against: whole-word EQUALITY
-  // on the fragment's executable argument, normalizing only a leading './'
+  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
+  // 5b82e94f — identical on an authoring machine, where the clone and the
+  // project are one tree, and divergent in a consumer, where Sterling's scripts
+  // live in the clone and never in <project>/scripts/). That is exactly what
+  // H15 compares against: the fragment's executable argument is realpath'd,
+  // required to be a regular file inside the canonicalized plugin root, and its
+  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
   // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store). A BARE BASENAME
+  // directory ending in the sanctioned name unlock the store; and there is no
+  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
   // therefore sanctions nothing unless the command is literally run from the
   // script's own directory, which H14's repo-root confinement never produces.
   // 'sterling-tui.mjs' was such a bare basename: it worked only while the
@@ -5253,7 +5275,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5370,7 +5392,7 @@ function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync2, existsSync, realpathSync } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname as dirname3, basename, join as join3, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -5441,6 +5463,14 @@ var ProjectRegistry = class {
 };
 
 // packages/store/dist/index.js
+function decodeLiveRecordRow(op, row) {
+  const record = JSON.parse(row.body);
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -6073,17 +6103,80 @@ var SterlingStore = class _SterlingStore {
       };
     });
   }
-  /** The server-owned identity columns of a live row — the CAS + lifecycle source. */
+  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
+   *
+   *  `scope` joins them (decision
+   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
+   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
+   *  routing decision that chose this physical store — while the JSON body's own
+   *  `scope` is caller-writable and can drift away from it (anti_pattern
+   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
+   *  supersession below pins the candidate's scope FROM HERE, so the field is
+   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
   identityOf(id) {
-    const row = this.db.prepare("SELECT version, lifecycle, freshness, body FROM records WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?").get(id);
     if (!row)
       return void 0;
     return {
       version: row.version,
       lifecycle: row.lifecycle === "retired" ? "retired" : "live",
       freshness: row.freshness === "flagged_stale" ? "flagged_stale" : "fresh",
+      scope: row.scope,
       body: row.body
     };
+  }
+  /**
+   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
+   * `records` row becomes a DurableRecord (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
+   *
+   * Every live materializing read selects `body, scope` and comes through here,
+   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
+   * before any caller sees it. Body/column disagreement is therefore
+   * unrepresentable on read: column authoritative on disk, and now on read too
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
+   * read path added later is hard to write wrongly because there is no other
+   * body→record parse to copy.
+   *
+   * TOTAL by construction — both drifted shapes normalize to the column with no
+   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
+   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
+   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
+   * visible, and it read zero of either across all four stores before this
+   * activated.
+   *
+   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
+   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
+   * every write funnels through via validateRecord, together with insertRecord
+   * writing the column from that validated record.scope: no store write can
+   * produce an empty or whitespace column. `records.scope` being NOT NULL is
+   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
+   * comment previously said it was (corrected 2026-09-06 on independent
+   * review; a comment that misattributes its own guarantee is how the real one
+   * gets removed later by someone who reads only the comment). If an empty or
+   * non-string column is nonetheless read, refuse loudly naming the row rather
+   * than inventing 'project' — a default here would re-create exactly the
+   * guess this decoder exists to delete.
+   *
+   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
+   * from identityOf's column in applyInPlace/supersede (part 3) — except that
+   * supersede takes an optional `authoritativeScope` from the layer that knows
+   * about MOUNTS (MountedStores), because the column is authoritative over the
+   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
+   * must be labelled for the mount it is physically inserted into.
+   *
+   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
+   */
+  static decodeLiveRecord(op, row) {
+    return decodeLiveRecordRow(op, row);
+  }
+  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
+  static decodeLiveRecords(op, rows) {
+    return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
   }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
   insertRelation(sourceId, rel, targetId, at) {
@@ -6197,6 +6290,56 @@ var SterlingStore = class _SterlingStore {
     }, opts);
   }
   /**
+   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
+   * closed list is what makes that method NARROW rather than a second content
+   * write path that happens to skip the clock: anything outside it is refused by
+   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
+   * neither is ever caller-supplied.
+   */
+  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations"];
+  /**
+   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
+   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
+   * record's `updated_at`.
+   *
+   * It bumps `version`, archives the prior body and honours `expected_version`
+   * exactly like every other in-place write: the baselines live in the record
+   * BODY and the body is authoritative, so a same-version body mutation would
+   * evade the CAS and version signal entirely. (addLink's precedent does NOT
+   * apply — its body copy of links[] is non-authoritative and re-hydrated from
+   * record_relations.)
+   *
+   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
+   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
+   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
+   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
+   * re-stamping only SOME owned paths therefore masks real, already-standing
+   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
+   * T1; a metadata write for `a` alone advances the clock to T2; a later read
+   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
+   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
+   * judged against exactly the instant its own baseline was taken.
+   *
+   * `activity_at` is the REAL time, recorded on the activity row (and used for
+   * any `resolves` drain) so the chronology stays true — see applyInPlace's
+   * `internal.activityAt`. It is required in practice for every caller; it
+   * defaults to now rather than to the preserved clock, because silently
+   * back-dating an activity row is the failure this parameter exists to prevent.
+   */
+  updateRecordMetadata(id, fields, opts = {}) {
+    const refused = Object.keys(fields).filter((k) => !_SterlingStore.METADATA_WRITE_FIELDS.includes(k));
+    if (refused.length) {
+      throw new Error(`updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(", ")} ${refused.length === 1 ? "is" : "are"} not a server-owned metadata field \u2014 this write PRESERVES updated_at, so it must never carry content. The writable set is ${_SterlingStore.METADATA_WRITE_FIELDS.join(", ")}; use updateRecord for anything else. Nothing was written.`);
+    }
+    return this.applyInPlace("updateRecordMetadata", id, (current) => ({
+      ...current,
+      ...fields,
+      // From the IN-TRANSACTION read, never a caller's copy: the whole point is
+      // that the stored clock does not move.
+      updated_at: current.updated_at
+    }), opts, { activityAt: opts.activity_at ?? (/* @__PURE__ */ new Date()).toISOString() });
+  }
+  /**
    * knowledge_append-shaped write: grow an ARRAY field in place (history,
    * files, current_ac, …) without retransmitting the existing entries. One
    * transaction, one version bump, prior array archived.
@@ -6239,6 +6382,17 @@ var SterlingStore = class _SterlingStore {
    * tombstone: renameFileKey, whose contract is that a move orphans no owning
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
+   *
+   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
+   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
+   * caller that deliberately preserves the stored `updated_at` — see
+   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
+   * content clock. The activity row must NOT inherit that preserved value: the
+   * activity log is a chronology of when things actually happened, and
+   * back-dating an entry to the previous write's timestamp makes it false. So
+   * the metadata write passes the REAL time here while the body keeps the old
+   * one. Absent (every ordinary write), behaviour is exactly as before: the
+   * activity row is stamped from the body's own updated_at.
    */
   applyInPlace(op, id, buildPatch, opts, internal = {}) {
     this.assertWritable(op);
@@ -6260,6 +6414,7 @@ var SterlingStore = class _SterlingStore {
       candidate.id = id;
       candidate.type = current.type;
       candidate.created_at = current.created_at;
+      candidate.scope = identity.scope;
       const freshness = candidate.freshness === "fresh" || candidate.freshness === "flagged_stale" ? candidate.freshness : candidate.status === "flagged_stale" ? "flagged_stale" : identity.freshness;
       const supersededBy = identity.lifecycle === "retired" ? current.superseded_by ?? null : null;
       const nextVersion = identity.version + 1;
@@ -6297,7 +6452,7 @@ var SterlingStore = class _SterlingStore {
       for (const link of validated.links)
         this.insertRelation(id, link.rel, link.target_id, now);
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
-      this.logActivity("updated", validated, stored.updated_at ?? now);
+      this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
         this.drainResolves(op, opts.resolves, now);
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
@@ -6389,9 +6544,9 @@ var SterlingStore = class _SterlingStore {
     let existing;
     let textUpdated = false;
     this.tx(() => {
-      const rows = this.db.prepare("SELECT body FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
       for (const r of rows) {
-        const t = JSON.parse(r.body);
+        const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
         if (t.source !== "system")
           continue;
         if (keyOf(t) !== wantKey)
@@ -6424,10 +6579,77 @@ var SterlingStore = class _SterlingStore {
     };
   }
   get(id) {
-    const row = this.db.prepare("SELECT body FROM records WHERE id = ?").get(id);
+    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
     if (!row)
       return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([JSON.parse(row.body)])[0]);
+    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
+  }
+  /**
+   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
+   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
+   *
+   * The record's body `scope` does NOT answer this and must never be used to:
+   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
+   * later write routes by the store PHYSICALLY HOLDING the id
+   * (MountedStores.storeHolding); `scope` is caller-writable through
+   * knowledge_update (it is not a refused server-owned field); and the in-place
+   * update path above pins id/type/created_at but never re-derives or validates
+   * the row's mount. So a domain-held record can carry scope 'project' and a
+   * project-held one can carry 'domain:x'. Only the storage layer can answer the
+   * question, so it answers it here rather than leaving callers to guess.
+   *
+   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
+   * is then the project store (server.ts mounts MountedStores; the tests wrap
+   * either). MountedStores overrides it to ask its project mount ALONE, never
+   * the fan. Existence only: a tombstoned/retired row still counts as held.
+   */
+  projectStoreHolds(id) {
+    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
+  }
+  /**
+   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
+   * projectStoreHolds (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
+   *
+   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
+   * all an atomicity or an H10-parity question needs. A caller that has to
+   * SUPPLY a scope — the replacement minted by a supersession, the new record an
+   * extraction creates — needs the mount NAMED, and until this existed there was
+   * no way to get one: both call sites reconstructed it as
+   * `heldByProject ? 'project' : record.scope`, which is physically derived for
+   * the project case and straight back to the body for every DOMAIN case. In a
+   * design whose whole thesis is that the body is not the routing key, that is
+   * the trap itself (anti_pattern
+   * [record-body-scope-is-not-physical-store-identity]).
+   *
+   * CONTRACT (both implementations):
+   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
+   *  - an id NO store holds THROWS, naming the id. It never falls back to
+   *    'project': "probably project" is exactly the fail-open the anti-pattern
+   *    forbids, and a caller that cannot locate its own record must not go on to
+   *    label a new one;
+   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
+   *    storeHolding there): one id names one row, and every routing guarantee in
+   *    this design assumes a single holder.
+   *
+   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
+   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
+   * decision that chose this store, and never touched by an in-place update
+   * (see identityOf). It is the same value column-authoritative reads already
+   * serve, so a bare-store caller sees no behaviour change; what changes is that
+   * the value now arrives from the column BY CONSTRUCTION rather than by a body
+   * parse that happens to have been corrected. MountedStores overrides this with
+   * the MOUNT the record actually lives in, which is strictly stronger: the
+   * column can still contradict the mount (the third drift class
+   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
+   * is the physical fact and the column is a label.
+   */
+  scopeOfHolder(id) {
+    const identity = this.identityOf(id);
+    if (!identity) {
+      throw new Error(`scopeOfHolder: no record '${id}' in this store \u2014 the scope of a record's holder cannot be derived from a record that is not held. Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`);
+    }
+    return identity.scope;
   }
   /**
    * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
@@ -6467,6 +6689,10 @@ var SterlingStore = class _SterlingStore {
    * Every active feature_article's slug + relies_on, in ONE scan — shared by
    * withDerivedReliedBy across a whole query() result so a capped list of N
    * articles costs one table scan, not N.
+   *
+   * NOT a materializing read, so it does not go through decodeLiveRecord: it
+   * projects two fields out of each body and never yields a DurableRecord to a
+   * caller. Nothing here reads or reports `scope`.
    */
   activeArticleRelations() {
     const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
@@ -6520,10 +6746,10 @@ var SterlingStore = class _SterlingStore {
    * '(lookup failed)' would trade one false payload for another.
    */
   articlesBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(rows.map((r) => JSON.parse(r.body)));
+    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
     if (!records.length)
       return records;
     const relations = this.activeArticleRelations();
@@ -6540,10 +6766,10 @@ var SterlingStore = class _SterlingStore {
    * live head while a version-pinned citation keeps using the id.
    */
   recordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
@@ -6556,10 +6782,10 @@ var SterlingStore = class _SterlingStore {
    * live head via recordsBySlug's own resolution.
    */
   supersededRecordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body FROM records
+    const rows = this.db.prepare(`SELECT body, scope FROM records
           WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
           ORDER BY updated_at DESC, rowid DESC`).all(slug);
-    return this.withDerivedReliedByAll(rows.map((r) => JSON.parse(r.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
    * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
@@ -6701,11 +6927,11 @@ var SterlingStore = class _SterlingStore {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
         const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql2 = `SELECT r.body FROM records r JOIN records_fts f ON f.record_id = r.id
+        const sql2 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
           ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
         const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(rows2.map((x) => JSON.parse(x.body)));
+        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
       }
     }
     const orderBy = [];
@@ -6715,10 +6941,10 @@ var SterlingStore = class _SterlingStore {
       overlapParams.push(...fileKeys);
     }
     orderBy.push("r.updated_at DESC", "r.id DESC");
-    const sql = `SELECT r.body FROM records r WHERE ${where.join(" AND ")}
+    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
       ORDER BY ${orderBy.join(", ")} LIMIT ?`;
     const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(rows.map((x) => JSON.parse(x.body)));
+    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
   }
   /** query()'s two return paths share this: one relations scan for the whole
    *  result set (not one per feature_article row) before applying the derived
@@ -6735,13 +6961,15 @@ var SterlingStore = class _SterlingStore {
    * old; the old is retained with status 'superseded' + superseded_by set.
    * This is the ONLY change path for immutable types (decision, §3.2.1).
    */
-  supersede(oldId, newInput) {
+  supersede(oldId, newInput, authoritativeScope) {
     this.assertWritable("supersede");
     const oldRecord = this.get(oldId);
     if (!oldRecord)
       throw new Error(`supersede: no record '${oldId}'`);
     const oldIdentity = this.identityOf(oldId);
-    if (oldIdentity?.lifecycle === "retired" || oldRecord.status === "superseded") {
+    if (!oldIdentity)
+      throw new Error(`supersede: no record '${oldId}'`);
+    if (oldIdentity.lifecycle === "retired" || oldRecord.status === "superseded") {
       throw new Error(`supersede: record '${oldId}' is already superseded (retired) \u2014 one successor maximum`);
     }
     const candidate = { ...newInput };
@@ -6753,6 +6981,7 @@ var SterlingStore = class _SterlingStore {
       links.push({ rel: "supersedes", target_id: oldId });
     }
     candidate.links = links;
+    candidate.scope = authoritativeScope ?? oldIdentity.scope;
     const prepared = _SterlingStore.resolveIdentity(candidate, { lifecycle: "live", freshness: "fresh", version: 1 });
     const newRecord = validateRecord(prepared.input);
     if (newRecord.type !== oldRecord.type) {
@@ -7444,15 +7673,22 @@ var SterlingStore = class _SterlingStore {
     return result;
   }
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
+   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
+   * PHYSICAL IDENTITY rather than by a label (decision
+   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
+   * label-routed transaction opens on the store the label NAMES while every
+   * record mutation independently opens on the store that HOLDS the id, so a
+   * drifted label put the transaction on the wrong database; routing by the
+   * holder makes the two agree by construction. On a plain SterlingStore there
+   * is only ONE physical store, so this is a straight alias for withTransaction
+   * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
-  withTransactionForScope(_scope, fn) {
+  withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);
   }
 };
@@ -7474,9 +7710,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join4(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -7484,6 +7823,139 @@ function loadConfig(cwd) {
 function openStore(cwd) {
   const p = join4(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
+}
+
+// scripts/hooks/lib/plan-lock.mjs
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync, constants as FS, existsSync as existsSync3, fstatSync, mkdirSync as mkdirSync3, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join as join5 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var TITLE_MAX = 200;
+var PATH_MAX = 512;
+var REASON_MAX = 400;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
+}
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function sha256Of(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+function computeStatus(lock) {
+  const read = readBounded(lock?.plan_path, PLAN_MAX_BYTES, "plan");
+  if (read.unreadable) {
+    return { status: read.code === "ENOENT" ? "MISSING" : "UNREADABLE", sha256: null, reason: read.unreadable };
+  }
+  const sha = sha256Of(read.bytes);
+  return { status: sha === lock.file_sha256_at_approval ? "UNCHANGED" : "MODIFIED", sha256: sha };
+}
+function claimMarker(path) {
+  const claimed = `${path}.claimed-${randomUUID2()}`;
+  try {
+    renameSync(path, claimed);
+  } catch {
+    return null;
+  }
+  const read = readStoreFileBounded(claimed, MARKER_MAX_BYTES);
+  try {
+    unlinkSync(claimed);
+  } catch {
+  }
+  return read.unreadable ? { unreadable: read.unreadable } : read.text;
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
@@ -7551,193 +8023,534 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
   return `dispatch ${identity} stopped holding uncommitted edits to ${list}${marker}; its gates did not complete.`;
 }
 
-// scripts/hooks/lib/dispatch-register-lock.mjs
-import { mkdirSync as mkdirSync3, rmSync, renameSync, statSync, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
-var DEFAULT_RETRY_MS = 1e3;
-var DEFAULT_STALE_MS = 1e4;
-var POLL_MS = 20;
-var OWNER_FILE = "owner";
-function registerLockDir(projectRoot2) {
-  return join5(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2 } from "node:fs";
+import { hostname } from "node:os";
+import { join as join6, basename as basename2, dirname as dirname5 } from "node:path";
+import { randomBytes } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
 }
-function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+function refusal(code, facts = {}, message = code) {
+  assertCode(code);
+  const err = new Error(message);
+  err.kind = "refusal";
+  err.code = code;
+  err.facts = facts;
+  return err;
 }
-function readOwnerNonce(lockDir) {
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join6(root, ".sterling", "transient", "dispatch-register.json");
+}
+function registerLockDir(root) {
+  return join6(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync4(p)) return { availability: "absent", arr: [] };
+  let raw;
   try {
-    return readFileSync2(join5(lockDir, OWNER_FILE), "utf8");
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var LOCK_CODE_BY_BASENAME = {
+  "dispatch-register.lock": "register_lock_held",
+  "review-ledger.lock": "ledger_lock_held"
+};
+function lockCodeFor(lockDir) {
+  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readOwner(lockDir) {
+  try {
+    return JSON.parse(readFileSync2(join6(lockDir, "owner.json"), "utf8"));
   } catch {
     return null;
   }
 }
-function tombAndRemove(lockDir) {
-  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID2()}`;
-  renameSync(lockDir, tomb);
+function looksDeadOwner(o) {
+  return !!o && o.host === hostname() && !isPidAlive(o.pid);
+}
+function statIno(p) {
   try {
-    rmSync(tomb, { recursive: true, force: true });
+    return statSync2(p).ino;
   } catch {
+    return null;
   }
 }
-function makeLock(lockDir, nonce) {
-  return {
-    nonce,
-    release() {
-      try {
-        if (readOwnerNonce(lockDir) !== nonce) return;
-        tombAndRemove(lockDir);
-      } catch {
-      }
-    }
-  };
+function sleepAsync(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
-async function acquireLock(lockDir, opts = {}) {
-  const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
-  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
-  const nonce = randomUUID2();
-  const deadline = Date.now() + retryMs;
-  const ownerPath = join5(lockDir, OWNER_FILE);
+async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 1e3;
+  const start = Date.now();
   for (; ; ) {
-    mkdirSync3(lockDir, { recursive: true });
     try {
-      writeFileSync(ownerPath, nonce, { flag: "wx" });
-      return makeLock(lockDir, nonce);
+      mkdirSync4(dirname5(lockDir), { recursive: true });
+      mkdirSync4(lockDir);
+      break;
     } catch (e) {
-      if (e.code === "ENOENT") continue;
-      if (e.code !== "EEXIST") throw e;
-    }
-    let ageMs = null;
-    try {
-      ageMs = Date.now() - statSync(ownerPath).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (ageMs >= staleMs) {
-      try {
-        tombAndRemove(lockDir);
-      } catch {
+      if (e?.code !== "EEXIST") throw e;
+      const owner = readOwner(lockDir);
+      if (looksDeadOwner(owner)) {
+        const examinedIno = statIno(lockDir);
+        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
+        let renamed = false;
+        try {
+          renameSync2(lockDir, tombstone);
+          renamed = true;
+        } catch {
+        }
+        if (renamed) {
+          const tombstoneOwner = readOwner(tombstone);
+          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
+          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+            try {
+              rmSync(tombstone, { recursive: true, force: true });
+            } catch {
+            }
+          } else {
+            try {
+              renameSync2(tombstone, lockDir);
+            } catch (restoreErr) {
+              if (restoreErr?.code === "EEXIST") {
+                process.stderr.write(
+                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
+`
+                );
+                throw refusal(
+                  lockCodeFor(lockDir),
+                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
+                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
+                );
+              }
+            }
+          }
+        }
       }
-      continue;
+      if (Date.now() - start >= timeoutMs) {
+        throw refusal(
+          lockCodeFor(lockDir),
+          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
+          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+        );
+      }
+      await sleepAsync(retryMs);
     }
-    if (Date.now() >= deadline) return null;
-    await sleep(POLL_MS);
   }
+  writeFileSync2(
+    join6(lockDir, "owner.json"),
+    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
+  );
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function withRegisterLock(root, fn, opts = {}) {
+  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
 
 // scripts/hooks/lib/review-ledger-entry.mjs
+import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, renameSync as renameSync3 } from "node:fs";
+import { join as join7, extname } from "node:path";
+import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
 function isEvidenceObject(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-function normalizeLedgerEntry(entry) {
-  if (!entry || typeof entry !== "object" || entry.schema_version !== 2) {
-    return entry;
-  }
-  const v2Deficient = typeof entry.entry_id !== "string" || entry.entry_id === "" || typeof entry.started_at !== "string" || entry.started_at === "" || !entry.identity || typeof entry.identity !== "object" || Array.isArray(entry.identity);
-  const reviewer = entry.reviewer && typeof entry.reviewer === "object" ? entry.reviewer : {};
-  const identity = entry.identity && typeof entry.identity === "object" ? entry.identity : {};
-  const territory = entry.territory && typeof entry.territory === "object" ? entry.territory : {};
-  const contentEvidence = isEvidenceObject(entry.content_evidence) ? entry.content_evidence : null;
-  const truncatedFlag = contentEvidence && typeof contentEvidence.truncated === "boolean" ? contentEvidence.truncated : contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0;
-  const truncatedOf = contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0 ? contentEvidence.truncated_of : null;
-  const blobs = contentEvidence ? contentEvidence.blobs : entry.content_evidence;
+function normalizeReceiptPath(p) {
+  const s2 = String(p).replace(/\\/g, "/").replace(/^\.\//, "");
+  if (/^[A-Za-z]:/.test(s2)) return null;
+  if (s2.startsWith("/")) return null;
+  if (s2.split("/").includes("..")) return null;
+  return s2;
+}
+function isUsableBlobSha(v) {
+  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
+}
+function parseDisposition(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (typeof raw.class !== "string" || raw.class === "") return { ok: false };
+  if (typeof raw.reason !== "string" || raw.reason === "") return { ok: false };
+  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
+  if (typeof raw.head_sha !== "string" || raw.head_sha === "") return { ok: false };
+  if (typeof raw.classifier_version !== "number") return { ok: false };
+  const facts = isEvidenceObject(raw.facts) ? raw.facts : {};
   return {
-    // THE SCHEMA VERSION IS SURFACED, and it is the ONE discriminator a reader
-    // may use to tell the two shapes apart (roster review LOW-2, board 7dd3200a).
-    // Reaching this line means `entry.schema_version === 2` — the gate at the top
-    // of this function — so this key is written BY THE ADAPTER and is never the
-    // writer's copy of it. That distinction is the whole finding: `v2_deficient`
-    // reads as a v2-only marker, but on the LEGACY branch this function returns
-    // the raw entry UNTOUCHED, so a hand-written v1 entry carrying its own
-    // `v2_deficient` key had that key survive into the "normalized" view and could
-    // steer a reader down the v2 path. Nothing a v1 entry can carry reaches this
-    // object, so `schema_version === 2` is exactly as trustworthy as the gate it
-    // mirrors — and isLegacyEntry() below asks the question in one place for both
-    // raw and normalized entries.
-    schema_version: 2,
-    // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
-    // entry it refuses or waives (decision 57984926 §2). undefined for v1.
-    entry_id: entry.entry_id,
-    // S2b-4 — THE KIND GATE (decision 57984926 §4). A v2 ledger is now
-    // MULTI-KIND: 'roster_receipt' entries are spendable review receipts, and
-    // 'external_review' entries are the conductor's attestation that an
-    // outside-model consult happened (minted only by scripts/review-ledger.mjs
-    // record-external). §4 requires external entries to be "never spendable,
-    // never stamped, never counted by roster eligibility (kind gate +
-    // agent-type regex, belt and braces)", so the KIND must be visible through
-    // the one adapter every reader uses — otherwise each surface would need its
-    // own `entry.kind` branch, which is the second hand-rolled switch this
-    // adapter exists to prevent (finding HIGH-3). Passed through RAW and
-    // undefaulted, same posture as `status`: an external entry carries no
-    // reviewer object, no identity and no started_at, so WITHOUT this key it
-    // normalizes to the shape of a structurally-deficient roster receipt and
-    // gets reported as a malformed REVIEW receipt rather than as what it is.
-    // undefined for v1 (early return above) and for a v2 entry promoted before
-    // the field existed — both of which are roster receipts by construction.
-    kind: entry.kind,
-    // S2b-3 — the v2 LIFECYCLE STATUS, raw and undefaulted (see the STATUS note
-    // in the header). undefined for v1; 'discharged' is the only value that
-    // makes an entry unspendable.
-    status: entry.status,
-    // S2b-3 FIX ROUND — the DISPOSITION, raw and unvalidated. A discharge is
-    // only AUTHENTICATED by the pair {status:'discharged', disposition:<object>}
-    // (see isAuthenticatedDischarge below), and until this was surfaced no
-    // reader could see the second half of that pair: `status` alone is a single
-    // string any hand-written or truncated ledger can carry, which made a
-    // one-field forgery enough to make real reviewer evidence invisible to every
-    // spending surface. Passed through UNCHANGED for the same reason `status` is:
-    // the shape-transparency layer reports what is there, the READER decides what
-    // it means. undefined for v1 (which returns early and has no lifecycle).
-    disposition: entry.disposition,
-    agent_type: reviewer.agent_type,
-    files: territory.files,
-    files_source: territory.source,
-    attribution: territory.attribution,
-    at: entry.started_at,
-    session_id: identity.session_id,
-    branch: identity.branch,
-    base_sha: identity.base_sha,
-    // HIGH-2/HIGH-3 — the register's own dispatch identity, undefined for a
-    // v1 entry (which never recorded it) or a legacy v2 entry promoted before
-    // this field existed.
-    agent_id: identity.agent_id,
-    reviewed_state: {
-      completed_at: typeof entry.finished_at === "string" ? entry.finished_at : void 0,
-      blobs,
-      ...truncatedFlag ? { truncated: true, truncated_of: truncatedOf } : {}
-    },
-    // F2 — v2-ONLY marker (a v1 entry returns early above and never reaches
-    // this object, so a reader that only ever sees this key set can rely on
-    // its presence to mean "this came through the v2 branch").
-    content_evidence_status: typeof contentEvidence?.status === "string" ? contentEvidence.status : void 0,
-    // MED-2 — v2-ONLY marker: true when this v2-claiming object is missing
-    // entry_id/started_at/identity. A v1 entry never sets this key at all
-    // (undefined, not false), matching content_evidence_status's v2-only
-    // presence convention.
-    v2_deficient: v2Deficient
+    ok: true,
+    value: { class: raw.class, reason: raw.reason, at: raw.at, head_sha: raw.head_sha, classifier_version: raw.classifier_version, facts }
   };
 }
-function dischargeMarkerClass(normalized) {
-  const e = normalized;
-  if (!e || typeof e !== "object" || e.status !== "discharged") return "none";
-  if (isLegacyEntry(e)) return isContentfulDisposition(e.disposition) ? "authenticated" : "v1-no-lifecycle";
-  if (e.v2_deficient === true) return "v2-deficient";
-  return isContentfulDisposition(e.disposition) ? "authenticated" : "unauthenticated";
+function parseReservation(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
+  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
+  if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
+  if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
+  return { ok: true, value: { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation } };
 }
-function isContentfulDisposition(d) {
-  if (!isEvidenceObject(d)) return false;
-  const reasonOk = typeof d.reason === "string" && d.reason.trim() !== "";
-  const classOk = d.class === "foreign-session" || d.class === "foreign-branch" || d.class === "no-live-territory";
-  return reasonOk && classOk;
+function parseConsumption(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
+  if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
+  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
+  return { ok: true, value: { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce } };
 }
-function isAuthenticatedDischarge(normalized) {
-  return dischargeMarkerClass(normalized) === "authenticated";
+function parseContentEvidence(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (raw.status !== "complete" && raw.status !== "partial" && raw.status !== "unavailable") return { ok: false };
+  const basis = typeof raw.basis === "string" && raw.basis ? raw.basis : "stop-time-worktree-snapshot";
+  let blobs;
+  if (raw.blobs === void 0) {
+    blobs = {};
+  } else if (isEvidenceObject(raw.blobs)) {
+    blobs = { ...raw.blobs };
+  } else {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.blobs" } };
+  }
+  let absentPaths;
+  if (raw.absent_paths === void 0) {
+    absentPaths = [];
+  } else if (Array.isArray(raw.absent_paths)) {
+    absentPaths = raw.absent_paths.filter((p) => typeof p === "string");
+  } else {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.absent_paths" } };
+  }
+  const value = { basis, status: raw.status, blobs, absent_paths: absentPaths };
+  if (raw.index_blobs !== void 0) {
+    if (!isEvidenceObject(raw.index_blobs)) {
+      return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.index_blobs" } };
+    }
+    value.index_blobs = { ...raw.index_blobs };
+  }
+  if (raw.truncated === true) value.truncated = true;
+  if (Number.isInteger(raw.truncated_of)) value.truncated_of = raw.truncated_of;
+  if (typeof raw.failure_reason === "string" && raw.failure_reason) value.failure_reason = raw.failure_reason;
+  return { ok: true, value };
 }
-function isExternalReviewEntry(normalized) {
-  return !!normalized && typeof normalized === "object" && normalized.kind === "external_review";
+function parseObservedEvidence(raw) {
+  const value = {};
+  if (Array.isArray(raw?.observed_files)) value.observed_files = raw.observed_files.filter((p) => typeof p === "string");
+  if (Array.isArray(raw?.observed_reads)) value.observed_reads = raw.observed_reads.filter((p) => typeof p === "string");
+  if (typeof raw?.observed_source === "string" && raw.observed_source) value.observed_source = raw.observed_source;
+  if (raw?.observed_truncated === true) value.observed_truncated = true;
+  return { ok: true, value };
 }
-function isLegacyEntry(raw) {
-  return !!raw && typeof raw === "object" && !Array.isArray(raw) && raw.schema_version !== 2;
+var RECEIPT_STATUSES = /* @__PURE__ */ new Set(["active", "reserved", "consumed", "discharged"]);
+var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var AGENT_TYPE_PATTERN = /^[A-Za-z0-9_-]+$/;
+var TERRITORY_SOURCES = /* @__PURE__ */ new Set(["review-territory", "free-prose-fallback", "unattributable"]);
+function parseReceipt(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false, code: "ledger_entry_malformed" };
+  if (raw.schema_version !== 2) return { ok: false, code: "ledger_entry_malformed" };
+  if (raw.kind !== void 0 && raw.kind !== "roster_receipt") return { ok: false, code: "ledger_entry_malformed" };
+  if (typeof raw.entry_id !== "string" || !UUID_PATTERN.test(raw.entry_id)) return { ok: false, code: "ledger_entry_malformed" };
+  if (!RECEIPT_STATUSES.has(raw.status)) return { ok: false, code: "ledger_entry_malformed" };
+  if (typeof raw.started_at !== "string" || !raw.started_at) return { ok: false, code: "ledger_entry_malformed" };
+  if (typeof raw.finished_at !== "string" || !raw.finished_at) return { ok: false, code: "ledger_entry_malformed" };
+  if (!isEvidenceObject(raw.reviewer)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer" } };
+  if (typeof raw.reviewer.agent_type !== "string" || !AGENT_TYPE_PATTERN.test(raw.reviewer.agent_type)) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer.agent_type" } };
+  }
+  if (!isEvidenceObject(raw.identity)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity" } };
+  if (typeof raw.identity.agent_id !== "string" || !raw.identity.agent_id) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity.agent_id" } };
+  }
+  if (!isEvidenceObject(raw.territory) || !Array.isArray(raw.territory.files)) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory" } };
+  }
+  if (!TERRITORY_SOURCES.has(raw.territory.source)) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
+  }
+  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "union") {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
+  }
+  const contentParsed = parseContentEvidence(raw.content_evidence);
+  if (!contentParsed.ok) {
+    return { ok: false, code: "ledger_entry_malformed", facts: contentParsed.facts ?? { field: "content_evidence" } };
+  }
+  let reservation;
+  let consumption;
+  let disposition = null;
+  if (raw.status === "reserved") {
+    const r = parseReservation(raw.reservation);
+    if (!r.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
+    reservation = r.value;
+  } else if (raw.reservation !== void 0) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
+  }
+  if (raw.status === "consumed") {
+    const c = parseConsumption(raw.consumption);
+    if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
+    consumption = c.value;
+  } else if (raw.consumption !== void 0) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
+  }
+  if (raw.status === "discharged") {
+    const d = parseDisposition(raw.disposition);
+    if (!d.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
+    disposition = d.value;
+  } else if (raw.disposition !== void 0 && raw.disposition !== null) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
+  }
+  const identity = {
+    session_id: typeof raw.identity.session_id === "string" ? raw.identity.session_id : null,
+    branch: typeof raw.identity.branch === "string" ? raw.identity.branch : null,
+    base_sha: typeof raw.identity.base_sha === "string" ? raw.identity.base_sha : null,
+    agent_id: raw.identity.agent_id
+  };
+  const observed = parseObservedEvidence(raw).value;
+  const receipt = {
+    schema_version: 2,
+    entry_id: raw.entry_id,
+    kind: "roster_receipt",
+    status: raw.status,
+    started_at: raw.started_at,
+    finished_at: raw.finished_at,
+    reviewer: {
+      agent_type: raw.reviewer.agent_type,
+      model: raw.reviewer.model ?? null,
+      model_family: raw.reviewer.model_family ?? null,
+      model_source: raw.reviewer.model_source ?? null
+    },
+    identity,
+    territory: {
+      files: raw.territory.files.filter((f) => typeof f === "string"),
+      source: raw.territory.source,
+      attribution: raw.territory.attribution
+    },
+    content_evidence: contentParsed.value,
+    disposition,
+    ...observed
+  };
+  if (reservation) receipt.reservation = reservation;
+  if (consumption) receipt.consumption = consumption;
+  return { ok: true, receipt };
+}
+function legacyFingerprint(raw) {
+  const files = Array.isArray(raw?.files) ? raw.files.filter((f) => typeof f === "string").map(normalizeReceiptPath).sort() : [];
+  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? raw.reviewed_state.blobs : {};
+  const blobs = Object.entries(blobsObj).map(([p, s2]) => [normalizeReceiptPath(p), s2]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  let canonical;
+  try {
+    canonical = JSON.stringify([raw?.agent_type ?? null, raw?.at ?? null, files, blobs]);
+    if (typeof canonical !== "string") canonical = "<unserializable>";
+  } catch {
+    canonical = "<unserializable>";
+  }
+  return createHash2("sha256").update(canonical).digest("hex").slice(0, 32);
+}
+function legacyReceiptHandle(raw) {
+  return `receipt-${legacyFingerprint(raw)}`;
+}
+function adaptLegacyEntry(raw) {
+  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? { ...raw.reviewed_state.blobs } : {};
+  return {
+    kind: "legacy",
+    handle: legacyReceiptHandle(raw),
+    agent_type: typeof raw?.agent_type === "string" ? raw.agent_type : null,
+    files: Array.isArray(raw?.files) ? raw.files.slice() : [],
+    at: typeof raw?.at === "string" ? raw.at : null,
+    session_id: typeof raw?.session_id === "string" ? raw.session_id : null,
+    branch: typeof raw?.branch === "string" ? raw.branch : null,
+    base_sha: typeof raw?.base_sha === "string" ? raw.base_sha : null,
+    blobs: blobsObj,
+    status: raw?.status === "discharged" ? "discharged" : "active"
+  };
+}
+function looksLikeLegacyV1(raw) {
+  return typeof raw?.agent_type === "string" && raw.agent_type !== "" && Array.isArray(raw?.files) && typeof raw?.at === "string" && raw.at !== "";
+}
+function classifyLedgerEntry(raw) {
+  if (!isEvidenceObject(raw)) {
+    return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (raw.schema_version === 2) {
+    if (raw.kind === "external_review") {
+      if (typeof raw.entry_id !== "string" || !raw.entry_id || typeof raw.thread_id !== "string" || !Array.isArray(raw.files)) {
+        return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "external_review" } };
+      }
+      return { kind: "external_review", entry: raw };
+    }
+    const parsed = parseReceipt(raw);
+    if (!parsed.ok) return { kind: "malformed", code: "ledger_entry_malformed", facts: parsed.facts ?? { reason: "receipt" } };
+    return { kind: "receipt", receipt: parsed.receipt };
+  }
+  if (looksLikeLegacyV1(raw)) {
+    return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
+  }
+  return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
+}
+function ledgerPath(root) {
+  return join7(root, ".sterling", "review-ledger.json");
+}
+function readLedger(root) {
+  const p = ledgerPath(root);
+  if (!existsSync5(p)) return { availability: "absent", entries: [], rawEntries: [], raw: "" };
+  let raw;
+  try {
+    raw = readFileSync3(p, "utf8");
+  } catch {
+    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
+  return {
+    availability: "ok",
+    entries: parsed.map((e, index) => ({ ...classifyLedgerEntry(e), index })),
+    rawEntries: parsed,
+    raw
+  };
 }
 
 // scripts/hooks/lib/undeclared-source.mjs
@@ -7983,11 +8796,11 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync4, statSync as statSync2 } from "node:fs";
+import { createHash as createHash3 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, readdirSync, existsSync as existsSync6, mkdirSync as mkdirSync6, statSync as statSync3 } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
-  return createHash("sha256").update(normalize(text), "utf8").digest("hex");
+  return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 function parseInstalledHeader(content) {
@@ -8013,7 +8826,7 @@ function extractBakedCommandPaths(content) {
   return [...paths];
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync3(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync4(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -8031,26 +8844,27 @@ var RESTART_INSTRUCTION = [
 
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join6(cwd, ".sterling", "transient");
-  const lockDir = registerLockDir(cwd);
+  const transientDir = join8(cwd, ".sterling", "transient");
   try {
-    mkdirSync5(transientDir, { recursive: true });
-    const lock = await acquireLock(lockDir, { retryMs: 1e3, staleMs: 1e4 });
-    if (!lock) {
+    mkdirSync7(transientDir, { recursive: true });
+    await withRegisterLock(
+      cwd,
+      () => {
+        rmSync2(registerPath(cwd), { force: true });
+        const registerBasename = basename3(registerPath(cwd));
+        for (const f of readdirSync2(transientDir)) {
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync2(join8(transientDir, f), { force: true });
+        }
+      },
+      { retryMs: 1e3, timeoutMs: 1e4 }
+    );
+  } catch (e) {
+    if (e?.code === "register_lock_held") {
       process.stderr.write(
-        "H1: register lock timed out \u2014 LEAVING the dispatch register intact and SKIPPING its orphaned .tmp-* staging-file cleanup (never deleting unlocked); the next locked H22 fire prunes this session's foreign entries\n"
+        `${render(e)} \u2014 LEAVING the dispatch register intact and SKIPPING its orphaned .tmp-* staging-file cleanup (never deleting unlocked); the next locked H22 fire prunes this session's foreign entries
+`
       );
-      return;
     }
-    try {
-      rmSync2(join6(transientDir, "dispatch-register.json"), { force: true });
-      for (const f of readdirSync2(transientDir)) {
-        if (f.startsWith("dispatch-register.json.tmp-")) rmSync2(join6(transientDir, f), { force: true });
-      }
-    } finally {
-      lock.release();
-    }
-  } catch {
   }
 }
 function conventions(maxConcurrent2) {
@@ -8135,11 +8949,15 @@ function paint(rows) {
   ).join("\n");
 }
 function pluginRoot() {
-  if (process.env.STERLING_PLUGIN_ROOT) return process.env.STERLING_PLUGIN_ROOT;
-  let dir = dirname5(fileURLToPath(import.meta.url));
+  const walked = walkUpPluginRoot();
+  if (walked) return walked;
+  return process.env.STERLING_PLUGIN_ROOT || null;
+}
+function walkUpPluginRoot() {
+  let dir = dirname6(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync4(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname5(dir);
+    if (existsSync7(join8(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname6(dir);
   }
   return null;
 }
@@ -8151,7 +8969,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot();
     if (!root) return null;
-    const v = JSON.parse(readFileSync4(join6(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync5(join8(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -8159,24 +8977,16 @@ function pluginVersion() {
 }
 function computeH1DeadDispatchResidue(cwd, source) {
   if (source !== "startup" && source !== "clear") return [];
-  const registerPath = join6(cwd, ".sterling", "transient", "dispatch-register.json");
-  let raw = [];
-  try {
-    if (existsSync4(registerPath)) {
-      const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
-      if (Array.isArray(parsed)) raw = parsed;
-    }
-  } catch {
-    raw = [];
-  }
-  if (!raw.length) return [];
+  const { availability, entries } = readRegister(cwd);
+  if (availability !== "ok" || !entries.length) return [];
   const lines = [];
-  for (const entry of raw) {
+  for (const entry of entries) {
     if (!entry || entry.residue_reported_at) continue;
+    if (entry.ended) continue;
     const probe = probeDirtyPaths(cwd, entry.files);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue;
-    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
   }
   return lines;
 }
@@ -8189,45 +8999,79 @@ function safeReceiptField(v) {
   }).join("").trim();
   return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}\u2026(truncated)` : cleaned;
 }
+function renderSurvivorLine(survivor) {
+  const isLegacy = survivor.kind === "legacy";
+  const legacy = isLegacy ? survivor.legacy : null;
+  const receipt = isLegacy ? null : survivor.receipt;
+  const startStr = isLegacy ? legacy.at : receipt.started_at;
+  const finishedStr = isLegacy ? null : receipt.finished_at;
+  const startMs = typeof startStr === "string" ? Date.parse(startStr) : NaN;
+  const rawCompletedMs = typeof finishedStr === "string" ? Date.parse(finishedStr) : NaN;
+  const nowMs = Date.now();
+  const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
+  const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
+  const useCompleted = !Number.isNaN(completedMs);
+  const recordedAt = useCompleted ? completedMs : startMs;
+  const age = Number.isNaN(recordedAt) ? "age unknown (no usable timestamp)" : `${((nowMs - recordedAt) / 36e5).toFixed(1)}h old`;
+  const e = isLegacy ? { agent_type: legacy.agent_type, session_id: legacy.session_id, branch: legacy.branch, files: legacy.files } : { agent_type: receipt.reviewer?.agent_type, session_id: receipt.identity?.session_id, branch: receipt.identity?.branch, files: receipt.territory?.files };
+  const type = safeReceiptField(e.agent_type) || "unknown reviewer";
+  const session = safeReceiptField(e.session_id);
+  const branch = safeReceiptField(e.branch);
+  const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(", ");
+  const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
+  const label = isLegacy ? "LEGACY " : "";
+  const handleSuffix = isLegacy ? `; discharge handle: ${legacy.handle}` : "";
+  const reservedSuffix = !isLegacy && receipt.status === "reserved" ? " [RESERVED \u2014 mid-spend, see reconcile below]" : "";
+  return `- ${label}${type} \u2014 ${age}${origin ? ` (earned in ${origin})` : " (no recorded session/branch \u2014 a pre-expiry receipt)"}${files.length ? `; files: ${files.slice(0, 5).join(", ")}` : ""}${handleSuffix}${reservedSuffix}`;
+}
+function renderMalformedLine(row, rawEntries) {
+  const raw = rawEntries[row.index];
+  const rawId = typeof raw?.entry_id === "string" ? safeReceiptField(raw.entry_id) : "";
+  const id = rawId || `index ${row.index}`;
+  const field = safeReceiptField(row.facts?.field ?? row.facts?.reason ?? "") || "unknown";
+  return render(
+    disclosure(
+      "ledger_entry_malformed",
+      row.facts ?? {},
+      `H1: ledger entry ${id} is unreadable \u2014 the shape owner refuses it (offending field: ${field}); no automated command can address it. Open .sterling/review-ledger.json and inspect this entry yourself.`
+    )
+  );
+}
 function reviewReceiptLines(cwd) {
-  const ledgerPath = join6(cwd, ".sterling", "review-ledger.json");
-  if (!existsSync4(ledgerPath)) return [];
-  let entries = [];
-  try {
-    const parsed = JSON.parse(readFileSync4(ledgerPath, "utf8"));
-    if (Array.isArray(parsed)) entries = parsed;
-  } catch {
-    return [];
+  const { availability, entries, rawEntries } = readLedger(cwd);
+  if (availability !== "ok") return { survivors: [], hasReserved: false, malformed: [] };
+  const survivors = [];
+  const malformed = [];
+  let hasReserved = false;
+  for (const row of entries) {
+    if (row.kind === "external_review") continue;
+    if (row.kind === "malformed") {
+      malformed.push(renderMalformedLine(row, rawEntries));
+      continue;
+    }
+    if (row.kind === "legacy") {
+      if (row.legacy.status === "discharged") continue;
+      survivors.push({ kind: "legacy", legacy: row.legacy });
+      continue;
+    }
+    const receipt = row.receipt;
+    if (receipt.status === "discharged" || receipt.status === "consumed") continue;
+    if (receipt.status === "reserved") hasReserved = true;
+    survivors.push({ kind: "receipt", receipt });
   }
-  return entries.filter((e) => e && typeof e === "object").map(normalizeLedgerEntry).filter((e) => !isAuthenticatedDischarge(e)).filter((e) => !isExternalReviewEntry(e)).map((e) => {
-    const startMs = typeof e.at === "string" ? Date.parse(e.at) : NaN;
-    const completedAtStr = e.reviewed_state && typeof e.reviewed_state.completed_at === "string" ? e.reviewed_state.completed_at : null;
-    const rawCompletedMs = completedAtStr === null ? NaN : Date.parse(completedAtStr);
-    const nowMs = Date.now();
-    const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
-    const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
-    const useCompleted = !Number.isNaN(completedMs);
-    const recordedAt = useCompleted ? completedMs : startMs;
-    const age = Number.isNaN(recordedAt) ? "age unknown (no usable timestamp)" : `${((nowMs - recordedAt) / 36e5).toFixed(1)}h old`;
-    const type = safeReceiptField(e.agent_type) || "unknown reviewer";
-    const session = safeReceiptField(e.session_id);
-    const branch = safeReceiptField(e.branch);
-    const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(", ");
-    const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
-    return `- ${type} \u2014 ${age}${origin ? ` (earned in ${origin})` : " (no recorded session/branch \u2014 a pre-expiry receipt)"}${files.length ? `; files: ${files.slice(0, 5).join(", ")}` : ""}`;
-  });
+  return { survivors: survivors.map(renderSurvivorLine), hasReserved, malformed };
 }
 var input = readStdin();
-var sessionMarkerPath = join6(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join6(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+var sessionMarkerPath = join8(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join8(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync4(join6(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync5(join6(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync3(
+  if (existsSync7(join8(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync7(join8(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync5(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync2(sessionMarkerTmp, sessionMarkerPath);
+    renameSync4(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
@@ -8247,20 +9091,59 @@ var receiptLines = (() => {
   try {
     return reviewReceiptLines(input.cwd);
   } catch {
-    return [];
+    return { survivors: [], hasReserved: false, malformed: [] };
   }
 })();
-var receiptContext = receiptLines.length ? `
+var REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
+var remedyClone = (() => {
+  try {
+    const r = walkUpPluginRoot();
+    if (!r) return null;
+    const posix = String(r).split("\\").join("/").replace(/\/+$/, "");
+    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
+  } catch {
+    return null;
+  }
+})();
+var receiptContext = receiptLines.survivors.length ? `
 
-SURVIVING REVIEW RECEIPTS (H1): ${receiptLines.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json \u2014 earned by a reviewer dispatch that ended, but never stamped into a commit.
-` + receiptLines.join("\n") + `
-A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed. Judge each one and remove it by hand, or re-dispatch a reviewer for the work it covered.` : "";
+SURVIVING REVIEW RECEIPTS (H1): ${receiptLines.survivors.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json \u2014 earned by a reviewer dispatch that ended, but never stamped into a commit.
+` + receiptLines.survivors.join("\n") + `
+A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.
+Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):
+  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"
+A LEGACY v1 receipt (no schema_version) has no entry_id \u2014 select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` + // R1-C82: a RESERVED entry (a crashed/interrupted commit-reviewed spend)
+// is NEVER offered the discharge remedy — discharge refuses a reserved
+// entry outright ([entry_not_active]), so printing it here would send the
+// operator at a guaranteed refusal. `reconcile` either finalizes it
+// against the commit that actually landed or releases it back to active.
+(receiptLines.hasReserved ? `
+One or more of the receipts above are RESERVED (mid-spend, marked above): discharge refuses a reserved entry outright \u2014 the remedy is
+  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs reconcile
+` : "") : "";
+var malformedContext = receiptLines.malformed.length ? `
+
+MALFORMED REVIEW LEDGER ENTRIES (H1): ${receiptLines.malformed.length} entry(ies) in .sterling/review-ledger.json do not parse as any recognized shape (receipt, external review, or legacy). Neither the discharge nor the reconcile command above can address one of these \u2014 both need parsed facts a malformed entry does not have \u2014 so open the file and inspect each one named below directly:
+` + receiptLines.malformed.join("\n") : "";
+var planLockContext = "";
+var planLock = null;
+var planLockMalformed = false;
+try {
+  const section = planLockSection({ cwd: input.cwd, source: input.source });
+  planLockContext = section.context;
+  planLock = section.lock;
+  planLockMalformed = section.malformed === true;
+} catch {
+}
 var store = openStore(input.cwd);
 if (!store) {
-  if (dispatchResidueLines.length || receiptContext) {
+  if (planLockContext || dispatchResidueLines.length || receiptContext || malformedContext) {
     process.stdout.write(
       JSON.stringify({
-        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: dispatchResidueLines.join("\n\n") + receiptContext }
+        hookSpecificOutput: {
+          hookEventName: "SessionStart",
+          additionalContext: planLockContext + dispatchResidueLines.join("\n\n") + receiptContext + malformedContext
+        }
       })
     );
   }
@@ -8270,10 +9153,15 @@ if (!store) {
   allow();
 }
 var config = null;
+var configUnreadable = false;
 try {
   config = loadConfig(input.cwd);
 } catch {
   config = null;
+  configUnreadable = true;
+}
+if (config !== null && (typeof config !== "object" || Array.isArray(config))) {
+  configUnreadable = true;
 }
 var roleContext = "";
 try {
@@ -8292,15 +9180,28 @@ MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The comm
   }
 } catch {
 }
+var tddPostureContext = "";
+try {
+  if (configUnreadable) {
+    tddPostureContext = "\n\nTDD posture: UNKNOWN \u2014 the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+  } else {
+    const tddOn = config?.tdd?.enabled !== false;
+    const mutationOn = config?.mutation_verification?.enabled !== false;
+    tddPostureContext = `
+
+TDD posture: tests-first ${tddOn ? "ON" : "OFF"} \xB7 mutation verification ${mutationOn ? "ON" : "OFF"} (config.tdd.enabled / config.mutation_verification.enabled \u2014 TUI System tab; explicit asks still work)`;
+  }
+} catch {
+}
 var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
-  const gitDir = root ? join6(root, ".git") : null;
-  if (gitDir && existsSync4(gitDir) && statSync3(gitDir).isDirectory()) {
+  const gitDir = root ? join8(root, ".git") : null;
+  if (gitDir && existsSync7(gitDir) && statSync4(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync4(join6(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync5(join8(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
@@ -8312,17 +9213,17 @@ try {
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join6(gitDir, "sterling-update-check.json");
+        const cachePath = join8(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync4(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync5(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
           spawnSync3("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync3(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync5(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -8338,12 +9239,128 @@ STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit
   }
 } catch {
 }
+function planLockSection(ctx) {
+  const TITLE_MAX2 = TITLE_MAX;
+  const PATH_MAX2 = PATH_MAX;
+  const REASON_MAX2 = REASON_MAX;
+  const STALE_DAYS = 14;
+  const DAY_MS = 24 * 60 * 60 * 1e3;
+  const clean = sanitizeForContext;
+  const sterlingDir = join8(ctx.cwd, ".sterling");
+  const transientDir = join8(sterlingDir, "transient");
+  const blocks = [];
+  const MARKERS = [
+    {
+      file: "plan-lock-unresolved.json",
+      render: (body) => `PLAN LOCK NOT BOUND (one-shot): an ExitPlanMode approval could not be bound to a plan file \u2014 ${clean(body?.reason, REASON_MAX2) || "no reason recorded"}. Any earlier lock was preserved unchanged. Re-bind by hand with plan-lock.mjs --plan <absolute path> if this objective still has an approved plan.`
+    },
+    {
+      file: "plan-lock-released.json",
+      render: (body) => `PLAN LOCK RELEASED (one-shot): the plan lock was released \u2014 ${clean(body?.reason, REASON_MAX2) || "no reason recorded"}. No plan governs this objective's scope and ordering until a new plan is approved.`
+    },
+    {
+      file: "plan-lock-previous.json",
+      render: (body) => `PLAN LOCK SUPERSEDED (one-shot): the previous plan was "${clean(body?.title, TITLE_MAX2) || "untitled"}" (${clean(body?.plan_path, PATH_MAX2) || "no path recorded"}). The lock above replaced it \u2014 work planned under the old plan is no longer governed by it.`
+    }
+  ];
+  const markerLines = [];
+  for (const marker of MARKERS) {
+    let raw = null;
+    try {
+      raw = claimMarker(join8(transientDir, marker.file));
+    } catch {
+      raw = null;
+    }
+    if (raw === null) continue;
+    let body = null;
+    if (typeof raw === "string") {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = null;
+      }
+    }
+    markerLines.push(marker.render(body && typeof body === "object" ? body : null));
+  }
+  let read = { absent: true };
+  try {
+    read = readLock(sterlingDir);
+  } catch (e) {
+    read = { malformed: `could not be read (${e && e.message || e})` };
+  }
+  const lock = read.lock ?? null;
+  const malformed = Boolean(read.malformed);
+  if (malformed) {
+    blocks.push(
+      `PLAN LOCK MALFORMED: .sterling/plan-lock.json exists but ${clean(read.malformed, REASON_MAX2)}, so it is not a usable lock record. Inspect it with \`plan-lock.mjs --show\`, or clear it with \`plan-lock.mjs --release --reason "<why>"\`. Nothing else in this session start is affected.`
+    );
+  } else if (lock) {
+    const planPath = clean(lock.plan_path, PATH_MAX2);
+    let status = "MISSING";
+    try {
+      const live = computeStatus(lock);
+      status = live.status === "MODIFIED" ? "MODIFIED since approval" : live.status;
+    } catch {
+      status = "UNREADABLE";
+    }
+    let branchNow = "unknown";
+    try {
+      const r = spawnSync3("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
+      const approved = clean(lock.approved_branch, 120);
+      if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
+    } catch {
+      branchNow = "unknown";
+    }
+    const source = lock.source === "manual" ? "manual" : "exit_plan_mode";
+    blocks.push(
+      `PLAN LOCK: ${clean(lock.title, TITLE_MAX2) || "(untitled plan)"} \u2014 ${planPath || "(no path recorded)"} (approved ${clean(lock.approved_at, 40).slice(0, 10) || "unknown date"} on ${clean(lock.approved_branch, 120) || "no branch recorded"}, ${source}) \xB7 plan file ${status} \xB7 branch now ${branchNow}`
+    );
+    blocks.push(
+      `THE APPROVED PLAN GOVERNS THIS OBJECTIVE'S SCOPE, ORDERING AND SLICES; STANDING STORE DECISIONS STILL GOVERN MECHANISMS UNLESS THE PLAN RECORDS A LATER USER RULING; THE BOARD IS INVENTORY; READ THE PLAN BEFORE THE FIRST DISPATCH. (The plan is the only surface carrying ORDER and the user's written rulings \u2014 the board holds inventory, the store holds design.)`
+    );
+    if (source === "manual") {
+      blocks.push(`This lock was written by hand (plan-lock.mjs --plan) \u2014 approval provenance is the operator's word, not an ExitPlanMode approval.`);
+    }
+    if (lock.text_file_mismatch === true) {
+      blocks.push(
+        `At approval the approved text and the file on disk already differed (text_file_mismatch) \u2014 the live status above is judged against the FILE's bytes at that moment, which is the only honest baseline.`
+      );
+    }
+    if (status === "MODIFIED since approval") {
+      blocks.push(
+        `The plan file has changed since it was approved. Approval provenance is never re-stamped: record the change with plan-lock.mjs --observe, or have the user approve a new plan.`
+      );
+    }
+    const ageMs = Date.now() - Date.parse(clean(lock.approved_at, 40));
+    if (Number.isFinite(ageMs) && ageMs > STALE_DAYS * DAY_MS) {
+      blocks.push(
+        `STALE: approved ~${Math.round(ageMs / DAY_MS)} days ago. Staleness is a DISCLOSURE, never a clear \u2014 only a later approval or plan-lock.mjs --release clears a lock.`
+      );
+    }
+  }
+  blocks.push(...markerLines);
+  return { context: blocks.length ? blocks.join("\n") + "\n\n" : "", lock: malformed ? null : lock, malformed };
+}
+var NOTE_PROSE_MAX = 2e3;
+var LIVE_DISPATCH_MAX = 20;
+var LIVE_TERRITORY_MAX = 40;
+var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
+var NOTE_FIELD_MAX = {
+  objective: NOTE_PROSE_MAX,
+  next_slice: NOTE_PROSE_MAX,
+  risks: NOTE_PROSE_MAX,
+  pointers: NOTE_PROSE_MAX,
+  branch: PATH_MAX,
+  head_sha: PATH_MAX,
+  at: PATH_MAX
+};
 var rotationContext = "";
 try {
   if (input.source === "clear") {
-    const notePath = join6(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync4(notePath)) {
-      const note = JSON.parse(readFileSync4(notePath, "utf8"));
+    const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
+    if (existsSync7(notePath)) {
+      const note = JSON.parse(readFileSync5(notePath, "utf8"));
       rmSync2(notePath, { force: true });
       const head = (() => {
         try {
@@ -8355,8 +9372,9 @@ try {
       })();
       const cautions = [];
       if (note.head_sha && head && head !== note.head_sha) {
-        cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
+        cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
       }
+      const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
       let commitsAheadUnverified = false;
       if (typeof note.commits_ahead === "number") {
         if (!note.base_branch) {
@@ -8367,7 +9385,7 @@ try {
             const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
             if (Number.isFinite(actual)) {
               if (actual !== note.commits_ahead) {
-                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
               }
             } else {
               commitsAheadUnverified = true;
@@ -8381,13 +9399,74 @@ try {
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
         cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
       }
-      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).concat(
-        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+      const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
+      const livePlanRaw = typeof planLock?.plan_path === "string" && planLock.plan_path ? planLock.plan_path : null;
+      const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
+      const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
+      if (notePlanRaw && planLockMalformed) {
+        cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
+      } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
+        cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
+      } else if (notePlanRaw && !livePlanRaw) {
+        cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
+      }
+      const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+      const fields = planField.concat(
+        ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${sanitizeForContext(String(note[k]), NOTE_FIELD_MAX[k])}`)
+      ).concat(
+        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
       ).join("\n");
+      const liveDispatches = note.live_dispatches;
+      let liveLine = "";
+      if (Array.isArray(liveDispatches) && liveDispatches.length) {
+        const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+          const entries = Array.isArray(d?.territory) ? d.territory : [];
+          let territory = "no declared territory";
+          if (entries.length) {
+            const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
+            const dropped = entries.length - shown.length;
+            let joined = shown.join(", ");
+            if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
+            territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
+          }
+          return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
+        }).join("\n");
+        const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
+        liveLine = `
+${liveDispatches.length} dispatch(es) were live at rotation \u2014 check ListAgents before re-dispatching:
+${rendered}` + (omitted > 0 ? `
+\u2026 (+${omitted} more)` : "");
+      } else if (liveDispatches === null) {
+        liveLine = `
+${render(
+          disclosure(
+            "register_unavailable",
+            {},
+            "dispatch register unavailable \u2014 the register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching."
+          )
+        )}`;
+      }
+      const uncertainDispatches = Array.isArray(note.uncertain_dispatches) ? note.uncertain_dispatches : [];
+      let uncertainLine = "";
+      if (uncertainDispatches.length) {
+        const renderedUncertain = uncertainDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+          const type = sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent";
+          const id = sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id";
+          const reason = sanitizeForContext(String(d?.reason ?? "unknown"), PATH_MAX) || "unknown";
+          return render(
+            disclosure("dispatch_status_unknown", {}, `${type}:${id} \u2014 ownership uncertain (${reason}); settle with ListAgents before re-dispatching`)
+          );
+        }).join("\n");
+        const omittedUncertain = uncertainDispatches.length - Math.min(uncertainDispatches.length, LIVE_DISPATCH_MAX);
+        uncertainLine = `
+${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead \u2014 never counted as live):
+${renderedUncertain}` + (omittedUncertain > 0 ? `
+\u2026 (+${omittedUncertain} more)` : "");
+      }
       rotationContext = `
 
 ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
-${fields}
+${fields}${liveLine}${uncertainLine}
 Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.`);
     }
   }
@@ -8395,14 +9474,14 @@ Resume from next_slice. The board and knowledge store remain the authorities for
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join6(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    const conductorLedger = join8(input.cwd, ".sterling", "transient", "conductor-reads.json");
     rmSync2(conductorLedger, { force: true });
   }
 } catch {
 }
 var dispatchResidueContext = dispatchResidueLines.length ? `
 
-DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).
+DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).` + (input.source === "clear" ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear \u2014 cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.` : "") + `
 ` + dispatchResidueLines.join("\n") : "";
 await deleteRegisterUnderLock(input.cwd);
 var PERCALL_TMP_TTL_MS = 60 * 60 * 1e3;
@@ -8413,7 +9492,7 @@ try {
     tagRoot = realpathSync2(input.cwd);
   } catch {
   }
-  const projectTag = createHash2("sha256").update(tagRoot).digest("hex").slice(0, 16);
+  const projectTag = createHash4("sha256").update(tagRoot).digest("hex").slice(0, 16);
   const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
   const tmp = tmpdir();
   const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
@@ -8421,9 +9500,9 @@ try {
   for (const name of readdirSync2(tmp)) {
     if (removed >= PERCALL_TMP_SWEEP_CAP) break;
     if (!percallRe.test(name)) continue;
-    const p = join6(tmp, name);
+    const p = join8(tmp, name);
     try {
-      if (statSync3(p).mtimeMs >= cutoff) continue;
+      if (statSync4(p).mtimeMs >= cutoff) continue;
       rmSync2(p, { force: true });
       removed++;
     } catch {
@@ -8434,16 +9513,16 @@ try {
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join6(input.cwd, ".sterling", "transient");
-    const regPaths = [join6(transient, "touches.json"), join6(transient, "session-events.json"), join6(transient, "capture-nagged.json")];
+    const transient = join8(input.cwd, ".sterling", "transient");
+    const regPaths = [join8(transient, "touches.json"), join8(transient, "session-events.json"), join8(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync4(p))) {
+    if (regPaths.some((p) => existsSync7(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync4(touchesPath)) {
-          const raw = JSON.parse(readFileSync4(touchesPath, "utf8"));
+        if (existsSync7(touchesPath)) {
+          const raw = JSON.parse(readFileSync5(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -8451,8 +9530,8 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync4(eventsPath)) {
-          const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
+        if (existsSync7(eventsPath)) {
+          const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -8552,12 +9631,12 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
   queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
 }
 var registryContext = "";
-if (existsSync4(registryPath())) {
+if (existsSync7(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   const registry = new ProjectRegistry(registryPath());
   try {
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync4(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync7(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -8575,7 +9654,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync4(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync5(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -8585,12 +9664,12 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join6(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync4(buildIdPath(serverDist)) ? readFileSync4(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join8(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync7(buildIdPath(serverDist)) ? readFileSync5(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join6(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync4(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync4(markerPath, "utf8")));
+  const markerPath = runtimeMarkerPath(join8(input.cwd, ".sterling", "sterling.db"));
+  if (existsSync7(markerPath)) {
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync5(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -8602,7 +9681,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join6(input.cwd, ".claude", "agents");
+  const agentsDir = join8(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -8618,7 +9697,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync4(join6(agentsDir, f), "utf8");
+      content = readFileSync5(join8(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -8631,7 +9710,7 @@ try {
       }
       continue;
     }
-    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync4(p));
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync7(p));
     if (unresolved) dead.push({ agent: f, node: unresolved });
   }
   if (dead.length || unknown.length) {
@@ -8647,7 +9726,7 @@ MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.le
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join6(input.cwd, ".claude", "agents");
+  const agentsDir = join8(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -8663,7 +9742,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync4(join6(agentsDir, n), "utf8");
+      content = readFileSync5(join8(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -8682,11 +9761,11 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot();
-    const templatesDir = root ? join6(root, "agent-templates") : null;
+    const templatesDir = root ? join8(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join6(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join8(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
@@ -8704,7 +9783,7 @@ try {
         );
         continue;
       }
-      if (templateFile !== basename2(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
+      if (templateFile !== basename3(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
         unknown.push(
           `- ${file} \u2014 currency UNKNOWN: its template '${templateFile}' does not name a plain .md file inside agent-templates/, so nothing outside that directory is allowed to certify it`
         );
@@ -8712,7 +9791,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync4(join6(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync5(join8(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -8776,7 +9855,8 @@ try {
 var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
+  // session may take on, so it is read before the conventions, not after them.
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + malformedContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
-process.stdout.write(JSON.stringify(output));
-allow();
+exitAfterWrite(JSON.stringify(output), 0);

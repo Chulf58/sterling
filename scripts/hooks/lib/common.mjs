@@ -104,15 +104,210 @@ export function readStdin() {
   return input;
 }
 
-/** Block: exit 2 with the rule named on stderr (§6 — exit 1 is non-blocking by platform semantics). */
-export function deny(message) {
-  process.stderr.write(message);
-  process.exit(2);
+/**
+ * WRITE-THEN-EXIT — the exit helpers, as ONE state machine (decision
+ * `hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous`).
+ *
+ * THE INVARIANT: a process that has handed a payload to stdout exits only after
+ * the stream has reported that payload handed off (the write callback), so the
+ * exit never truncates the envelope; and exactly ONE stdout envelope leaves a
+ * process — a second non-empty payload is suppressed and disclosed on stderr,
+ * because Claude Code parses this stdout as ONE JSON object and `{…}{…}` parses
+ * as nothing at all, destroying the first envelope rather than adding to it.
+ * Bookkeeping that records 'delivered' runs in `onWritten`, exactly once, only
+ * after a SUCCESSFUL hand-off, so a failed write leaves those records eligible
+ * for re-delivery. A failed write (a synchronous throw, a callback error, or a
+ * stream 'error' — all settled ONCE per write) exits non-zero: a requested 0
+ * becomes 1, never a clean 0 over a lost envelope.
+ *
+ * MEASURED, which is why this is not ceremony (2026-09-07, WSL2 Linux, Node
+ * v24.14.0, child spawned with stdout piped): a bare `process.stdout.write(p)`
+ * followed by `process.exit(0)` is intact at 16/64/128 KiB and TRUNCATED above
+ * that — 146,176 of 262,144 bytes at 256 KiB, 146,176–182,720 of 1,048,576 at
+ * 1 MiB, reader-timing dependent. The callback form is intact from 64 KiB to
+ * 4 MiB, and intact against a reader paused 300 ms. The truncation is NOT
+ * Windows-only, as was assumed: Node calls `_handle.setBlocking(true)` for fd
+ * 1/2 pipes only on win32, so Linux is the exposed platform here.
+ *
+ * WHAT IT DOES NOT GUARANTEE, stated flat because an over-claiming comment on a
+ * delivery surface is worse than none:
+ *   • that the READER CONSUMED the bytes — the callback proves hand-off to the
+ *     underlying resource, nothing about the other end;
+ *   • completion when the reader never drains. There is deliberately NO timer:
+ *     Claude Code's own hook timeout governs, and an exit-1-after-partial-write
+ *     would lose the same envelope while adding an underivable policy constant;
+ *   • the native-Windows arm — unmeasured (no node.exe on the authoring machine);
+ *   • stderr payloads above the synchronous window (deny/warnNonBlocking below
+ *     stay synchronous, and their messages are bounded far under it);
+ *   • a `deny()` issued while a stdout write is pending TRUNCATES that envelope,
+ *     by design — a block is never lowered to wait for an advisory payload.
+ *
+ * WHY deny()/warnNonBlocking() ARE NOT ON THIS PATH: they are non-returning
+ * control flow across the whole suite (H3, H15, H17 and every other gate rely on
+ * `deny()` never returning), so converting them would need a suite-wide
+ * control-flow migration — and a blocking exit must never become asynchronous.
+ * Their only change is pending-awareness, below.
+ *
+ * The state lives per instance so tests build their own with stubs; there is
+ * deliberately no test-only reset.
+ */
+export function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false; // a non-empty payload was ATTEMPTED (not necessarily delivered)
+  let pending = 0; // writes handed to the stream and not yet settled
+  let exitCode = 0; // the code the settled write will exit with
+  let finished = false; // the FIRST actual exit wins
+
+  // Every disclosure is best-effort: a stderr write that throws must never
+  // change the outcome the caller asked for.
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+      /* there is nothing left to say it on */
+    }
+  };
+
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+
+  /**
+   * Put `payload` on stdout and exit `code` once the stream has taken it.
+   * An EMPTY payload with nothing pending exits synchronously (this is what
+   * keeps allow() non-returning for every unmigrated caller); an empty payload
+   * while a write is in flight is a no-op — that write's exit carries.
+   */
+  function exitAfterWrite(payload, code, { onWritten } = {}) {
+    const text = typeof payload === 'string' ? payload : String(payload ?? '');
+
+    if (!text) {
+      if (pending > 0) return; // the in-flight write owns the exit
+      exitCode = code;
+      finish();
+      return;
+    }
+
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED — the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      // Nothing pending means the first write already settled and exited; this
+      // is a no-op there, and the in-flight case is carried by that write.
+      // The suppressed call's `code` is NOT honoured (disclosed, not raised):
+      // the first envelope's exit stands, because a delivered envelope outranks
+      // a later advisory code — an exit-1 hook's stdout is not read as an
+      // envelope. A block is never requested this way: deny() is the primitive.
+      if (pending === 0) finish();
+      return;
+    }
+
+    // BOTH SET BEFORE THE ATTEMPT: a write that throws may already have emitted
+    // a partial JSON prefix (so the one-envelope rule must already hold), and an
+    // injected stream may call its callback SYNCHRONOUSLY (so `pending` must
+    // already be counted when settle runs).
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return; // Node may report one failure via BOTH the callback and 'error'
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === 'function') {
+          try {
+            stdout.removeListener('error', onError);
+          } catch {
+            /* best effort */
+          }
+        }
+        if (err) {
+          // A clean 0 would tell the platform the envelope landed. It did not.
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${(err && err.message) || err}) — exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === 'function') {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${(e && e.message) || e}) — the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        // ONE decrement, ONE exit, whatever happened above.
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error('stdout error'));
+    if (typeof stdout.once === 'function') stdout.once('error', onError);
+
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error('stdout write threw'));
+    }
+  }
+
+  /** Exit 0 — pending-aware: with a write in flight, that write's exit carries. */
+  function allow() {
+    return exitAfterWrite('', 0);
+  }
+
+  /**
+   * Block: exit 2 with the rule named on stderr (§6 — exit 1 is non-blocking by
+   * platform semantics). The message write is BEST-EFFORT and the exit is not:
+   * a stderr failure costs the reader the reason, never the block — a denial
+   * voided by its own disclosure is the fail-open this whole layer exists to
+   * prevent.
+   */
+  function deny(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight — that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).\n`
+      );
+    }
+    note(message);
+    // The block takes the shared exit latch itself — NOT through finish(), whose
+    // code is the stdout write's — so a write settling afterwards in an
+    // injected instance can never add a second exit (Codex review 01a07a8b).
+    finished = true;
+    exit(2);
+  }
+
+  /**
+   * Non-blocking internal failure: loud on stderr, exit 1 (P5: visible, never a
+   * silent gate-void). PENDING-AWARE: with a stdout write in flight this
+   * discloses and RETURNS, letting that write's exit carry — a delivered
+   * envelope outranks an advisory failure, and an exit-1 hook's stdout is not
+   * the envelope Claude Code reads.
+   */
+  function warnNonBlocking(message) {
+    if (pending > 0) {
+      note(
+        `${message}\nhook stdout: the above is DISCLOSED ONLY — a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.\n`
+      );
+      return;
+    }
+    note(message);
+    finished = true; // same latch, same reason as deny()
+    exit(1);
+  }
+
+  return { exitAfterWrite, allow, deny, warnNonBlocking };
 }
 
-export function allow() {
-  process.exit(0);
-}
+/** The process-bound instance. Every hook imports these names; tests build their own. */
+export const { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code),
+});
 
 /**
  * Standardized wrapper for a gate denial caused by BROKEN INTERNAL STATE (a
@@ -175,12 +370,6 @@ export function environmentDefectDenial(gateName, detail, opts = {}) {
     instruction = agentFacing;
   }
   return `⚠ ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
-}
-
-/** Non-blocking internal failure: loud on stderr, exit 1 (P5: visible, never a silent gate-void). */
-export function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
 }
 
 export function loadConfig(cwd) {

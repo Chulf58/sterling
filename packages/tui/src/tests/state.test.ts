@@ -14,6 +14,38 @@ import { keyToEvent, mouseToEvent, draw } from '../render.js';
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
+/**
+ * A DISTINCT, MONOTONIC stamp per seeded record — DESCENDING from NOW — shared
+ * by BOTH record builders in this file (`envelope` and `kenv`), so every seed
+ * is covered by one clock.
+ *
+ * WHY (fixture race, not a behaviour change): the store's total order for
+ * query() is `ORDER BY updated_at DESC, id DESC` (deliberate, for keyset
+ * paging) and the id tiebreak is a RANDOM uuid. Every seed here used to carry
+ * the SAME constant NOW, so the tiebreak decided the order and the
+ * insertion-order assertions flipped between runs (measured: the same test
+ * passing one run and failing the next with elements 0/1 swapped).
+ *
+ * DIRECTION, derived from the assertions rather than from taste: `todoCards`
+ * is asserted to be `['first todo', 'second todo']`, rows[0] is asserted to be
+ * t1 (the `priority: high` one), and the body-line hit-tests treat line 4 as
+ * t1 and line 5 as t2 — i.e. RENDERED order == INSERTION order. Under
+ * `updated_at DESC` the row that sorts FIRST needs the LATEST stamp, so the
+ * FIRST record seeded gets the latest stamp and each later seed a strictly
+ * earlier one. Hence descending.
+ *
+ * The clock is BASED 30 SECONDS AFTER NOW and decrements 1ms per seed, so the
+ * first 30,000 seeds all land inside minute 12:00 — a base AT NOW would put
+ * the second seed onward at 11:59:59.999, crossing the minute boundary. No
+ * assertion reads a literal timestamp (only \d{2}:\d{2} format regexes), but a
+ * clock that silently walks backwards through minutes is a fixture waiting to
+ * surprise someone. Every stamp also stays strictly OLDER than the 12:30–12:35
+ * removal stamps the queue arms pass to store.remove().
+ */
+const NOW_MS = Date.parse(NOW) + 30_000;
+let seeded = 0;
+const seedStamp = (): string => new Date(NOW_MS - seeded++).toISOString();
+
 /** UiState literal helper — defaults from initialUi, overrides on top. */
 const st = (over: Partial<UiState> = {}): UiState => ({ ...initialUi, ...over });
 
@@ -79,11 +111,12 @@ function emptyFixture() {
 }
 
 function envelope(type: string) {
+  const at = seedStamp();
   return {
     id: randomUUID(),
     type,
-    created_at: NOW,
-    updated_at: NOW,
+    created_at: at,
+    updated_at: at,
     author: 'conductor',
     status: 'active',
     superseded_by: null,
@@ -243,7 +276,13 @@ test('queue tab activity section (board 39d6462d): every knowledge write, drawn 
     assert.ok(s.queueActivity!.lines.length > 0);
     assert.match(s.queueActivity!.lines[0], /^(\d{2}-\d{2} )?\d{2}:\d{2} \w+ · .+$/, 'left stamp + verb + title, same format as completed');
 
-    // a fresh write appears at the top, newest first
+    // a fresh write appears at the top, newest first — AND THE ORDERING KEY IS
+    // THE WRITE SEQUENCE, NOT THE DISPLAYED STAMP. The shared seeding clock
+    // hands out DESCENDING stamps, so this record — the newest by sequence —
+    // carries the OLDEST stamp in the store. That makes this arm a real
+    // discriminator: an activity log re-sorted by the record stamp would put
+    // this decision LAST and go red, exactly as the completed-section arm below
+    // pins the same distinction for the drain log ('seq beats stamp').
     const d = store.create({ ...envelope('decision'), title: 'a fresh decision', statement: 'x', alternatives_rejected: [], rationale: 'y', file_keys: [] });
     s = buildDashboardState(store, ui);
     assert.match(s.queueActivity!.lines[0], /created · a fresh decision$/);
@@ -723,7 +762,8 @@ const vm = viewmodel as unknown as KnowledgeViewmodel;
 
 // -- record builders (full valid envelopes per @sterling/schemas) ------------
 function kenv(type: string, scope = 'project') {
-  return { id: randomUUID(), type, created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active', superseded_by: null, links: [], scope, stack_tags: [] };
+  const at = seedStamp();
+  return { id: randomUUID(), type, created_at: at, updated_at: at, author: 'conductor', status: 'active', superseded_by: null, links: [], scope, stack_tags: [] };
 }
 function decisionRec(over: Record<string, unknown> = {}) {
   return {

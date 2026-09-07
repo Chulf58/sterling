@@ -91,8 +91,8 @@ test('AC1: board_edit replaces a unique passage in a user board item text withou
     // (same idiom as board_update's own test).
     const laterTools = new SterlingTools({ store, now: () => LATER });
 
-    // EXPECTED FAILURE TODAY: TS2339 "Property 'boardEdit' does not exist on
-    // type 'SterlingTools'" (compile-time) — board_edit is not implemented.
+    // Authored red-first (TS2339 on boardEdit at the time); board_edit has since
+    // landed and this arm is retained as its regression pin.
     const after = editedItem(laterTools.boardEdit(original.id, 'with header', 'with headers'));
 
     assert.equal(after.id, original.id, 'the id is PRESERVED — board_edit is an in-place edit, not a supersession (decision a91c80b5)');
@@ -185,6 +185,77 @@ test('AC3: board_edit edits a maintenance (source:system) item the same way — 
 });
 
 // ---------------------------------------------------------------------------
+// OVERLAPPING-MATCH COUNTING + LITERAL REPLACEMENT (board-less side finding,
+// fixed by the tools.ts lane). board_edit's exactly-once occurrence count is
+// the SAME shared char-by-char-advancing scan used by knowledge_edit and
+// knowledge_extract (tools.ts ~:8125), which ALSO gained a literal splice
+// (tools.ts ~:8138) — replacement text is no longer run through native
+// `current.replace(find, replace)`, which treats `$&`/`$$` specially even
+// for a plain string search pattern. See knowledge-edit-selector.test.ts for
+// the same shapes pinned at knowledge_edit's two sites, and
+// knowledge-extract.test.ts for knowledge_extract's — each site is an
+// INDEPENDENT guard.
+// ---------------------------------------------------------------------------
+
+test('CONTROL (board_edit, first): find "aa" in "aab" (one match, no overlap) still edits successfully', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: original } = tools.boardAdd({ text: 'aab', source: 'user' }) as unknown as { record: { id: string } };
+    const after = editedItem(tools.boardEdit(original.id, 'aa', 'Z'));
+    assert.equal(after.text, 'Zb', 'the one non-overlapping match is replaced');
+  } finally {
+    cleanup();
+  }
+});
+// No dedicated sabotage — this is the control the AMBIGUITY pin below needs
+// to mean anything.
+
+test('AMBIGUITY (board_edit): find "aa" in "aaa" (overlapping matches at offset 0 and 1) is refused, naming the count; item unchanged', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: original } = tools.boardAdd({ text: 'aaa', source: 'user' }) as unknown as { record: { id: string; text: string } };
+    assert.throws(
+      () => tools.boardEdit(original.id, 'aa', 'Z'),
+      /appears 2 times/,
+      'the overlapping-match count (2) is named, not silently 1'
+    );
+    const [unchanged] = tools.boardQuery({ source: 'user' }) as unknown as { id: string; text: string }[];
+    assert.equal(unchanged.text, 'aaa', 'nothing was written by the refused call');
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: restore `current.split(find).length - 1` as the occurrence count
+// at the board_edit site (tools.ts ~:8125) — 'aaa'.split('aa') = ['', 'a'],
+// length-1 = 1, so the overlapping second match at offset 1 is missed and
+// this call wrongly succeeds instead of refusing — this test's
+// `assert.throws` goes red ("Missing expected exception") while the CONTROL
+// above, and the knowledge_edit / knowledge_extract overlap pins in their own
+// files, stay green (each site is an independent guard; all of them
+// reddening together would mean the harness itself is wrong, not this one
+// site).
+
+test('LITERAL REPLACE (board_edit): replace text containing $& and $$ is stored LITERALLY, not native-String.replace-expanded', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const { record: original } = tools.boardAdd({ text: 'KEEP ORIG TAIL', source: 'user' }) as unknown as { record: { id: string } };
+    const after = editedItem(tools.boardEdit(original.id, 'ORIG', 'cost $5 and $& and $$'));
+    assert.equal(
+      after.text,
+      'KEEP cost $5 and $& and $$ TAIL',
+      'the replacement text is spliced in literally — $& is not expanded to the matched text, $$ is not collapsed to a single $'
+    );
+  } finally {
+    cleanup();
+  }
+});
+// Sabotage: restore `current.replace(find, replace)` (the literal splice
+// tools.ts ~:8138 replaces) — MEASURED shape: the item reads back
+// "KEEP cost $5 and ORIG and $ TAIL" instead of the literal replacement text
+// ($& expands to the matched text 'ORIG', $$ collapses to a single $), so
+// this assertion goes red.
+
+// ---------------------------------------------------------------------------
 // 4. board_get — AC4: full untruncated item by id; refuses unknown id naming
 //    it; resolves an unambiguous 8-char prefix (mirrors the knowledge id
 //    ladder tested for knowledge_get).
@@ -198,8 +269,8 @@ test('AC4: board_get returns the full untruncated item, refuses an unknown id na
       record: { id: string; text: string };
     };
 
-    // EXPECTED FAILURE TODAY: TS2339 "Property 'boardGet' does not exist on
-    // type 'SterlingTools'" (compile-time) — board_get is not implemented.
+    // Authored red-first (TS2339 on boardGet at the time); board_get has since
+    // landed and this arm is retained as its regression pin.
     const full = tools.boardGet(item.id) as unknown as { id: string; text: string };
     assert.equal(full.id, item.id);
     assert.equal(full.text, longText, 'the FULL text, byte for byte — untruncated, unlike the digest projection');

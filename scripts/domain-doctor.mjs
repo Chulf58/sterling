@@ -92,6 +92,74 @@
 //     Unix and native Windows. Exit 0 published; exit 2 anything else,
 //     including EEXIST when the destination already exists or appears
 //     mid-run — never a partial or replaced destination.
+//
+//   node scripts/domain-doctor.mjs scope-audit [--project <dir>] [--roots <a,b>] [--json]
+//     READ-ONLY INVENTORY of scope disagreement. It REPAIRS NOTHING — there is
+//     no --apply, and there never should be one on this verb; the repair is a
+//     separate, later, gated step that needs this count first.
+//     WHY: a record's body `scope` is NOT which physical store holds it
+//     (anti_pattern record-body-scope-is-not-physical-store-identity, severity
+//     block). Creation routes by body scope (packages/store/src/mounted.ts:30-33
+//     via resolveDomainMounts, mounted.ts:73), but every later update routes by
+//     the store PHYSICALLY HOLDING the id, and `scope` is caller-writable and
+//     never re-validated against the row's own column. The `records.scope`
+//     COLUMN is NOT NULL (packages/store/src/index.ts:45), so a scope-less ROW
+//     cannot exist — but a row whose column is set while its JSON BODY omits or
+//     contradicts the key is ordinarily reachable, and since reads parse the
+//     BODY, the storage layer holds an authoritative value the read path never
+//     consults. Before the read path can be changed to make that
+//     unrepresentable, we must know HOW MANY rows already disagree. H15 denies
+//     any ad-hoc shell command touching a store file, so this sanctioned script
+//     is the only route to that count.
+//     FIVE FINDING CLASSES:
+//       C1 body_omits_scope           body has no `scope` key at all — the row is
+//                                     well-formed (its column is set); the read
+//                                     path simply never sees the column.
+//       C2 body_contradicts_column    body.scope is present and differs from the
+//                                     row's `scope` column.
+//       C3 column_contradicts_location the column disagrees with the store the row
+//                                     PHYSICALLY sits in. Deliberately NOT a SQL
+//                                     predicate: the file you opened IS the
+//                                     physical location, so this is attributed
+//                                     per-file from the dbPath's MOUNTED identity
+//                                     (the project's stack_tags manifest +
+//                                     domain_paths), never from any row's field.
+//       C4 duplicate_id_across_mounts one id present in more than one store of the
+//                                     mounted fan. MountedStores.get()
+//                                     (mounted.ts:168) and storeHolding() (:346)
+//                                     both silently resolve PROJECT-FIRST while
+//                                     their comments assume uniqueness, so with a
+//                                     duplicate "the holding store" has no single
+//                                     answer. Every holder is NAMED and NO WINNER
+//                                     IS EVER PICKED — picking one here would be
+//                                     the very guess the anti-pattern forbids.
+//       C5 ambiguous_mount            one physical database mounted under two
+//                                     different identities. Its rows are REFUSED,
+//                                     not classified: attributing them to
+//                                     whichever name was inspected first would
+//                                     manufacture C3 findings out of the tool's
+//                                     own iteration order.
+//     Stores found under --roots that the project does NOT mount are reported in
+//     their own UNMOUNTED/STRANDED section and never mixed into the mounted
+//     findings; their C3 identity is INFERRED FROM THE PATH (disclosed as such),
+//     because no manifest claims them. THAT SWEEP IS OPT-IN: with --project and
+//     no --roots the audit stays inside that project's mounted fan and does NOT
+//     touch this machine's default domain roots (unlike scan/sweep, whose job IS
+//     the machine-wide inventory). With NO --project there is no mounted fan at
+//     all, so C4 is reported as NOT CHECKED — never as 0 — and the run is
+//     INCOMPLETE by construction on both surfaces.
+//     A project store that has not been materialized yet (§2.3 lazy create) is
+//     an ABSENT store, exactly like an unmaterialized domain store — the mounted
+//     domain stores are still audited. Only a project that cannot be IDENTIFIED
+//     (no config, or several candidate .db files and no canonical one) refuses.
+//     FAILURE IS NEVER SILENCE (P5): an unreadable store, an absent records
+//     table, an absent scope column, an unparseable body and a malformed row id
+//     are each their own BLOCKED class, printed with the path and the underlying
+//     error, and they make the audit INCOMPLETE. A store that could not be read
+//     is NOT zero findings.
+//     Exit 0 clean (every row agrees, nothing was blocked); exit 3 FINDINGS
+//     exist; exit 2 the audit COULD NOT BE COMPLETED (a blocked store/row or an
+//     ambiguous mount) — an operator can always tell "clean" from "blocked".
 import {
   readFileSync, readdirSync, existsSync, mkdirSync, openSync, readSync, closeSync,
   realpathSync, statSync, rmSync, linkSync, writeFileSync,
@@ -99,19 +167,38 @@ import {
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { SterlingStore, resolveDomainMounts, droppedKeyPaths, renderCappedPathList } from '@sterling/store';
 import { parseConfig, validateRecord } from '@sterling/schemas';
 import { buildResolver } from './lib/citations.mjs';
+import { arg as sharedArg, hasFlag as sharedHasFlag } from './lib/project.mjs';
+import { resolveStoreWritePath } from './lib/store-path.mjs';
 
 function fail(msg, code = 2) {
   console.error(`domain-doctor: ${msg}`);
   process.exit(code);
 }
 
+// ONE shared, exact-token parser (decision sanctioned-script-store-writes-one-
+// containment-helper-one-arg-parser, R5) — both spellings, duplicate refusal,
+// flag-as-value refusal. Same bare-name convenience wrapper this script
+// already offered; `undefined` on absence preserves every existing `?? fail(...)`
+// call site unchanged.
 function arg(name) {
-  const i = process.argv.indexOf(`--${name}`);
-  return i === -1 ? undefined : process.argv[i + 1];
+  try {
+    return sharedArg(`--${name}`);
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
+function hasFlag(name) {
+  try {
+    return sharedHasFlag(`--${name}`);
+  } catch (e) {
+    fail(e.message);
+  }
 }
 
 const POSIX = (p) => p.replace(/\\/g, '/');
@@ -120,10 +207,19 @@ const POSIX = (p) => p.replace(/\\/g, '/');
  *  plus the Windows-side home when running under WSL (the machine's other
  *  launcher context — the flip between the two is the incident's leading cause). */
 function defaultRoots() {
-  const roots = [join(homedir(), '.sterling', 'domains')];
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): homedir() always exists, so the helper's
+  // realpath step never trips here. The alternate Windows-side home may not
+  // exist at all on this machine (not running under WSL) — existence is
+  // checked BEFORE the helper runs, because the helper's realpath step
+  // requires the root itself to exist.
+  const roots = [resolveStoreWritePath(homedir(), '.sterling', 'domains')];
   const user = basename(homedir());
-  const winHome = join('/mnt/c/Users', user, '.sterling', 'domains');
-  if (existsSync(winHome)) roots.push(winHome);
+  const winHomeRoot = join('/mnt/c/Users', user);
+  if (existsSync(winHomeRoot)) {
+    const winHome = resolveStoreWritePath(winHomeRoot, '.sterling', 'domains');
+    if (existsSync(winHome)) roots.push(winHome);
+  }
   return roots;
 }
 
@@ -159,19 +255,149 @@ function openRO(dbPath) {
  * `fn` must only GATHER — never call fail() inside it. fail() exits the
  * process, and process.exit skips the finally below, so a refusal from inside
  * would leak both the handle and the litter this exists to prevent.
+ *
+ * NEITHER THE SAMPLE NOR A ZERO-LENGTH WAL PROVES OWNERSHIP — WHAT IS AND IS
+ * NOT ESTABLISHED, MEASURED RATHER THAN ASSERTED:
+ *   MEASURED 2026-09-06 (throwaway probe, this machine, node:sqlite over
+ *   /tmp): a read-only open materializes NOTHING until its first query, and
+ *   then leaves a ZERO-byte -wal and a 32768-byte -shm, both still present
+ *   after close (a read-only connection cannot checkpoint or unlink them).
+ *   A writer holding committed uncheckpointed frames has a NON-EMPTY -wal
+ *   (8272 bytes for one small row; 37112 measured earlier for another).
+ * So a non-empty WAL is reliably somebody's live state and is never touched.
+ * What the earlier version of this comment claimed — that removing only
+ * zero-length WALs "can never discard a commit, whoever created it" — is
+ * FALSE, and was measured false: a writer that attaches INSIDE this probe's
+ * window, commits, and then checkpoints under TRUNCATE (or under
+ * journal_size_limit) leaves the -wal PRESENT AT ZERO BYTES while still
+ * holding it open. Under the old predicate that WAL was removed; on POSIX the
+ * writer then goes on writing frames into an unlinked inode, invisible to
+ * every later reader, and a fresh reader gets `disk I/O error` (measured, same
+ * probe). That is the shape anti_pattern artifact-asserts-unperformed-
+ * verification names, so the removal is now NARROWED and the residual is
+ * disclosed below rather than claimed away.
+ *
+ * THE NARROWED PREDICATE (an exclusivity PROXY, not a proof). The probe issues
+ * one trivial read of its own immediately after opening, so the sidecars it
+ * creates are MATERIALIZED AND SAMPLED BEFORE `fn` runs. Removal then requires
+ * ALL of:
+ *   - NEITHER -wal NOR -shm existed before the open (a -shm we did not create
+ *     means another connection is or was attached: leave BOTH alone);
+ *   - our own read materialized a zero-length -wal, and we hold its identity;
+ *   - at removal the -wal is the SAME FILE (dev+inode), still zero-length, and
+ *     its mtime AND ctime are unchanged since we created it — a foreign
+ *     connection's frames stamp the WAL, and so does the checkpoint that
+ *     truncates them back to zero, which is exactly what the old size-only
+ *     check could not see (measured: refuses the truncate-checkpoint case that
+ *     the old predicate removed);
+ *   - -shm is removed only alongside, and only when it is still the same file
+ *     we created (its BYTES legitimately change — our own read-mark lives
+ *     there — so only identity is compared, never content).
+ *
+ * DISCLOSED LIMIT, BESIDE THE -shm ONE: this is a PROXY and the open-handle
+ * race is NOT closed. A connection that attaches inside the window and has not
+ * yet touched the -wal file (a pure reader, or a writer between BEGIN and its
+ * first frame) leaves every byte of metadata above unchanged, so its sidecars
+ * are still removed — measured, and left as found rather than papered over. It
+ * cannot be closed from here: proving exclusivity needs a descriptor-bound or
+ * lock-bound check, a WRITABLE handle (which would checkpoint the store — the
+ * anti_pattern this whole helper exists for), or an OS facility node does not
+ * expose; a PreToolUse-style check cannot be descriptor-bound either, since it
+ * sees a command line and not the file handles it will open. WHY NARROW RATHER
+ * THAN LEAVE-AS-FOUND: leaving the litter unconditionally is the strictly safer
+ * posture, and it would break P-RACE-2, which pins that a COLD store gets no
+ * litter from this tool. Narrowing keeps that promise while closing the one
+ * unsound branch that was measured reachable; the tension is recorded here
+ * rather than resolved by loosening either side.
  */
-function readOnlyProbe(dbPath, fn) {
+/** Everything that can distinguish "the sidecar OUR open created, untouched
+ *  since" from "a file another connection has written to". `absent` and
+ *  `unknown` are kept apart — an unstattable sidecar is never removed. */
+function sidecarState(path) {
+  try {
+    const s = statSync(path);
+    return { state: 'present', size: s.size, dev: s.dev, ino: s.ino, mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs };
+  } catch (e) {
+    return { state: e?.code === 'ENOENT' ? 'absent' : 'unknown', code: e?.code ?? null };
+  }
+}
+
+/** Same file, same bytes-length, and no write since it was sampled. */
+function sidecarUnchanged(a, b) {
+  return (
+    a.state === 'present' && b.state === 'present' &&
+    a.dev === b.dev && a.ino === b.ino && a.size === b.size &&
+    a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs
+  );
+}
+
+/** A cleanup failure MUST NOT become the probe's result. rmSync suppresses only
+ *  ENOENT: on native Windows unlinking a sidecar another process holds open
+ *  fails EPERM/EBUSY, and a read-only directory gives EACCES — and a throw from
+ *  a `finally` REPLACES the value or the exception the caller was about to see,
+ *  which downstream reads as "opening it read-only failed" for a read that
+ *  actually SUCCEEDED (a wrong diagnosis, and for scope-audit a completed audit
+ *  turned into a BLOCKED entry and exit 2). Failing to delete litter is
+ *  harmless; masking the outcome is not. So it is surfaced as a NOTE and
+ *  swallowed. */
+function removeOwnSidecar(path, what) {
+  try {
+    rmSync(path, { force: true });
+  } catch (e) {
+    console.error(
+      `domain-doctor: NOTE — the ${what} this read-only open created ('${path}') could not be removed ` +
+        `(${e?.code ?? 'error'}: ${e?.message ?? e}). The probe's RESULT is unaffected: nothing was read differently and ` +
+        'nothing was written. What is left behind is a rebuildable sidecar, never database content.'
+    );
+  }
+}
+
+/* EXPORTED AS A TEST SEAM, and for no other reason. The race this helper
+ * guards is an INTERLEAVING — a commit landing between the existence sample and
+ * the removal — and it cannot be constructed across a spawnSync boundary: any
+ * -wal a parent process can create before the child starts is already present
+ * at the child's sample point, so the unguarded branch is never reached. Driven
+ * in-process, `fn` runs INSIDE that window and a second connection can commit
+ * from there with no timing dependence. The export adds no parameter, changes
+ * no behaviour, and is used by nothing in this file's own CLI paths. */
+export function readOnlyProbe(dbPath, fn) {
   const walPath = `${dbPath}-wal`;
   const shmPath = `${dbPath}-shm`;
-  const hadWal = existsSync(walPath);
-  const hadShm = existsSync(shmPath);
+  const walBefore = sidecarState(walPath);
+  const shmBefore = sidecarState(shmPath);
   const db = openRO(dbPath);
+  // MATERIALIZE OUR OWN SIDECARS AND SAMPLE THEM, before `fn` can run and
+  // before any other connection can attach: a read-only open creates nothing
+  // until its first query (measured), so without this read the cleanup has no
+  // baseline to compare against and cannot tell its own -wal from a
+  // truncate-checkpointed one. Deliberately swallowed: a file that is not a
+  // database, a corrupt one, or a store without the table the caller wants are
+  // all reported by `fn`'s own guarded reads exactly as before — here a throw
+  // only means we hold NO baseline, and with no baseline nothing is removed.
+  let walOurs = { state: 'unknown', code: 'UNSAMPLED' };
+  let shmOurs = { state: 'unknown', code: 'UNSAMPLED' };
+  try {
+    db.prepare('SELECT 1 AS materialize FROM sqlite_master LIMIT 1').get();
+    walOurs = sidecarState(walPath);
+    shmOurs = sidecarState(shmPath);
+  } catch { /* no baseline — see above; the removal below then refuses. */ }
   try {
     return fn(db);
   } finally {
     db.close();
-    if (!hadWal) rmSync(walPath, { force: true });
-    if (!hadShm) rmSync(shmPath, { force: true });
+    // Nothing existed before, our own read made an EMPTY -wal, and that exact
+    // file is untouched since. Anything else — a pre-existing sidecar, frames,
+    // a truncate, a replaced inode, an unstattable file — leaves BOTH alone.
+    const pristineBefore = walBefore.state === 'absent' && shmBefore.state === 'absent';
+    const ourEmptyWal = pristineBefore && walOurs.state === 'present' && walOurs.size === 0;
+    if (ourEmptyWal && sidecarUnchanged(walOurs, sidecarState(walPath))) {
+      removeOwnSidecar(walPath, '-wal sidecar');
+      const shmNow = sidecarState(shmPath);
+      // -shm bytes change legitimately (the read-mark), so identity only.
+      if (shmOurs.state === 'present' && shmNow.state === 'present' && shmNow.dev === shmOurs.dev && shmNow.ino === shmOurs.ino) {
+        removeOwnSidecar(shmPath, '-shm sidecar');
+      }
+    }
   }
 }
 
@@ -410,14 +636,41 @@ function refuseSameFile(from, to, verb) {
   }
 }
 
-/** Every store file under the given roots: root/<domain>/sterling.db. */
-function storeFilesUnder(rootList) {
+/**
+ * Every store file under the given roots: root/<domain>/sterling.db.
+ *
+ * `onInaccessible` is OPT-IN and changes nothing for a caller that omits it —
+ * scan and sweep keep their existing behaviour exactly (an unreachable path is
+ * skipped, as `existsSync` skipped it before). It exists because scope-audit
+ * must never report a store it was not ALLOWED to read as one that is not
+ * there: `existsSync` answers false for EACCES/EPERM exactly as it does for
+ * ENOENT (the distinction storePresence() already makes for the mounted fan),
+ * so a domain directory that is mode 0700 under another uid was silently
+ * omitted from the stranded fan — no BLOCKED entry, nothing marked incomplete,
+ * and a run that printed its verdict as if it had looked everywhere. Callers
+ * that pass the callback receive those paths and can BLOCK on them.
+ *
+ * (`readdirSync` throwing on an unreadable ROOT still escapes to the top-level
+ * handler as a loud exit 2 — that half was already loud; only the per-path
+ * checks went quiet.)
+ */
+function storeFilesUnder(rootList, { onInaccessible = null } = {}) {
   const found = [];
   for (const root of rootList) {
-    if (!existsSync(root)) continue;
+    const rootPresence = storePresence(root);
+    if (rootPresence.inaccessible) {
+      if (onInaccessible) onInaccessible({ kind: 'root', root: POSIX(root), path: POSIX(root), domain: null, error: rootPresence.accessError });
+      continue;
+    }
+    if (!rootPresence.exists) continue;
     for (const name of readdirSync(root)) {
       const dbPath = POSIX(join(root, name, 'sterling.db'));
-      if (existsSync(dbPath)) found.push({ root: POSIX(root), domain: name, dbPath });
+      const presence = storePresence(dbPath);
+      if (presence.inaccessible) {
+        if (onInaccessible) onInaccessible({ kind: 'store', root: POSIX(root), path: dbPath, domain: name, error: presence.accessError });
+        continue;
+      }
+      if (presence.exists) found.push({ root: POSIX(root), domain: name, dbPath });
     }
   }
   return found;
@@ -425,7 +678,14 @@ function storeFilesUnder(rootList) {
 
 function projectContext(projectDir) {
   if (!projectDir) fail('--project <dir> is required');
-  const dotDir = join(projectDir, '.sterling');
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
+  let dotDir;
+  try {
+    dotDir = resolveStoreWritePath(projectDir, '.sterling');
+  } catch (e) {
+    fail(e.message);
+  }
   const configPath = join(dotDir, 'config.json');
   if (!existsSync(configPath)) fail(`no Sterling config at ${POSIX(configPath)} — is this an init'd project?`);
   // store.db is the standard name; fall back to the single *.db in .sterling so
@@ -691,7 +951,7 @@ function writeMigrateJournal(journalPath, journal, { beforeAnyWrite }) {
 function migrate() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
-  const apply = process.argv.includes('--apply');
+  const apply = hasFlag('apply');
   if (!existsSync(from)) fail(`no source store at ${from}`);
   // THE FIFTH REFUSAL PATH (outside-model review, 2026-08-27): this message
   // predates NO_OPERABLE_ROUTE and used to promise that "'adopt' creates a
@@ -1390,8 +1650,8 @@ function supersessionPointers(dbPath) {
 function adopt() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
-  const apply = process.argv.includes('--apply');
-  const createOnly = process.argv.includes('--create-only');
+  const apply = hasFlag('apply');
+  const createOnly = hasFlag('create-only');
   // THE TWO FLAGS ARE ONE GESTURE, and the pairing is required in both
   // directions. `--create-only` exists so nobody can reach a write by typing
   // the flag they already know: bare `--apply` is what an operator types when
@@ -2000,7 +2260,7 @@ function show() {
 
 function scan() {
   const rootList = roots();
-  console.log(`domain-doctor scan — roots: ${rootList.join(', ')}`);
+  console.log(`domain-doctor scan — READ-ONLY, NOTHING IS REPAIRED. roots: ${rootList.join(', ')}`);
   const files = storeFilesUnder(rootList);
   if (!files.length) {
     console.log('no domain store files found under any root');
@@ -2052,8 +2312,14 @@ function sweep() {
   if (surveyed.error) fail(surveyed.error);
   const { pointers: rows, conflicts } = surveyed.ok;
   const dangling = rows.filter((r) => !universe.has(r.successor_id));
+  // The read-only claim is stated where the run's evidence is, not only in this
+  // file's header: a forensics verb whose whole value is telling the truth about
+  // a store should say, on the output an operator actually reads, that it
+  // touched nothing. sweep opens every store through readOnlyProbe and has no
+  // write path at all.
   console.log(
-    `domain-doctor sweep — ${rows.length} superseded_by pointer(s) in ${storePath}, resolved against ${seenPaths.size} store file(s)`
+    `domain-doctor sweep — READ-ONLY, NOTHING IS REPAIRED: ${rows.length} superseded_by pointer(s) in ${storePath}, ` +
+      `resolved against ${seenPaths.size} store file(s)`
   );
   for (const c of conflicts) {
     const labeled = c.successors.map((s) => `${s.successorId} (${s.via})`).join(' vs ');
@@ -2130,7 +2396,7 @@ function restore() {
   const { config, storePath } = projectContext(arg('project'));
   const tombstoneId = arg('tombstone') ?? fail('--tombstone <id> is required');
   const domain = arg('domain') ?? fail('--domain <name> is required');
-  const apply = process.argv.includes('--apply');
+  const apply = hasFlag('apply');
 
   const info = tombstoneInfo(storePath, tombstoneId);
   if (info.error) fail(info.error);
@@ -2186,7 +2452,23 @@ function restore() {
     );
   }
 
-  const domainDb = POSIX(config.domain_paths[domain] ?? join(homedir(), '.sterling', 'domains', domain, 'sterling.db'));
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5) for the DEFAULT path only: an admin-configured
+  // config.domain_paths[domain] is an explicit, already-trusted absolute path
+  // with no fixed root to validate against, so it passes through unchanged.
+  // The default join was previously a bare lexical join of `domain` (a CLI
+  // argument) under the user's home directory — vulnerable to both a `..`
+  // segment in --domain and a pre-positioned symlink under
+  // ~/.sterling/domains, the same class of bug board a416e276 measured in
+  // no-capture.mjs.
+  let domainDb;
+  try {
+    domainDb = POSIX(
+      config.domain_paths[domain] ?? resolveStoreWritePath(homedir(), '.sterling', 'domains', domain, 'sterling.db')
+    );
+  } catch (e) {
+    fail(e.message);
+  }
   const now = new Date().toISOString();
   // content verbatim from the tombstone body; envelope rebuilt exactly as
   // knowledge_promote builds it, except the id is the DANGLING one — restoring
@@ -2233,6 +2515,736 @@ function restore() {
   console.log(`RESTORED: '${targetId}' now resolves in ${domainDb}`);
 }
 
+/* ── scope-audit ───────────────────────────────────────────────────────────
+ * READ-ONLY. Every handle below goes through readOnlyProbe; nothing in this
+ * section opens a writable connection, and there is no --apply. See the header
+ * block for what each class means and why the count is needed.
+ */
+
+/** Named once so the human and the --json surfaces can never drift apart. */
+const SCOPE_FINDING = {
+  C1: 'body_omits_scope',
+  C2: 'body_contradicts_column',
+  C3: 'column_contradicts_location',
+  C4: 'duplicate_id_across_mounts',
+  C5: 'ambiguous_mount',
+};
+
+/** BLOCKED is structurally separate from FINDINGS, and that separation is the
+ *  point: "3 rows disagree" and "1 store I could not read" are different facts,
+ *  and a surface that adds them together lets a failure read as an inventory. */
+const SCOPE_BLOCKED = {
+  B1: 'store_unreadable',
+  B2: 'records_table_absent',
+  B3: 'scope_column_absent',
+  B4: 'body_unparseable',
+  B5: 'record_id_malformed',
+};
+
+/** Are two mount entries the SAME FILE? Same question sameFile() answers, but
+ *  as a GROUPING KEY rather than a pairwise test — C5 needs to bucket N mounts,
+ *  and N pairwise realpath calls would be quadratic. inode/device first (it sees
+ *  through hard links, which realpath cannot), realpath second, literal path
+ *  last for a mount whose file does not exist yet. */
+function physicalKey(dbPath) {
+  try {
+    const s = statSync(dbPath);
+    // ino is 0/unreliable on some Windows filesystems — it only ever CONFIRMS
+    // sameness here, exactly as in sameFile().
+    if (s.ino !== 0) return `ino:${s.dev}:${s.ino}`;
+  } catch { /* unstattable: fall through */ }
+  try { return `real:${POSIX(realpathSync(dbPath))}`; } catch { return `path:${POSIX(dbPath)}`; }
+}
+
+/**
+ * Is this store ABSENT, or merely UNREACHABLE? existsSync() answers false for
+ * both — it swallows EACCES/EPERM exactly as it swallows ENOENT — and the two
+ * are opposite facts: a store that has not been created yet holds no rows and
+ * is honestly skipped, while a store we are not ALLOWED to look at may hold
+ * every finding this audit exists to count. Reporting the second as `absent`
+ * is the "blocked read misreported as clean" failure arriving through the
+ * filesystem instead of through SQLite, so anything that is not ENOENT is
+ * BLOCKED here and never absent.
+ */
+function storePresence(dbPath) {
+  try {
+    statSync(dbPath);
+    return { exists: true, inaccessible: false, accessError: null };
+  } catch (e) {
+    if (e?.code === 'ENOENT') return { exists: false, inaccessible: false, accessError: null };
+    return { exists: false, inaccessible: true, accessError: `${e?.code ?? 'unknown error'} — ${e?.message ?? e}` };
+  }
+}
+
+/**
+ * scope-audit's own project resolution. It keeps projectContext's loud refusal
+ * for a project that cannot be IDENTIFIED (no config, or several candidate
+ * stores and no canonical one) — a project we cannot identify must never
+ * degrade into a roots-only scan wearing the word "project" — but a project
+ * store that has not been MATERIALIZED yet is an ABSENT store, not a fatal
+ * refusal: §2.3 lazy-create means an init'd project legitimately has none, and
+ * this verb already reports an unmaterialized DOMAIN store as `absent` rather
+ * than refusing the run. Treating the project store as the one store whose
+ * absence aborts everything made the mounted domain stores unauditable for the
+ * exact projects most likely to need auditing.
+ *
+ * CANONICAL NAME FIRST: the project store is `.sterling/sterling.db`
+ * (packages/mcp-server/src/main.ts:24-32 documents that exact `--store` form,
+ * and it is what a real init'd project holds). `store.db` is accepted second,
+ * then a lone `*.db`, matching projectContext's older fallback.
+ */
+function scopeAuditProjectContext(projectDir) {
+  // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
+  // helper-one-arg-parser, R5): projectDir is caller-supplied (--project).
+  let dotDir;
+  try {
+    dotDir = resolveStoreWritePath(projectDir, '.sterling');
+  } catch (e) {
+    fail(e.message);
+  }
+  const configPath = join(dotDir, 'config.json');
+  if (!existsSync(configPath)) fail(`no Sterling config at ${POSIX(configPath)} — is this an init'd project?`);
+  const config = parseConfig(JSON.parse(readFileSync(configPath, 'utf8')));
+  const canonical = POSIX(join(dotDir, 'sterling.db'));
+  const present = ['sterling.db', 'store.db'].filter((name) => existsSync(POSIX(join(dotDir, name))));
+  if (present.length) {
+    // BOTH canonical names present is the plausible mid-rename state, and the
+    // audit silently picking one of them is the same unstated choice PIN4/5 is
+    // about: the rows in the OTHER file are not audited and nothing said so.
+    // The canonical name still wins (it is the one a live session mounts) —
+    // what changes is that the ignored candidate is NAMED.
+    const note =
+      present.length > 1
+        ? `two candidate project stores are present in ${POSIX(dotDir)} (${present.join(', ')}); the canonical '${present[0]}' ` +
+          `was audited and '${present.slice(1).join(', ')}' was NOT read at all — its rows are outside every number in this report`
+        : null;
+    return { config, storePath: POSIX(join(dotDir, present[0])), projectStoreNote: note };
+  }
+  const dbs = readdirSync(dotDir).filter((f) => f.endsWith('.db'));
+  if (dbs.length === 1) return { config, storePath: POSIX(join(dotDir, dbs[0])), projectStoreNote: null };
+  if (dbs.length > 1) {
+    fail(
+      `cannot tell which file in ${POSIX(dotDir)} is the project store (found ${dbs.join(', ')} and no sterling.db/store.db) — ` +
+        'auditing the wrong one would attribute its rows to this project'
+    );
+  }
+  // No .db at all: the project store has simply never been created.
+  return { config, storePath: canonical, projectStoreNote: null };
+}
+
+/** A human-readable name for a row, so no id is ever printed bare (the conduct
+ *  rule: a truncated id is unresolvable, a truncated name is still
+ *  recognisable). Different record types carry their name in different fields,
+ *  and a row this verb exists to audit may be malformed enough to carry none —
+ *  which is itself said out loud rather than papered over with the id. */
+function scopeRowLabel(body) {
+  const candidate = [body?.title, body?.slug, body?.name, body?.text].find(
+    (v) => typeof v === 'string' && v.trim()
+  );
+  if (!candidate) return '(no title/slug/name on this row)';
+  const flat = candidate.replace(/\s+/g, ' ').trim();
+  return flat.length > 70 ? `${flat.slice(0, 69)}…` : flat;
+}
+
+/** id + name, never the id alone. */
+function scopeRowRef(id, label) {
+  return `"${label}" (${id})`;
+}
+
+/** How a body's `scope` presents. Deliberately hasOwnProperty rather than a
+ *  truthiness or != null test: `{"scope": null}` and a body with NO scope key
+ *  are different rows with different repairs, and only the second is C1. */
+function bodyScopeOf(body) {
+  if (!Object.prototype.hasOwnProperty.call(body, 'scope')) return { present: false, value: undefined };
+  return { present: true, value: body.scope };
+}
+
+/**
+ * Which stores this audit covers, and under WHAT IDENTITY each one is claimed.
+ * Identity is what C3 is judged against, so where it comes from is recorded on
+ * every target and disclosed in the output: a manifest claim is a real claim; a
+ * directory name under a root is an INFERENCE about a store nobody mounts.
+ */
+function scopeAuditTargets() {
+  const projectDir = arg('project');
+  const targets = [];
+  let projectStorePath = null;
+  let projectStoreNote = null;
+  let config = null;
+
+  if (projectDir !== undefined) {
+    // Loud on a project we cannot IDENTIFY, tolerant of one not yet
+    // MATERIALIZED — see scopeAuditProjectContext.
+    ({ config, storePath: projectStorePath, projectStoreNote = null } = scopeAuditProjectContext(projectDir));
+    targets.push({
+      dbPath: projectStorePath,
+      mount: 'project',
+      expected: 'project',
+      identitySource: 'manifest',
+      mounted: true,
+      ...storePresence(projectStorePath),
+    });
+    for (const m of resolveDomainMounts(config)) {
+      const p = POSIX(m.dbPath);
+      targets.push({
+        dbPath: p,
+        mount: `domain:${m.name}`,
+        expected: `domain:${m.name}`,
+        identitySource: 'manifest',
+        mounted: true,
+        ...storePresence(p),
+      });
+    }
+  }
+
+  // Everything under the roots the project does NOT mount. Reported separately
+  // and NEVER folded into the mounted findings.
+  //
+  // OPT-IN WHEN A PROJECT IS NAMED (ruling 2026-09-06): with --project, the
+  // audit is scoped to THAT project's fan and the machine's default domain
+  // roots are NOT swept. A run asked about one project used to read — and
+  // print live record counts from — every store belonging to the user on this
+  // machine, which a test fixture in a tmpdir has no business reaching. Pass
+  // --roots explicitly to include them. scan/sweep are deliberately untouched:
+  // their whole job is the machine-wide inventory.
+  const strandedScan = arg('roots') !== undefined || projectDir === undefined;
+  const mountedKeys = new Set(targets.filter((t) => t.exists).map((t) => physicalKey(t.dbPath)));
+  const rootList = strandedScan ? roots() : [];
+  // A path under the roots that we were not ALLOWED to look at is BLOCKED, not
+  // absent — the same distinction storePresence() draws for the mounted fan,
+  // carried into the stranded one so an unreadable domain directory cannot be
+  // silently dropped and leave the run reporting a completed audit.
+  const unreachable = [];
+  const found = storeFilesUnder(rootList, { onInaccessible: (u) => unreachable.push(u) });
+  for (const f of found) {
+    if (mountedKeys.has(physicalKey(f.dbPath))) continue;
+    targets.push({
+      dbPath: f.dbPath,
+      mount: `domain:${f.domain}`,
+      expected: `domain:${f.domain}`,
+      // NOT a manifest claim: nothing mounts this store, so its identity is
+      // read off its own directory name. Said out loud on every finding.
+      identitySource: 'path',
+      mounted: false,
+      exists: true,
+      inaccessible: false,
+      accessError: null,
+    });
+  }
+  for (const u of unreachable) {
+    targets.push({
+      dbPath: u.path,
+      // A whole root we could not stat names no domain, so it is claimed under
+      // no identity at all rather than under a guessed one.
+      mount: u.domain === null ? `root:${u.root}` : `domain:${u.domain}`,
+      expected: u.domain === null ? null : `domain:${u.domain}`,
+      identitySource: 'path',
+      mounted: false,
+      exists: false,
+      inaccessible: true,
+      accessError:
+        u.domain === null
+          ? `${u.error} (a domain ROOT — every store under it is unaudited, and there is no way to know how many)`
+          : u.error,
+    });
+  }
+
+  return { targets, rootList, strandedScan, projectDir, projectStorePath, projectStoreNote, config };
+}
+
+/**
+ * ONE read-only pass over one store, GATHERING ONLY. Never calls fail() —
+ * process.exit would skip readOnlyProbe's finally and leak both the handle and
+ * the sidecar litter the conditional cleanup exists to prevent (anti_pattern
+ * a-writable-sqlite-open-on-a-wal-database-mutates-the-main-fi). Every refusal
+ * is returned upward as a BLOCKED entry instead.
+ */
+function scopeAuditStore(target) {
+  // `rows` are CLASSIFIABLE rows (C1/C2/C3 need a parsed body); `holders` is
+  // the id INVENTORY C4 counts, which must also carry rows whose body did not
+  // parse — an id held by three stores, one of them unparseable, would
+  // otherwise be reported with two holders under a note promising every one.
+  // recordCount starts NULL, never 0: a store whose rows were never read has an
+  // UNKNOWN count, and printing 0 for it is the same false-zero shape B1/PIN6
+  // exist to remove — "it holds nothing" and "I could not look" must not share
+  // a rendering. It becomes a number only once the rows are actually in hand.
+  const out = { rows: [], holders: [], findings: [], blocked: [], recordCount: null };
+  const blocked = (cls, error, extra = {}) =>
+    out.blocked.push({ class: cls, dbPath: target.dbPath, mount: target.mount, error, ...extra });
+
+  let probe;
+  try {
+    probe = readOnlyProbe(target.dbPath, (db) => {
+      let tables;
+      try {
+        tables = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((t) => t.name));
+      } catch (e) {
+        return { fatal: SCOPE_BLOCKED.B1, detail: `listing its tables failed: ${e.message}` };
+      }
+      if (!tables.has('records')) {
+        return {
+          fatal: SCOPE_BLOCKED.B2,
+          detail: 'it holds no `records` table — a SQLite file, but not a Sterling knowledge store',
+        };
+      }
+      let cols;
+      try {
+        cols = new Set(db.prepare('PRAGMA table_info(records)').all().map((c) => c.name));
+      } catch (e) {
+        return { fatal: SCOPE_BLOCKED.B1, detail: `reading the shape of its \`records\` table failed: ${e.message}` };
+      }
+      if (!cols.has('scope')) {
+        return {
+          fatal: SCOPE_BLOCKED.B3,
+          detail:
+            'its `records` table has no `scope` column, so there is no physical scope for a body to agree or disagree with',
+        };
+      }
+      try {
+        return { rows: db.prepare('SELECT id, scope, body FROM records').all() };
+      } catch (e) {
+        return { fatal: SCOPE_BLOCKED.B1, detail: `reading rows from its \`records\` table failed: ${e.message}` };
+      }
+    });
+  } catch (e) {
+    // The open itself, or anything past this file's own guards. A crash on the
+    // reporting path would say nothing about what was or was not audited.
+    blocked(SCOPE_BLOCKED.B1, `opening it read-only failed: ${e.message}`);
+    return out;
+  }
+  if (probe.fatal) {
+    blocked(probe.fatal, probe.detail);
+    return out;
+  }
+
+  out.recordCount = probe.rows.length;
+  for (const raw of probe.rows) {
+    if (typeof raw.id !== 'string' || !raw.id) {
+      // show() already treats a null/non-string id as a FINDING rather than
+      // dropping it; the same posture here — an unidentifiable row cannot be
+      // inventoried, so it blocks rather than vanishing.
+      // THE PREDICATE IS NARROWER THAN THE CLASS NAME: `record_id_malformed`
+      // fires on "not a non-empty string" — i.e. UNADDRESSABLE — and on nothing
+      // else. It deliberately does NOT check id SHAPE (uuid or otherwise): a
+      // shape check was considered and rejected, because this audit must keep
+      // reading legacy and foreign stores whose ids are legitimately not uuids,
+      // and refusing them would block the very forensics the verb exists for.
+      blocked(SCOPE_BLOCKED.B5, `a row carries a ${raw.id === null ? 'NULL' : typeof raw.id} id, which no audit can address`);
+      continue;
+    }
+    const unreadableHolder = () =>
+      out.holders.push({
+        dbPath: target.dbPath,
+        mount: target.mount,
+        identity_source: target.identitySource,
+        mounted: target.mounted,
+        id: raw.id,
+        label: '(no readable name — this row\'s body could not be parsed)',
+        column_scope: raw.scope,
+        body_unparseable: true,
+      });
+
+    let body;
+    try {
+      body = JSON.parse(raw.body);
+    } catch (e) {
+      blocked(SCOPE_BLOCKED.B4, `its body is not parseable JSON: ${e.message}`, { id: raw.id });
+      unreadableHolder();
+      continue;
+    }
+    if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+      blocked(SCOPE_BLOCKED.B4, 'its body parses but is not a JSON object, so it has no fields to audit', { id: raw.id });
+      unreadableHolder();
+      continue;
+    }
+
+    const label = scopeRowLabel(body);
+    const bodyScope = bodyScopeOf(body);
+    const entry = {
+      dbPath: target.dbPath,
+      mount: target.mount,
+      identity_source: target.identitySource,
+      mounted: target.mounted,
+      id: raw.id,
+      label,
+      column_scope: raw.scope,
+      body_scope: bodyScope.present ? bodyScope.value : undefined,
+      body_scope_present: bodyScope.present,
+    };
+    out.rows.push(entry);
+    out.holders.push(entry);
+
+    if (!bodyScope.present) {
+      out.findings.push({ ...entry, class: SCOPE_FINDING.C1 });
+    } else if (bodyScope.value !== raw.scope) {
+      out.findings.push({ ...entry, class: SCOPE_FINDING.C2 });
+    }
+    // C3 is a PER-FILE attribution, not a row predicate: the file we opened IS
+    // the physical location, so the comparison is against this target's mounted
+    // identity — never against anything the row itself claims.
+    if (raw.scope !== target.expected) {
+      out.findings.push({ ...entry, class: SCOPE_FINDING.C3, expected_scope: target.expected });
+    }
+  }
+  return out;
+}
+
+function scopeAudit() {
+  const asJson = hasFlag('json');
+  const { targets: declaredTargets, rootList, strandedScan, projectDir, projectStorePath, projectStoreNote } = scopeAuditTargets();
+
+  // ONE FILE DECLARED TWICE UNDER THE SAME NAME IS ONE STORE, NOT AN AMBIGUITY.
+  // config.stack_tags carries no uniqueness constraint (packages/schemas/src/
+  // config.ts:62), so `["node","node"]` yields two targets with the same mount
+  // AND the same file. C5 below only fires on DIFFERING identities, so such a
+  // pair fell through and the store was audited TWICE: every row counted
+  // twice, the store listed twice, and every id turned into a spurious C4
+  // whose two "holders" were the same path — a store with no drift at all
+  // exiting 3. Collapsed here (and disclosed), which leaves C5 to answer the
+  // question it is actually for: one file claimed under two DIFFERENT names.
+  const targets = [];
+  const declarationsSeen = new Set();
+  const duplicateDeclarations = [];
+  for (const t of declaredTargets) {
+    const key = physicalKey(t.dbPath);
+    const declaration = `${key} ${t.mount}`;
+    if (declarationsSeen.has(declaration)) {
+      duplicateDeclarations.push({ dbPath: t.dbPath, mount: t.mount });
+      continue;
+    }
+    declarationsSeen.add(declaration);
+    targets.push({ ...t, physicalKey: key });
+  }
+
+  // C5 first: a store mounted under two identities has its rows REFUSED, so the
+  // ambiguity must be known before any row of it is classified.
+  const byPhysical = new Map();
+  for (const t of targets) {
+    if (!t.exists) continue;
+    const key = t.physicalKey;
+    if (!byPhysical.has(key)) byPhysical.set(key, []);
+    byPhysical.get(key).push(t);
+  }
+  const findings = [];
+  const blocked = [];
+  const ambiguousKeys = new Set();
+  for (const [key, group] of byPhysical) {
+    const identities = [...new Set(group.map((t) => t.mount))];
+    if (identities.length < 2) continue;
+    ambiguousKeys.add(key);
+    findings.push({
+      class: SCOPE_FINDING.C5,
+      dbPath: group[0].dbPath,
+      mounts: identities,
+      paths: [...new Set(group.map((t) => t.dbPath))],
+      note:
+        'one physical database is mounted under more than one identity — its rows are NOT classified, because attributing ' +
+        'them to whichever identity was inspected first would manufacture findings out of this tool\'s iteration order',
+    });
+  }
+
+  const perStore = [];
+  const holdersById = new Map();
+  for (const t of targets) {
+    const key = t.exists ? t.physicalKey : null;
+    if (t.inaccessible) {
+      // Not absent — UNREACHABLE. It was never opened, so its rows are
+      // uncounted and the audit is incomplete, exactly as for a store that
+      // failed to open.
+      const entry = {
+        class: SCOPE_BLOCKED.B1,
+        dbPath: t.dbPath,
+        mount: t.mount,
+        error: `it could not be inspected, so it was never opened and none of its rows were audited: ${t.accessError}`,
+      };
+      blocked.push(entry);
+      perStore.push({ ...t, status: 'blocked', recordCount: null, findings: [], blocked: [entry], counts: {} });
+      continue;
+    }
+    if (!t.exists) {
+      // NULL, not 0, on both surfaces: an unmaterialized store was never read,
+      // and `records: 0` for an unread store is a count nobody took.
+      perStore.push({ ...t, status: 'absent', recordCount: null, findings: [], counts: {} });
+      continue;
+    }
+    if (ambiguousKeys.has(key)) {
+      perStore.push({ ...t, status: 'refused_ambiguous_mount', recordCount: null, findings: [], counts: {} });
+      continue;
+    }
+    const res = scopeAuditStore(t);
+    findings.push(...res.findings);
+    blocked.push(...res.blocked);
+    const counts = {};
+    for (const f of res.findings) counts[f.class] = (counts[f.class] ?? 0) + 1;
+    perStore.push({
+      ...t,
+      status: res.blocked.length ? 'blocked' : 'audited',
+      recordCount: res.recordCount,
+      findings: res.findings,
+      blocked: res.blocked,
+      counts,
+    });
+    // C4 spans the MOUNTED fan only — that is where MountedStores.get() and
+    // storeHolding() actually resolve, and therefore the only place a duplicate
+    // id makes "the holding store" unanswerable.
+    if (!t.mounted) continue;
+    for (const r of res.holders) {
+      if (!holdersById.has(r.id)) holdersById.set(r.id, []);
+      holdersById.get(r.id).push(r);
+    }
+  }
+
+  for (const [id, holders] of holdersById) {
+    if (holders.length < 2) continue;
+    findings.push({
+      class: SCOPE_FINDING.C4,
+      id,
+      label: (holders.find((h) => !h.body_unparseable) ?? holders[0]).label,
+      holders: holders.map((h) => ({
+        dbPath: h.dbPath,
+        mount: h.mount,
+        column_scope: h.column_scope,
+        body_scope: h.body_scope,
+        body_scope_present: h.body_scope_present ?? null,
+        body_unparseable: h.body_unparseable === true,
+      })),
+      note:
+        'the same id is held by more than one store in the mounted fan; MountedStores.get() (mounted.ts:168) and ' +
+        'storeHolding() (mounted.ts:346) would both silently answer PROJECT-FIRST. NO WINNER IS PICKED HERE.',
+    });
+  }
+
+  // A CLASS THAT WAS NEVER EVALUATED IS NOT A CLASS WITH ZERO FINDINGS.
+  // C4 asks whether one id is held by two stores OF THE MOUNTED FAN; with no
+  // --project there is no fan, nothing is ever compared, and printing
+  // `duplicate_id_across_mounts: 0` would be a "checked, found none" claim for
+  // something never checked — on a machine whose two domain stores really do
+  // share an id, a --json consumer was told the audit completed and found
+  // nothing. (A fan of ONE store is different: the comparison is performed and
+  // vacuously answers none.) The same run also has no manifest to judge C3
+  // against, so every identity in it is a directory-name inference.
+  const notChecked =
+    targets.some((t) => t.mounted)
+      ? []
+      : [
+          {
+            class: SCOPE_FINDING.C4,
+            reason:
+              'no --project was given, so there is no mounted fan to compare across — no pair of stores was ever checked for a ' +
+              'shared id, and every C3 identity below is INFERRED from a directory name rather than claimed by a manifest',
+          },
+        ];
+
+  // An ambiguous mount is a FINDING, and it also leaves rows unclassified — so
+  // it makes the audit INCOMPLETE exactly as a blocked store does. Incomplete
+  // dominates: an operator must never read a partial inventory as clean.
+  const incomplete = blocked.length > 0 || ambiguousKeys.size > 0 || notChecked.length > 0;
+  const counts = {};
+  for (const f of findings) counts[f.class] = (counts[f.class] ?? 0) + 1;
+  const blockedCounts = {};
+  for (const b of blocked) blockedCounts[b.class] = (blockedCounts[b.class] ?? 0) + 1;
+  const exitCode = incomplete ? 2 : findings.length ? 3 : 0;
+
+  if (asJson) {
+    // JSON.stringify DROPS a key whose value is undefined, so a C1 finding —
+    // whose whole content is that the body has NO scope key — reached a machine
+    // consumer with no `body_scope` at all, while the human surface says
+    // "<key absent from body>" out loud. The two surfaces must disclose the
+    // same thing: the key is always present here, and `body_scope_present`
+    // carries the distinction from a body whose scope really is null.
+    const jsonFinding = (f) => {
+      const out = { ...f };
+      if ('body_scope_present' in out) out.body_scope = out.body_scope ?? null;
+      if (Array.isArray(out.holders)) out.holders = out.holders.map((h) => ({ ...h, body_scope: h.body_scope ?? null }));
+      return out;
+    };
+    console.log(
+      JSON.stringify(
+        {
+          verb: 'scope-audit',
+          read_only: true,
+          repaired: 'nothing — this verb has no write path',
+          project: projectDir ?? null,
+          project_store: projectStorePath,
+          // Non-null only when more than one canonical project-store name is
+          // present and one of them was therefore NOT read.
+          project_store_note: projectStoreNote ?? null,
+          roots: rootList,
+          stranded_scan: strandedScan,
+          stranded_scan_note: strandedScan
+            ? null
+            : 'a --project was given without --roots, so the machine\'s default domain roots were NOT swept: stores outside this ' +
+              "project's mounted fan are neither listed nor audited here",
+          duplicate_mount_declarations: duplicateDeclarations,
+          stores: perStore.map((s) => ({
+            dbPath: s.dbPath,
+            mount: s.mount,
+            expected_scope: s.expected,
+            identity_source: s.identitySource,
+            mounted: s.mounted,
+            status: s.status,
+            records: s.recordCount,
+            counts: s.counts,
+          })),
+          findings: findings.map(jsonFinding),
+          blocked,
+          counts,
+          blocked_counts: blockedCounts,
+          // Classes this run could not evaluate. A consumer must read these as
+          // UNKNOWN, never as zero — `counts` deliberately says nothing about
+          // them.
+          not_checked: notChecked,
+          audit_complete: !incomplete,
+          exit: exitCode,
+        },
+        null,
+        2
+      )
+    );
+    process.exit(exitCode);
+  }
+
+  console.log('domain-doctor scope-audit — READ-ONLY inventory of scope disagreement. NOTHING IS REPAIRED.');
+  if (projectDir === undefined) {
+    console.log(
+      'no --project given: there is no mounted fan, so every store below is UNMOUNTED, C3 identity is inferred from each ' +
+        "store's own directory name, and C4 (duplicate id across mounts) cannot be evaluated at all"
+    );
+  } else {
+    console.log(`project: ${projectDir}  (store ${projectStorePath})`);
+    if (projectStoreNote) console.log(`note: ${projectStoreNote}`);
+  }
+  if (strandedScan) {
+    console.log(`roots scanned: ${rootList.join(', ')}`);
+  } else {
+    console.log(
+      'roots scanned: none — a --project was given without --roots, so this audit stays inside that project\'s mounted fan and ' +
+        "does NOT sweep this machine's domain roots (pass --roots <a,b> to include them)"
+    );
+  }
+  if (duplicateDeclarations.length) {
+    console.log(
+      `note: ${duplicateDeclarations.length} duplicate mount declaration(s) collapsed — ` +
+        `${duplicateDeclarations.map((d) => `${d.mount} -> ${d.dbPath}`).join(', ')} names a file already claimed under the same ` +
+        'identity (a repeated stack tag), so it is audited once rather than twice'
+    );
+  }
+
+  const mountedStores = perStore.filter((s) => s.mounted);
+  const strandedStores = perStore.filter((s) => !s.mounted);
+
+  const printStore = (s) => {
+    const identity = s.identitySource === 'manifest' ? s.mount : `${s.mount} [identity INFERRED from the path — nothing mounts this store]`;
+    if (s.status === 'absent') {
+      console.log(`\n[${identity}] ${s.dbPath}\n  not materialized yet (§2.3 lazy create) — skipped, and deliberately NOT created`);
+      return;
+    }
+    if (s.status === 'refused_ambiguous_mount') {
+      console.log(`\n[${identity}] ${s.dbPath}\n  REFUSED (${SCOPE_FINDING.C5}): see the ambiguous-mount finding below — rows NOT classified`);
+      return;
+    }
+    console.log(`\n[${identity}] ${s.dbPath}`);
+    // A count nobody took is printed as such. `records: 0` here used to be the
+    // rendering for a store this run never managed to read.
+    console.log(
+      s.recordCount === null
+        ? '  records: NOT READ — this store was never opened, so its row count is unknown (not zero)'
+        : `  records: ${s.recordCount}`
+    );
+    for (const b of s.blocked ?? []) {
+      console.log(`  BLOCKED ${b.class}: ${b.id ? `${scopeRowRef(b.id, '(unreadable row)')} — ` : ''}${b.error}`);
+    }
+    if (!s.findings.length && !(s.blocked ?? []).length) {
+      // Deliberately NOT the word "clean". That word is the RUN's verdict and
+      // is printed once, in SUMMARY, where it is gated on the audit having
+      // completed. Per-store it read as reassurance: a run that was blocked on
+      // the one store that mattered still printed dozens of "clean" lines above
+      // a single buried AUDIT INCOMPLETE, and a human skimming that output
+      // takes away the reassurance, not the incompleteness.
+      console.log('  no disagreement in this store: every body agrees with its column, and every column agrees with this store');
+      return;
+    }
+    for (const [cls, n] of Object.entries(s.counts)) console.log(`  ${cls}: ${n}`);
+    for (const f of s.findings) {
+      const bodyShown = f.body_scope_present ? JSON.stringify(f.body_scope) : '<key absent from body>';
+      const extra = f.class === SCOPE_FINDING.C3 ? `, this store holds scope=${JSON.stringify(f.expected_scope)}` : '';
+      console.log(`    ${f.class}: ${scopeRowRef(f.id, f.label)} column=${JSON.stringify(f.column_scope)} body=${bodyShown}${extra}`);
+    }
+  };
+
+  console.log(`\nMOUNTED FAN (${mountedStores.length} store(s))`);
+  if (!mountedStores.length) console.log('  none — no project was given, so nothing is claimed as mounted');
+  for (const s of mountedStores) printStore(s);
+
+  console.log(
+    `\nUNMOUNTED / STRANDED (${strandedStores.length} store(s) under the roots that this project does not mount — reported ` +
+      'separately, never mixed into the mounted findings)'
+  );
+  if (!strandedStores.length) console.log('  none');
+  for (const s of strandedStores) printStore(s);
+
+  const crossStore = findings.filter((f) => f.class === SCOPE_FINDING.C4 || f.class === SCOPE_FINDING.C5);
+  console.log(`\nCROSS-STORE (${crossStore.length})`);
+  if (!crossStore.length) console.log('  none');
+  for (const f of crossStore) {
+    if (f.class === SCOPE_FINDING.C5) {
+      console.log(`  ${f.class}: ${f.paths.join(' == ')} is mounted as ${f.mounts.join(' AND ')} — ${f.note}`);
+      continue;
+    }
+    console.log(
+      `  ${f.class}: ${scopeRowRef(f.id, f.label)} is held by ${f.holders.map((h) => `${h.dbPath} (${h.mount})`).join('; ')} — ${f.note}`
+    );
+  }
+
+  console.log('\nSUMMARY');
+  for (const cls of Object.values(SCOPE_FINDING)) {
+    const unchecked = notChecked.find((n) => n.class === cls);
+    // "NOT CHECKED" rather than 0 — printing a zero for a class this run never
+    // evaluated is a claim it is not entitled to make.
+    console.log(unchecked ? `  ${cls}: NOT CHECKED — ${unchecked.reason}` : `  ${cls}: ${counts[cls] ?? 0}`);
+  }
+  console.log(`  findings: ${findings.length}`);
+  for (const cls of Object.values(SCOPE_BLOCKED)) {
+    if (blockedCounts[cls]) console.log(`  BLOCKED ${cls}: ${blockedCounts[cls]}`);
+  }
+  console.log(`  blocked: ${blocked.length}`);
+  if (incomplete) {
+    console.log(
+      'AUDIT INCOMPLETE — one or more stores or rows could not be classified, or a whole finding class could not be evaluated. ' +
+        'This is NOT a no-drift result: the rows behind them are uncounted, so treat every number above as a LOWER BOUND (exit 2).'
+    );
+  } else if (findings.length) {
+    console.log(`FINDINGS: ${findings.length} row(s)/id(s) disagree. Nothing was repaired (exit 3).`);
+  } else {
+    console.log('CLEAN: every audited row\'s body scope agrees with its column, and every column agrees with the store holding it (exit 0).');
+  }
+  process.exit(exitCode);
+}
+
+/**
+ * Is this file being RUN, or merely IMPORTED? Until readOnlyProbe was exported
+ * (see its comment) the question could not arise — the module was CLI-only, so
+ * the dispatch below ran unconditionally. An importer would now hit that
+ * dispatch with the IMPORTER's argv and exit(2) on the usage refusal, which
+ * would make the seam unusable.
+ *
+ * FAILS OPEN ON PURPOSE: any doubt — an argv[1] that cannot be resolved, a
+ * platform where the comparison throws — answers YES and the CLI runs exactly
+ * as before. The wrong answer in that direction is a loud usage refusal in a
+ * test; the wrong answer in the other direction is a sanctioned repair CLI that
+ * silently does NOTHING, which is far worse than the hazard this seam exists to
+ * pin. realpath on both sides so a symlinked or relative invocation still
+ * matches.
+ */
+function invokedAsCli() {
+  try {
+    if (!process.argv[1]) return true;
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return true;
+  }
+}
+
 const mode = process.argv[2];
 // LAST LINE OF DEFENCE: no driver exception leaves this file as a bare exit-1
 // stack trace. Every anticipated failure is already a fail() with its own
@@ -2243,14 +3255,17 @@ const mode = process.argv[2];
 // the hazard the refusal guards, since it says nothing about what was or was
 // not written. process.exit() does not throw, so every deliberate exit code
 // (0/2/3) still passes through untouched.
-try {
-  if (mode === 'scan') scan();
-  else if (mode === 'sweep') sweep();
-  else if (mode === 'restore') restore();
-  else if (mode === 'migrate') migrate();
-  else if (mode === 'adopt') adopt();
-  else if (mode === 'show') show();
-  else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show … (got '${mode ?? ''}')`);
-} catch (e) {
-  fail(`'${mode}' failed unexpectedly and was abandoned where it stood: ${e?.message ?? e}`);
+if (invokedAsCli()) {
+  try {
+    if (mode === 'scan') scan();
+    else if (mode === 'sweep') sweep();
+    else if (mode === 'restore') restore();
+    else if (mode === 'migrate') migrate();
+    else if (mode === 'adopt') adopt();
+    else if (mode === 'show') show();
+    else if (mode === 'scope-audit') scopeAudit();
+    else fail(`usage: domain-doctor.mjs scan|sweep|restore|migrate|adopt|show|scope-audit … (got '${mode ?? ''}')`);
+  } catch (e) {
+    fail(`'${mode}' failed unexpectedly and was abandoned where it stood: ${e?.message ?? e}`);
+  }
 }

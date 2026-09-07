@@ -58,6 +58,32 @@ import { buildDashboardState, initialUi, QUEUE_TAB } from '../state.js';
 
 const NOW = '2026-08-29T12:00:00.000Z';
 
+/**
+ * A DISTINCT, MONOTONIC stamp per seeded record — DESCENDING from NOW.
+ *
+ * WHY (fixture race, not a behaviour change): the store's total order for
+ * query() is `ORDER BY updated_at DESC, id DESC` (deliberate, for keyset
+ * paging) and the id tiebreak is a RANDOM uuid. Every seed here used to carry
+ * the SAME constant NOW, so the tiebreak decided the order and T0's
+ * insertion-order assertion flipped between runs (measured: elements 0/1
+ * swapped on consecutive runs of the same test).
+ *
+ * DIRECTION, derived from the assertions rather than from taste: T0 asserts
+ * the RENDERED order equals the INSERTION order (`['first todo', 'second
+ * todo']`). Under `updated_at DESC` the row that sorts FIRST is the one with
+ * the LATEST stamp — so the FIRST record seeded must carry the LATEST stamp
+ * and each later seed a strictly EARLIER one. Hence descending.
+ *
+ * The clock is BASED 30 SECONDS AFTER NOW and decrements 1ms per seed, so the
+ * first 30,000 seeds all land inside minute 12:00 — a base AT NOW would put
+ * the second seed onward at 11:59:59.999, crossing the minute boundary. No
+ * assertion here reads a literal timestamp, but a clock that silently walks
+ * backwards through minutes is a fixture waiting to surprise someone.
+ */
+const NOW_MS = Date.parse(NOW) + 30_000;
+let seeded = 0;
+const seedStamp = (): string => new Date(NOW_MS - seeded++).toISOString();
+
 const NAME_CLIP = 48;
 const ELLIPSIS = '…';
 const clipName = (n: string): string => (n.length <= NAME_CLIP ? n : n.slice(0, NAME_CLIP - 1) + ELLIPSIS);
@@ -87,11 +113,12 @@ interface QueueViewmodel {
 const vm = viewmodel as unknown as QueueViewmodel;
 
 function envelope(type: string) {
+  const at = seedStamp();
   return {
     id: randomUUID(),
     type,
-    created_at: NOW,
-    updated_at: NOW,
+    created_at: at,
+    updated_at: at,
     author: 'conductor',
     status: 'active',
     superseded_by: null,

@@ -1,99 +1,34 @@
-// REVIEW-LEDGER `discharge` — THE EXPLICIT LIFECYCLE VERB
-// (campaign slice S2b-3; decision 57984926, slug
-// review-ledger-v2-lifecycle-refuse-flip-and-external-review-design, §3
-// "FALLBACK NARROWING + DISCHARGE").
+// REVIEW-LEDGER `discharge` — THE EXPLICIT LIFECYCLE VERB (R1 PIN RE-CUT).
 //
-// SPEC-ONLY, RED-FIRST. `scripts/review-ledger.mjs` DOES NOT EXIST YET
-// (confirmed by Glob before writing: no scripts/review-ledger*.mjs). Every pin
-// below therefore fails on its FIRST ASSERTION today — spawning a missing
-// module exits non-zero with a MODULE_NOT_FOUND stderr, so the assertions fire
-// normally rather than crashing the harness.
+// AUTHORITY: decision review-receipt-rebuild-invariant-three-owner-modules-
+// tri-state-liveness-receipt-bound-supersession, projected by the R1 contract
+// sheet (§1.2 lifecycle, §1.4 codes, §3.1 the CLI, §6 A5/A7/A9). Where the sheet
+// and the decision differ the decision wins.
 //
-// Authored from the decision record (opened via knowledge_get; §3 quoted
-// verbatim below) and the launching brief — NOT from any implementation. H4
-// read wall honored: this file's author never Read nor content-Grepped
-// scripts/commit-reviewed.mjs or scripts/hooks/lib/*; only sibling TEST files
-// were read, for fixture conventions.
+// WHAT THIS FILE PINS: the verb's SELECTOR, its CONCURRENCY TOKEN, its LIFECYCLE
+// preconditions, its structured `--json` contract, and the two classes whose
+// facts are proved from identity (foreign-session / foreign-branch) or from git
+// (no-live-territory). The superseded / unattributable / legacy classes are
+// pinned in review-ledger-superseded-classes.test.mjs and
+// review-ledger-legacy-handle.test.mjs.
 //
-// SPEC UNDER TEST (decision 57984926 §3, verbatim clause):
-//   "DISCHARGE is a dedicated command (scripts/review-ledger.mjs discharge),
-//    explicit-only, NEVER automatic: selector is entry_id (v2) or a generated
-//    legacy handle + a SHA-256 digest of the exact ledger bytes as the
-//    concurrency token (mtime rejected — granularity and preserved-mtime
-//    rewrites defeat it); requires a recognized unspendable class (foreign
-//    session, foreign branch, conclusive no-live structured territory);
-//    preserves the original evidence, sets status:'discharged' +
-//    disposition{reason, at, head_sha, classifier_version, class, underlying
-//    facts}; atomic locked replace; H1, spending, amend spending, fallback
-//    selection and counts all ignore discharged entries; NO resurrection
-//    command (a mistake is corrected by re-dispatching a reviewer); deletion is
-//    never silent — durable preservation promised, a future explicit archival
-//    operation left open."
-// And, for the no-live class (same section):
-//   "NO-LIVE-TERRITORY classification ... applies ONLY when ALL hold: v2 roster
-//    receipt, structured non-empty territory, usable base_sha, git conclusively
-//    compares EVERY declared path (untracked and deletions checked explicitly),
-//    every path returned to base state in the mode-appropriate view; any
-//    ambiguity yields 'unknown', never no-live. MODE-SPECIFIC classifier
-//    semantics ... new-commit mode compares receipt base -> effective
-//    index/worktree."
+// CONVENTIONS (contract sheet §4):
+//   * a refusal is asserted by its `[code]` token in stderr, or by `--json`'s
+//     `code` field — never by sentence text;
+//   * required FACTS are asserted as fields;
+//   * exit 0 = ok, exit 1 = refusal; a refused discharge leaves the ledger
+//     BYTE-IDENTICAL and no partial file behind.
 //
-// ===========================================================================
-// ASSUMED INTERFACE — STATED SO THE CONDUCTOR CAN ADJUDICATE BEFORE THE CODER
-// LOCKS IT. §3 fixes the SEMANTICS (selector + ledger-bytes digest + recognized
-// class + reason) but names no flag spellings. This file assumes:
-//
-//     node scripts/review-ledger.mjs discharge \
-//       --entry-id <uuid>            # the v2 selector
-//       --digest <sha256-hex>        # SHA-256 of the EXACT current ledger bytes,
-//                                    # lowercase hex, no prefix
-//       --class <foreign-session|foreign-branch|no-live-territory>
-//       --reason "<single-line reason>"
-//
-//   * cwd is the project root; the ledger is .sterling/review-ledger.json
-//     (the path every sibling commit-reviewed suite already uses).
-//   * exit 0 = discharged; exit 1 = refused. Refusals speak on stderr.
-//   * STERLING_SESSION_ID is the current-session seam (the one documented in
-//     commit-reviewed-file-scoping.test.mjs's runCommitReviewedEnv).
-//   * The three class tokens are the decision's own three unspendable classes,
-//     spelled as kebab-case tokens.
-//   IF THE CODER PICKS DIFFERENT SPELLINGS, THIS FILE'S FLAG NAMES ARE THE
-//   THING TO CHANGE — the assertions inside each test are the spec and stand
-//   unchanged. Every flag-name red is a naming adjudication, not a defect.
-//
-// FIXTURE CHOICES THAT ARE LOAD-BEARING:
-//   1. D0's target entry is GENUINELY foreign-session (identity.session_id !=
-//      STERLING_SESSION_ID) so the pin is green under BOTH readings of §3 —
-//      "the CLI merely records the asserted class" and "the CLI verifies the
-//      class holds". A same-session fixture would be ambiguous under the
-//      second reading, and §3 does not say which applies to the two foreign-*
-//      classes (reported as ambiguity (a) below).
-//   2. D6a's receipt base_sha is deliberately NOT HEAD (HEAD has advanced past
-//      it on an unrelated file), so an implementation that "classifies no-live"
-//      by comparing base_sha to HEAD cannot pass it.
-//   3. Every ledger seeded here carries a BYSTANDER entry that no pin
-//      discharges, so every write is checked for collateral damage.
-//
-// AMBIGUITIES FLAGGED, NOT RESOLVED (reported to the launching agent):
-//   (a) Whether `--class foreign-session|foreign-branch` is VERIFIED by the CLI
-//       or merely recorded as the conductor's assertion. §3 verifies only the
-//       no-live class explicitly ("conclusive no-live structured territory").
-//       Fixtures above are built to be green either way; NO pin asserts a
-//       refusal for a mis-asserted foreign-* class.
-//   (b) The "generated legacy handle" selector for v1 entries is unspecified
-//       (§3 names it without defining its generation). NOTHING here pins it —
-//       the brief scopes this slice's pins to the v2 entry_id selector.
-//   (c) "underlying facts" in the disposition object is named by §3 without a
-//       shape. D0 asserts the five NAMED keys and deliberately does not
-//       constrain any additional key.
-//   (d) Whether a second `discharge` on an already-discharged entry REFUSES or
-//       NO-OPS is not stated. D5 pins the invariant that holds under either
-//       (never a second state flip, disposition never rewritten).
-//   (e) Whether --reason is bounded/sanitized the way §2's --waive-bytes reason
-//       is. D8 pins only the MISSING/EMPTY case (an accountability record with
-//       no reason is not an accountability record); no length or newline bound
-//       is invented here.
-// ===========================================================================
+// RETIRED IN THIS RE-CUT (each with its reason):
+//   RETIRED: D2's /digest|checksum|sha-?256|changed|stale/i prose match — converted to [ledger_digest_mismatch].
+//   RETIRED: D3's /class/i prose match — converted to [class_unknown].
+//   RETIRED: D7's /entr|selector|not found|no match/i prose match — converted to [entry_not_found].
+//   RETIRED: D8's /reason/i prose match — a missing flag is now [argument_invalid] with facts.flag.
+//   RETIRED: D4 and D4-CONTROL's "the ledger is [] afterwards" assertions — a spend no longer DELETES; it sets status 'consumed' with consumption{commit_sha}, so deletion-as-consumption is retired outright.
+//   RETIRED: D5b's four-verb resurrection sweep — collapsed to one unknown-verb arm, since every unknown verb is one code ([argument_invalid]) and the extra spellings were duplicate permutations.
+//   RETIRED: D6b/D6c's per-arm prose alternations — converted to [no_live_territory_disproved] (facts.live_paths) and [class_not_applicable].
+//   RETIRED: D6c's legacy-v1 arm — a v1 entry is not addressable by --entry-id at all; that boundary is review-ledger-legacy-handle's, not this file's.
+//   RETIRED: the header's ambiguity register (a)-(e) and its interface-assumption block — the contract sheet fixes the flags, the codes and the facts, so there is nothing left to assume.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -116,6 +51,8 @@ const GIT_SKIP = (() => {
 const SESSION = 'this-session';
 const ENV_SESSION = { STERLING_SESSION_ID: SESSION };
 
+// A refusal/disclosure is identified by its code token, never by its sentence.
+const token = (c) => new RegExp('\\[' + c + '\\]');
 // Anti-pattern ee89c3fd guard: flatten before interpolating into a message.
 const flat = (s) => String(s ?? '').replace(/\r?\n/g, ' | ');
 const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
@@ -141,35 +78,17 @@ function makeRepo() {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function ledgerPath(dir) {
-  return join(dir, '.sterling', 'review-ledger.json');
-}
-function writeLedger(dir, entries) {
-  writeFileSync(ledgerPath(dir), JSON.stringify(entries));
-}
-function readLedger(dir) {
-  return existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null;
-}
-function readLedgerRaw(dir) {
-  return existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null;
-}
+const ledgerPath = (dir) => join(dir, '.sterling', 'review-ledger.json');
+const writeLedger = (dir, entries) => writeFileSync(ledgerPath(dir), JSON.stringify(entries));
+const readLedger = (dir) => (existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null);
+const readLedgerRaw = (dir) => (existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null);
 
-// THE CONCURRENCY TOKEN: SHA-256 over the EXACT ledger bytes, per §3 (mtime was
-// explicitly rejected). Computed from the file, never from a re-serialization
-// of the fixture object — a re-serialized digest could differ from the bytes on
-// disk and would make a "stale digest" red ambiguous.
-function ledgerDigest(dir) {
-  return createHash('sha256').update(readFileSync(ledgerPath(dir))).digest('hex');
-}
+// THE CONCURRENCY TOKEN: SHA-256 over the EXACT ledger bytes, never over a
+// re-serialization of the parsed entries.
+const ledgerDigest = (dir) => createHash('sha256').update(readFileSync(ledgerPath(dir))).digest('hex');
 
-// "atomic locked replace" is not directly observable from outside the process;
-// what IS observable is that no half-written sibling survives the call. A
-// `.lock` file is excluded — a lock is a legitimate artifact of the mechanism,
-// a `.tmp`/`.new`/partial copy is residue (P4).
 function assertNoLedgerResidue(dir, label) {
-  const residue = readdirSync(join(dir, '.sterling')).filter(
-    (n) => /^review-ledger\.json\..+/.test(n) && !n.endsWith('.lock')
-  );
+  const residue = readdirSync(join(dir, '.sterling')).filter((n) => /^review-ledger\.json\..+/.test(n) && !n.endsWith('.lock'));
   assert.deepEqual(residue, [], `${label}: the replace leaves no partial ledger behind — got ${JSON.stringify(residue)}`);
 }
 
@@ -182,53 +101,57 @@ function stageChange(dir, relPath, content) {
 function commitFile(dir, relPath, content) {
   stageChange(dir, relPath, content);
   git(dir, ['commit', '-m', `seed ${relPath}`]);
-  return git(dir, ['hash-object', relPath]);
 }
-function stagedBlob(dir, relPath) {
-  return git(dir, ['hash-object', relPath]);
-}
+const stagedBlob = (dir, relPath) => git(dir, ['hash-object', relPath]);
 
 function runLedger(dir, args, env = ENV_SESSION) {
-  const r = spawnSync(process.execPath, [LEDGER_CLI, ...args], {
-    cwd: dir,
-    encoding: 'utf8',
-    timeout: 30_000,
-    env: { ...process.env, ...env },
-  });
+  const r = spawnSync(process.execPath, [LEDGER_CLI, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env } });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
+// `--json` mode: EXACTLY ONE object on stdout. JSON.parse throws on trailing
+// junk, so a successful parse of the whole stream IS the one-object assertion.
+function runLedgerJson(dir, args, env = ENV_SESSION) {
+  const r = runLedger(dir, [...args, '--json'], env);
+  let json = null;
+  let parseError = null;
+  try {
+    json = JSON.parse(r.stdout);
+  } catch (e) {
+    parseError = e;
+  }
+  return { ...r, json, parseError };
+}
+
 function runCommitReviewed(dir, args, env = ENV_SESSION) {
-  const r = spawnSync(process.execPath, [COMMIT_CLI, ...args], {
-    cwd: dir,
-    encoding: 'utf8',
-    timeout: 30_000,
-    env: { ...process.env, ...env },
-  });
+  const r = spawnSync(process.execPath, [COMMIT_CLI, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env } });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
 function reviewedByTrailers(dir, sha = 'HEAD') {
-  const out = git(dir, ['log', '-1', `--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)`, sha]);
-  return out.split('\n').filter((l) => l.trim() !== '');
+  return git(dir, ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha]).split('\n').filter((l) => l.trim() !== '');
 }
 
-// v2 entry per decision 57984926 §1, structurally complete (a deficient v2
-// entry is withheld for a DIFFERENT reason — file-scoping S13).
+// A ReceiptV2 per contract sheet §1.2. `basis` is present because the rebuilt
+// parser reads a MISSING basis as this same value (A3) — a fixture that omitted
+// it would pin the compatibility path, not the ordinary one.
 function v2({
   entry_id,
-  agent_type,
+  agent_type = 'reviewer-security',
   files,
   blobs = {},
-  base_sha,
+  base_sha = null,
   session_id = SESSION,
   branch = 'main',
+  agent_id = 'agent-0001',
   source = 'review-territory',
   status = 'active',
   disposition = null,
+  reservation = undefined,
+  consumption = undefined,
   at = isoAgo(60_000),
 }) {
-  return {
+  const e = {
     schema_version: 2,
     entry_id,
     kind: 'roster_receipt',
@@ -236,11 +159,14 @@ function v2({
     started_at: at,
     finished_at: at,
     reviewer: { agent_type, model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
-    identity: { session_id, branch, base_sha },
+    identity: { session_id, branch, base_sha, agent_id },
     territory: { files, source, attribution: 'block' },
-    content_evidence: { status: 'complete', blobs, absent_paths: [], truncated_of: null, failure_reason: null },
+    content_evidence: { basis: 'stop-time-worktree-snapshot', status: 'complete', blobs, absent_paths: [] },
     disposition,
   };
+  if (reservation) e.reservation = reservation;
+  if (consumption) e.consumption = consumption;
+  return e;
 }
 
 const TARGET_ID = 'd0000000-0000-4000-8000-00000000000a';
@@ -248,227 +174,214 @@ const BYSTANDER_ID = 'd0000000-0000-4000-8000-00000000000b';
 const CODE = 'export const f = 1;\n';
 const OTHER = 'export const f = 2;\n';
 
-// A bystander that no pin ever discharges — every write is checked against it.
-function bystander(base_sha) {
-  return v2({ entry_id: BYSTANDER_ID, agent_type: 'reviewer-bystander', files: ['src/base.mjs'], base_sha });
-}
+// A bystander no pin ever discharges — every write is checked against it.
+const bystander = (base_sha) => v2({ entry_id: BYSTANDER_ID, agent_type: 'reviewer-bystander', files: ['src/base.mjs'], base_sha });
 
 // ===========================================================================
-// D0 — THE HAPPY PATH (CONTROL, PLACED FIRST).
-// Every refusal pin in this file (D2, D3, D7, D8, D6b, D6c) would be satisfied
-// identically by a `discharge` that refuses EVERYTHING — including a stub that
-// does not exist. This pin is the evidence that they are not: without D0 green,
-// no refusal pin here carries a verdict.
+// R1-C01 — THE HAPPY PATH (CONTROL, PLACED FIRST).
+// Every refusal pin in this file would be satisfied identically by a verb that
+// refuses EVERYTHING. Without this green, none of them carries a verdict.
 // ===========================================================================
 
-// EXPECTED STATE: RED today — scripts/review-ledger.mjs does not exist, so the
-// spawn exits non-zero and the first assertion (`r.code === 0`) fails.
-// SABOTAGE (preservation half): implement discharge as a DELETE (splice the
-// entry out) -> `after.length === 2` and the evidence deepEqual go red. §3's
-// "deletion is never silent — durable preservation promised" is the whole point
-// of the verb, and a delete would otherwise look like a perfectly good pass.
-// SABOTAGE (disposition half): write status:'discharged' but leave
-// disposition null -> the five named-key assertions go red while status stays
-// green. Those are two independent guards; both are load-bearing here.
-test('discharge D0 (CONTROL, first): a v2 roster receipt is discharged by entry_id with a matching ledger digest — evidence PRESERVED, status discharged, disposition recorded, ledger still valid JSON', { skip: GIT_SKIP }, () => {
+// SABOTAGE (preservation): implement discharge as a splice -> `after.length === 2`
+// and the evidence deepEquals go red.
+// SABOTAGE (disposition): flip status and leave disposition null -> the
+// class/reason/head_sha/classifier_version assertions go red while status stays
+// green. Two independent guards, both load-bearing.
+test('R1-C01 (CONTROL, first): a v2 receipt is discharged by entry_id under a matching digest — evidence preserved, status discharged, disposition{class,reason,at,head_sha,classifier_version:2,facts} recorded', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     const head = git(dir, ['rev-parse', 'HEAD']);
     const target = v2({
       entry_id: TARGET_ID,
-      agent_type: 'reviewer-security',
       files: ['src/base.mjs'],
       blobs: { 'src/base.mjs': stagedBlob(dir, 'src/base.mjs') },
       base_sha: head,
-      session_id: 'a-session-that-ended', // genuinely foreign — fixture choice 1
+      session_id: 'a-session-that-ended', // genuinely foreign, so the class's facts hold
     });
     const other = bystander(head);
     writeLedger(dir, [target, other]);
 
-    const reason = 'session ended before the receipt could be spent; work landed under a later review';
+    const reason = 'session ended before the receipt could be spent';
     const tMin = Date.now() - 1_000;
-    const r = runLedger(dir, [
-      'discharge',
-      '--entry-id', TARGET_ID,
-      '--digest', ledgerDigest(dir),
-      '--class', 'foreign-session',
-      '--reason', reason,
-    ]);
-    assert.equal(r.code, 0, `a well-formed discharge must succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'foreign-session', '--reason', reason]);
+    assert.equal(r.code, 0, `a well-formed discharge exits 0 — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.equal(r.parseError, null, `--json emits exactly one parseable JSON object and nothing else — stdout=${JSON.stringify(r.stdout)}`);
+    assert.equal(r.json.ok, true, `the object reports ok:true — got ${JSON.stringify(r.json)}`);
 
     const after = readLedger(dir);
-    assert.ok(Array.isArray(after), `the ledger is still valid JSON holding an array — raw=${flat(readLedgerRaw(dir))}`);
-    assert.equal(after.length, 2, `NOTHING is deleted — a discharge preserves the record, it does not remove it — got ${JSON.stringify(after)}`);
+    assert.equal(after.length, 2, `NOTHING is deleted — discharge preserves the record — got ${JSON.stringify(after)}`);
+    const discharged = after.find((e) => e.entry_id === TARGET_ID);
+    assert.deepEqual(after.find((e) => e.entry_id === BYSTANDER_ID), other, 'the bystander is byte-for-byte untouched — a discharge writes exactly one entry');
 
-    const [discharged, untouched] = [after.find((e) => e.entry_id === TARGET_ID), after.find((e) => e.entry_id === BYSTANDER_ID)];
-    assert.ok(discharged, 'the discharged entry is still addressable by its entry_id');
-    assert.deepEqual(untouched, other, 'the bystander entry is byte-for-byte untouched — a discharge writes exactly one entry');
-
-    // THE EVIDENCE IS THE POINT: every field that constitutes the review record
-    // survives the state flip unchanged.
-    assert.deepEqual(discharged.reviewer, target.reviewer, 'the reviewer provenance is preserved');
-    assert.deepEqual(discharged.territory, target.territory, 'the reviewed territory is preserved');
-    assert.deepEqual(discharged.content_evidence, target.content_evidence, 'the content evidence is preserved');
-    assert.deepEqual(discharged.identity, target.identity, 'the identity is preserved');
-    assert.equal(discharged.started_at, target.started_at, 'started_at is preserved');
-    assert.equal(discharged.finished_at, target.finished_at, 'finished_at is preserved');
-
+    for (const k of ['reviewer', 'territory', 'content_evidence', 'identity']) {
+      assert.deepEqual(discharged[k], target[k], `${k} survives the state flip unchanged — the evidence IS the point`);
+    }
+    assert.equal(discharged.started_at, target.started_at, 'started_at preserved');
+    assert.equal(discharged.finished_at, target.finished_at, 'finished_at preserved');
     assert.equal(discharged.status, 'discharged', 'the status flips to discharged');
 
     const d = discharged.disposition;
-    assert.ok(d && typeof d === 'object', `the disposition object is recorded, never left null — got ${JSON.stringify(d)}`);
+    assert.equal(d.class, 'foreign-session', 'the class is recorded');
     assert.equal(d.reason, reason, 'the conductor-supplied reason is recorded verbatim');
-    assert.equal(d.class, 'foreign-session', 'the recognized class is recorded');
     assert.equal(d.head_sha, git(dir, ['rev-parse', 'HEAD']), 'head_sha pins WHEN in history the discharge was decided');
-    assert.ok(
-      d.classifier_version !== undefined && d.classifier_version !== null && String(d.classifier_version) !== '',
-      `classifier_version is recorded so a later reader knows which rules produced this verdict — got ${JSON.stringify(d.classifier_version)}`
-    );
+    assert.equal(d.classifier_version, 2, `classifier_version is the rebuild's 2 — got ${JSON.stringify(d.classifier_version)}`);
+    assert.ok(d.facts && typeof d.facts === 'object', `the underlying facts are recorded as an object — got ${JSON.stringify(d.facts)}`);
     const at = Date.parse(d.at);
-    assert.ok(Number.isFinite(at), `disposition.at is a parseable timestamp — got ${JSON.stringify(d.at)}`);
-    assert.ok(at >= tMin && at <= Date.now() + 1_000, `disposition.at is the moment of the discharge, not a copied review timestamp — got ${JSON.stringify(d.at)}`);
+    assert.ok(Number.isFinite(at) && at >= tMin && at <= Date.now() + 1_000, `disposition.at is the moment of the discharge, not a copied review timestamp — got ${JSON.stringify(d.at)}`);
 
-    assertNoLedgerResidue(dir, 'D0');
+    assertNoLedgerResidue(dir, 'R1-C01');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// D2 / D3 / D7 / D8 — THE REFUSAL FAMILY. Each refusal fixture is D0's fixture
-// with EXACTLY ONE thing wrong, and every one of them supplies a CORRECT value
-// for everything else, so a green cannot come from a different cause.
+// R1-C02 — THE STRUCTURED CONTRACT ITSELF (§3.1).
 // ===========================================================================
 
-// EXPECTED STATE: RED today (the CLI is absent, so `after` reads the seeded
-// ledger and the code/naming assertions on a MODULE_NOT_FOUND stderr fail —
-// specifically the /digest/i assertion, which a module-not-found message does
-// not satisfy).
-// SABOTAGE: accept the discharge whenever the digest is merely PRESENT (or
-// compare it against a re-serialization of the parsed ledger rather than the
-// bytes on disk) -> the concurrency token stops detecting the concurrent write,
-// exit 0, status flips -> the code and status assertions go red. That is the
-// exact failure §3 rejected mtime for.
-test('discharge D2: a STALE digest (the ledger changed after the digest was taken) is REFUSED — nothing written, the ledger byte-identical, the refusal names the mismatch', { skip: GIT_SKIP }, () => {
+// SABOTAGE: print the refusal sentence on stdout beside the JSON (a banner, a
+// log line, a second object) -> the parse of the whole stream throws and the
+// parseError assertion goes red. The caller substitutes stdout into a JSON
+// reader, so anything else on it corrupts the answer rather than decorating it.
+// SECOND SABOTAGE: drop the `[code]` token from the human rendering -> only the
+// stderr token assertion goes red; the two renderings are independent guards.
+test('R1-C02: every verb answers `--json` with exactly ONE object — {ok:true,...} at exit 0, {ok:false,code,facts,message} at exit 1 — and human mode renders the same code as a [code] token', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     const head = git(dir, ['rev-parse', 'HEAD']);
-    const target = v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' });
+    writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' })]);
+    const stale = createHash('sha256').update('not the ledger bytes').digest('hex');
+    const args = ['discharge', '--entry-id', TARGET_ID, '--digest', stale, '--class', 'foreign-session', '--reason', 'a refusal, structurally'];
+
+    const j = runLedgerJson(dir, args);
+    assert.equal(j.code, 1, `a refusal exits 1, never 2 and never 0 — stdout=${j.stdout} stderr=${flat(j.stderr)}`);
+    assert.equal(j.parseError, null, `--json emits exactly one parseable object on a REFUSAL too — stdout=${JSON.stringify(j.stdout)}`);
+    assert.equal(j.json.ok, false, `ok:false — got ${JSON.stringify(j.json)}`);
+    assert.equal(j.json.code, 'ledger_digest_mismatch', `the refusal names its code as a FIELD — got ${JSON.stringify(j.json)}`);
+    assert.ok(j.json.facts && typeof j.json.facts === 'object', `facts is an object — got ${JSON.stringify(j.json.facts)}`);
+    assert.equal(typeof j.json.message, 'string', `message is a string — got ${JSON.stringify(j.json.message)}`);
+
+    const h = runLedger(dir, args);
+    assert.equal(h.code, 1, 'human mode agrees on the exit code');
+    assert.match(h.stderr, /REFUSED/, `human mode renders the refusal verb — stderr=${flat(h.stderr)}`);
+    assert.match(h.stderr, token('ledger_digest_mismatch'), `and carries the SAME code as a [code] token — stderr=${flat(h.stderr)}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// R1-C03 / R1-C04 / R1-C05 / R1-C06 — THE REFUSAL FAMILY. Each fixture is
+// R1-C01's with EXACTLY ONE thing wrong; everything else is correct, so a green
+// cannot come from a different cause.
+// ===========================================================================
+
+// SABOTAGE: accept the digest whenever it is merely PRESENT, or compare it
+// against a re-serialization of the parsed ledger instead of the bytes on disk
+// -> the concurrent write stops being detected, exit 0, the status flips, and
+// the code/byte-identical assertions go red.
+test('R1-C03: a STALE digest is REFUSED with [ledger_digest_mismatch] — nothing written, the ledger byte-identical, the entry still active', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const target = v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' });
     writeLedger(dir, [target]);
-
     const staleDigest = ledgerDigest(dir);
-    // A CONCURRENT WRITER lands between the read and the discharge — exactly the
-    // race the token exists for (an H22 promotion appending a fresh receipt).
+    // A CONCURRENT WRITER lands between the read and the discharge — the race
+    // the token exists for.
     writeLedger(dir, [target, bystander(head)]);
     const before = readLedgerRaw(dir);
-    assert.notEqual(staleDigest, ledgerDigest(dir), 'fixture guard: the ledger genuinely changed, so the digest is genuinely stale');
+    assert.notEqual(staleDigest, ledgerDigest(dir), 'fixture guard: the ledger genuinely changed');
 
-    const r = runLedger(dir, [
-      'discharge',
-      '--entry-id', TARGET_ID,
-      '--digest', staleDigest,
-      '--class', 'foreign-session',
-      '--reason', 'stale token must not be honoured',
-    ]);
-    assert.notEqual(r.code, 0, `a stale concurrency token must REFUSE — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', staleDigest, '--class', 'foreign-session', '--reason', 'stale token must not be honoured']);
+    assert.equal(r.code, 1, `a stale concurrency token REFUSES — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.equal(r.json.code, 'ledger_digest_mismatch', `got ${JSON.stringify(r.json)}`);
     assert.equal(readLedgerRaw(dir), before, 'the ledger is byte-identical — a refused discharge writes nothing at all');
-    assert.match(r.stderr, /digest|checksum|sha-?256|changed|stale/i, `the refusal must be ABOUT THE TOKEN MISMATCH, not a generic error — stderr=${flat(r.stderr)}`);
-    assert.equal(readLedger(dir).find((e) => e.entry_id === TARGET_ID).status, 'active', 'and the target entry is still active');
-    assertNoLedgerResidue(dir, 'D2');
+    assert.equal(readLedger(dir).find((e) => e.entry_id === TARGET_ID).status, 'active', 'and the target is still active');
+    assertNoLedgerResidue(dir, 'R1-C03');
   } finally {
     cleanup();
   }
 });
 
-// EXPECTED STATE: RED today (the CLI is absent; the /class/i assertion fails on
-// a MODULE_NOT_FOUND stderr).
-// SABOTAGE: record whatever `--class` string is supplied without checking it
-// against the recognized set -> exit 0 and the entry flips to discharged with a
-// made-up class -> the code, status and byte-identical assertions go red. An
-// unrecognized class is exactly how "discharge" would decay into "delete
-// anything I do not want to see" (P5: unknown signals halt).
-test('discharge D3: an UNRECOGNIZED class is REFUSED — nothing written, ledger byte-identical, the refusal is about the class', { skip: GIT_SKIP }, () => {
+// SABOTAGE: record whatever --class string is supplied without checking it
+// against the closed class set -> exit 0 and the entry flips under a made-up
+// class -> code/status/byte-identical go red. P5: unknown signals halt.
+test('R1-C04: an UNRECOGNIZED --class is REFUSED with [class_unknown]; an UNKNOWN VERB is REFUSED with [argument_invalid] — there is still no undischarge/restore verb', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     const head = git(dir, ['rev-parse', 'HEAD']);
-    const target = v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' });
-    writeLedger(dir, [target, bystander(head)]);
+    writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' }), bystander(head)]);
     const before = readLedgerRaw(dir);
 
-    // Everything else is CORRECT — a fresh digest, a real entry_id, a real
-    // reason — so the only possible cause of a refusal is the class.
-    const r = runLedger(dir, [
-      'discharge',
-      '--entry-id', TARGET_ID,
-      '--digest', ledgerDigest(dir),
-      '--class', 'because-i-said-so',
-      '--reason', 'an unrecognized class must never be honoured',
-    ]);
-    assert.notEqual(r.code, 0, `an unrecognized unspendable class must REFUSE — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    // Everything else is CORRECT, so the class is the only possible cause.
+    const bad = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'because-i-said-so', '--reason', 'an unrecognized class is never honoured']);
+    assert.equal(bad.code, 1, `stdout=${bad.stdout} stderr=${flat(bad.stderr)}`);
+    assert.equal(bad.json.code, 'class_unknown', `got ${JSON.stringify(bad.json)}`);
     assert.equal(readLedgerRaw(dir), before, 'NOTHING is written on the refusal path');
-    assert.match(r.stderr, /class/i, `the refusal must be ABOUT THE CLASS — stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /TypeError|ReferenceError/, `and it is a refusal, not a crash — stderr=${flat(r.stderr)}`);
-    assertNoLedgerResidue(dir, 'D3');
+
+    // THE ABSENCE OF A RESURRECTION VERB, pinned as today. A discharged entry
+    // that could be returned to active would make the record round-trippable and
+    // therefore worthless; the correction is re-dispatching a reviewer.
+    const verb = runLedgerJson(dir, ['undischarge', '--entry-id', TARGET_ID]);
+    assert.equal(verb.code, 1, `an unknown verb halts loudly — stdout=${verb.stdout} stderr=${flat(verb.stderr)}`);
+    assert.equal(verb.json.code, 'argument_invalid', `an unknown verb is a usage error — got ${JSON.stringify(verb.json)}`);
+    assert.equal(readLedgerRaw(dir), before, 'and writes nothing');
   } finally {
     cleanup();
   }
 });
 
-// EXPECTED STATE: RED today (the CLI is absent; the /entry|selector|not found/i
-// assertion fails on a MODULE_NOT_FOUND stderr).
 // SABOTAGE: fall back to "the only entry" / "the first entry" when the selector
-// matches nothing -> the bystander is discharged, the length-2/status
-// assertions go red. A forgiving selector on a state-changing operation is the
-// shape anti-pattern no-bounded-trail-guard-for-destructive-addressing forbids.
-test('discharge D7: an entry_id matching NO entry is REFUSED — no other entry is discharged in its place, ledger byte-identical', { skip: GIT_SKIP }, () => {
+// matches nothing -> the bystander is discharged and the status assertions go
+// red. A forgiving selector on a destroying operation is exactly what
+// anti-pattern no-bounded-trail-guard-for-destructive-addressing forbids.
+// SECOND SABOTAGE: resolve an ambiguous id to matches[0] -> the ambiguous arm's
+// code assertion goes red while the not-found arm stays green.
+test('R1-C05: an entry_id matching NO entry is [entry_not_found]; an entry_id matching TWO entries is [entry_selector_ambiguous] — nothing is discharged in either case', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     const head = git(dir, ['rev-parse', 'HEAD']);
-    writeLedger(dir, [bystander(head)]);
-    const before = readLedgerRaw(dir);
 
-    const r = runLedger(dir, [
-      'discharge',
-      '--entry-id', 'ffffffff-0000-4000-8000-00000000ffff',
-      '--digest', ledgerDigest(dir),
-      '--class', 'foreign-session',
-      '--reason', 'no such entry',
-    ]);
-    assert.notEqual(r.code, 0, `an unknown selector must REFUSE — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    writeLedger(dir, [bystander(head)]);
+    let before = readLedgerRaw(dir);
+    const miss = runLedgerJson(dir, ['discharge', '--entry-id', 'ffffffff-0000-4000-8000-00000000ffff', '--digest', ledgerDigest(dir), '--class', 'foreign-session', '--reason', 'no such entry']);
+    assert.equal(miss.code, 1, `stdout=${miss.stdout} stderr=${flat(miss.stderr)}`);
+    assert.equal(miss.json.code, 'entry_not_found', `got ${JSON.stringify(miss.json)}`);
     assert.equal(readLedgerRaw(dir), before, 'the ledger is byte-identical');
     assert.equal(readLedger(dir)[0].status, 'active', 'the ONLY entry present is not discharged as a consolation prize');
-    assert.match(r.stderr, /entr|selector|not found|no match/i, `the refusal names the addressing failure — stderr=${flat(r.stderr)}`);
+
+    writeLedger(dir, [
+      v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' }),
+      v2({ entry_id: TARGET_ID, agent_type: 'reviewer-correctness', files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' }),
+    ]);
+    before = readLedgerRaw(dir);
+    const amb = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'foreign-session', '--reason', 'two entries answer to this id']);
+    assert.equal(amb.code, 1, `stdout=${amb.stdout} stderr=${flat(amb.stderr)}`);
+    assert.equal(amb.json.code, 'entry_selector_ambiguous', `choosing either of two indistinguishable targets is choosing at random on a write that cannot be undone — got ${JSON.stringify(amb.json)}`);
+    assert.equal(readLedgerRaw(dir), before, 'and NEITHER is discharged');
   } finally {
     cleanup();
   }
 });
 
-// EXPECTED STATE: RED today (the CLI is absent; the /reason/i assertion fails on
-// a MODULE_NOT_FOUND stderr).
-// SABOTAGE: default a missing/empty reason to '' or 'discharged' and proceed ->
-// exit 0, the entry flips with an empty accountability record -> the code and
-// byte-identical assertions go red. The reason IS the accountability §3 chose
-// explicit discharge for over silent auto-discharge; an empty one is the
-// auto-discharge that decision rejected, wearing a flag.
-test('discharge D8: a MISSING or EMPTY --reason is REFUSED — an accountability record with no reason is not an accountability record', { skip: GIT_SKIP }, () => {
+// SABOTAGE: default a missing/empty --reason to '' or 'discharged' and proceed
+// -> exit 0 with an empty accountability record -> code and byte-identical go
+// red. The reason IS the accountability that explicit discharge exists for.
+test('R1-C06: a MISSING or EMPTY --reason is [argument_invalid] with facts.flag naming the flag — an accountability record with no reason is not an accountability record', { skip: GIT_SKIP }, () => {
   for (const [label, extra] of [['missing', []], ['empty', ['--reason', '']]]) {
     const { dir, cleanup } = makeRepo();
     try {
       const head = git(dir, ['rev-parse', 'HEAD']);
-      const target = v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' });
-      writeLedger(dir, [target]);
+      writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' })]);
       const before = readLedgerRaw(dir);
 
-      const r = runLedger(dir, [
-        'discharge',
-        '--entry-id', TARGET_ID,
-        '--digest', ledgerDigest(dir),
-        '--class', 'foreign-session',
-        ...extra,
-      ]);
-      assert.notEqual(r.code, 0, `[${label}] a discharge without a reason must REFUSE — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'foreign-session', ...extra]);
+      assert.equal(r.code, 1, `[${label}] a discharge without a reason REFUSES — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      assert.equal(r.json.code, 'argument_invalid', `[${label}] got ${JSON.stringify(r.json)}`);
+      assert.match(String(r.json.facts.flag), /reason/, `[${label}] facts.flag NAMES the offending flag, so the operator is not left guessing which argument — got ${JSON.stringify(r.json.facts)}`);
       assert.equal(readLedgerRaw(dir), before, `[${label}] ledger byte-identical`);
-      assert.match(r.stderr, /reason/i, `[${label}] the refusal must be ABOUT THE REASON — stderr=${flat(r.stderr)}`);
     } finally {
       cleanup();
     }
@@ -476,249 +389,208 @@ test('discharge D8: a MISSING or EMPTY --reason is REFUSED — an accountability
 });
 
 // ===========================================================================
-// D4 — DISCHARGED ENTRIES ARE INVISIBLE TO SPENDING (§3: "spending, amend
-// spending, fallback selection and counts all ignore discharged entries").
+// R1-C07 — THE CLASS MUST BE PROVED, NOT ASSERTED (§1.4 class_not_applicable).
 // ===========================================================================
 
-// EXPECTED STATE: GREEN today (two active receipts covering the staged file are
-// both stamped and both consumed — file-scoping S1's shape in v2 clothing).
-// PLACED FIRST in this family on purpose: D4's verdict ("only the active one
-// stamps") has two possible causes — the discharged entry was ignored, or the
-// second entry never stamps for some unrelated reason (a v2 adapter defect, a
-// duplicate-agent_type dedupe, an eligibility rule). This control is identical
-// EXCEPT that both entries are active, so it must pass for the OPPOSITE reason.
-// SABOTAGE: dedupe stamped receipts by agent_type or stamp only the first
-// eligible receipt -> one trailer instead of two -> red, and D4's green is
-// exposed as meaningless.
-test('discharge D4 (CONTROL): two ACTIVE v2 receipts covering the staged file are BOTH stamped and BOTH consumed — the same fixture as D4 minus the discharged status', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs', CODE);
-    const head = git(dir, ['rev-parse', 'HEAD']);
-    const blobs = { 'src/laneA.mjs': stagedBlob(dir, 'src/laneA.mjs') };
-    writeLedger(dir, [
-      v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], blobs, base_sha: head }),
-      v2({ entry_id: BYSTANDER_ID, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs, base_sha: head }),
-    ]);
+// EXPECTED: R1-C01 and R1-C08 are this family's controls — a genuinely foreign
+// identity discharges, so a green here cannot be explained by "foreign-* refuses
+// everything".
+// SABOTAGE: record the asserted class without verifying it -> all four arms
+// discharge -> code/status go red.
+// SECOND SABOTAGE: implement the check as `identity?.session_id !== currentSession`
+// -> the missing and empty arms discharge (undefined and '' both compare
+// unequal) while the equal arms stay refused. UNKNOWN IS NEVER FOREIGN: deleting
+// one field of an agent-writable ledger must not make a receipt dischargeable.
+test('R1-C07: foreign-session / foreign-branch are [class_not_applicable] when the recorded identity EQUALS this side\'s, and when it is MISSING or EMPTY — unknown is not foreign', { skip: GIT_SKIP }, () => {
+  const arms = [
+    { label: 'session-equal', cls: 'foreign-session', patch: (e) => { e.identity.session_id = SESSION; } },
+    { label: 'branch-equal', cls: 'foreign-branch', patch: (e, b) => { e.identity.branch = b; } },
+    { label: 'session-unknown', cls: 'foreign-session', patch: (e) => { delete e.identity.session_id; } },
+    { label: 'branch-unknown', cls: 'foreign-branch', patch: (e) => { e.identity.branch = ''; } },
+  ];
+  for (const arm of arms) {
+    const { dir, cleanup } = makeRepo();
+    try {
+      const head = git(dir, ['rev-parse', 'HEAD']);
+      const branch = git(dir, ['rev-parse', '--abbrev-ref', 'HEAD']);
+      assert.equal(branch, 'main', 'fixture guard: the repo really is on main');
+      const target = v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head });
+      arm.patch(target, branch);
+      writeLedger(dir, [target, bystander(head)]);
+      const before = readLedgerRaw(dir);
 
-    const r = runCommitReviewed(dir, ['-m', 'D4 control: both active']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(reviewedByTrailers(dir).sort(), ['reviewer-correctness', 'reviewer-security'], 'both ACTIVE receipts are stamped');
-    assert.deepEqual(readLedger(dir), [], 'and both are consumed');
-  } finally {
-    cleanup();
-  }
-});
-
-// EXPECTED STATE: RED today — nothing reads `status` yet, so the discharged
-// receipt is stamped and consumed exactly like an active one: the trailer
-// deepEqual (two values instead of one) and the survivor assertions both fail.
-// SABOTAGE: filter discharged entries out of the STAMPED set but not out of the
-// CONSUMED set -> the trailer assertion stays green while the survival
-// assertions go red. That is the dangerous half: silently destroying preserved
-// evidence is precisely what §3's "deletion is never silent" forbids, and the
-// trailer pin alone cannot see it.
-// SECOND SABOTAGE: read `status !== 'active'` as ineligible-but-consumable, or
-// treat a missing status as discharged -> the D4 CONTROL above goes red, which
-// is how a mis-read of the compatibility adapter ("missing status = active") is
-// caught rather than mistaken for this pin passing.
-test('discharge D4: a DISCHARGED v2 receipt covering the staged file is neither stamped nor consumed — only the active receipt spends, and the discharged one SURVIVES the consume write', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs', CODE);
-    const head = git(dir, ['rev-parse', 'HEAD']);
-    const blobs = { 'src/laneA.mjs': stagedBlob(dir, 'src/laneA.mjs') };
-
-    const dischargedEntry = v2({
-      entry_id: TARGET_ID,
-      agent_type: 'reviewer-security',
-      files: ['src/laneA.mjs'],
-      blobs,
-      base_sha: head,
-      status: 'discharged',
-      disposition: {
-        reason: 'the session that produced it ended',
-        at: isoAgo(30_000),
-        head_sha: head,
-        classifier_version: 1,
-        class: 'foreign-session',
-      },
-    });
-    writeLedger(dir, [
-      dischargedEntry,
-      v2({ entry_id: BYSTANDER_ID, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs, base_sha: head }),
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'D4 discharged is not spendable']);
-    assert.equal(r.code, 0, `an active receipt covers the diff, so the commit succeeds — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness'], 'a discharged receipt NEVER earns a Reviewed-By-Agent trailer — that would be an attestation from evidence already ruled unspendable');
-    const after = readLedger(dir);
-    assert.equal(after.length, 1, `the discharged entry survives the consume write — got ${JSON.stringify(after)}`);
-    assert.deepEqual(after, [dischargedEntry], 'and survives byte-identical, disposition intact — preserved evidence is never collateral of a consume');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// D5 — NO RESURRECTION (§3: "NO resurrection command (a mistake is corrected by
-// re-dispatching a reviewer)").
-// ===========================================================================
-
-// EXPECTED STATE: RED today (the CLI is absent, so the FIRST discharge fails
-// and `first.code === 0` reddens).
-// SABOTAGE (the one this pin exists for): make discharge idempotent by
-// REWRITING the disposition on a second call -> the reason/at preservation
-// assertions go red while status stays 'discharged'. A silently rewritten
-// disposition is a second state flip wearing the first one's clothes: it lets a
-// later, weaker justification overwrite the recorded one with no trace.
-// EITHER-READING: §3 does not say whether a repeat discharge refuses or no-ops
-// (ambiguity (d)), so the exit code is asserted only as "defined and not a
-// crash"; the invariant pinned is that the RECORD never flips twice.
-test('discharge D5: a second discharge of an already-discharged entry never flips state twice — the original disposition is preserved verbatim, whichever way the repeat is handled', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    const head = git(dir, ['rev-parse', 'HEAD']);
-    // ONE construction, used for both the seed and the expected value. bystander()
-    // defaults `at = isoAgo(60_000)`, which is evaluated PER CALL, so a second
-    // construction differs from the seeded one by the milliseconds between them
-    // and the deepEqual below could never pass on a byte-correct ledger. Same
-    // idiom as D0's `const other = bystander(head)`.
-    const other = bystander(head);
-    writeLedger(dir, [
-      v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' }),
-      other,
-    ]);
-
-    const firstReason = 'the original, accountable justification';
-    const first = runLedger(dir, [
-      'discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir),
-      '--class', 'foreign-session', '--reason', firstReason,
-    ]);
-    assert.equal(first.code, 0, `the first discharge succeeds — stdout=${first.stdout} stderr=${flat(first.stderr)}`);
-    const afterFirst = readLedger(dir).find((e) => e.entry_id === TARGET_ID);
-    assert.equal(afterFirst.status, 'discharged', 'precondition: the entry is discharged');
-
-    // A fresh digest — the ledger legitimately changed — so a refusal here can
-    // only be about the repeat, never about a stale token.
-    const second = runLedger(dir, [
-      'discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir),
-      '--class', 'no-live-territory', '--reason', 'a different, later justification',
-    ]);
-    assert.doesNotMatch(second.stderr, /TypeError|ReferenceError/, `a repeat discharge must never crash — stderr=${flat(second.stderr)}`);
-
-    const afterSecond = readLedger(dir).find((e) => e.entry_id === TARGET_ID);
-    assert.equal(afterSecond.status, 'discharged', 'the status is still discharged — never toggled, never re-flipped');
-    assert.deepEqual(
-      afterSecond.disposition,
-      afterFirst.disposition,
-      `the ORIGINAL disposition survives verbatim — a repeat discharge may refuse or no-op, but it may never overwrite the recorded justification: ${JSON.stringify(afterSecond.disposition)}`
-    );
-    assert.deepEqual(readLedger(dir).find((e) => e.entry_id === BYSTANDER_ID), other, 'and the bystander is still untouched');
-  } finally {
-    cleanup();
-  }
-});
-
-// EXPECTED STATE: RED today (the CLI is absent, so the first discharge fails and
-// `first.code === 0` reddens).
-// SABOTAGE: add any un-discharge/restore verb that sets status back to 'active'
-// -> the status assertion goes red for that verb. §3 is explicit that a mistake
-// is corrected by RE-DISPATCHING A REVIEWER, not by resurrecting spent-looking
-// evidence: a resurrect verb would make the ledger's discharged state
-// round-trippable and therefore worthless as a record.
-// NOTE: this pin asserts the ABSENCE of an interface, so it invents no flag
-// spellings — it names the four plausible verbs and requires that none of them
-// produce an active entry, whatever the CLI calls its subcommands.
-test('discharge D5b: the CLI exposes NO resurrection — no undischarge/restore/reactivate/resurrect verb returns a discharged entry to active', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    const head = git(dir, ['rev-parse', 'HEAD']);
-    writeLedger(dir, [v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' })]);
-
-    const first = runLedger(dir, [
-      'discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir),
-      '--class', 'foreign-session', '--reason', 'unspendable, recorded',
-    ]);
-    assert.equal(first.code, 0, `precondition: the discharge succeeds — stdout=${first.stdout} stderr=${flat(first.stderr)}`);
-
-    for (const verb of ['undischarge', 'restore', 'reactivate', 'resurrect']) {
-      const r = runLedger(dir, [verb, '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--reason', 'put it back']);
-      assert.notEqual(r.code, 0, `[${verb}] an unknown verb halts loudly (P5) rather than succeeding quietly — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-      assert.equal(
-        readLedger(dir).find((e) => e.entry_id === TARGET_ID).status,
-        'discharged',
-        `[${verb}] a discharged entry can never be returned to active — the correction for a mistaken discharge is re-dispatching a reviewer`
-      );
+      const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', arm.cls, '--reason', `${arm.label}: the class must be proved from the record`]);
+      assert.equal(r.code, 1, `[${arm.label}] stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      assert.equal(r.json.code, 'class_not_applicable', `[${arm.label}] got ${JSON.stringify(r.json)}`);
+      assert.equal(readLedgerRaw(dir), before, `[${arm.label}] the ledger is byte-identical`);
+      assert.equal(readLedger(dir).find((e) => e.entry_id === TARGET_ID).status, 'active', `[${arm.label}] the receipt stays active and spendable`);
+      assertNoLedgerResidue(dir, `R1-C07/${arm.label}`);
+    } finally {
+      cleanup();
     }
+  }
+});
+
+// SABOTAGE: require the identity fields to be present AND refuse whenever they
+// are (an over-tight fix that never accepts foreign-*) -> both arms here go red
+// while R1-C07 stays green. That result pair is the signature of an over-narrow
+// fix and no single pin can see it.
+test('R1-C08 (CONTROL for R1-C07): a PRESENT identity that genuinely differs discharges — foreign-session on a foreign session_id, foreign-branch on a foreign branch', { skip: GIT_SKIP }, () => {
+  const arms = [
+    { label: 'foreign-session', cls: 'foreign-session', patch: (e) => { e.identity.session_id = 'a-session-that-ended'; } },
+    { label: 'foreign-branch', cls: 'foreign-branch', patch: (e) => { e.identity.branch = 'feature/elsewhere'; } },
+  ];
+  for (const arm of arms) {
+    const { dir, cleanup } = makeRepo();
+    try {
+      const head = git(dir, ['rev-parse', 'HEAD']);
+      const target = v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head });
+      arm.patch(target);
+      writeLedger(dir, [target, bystander(head)]);
+
+      const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', arm.cls, '--reason', `${arm.label}: earned where this commit cannot spend it`]);
+      assert.equal(r.code, 0, `[${arm.label}] stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      const entry = readLedger(dir).find((e) => e.entry_id === TARGET_ID);
+      assert.equal(entry.status, 'discharged', `[${arm.label}] the entry is discharged`);
+      assert.equal(entry.disposition.class, arm.cls, `[${arm.label}] under the class it was verified as`);
+      assert.deepEqual(entry.identity, target.identity, `[${arm.label}] with the identity evidence preserved verbatim`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+// ===========================================================================
+// R1-C09 — LIFECYCLE PRECONDITIONS (§3.1: "Refuses reserved/consumed entries").
+// This replaces the retired mid-commit write-back family: the two-phase spend
+// closes that race by RESERVING, so the contract to pin is the refusal, not an
+// ordering of writes.
+// ===========================================================================
+
+// SABOTAGE: check only `status === 'discharged'` before discharging -> both arms
+// flip a reserved or consumed entry and the code/status assertions go red.
+// Discharging a RESERVED entry retires evidence a commit is mid-flight on;
+// discharging a CONSUMED one rewrites the record of a commit that already exists.
+// SABOTAGE (facts half): refuse without facts.status -> the facts assertion goes
+// red alone; the operator must be told WHICH state blocked them, since the two
+// have different remedies (reconcile vs nothing).
+test('R1-C09: a RESERVED or CONSUMED entry is [entry_not_active] with facts.status naming the state — the ledger is byte-identical and the entry keeps its reservation/consumption', { skip: GIT_SKIP }, () => {
+  const arms = [
+    { label: 'reserved', patch: { status: 'reserved', reservation: { nonce: 'n-1', at: isoAgo(5_000), index_blobs: {}, operation: 'commit-reviewed' } } },
+    { label: 'consumed', patch: { status: 'consumed', consumption: { commit_sha: 'a'.repeat(40), consumed_at: isoAgo(5_000), nonce: 'n-1' } } },
+  ];
+  for (const arm of arms) {
+    const { dir, cleanup } = makeRepo();
+    try {
+      const head = git(dir, ['rev-parse', 'HEAD']);
+      writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended', ...arm.patch })]);
+      const before = readLedgerRaw(dir);
+
+      const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'foreign-session', '--reason', `${arm.label}: not the verb's to retire`]);
+      assert.equal(r.code, 1, `[${arm.label}] stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      assert.equal(r.json.code, 'entry_not_active', `[${arm.label}] got ${JSON.stringify(r.json)}`);
+      assert.equal(r.json.facts.status, arm.label, `[${arm.label}] facts.status names the blocking state — got ${JSON.stringify(r.json.facts)}`);
+      assert.equal(readLedgerRaw(dir), before, `[${arm.label}] the ledger is byte-identical`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
+// ===========================================================================
+// R1-C10 — A CORRUPT LEDGER IS NEVER TRUNCATED.
+// ===========================================================================
+
+// SABOTAGE: open the ledger for writing before parsing it (or write `[]` on a
+// parse failure) -> the byte-identical assertion goes red. An unreadable
+// evidence file is a refusal, never an invitation to start a fresh one.
+test('R1-C10: a CORRUPT ledger is [ledger_corrupt] and its bytes are left exactly as found — never truncated, never replaced with an empty array', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    writeFileSync(ledgerPath(dir), '{not json');
+    const before = readLedgerRaw(dir);
+    const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', createHash('sha256').update(before).digest('hex'), '--class', 'foreign-session', '--reason', 'corrupt ledger']);
+    assert.equal(r.code, 1, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.equal(r.json.code, 'ledger_corrupt', `got ${JSON.stringify(r.json)}`);
+    assert.equal(readLedgerRaw(dir), before, 'the corrupt bytes survive for a human to inspect');
+    assertNoLedgerResidue(dir, 'R1-C10');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// D6 — NO-LIVE-TERRITORY IS CONCLUSIVE OR IT IS NOTHING.
+// R1-C11 — --covering BELONGS TO `superseded` ONLY (§3.1).
 // ===========================================================================
 
-// EXPECTED STATE: RED today (the CLI is absent; `r.code === 0` reddens).
-// FIXTURE (choice 2): HEAD has advanced PAST the receipt's base_sha on an
-// unrelated file, and the reviewed file was changed and then reverted, so the
-// declared path equals its base state in the index/worktree while base_sha is
-// NOT HEAD.
-// SABOTAGE (the shortcut this fixture exists to kill): classify no-live by
-// comparing base_sha to HEAD (or by `git status --porcelain` being empty) ->
-// with HEAD moved past base_sha the classifier says "unknown" and refuses ->
-// exit 0 assertion red. Both shortcuts pass a naive fixture where base_sha ==
-// HEAD, which is why this one deliberately moves HEAD.
-// PLACED BEFORE D6b/D6c as their control: without it, their refusals are
-// satisfied by a classifier that refuses no-live-territory unconditionally.
-test('discharge D6a (CONTROL for the no-live family): --class no-live-territory succeeds when every declared path is back at its base state — even though HEAD has moved past base_sha', { skip: GIT_SKIP }, () => {
+// SABOTAGE: parse --covering generically and ignore it for other classes -> the
+// code assertion goes red. A set-cover argument silently ignored reads to the
+// operator as a set cover that was VERIFIED, which is the laundering route the
+// explicit-only rule exists to close.
+test('R1-C11: --covering on any class but superseded is [covering_not_allowed] — never silently ignored', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' }), bystander(head)]);
+    const before = readLedgerRaw(dir);
+
+    const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'foreign-session', '--covering', BYSTANDER_ID, '--reason', 'a covering set means nothing to this class']);
+    assert.equal(r.code, 1, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.equal(r.json.code, 'covering_not_allowed', `got ${JSON.stringify(r.json)}`);
+    assert.equal(readLedgerRaw(dir), before, 'the ledger is byte-identical');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// R1-C12 / R1-C13 — NO-LIVE-TERRITORY IS CONCLUSIVE OR IT IS NOTHING.
+// The class compares EVERY DECLARED path (not only the blob-backed covered set)
+// against base/index/worktree — the existing contract, kept.
+// ===========================================================================
+
+// PLACED FIRST as R1-C13's control: without it, every no-live refusal is
+// satisfied by a classifier that refuses the class unconditionally.
+// SABOTAGE: classify no-live by comparing base_sha to HEAD, or by an empty
+// `git status --porcelain` -> with HEAD deliberately moved past base_sha the
+// classifier says unknown and refuses -> the exit-0 assertion goes red. Both
+// shortcuts pass a naive fixture where base_sha == HEAD, which is why this one
+// moves HEAD.
+test('R1-C12 (CONTROL, first): no-live-territory SUCCEEDS when every declared path is back at its base bytes — even though HEAD has advanced past base_sha', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     commitFile(dir, 'src/laneA.mjs', CODE);
     const baseSha = git(dir, ['rev-parse', 'HEAD']);
     commitFile(dir, 'src/unrelated.mjs', OTHER); // HEAD advances; laneA untouched
-    // A genuine round trip: laneA is edited, then returned to its base bytes.
     stageChange(dir, 'src/laneA.mjs', OTHER);
-    stageChange(dir, 'src/laneA.mjs', CODE);
-    assert.equal(
-      stagedBlob(dir, 'src/laneA.mjs'),
-      git(dir, ['rev-parse', `${baseSha}:src/laneA.mjs`]),
-      'fixture guard: the declared path really is back at its base-state blob'
-    );
+    stageChange(dir, 'src/laneA.mjs', CODE); // a genuine round trip
+    assert.equal(stagedBlob(dir, 'src/laneA.mjs'), git(dir, ['rev-parse', `${baseSha}:src/laneA.mjs`]), 'fixture guard: the declared path is back at its base-state blob');
     assert.notEqual(baseSha, git(dir, ['rev-parse', 'HEAD']), 'fixture guard: HEAD has genuinely moved past base_sha');
 
-    writeLedger(dir, [
-      v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], base_sha: baseSha }),
-      bystander(baseSha),
-    ]);
+    writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/laneA.mjs'], base_sha: baseSha }), bystander(baseSha)]);
 
-    const r = runLedger(dir, [
-      'discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir),
-      '--class', 'no-live-territory', '--reason', 'the reviewed change was reverted; nothing of it remains to commit',
-    ]);
-    assert.equal(r.code, 0, `a conclusive no-live classification must succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'no-live-territory', '--reason', 'the reviewed change was reverted; nothing of it remains to commit']);
+    assert.equal(r.code, 0, `a conclusive no-live classification succeeds — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
     const entry = readLedger(dir).find((e) => e.entry_id === TARGET_ID);
     assert.equal(entry.status, 'discharged', 'the entry is discharged');
-    assert.equal(entry.disposition.class, 'no-live-territory', 'and records the class it was classified under');
-    assert.deepEqual(entry.territory, { files: ['src/laneA.mjs'], source: 'review-territory', attribution: 'block' }, 'with its territory evidence preserved');
+    assert.equal(entry.disposition.class, 'no-live-territory', 'under the class it was classified as');
+    assert.deepEqual(entry.territory.files, ['src/laneA.mjs'], 'with its territory evidence preserved');
   } finally {
     cleanup();
   }
 });
 
-// EXPECTED STATE: RED today (the CLI is absent; the /live|revert|differ/i
-// assertion fails on a MODULE_NOT_FOUND stderr).
-// SABOTAGE: classify no-live from the paths that DO match base and ignore the
-// ones that do not (an `.some()` where §3 requires "EVERY declared path") ->
-// both arms below discharge a receipt whose territory is still live -> the
-// code/status assertions go red. That is the classifier defect with real
-// consequences: discharging live territory destroys the requirement that the
-// work be reviewed before it commits.
-// TWO ARMS because §3 says deletions are checked EXPLICITLY: a MODIFIED path
-// and a DELETED path are different comparisons and one guard need not cover the
-// other.
-test('discharge D6b: --class no-live-territory is REFUSED when a declared path DIFFERS from its base state — modified or deleted; live territory is never dischargeable as no-live', { skip: GIT_SKIP }, () => {
+// SABOTAGE: classify from the paths that DO match base and ignore the ones that
+// do not (an `.some()` where every declared path is required) -> both arms
+// discharge a receipt whose territory is still live, and the code/status
+// assertions go red. Discharging live territory destroys the requirement that
+// the work be reviewed before it commits.
+// TWO ARMS because a MODIFIED path and a DELETED path are different comparisons
+// and one guard need not cover the other; laneB is at base in both, so a
+// classifier that ORs across paths concludes no-live and reddens.
+// SABOTAGE (facts half): refuse without facts.live_paths -> that assertion alone
+// goes red, and the operator is sent to git to find which path blocked them.
+test('R1-C13: no-live-territory is [no_live_territory_disproved] with facts.live_paths when ANY declared path differs from base — modified or deleted', { skip: GIT_SKIP }, () => {
   for (const arm of ['modified', 'deleted']) {
     const { dir, cleanup } = makeRepo();
     try {
@@ -728,88 +600,164 @@ test('discharge D6b: --class no-live-territory is REFUSED when a declared path D
       commitFile(dir, 'src/unrelated.mjs', OTHER);
 
       if (arm === 'modified') {
-        stageChange(dir, 'src/laneA.mjs', OTHER); // still live
+        stageChange(dir, 'src/laneA.mjs', OTHER);
       } else {
         unlinkSync(join(dir, 'src', 'laneA.mjs'));
         git(dir, ['add', '-A']); // a deletion is a difference from base, not a revert
       }
 
-      // laneB IS back at base — so a classifier that stops at the first
-      // satisfied path, or that ORs across paths, would wrongly conclude
-      // no-live. §3 requires EVERY declared path.
-      writeLedger(dir, [
-        v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/laneA.mjs', 'src/laneB.mjs'], base_sha: baseSha }),
-      ]);
+      writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/laneA.mjs', 'src/laneB.mjs'], base_sha: baseSha })]);
       const before = readLedgerRaw(dir);
 
-      const r = runLedger(dir, [
-        'discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir),
-        '--class', 'no-live-territory', '--reason', `${arm} territory must not classify as no-live`,
-      ]);
-      assert.notEqual(r.code, 0, `[${arm}] a declared path that differs from base makes the classification NOT conclusive — REFUSE — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-      assert.equal(readLedgerRaw(dir), before, `[${arm}] the ledger is byte-identical — a refused classification writes nothing`);
+      const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'no-live-territory', '--reason', `${arm} territory must not classify as no-live`]);
+      assert.equal(r.code, 1, `[${arm}] stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      assert.equal(r.json.code, 'no_live_territory_disproved', `[${arm}] got ${JSON.stringify(r.json)}`);
+      assert.deepEqual(r.json.facts.live_paths, ['src/laneA.mjs'], `[${arm}] facts.live_paths names exactly the path that is still live — got ${JSON.stringify(r.json.facts)}`);
+      assert.equal(readLedgerRaw(dir), before, `[${arm}] the ledger is byte-identical`);
       assert.equal(readLedger(dir)[0].status, 'active', `[${arm}] and the receipt stays spendable`);
-      assert.match(r.stderr, /live|revert|differ|base|classif|ambig/i, `[${arm}] the refusal is about the classification, not a generic error — stderr=${flat(r.stderr)}`);
-      assert.match(r.stderr, /src\/laneA\.mjs/, `[${arm}] and names the path that is still live — stderr=${flat(r.stderr)}`);
     } finally {
       cleanup();
     }
   }
 });
 
-// EXPECTED STATE: RED today (the CLI is absent; the /class|structur|base|v2/i
-// assertion fails on a MODULE_NOT_FOUND stderr).
-// SABOTAGE: run the no-live comparison on whatever paths the entry happens to
-// declare, without first checking the three PRECONDITIONS §3 lists (v2 roster
-// receipt / structured non-empty territory / usable base_sha) -> all three arms
-// discharge, and the code/status assertions go red. Each arm is a DIFFERENT
-// precondition, so one guard cannot cover another: a legacy entry has no
-// territory.source at all; a free-prose entry has measured-unreliable paths
-// (finding 289cd172) whose "no live territory" verdict is about the wrong
+// SABOTAGE: run the comparison on whatever the entry declares without first
+// asking whether the class's preconditions hold -> both arms discharge and the
+// code assertions go red. The fixtures are otherwise CLEAN — the declared path
+// really is at base state in each — so the only possible cause of a refusal is
+// the failed precondition, never a live-territory finding.
+// TWO ARMS, two DIFFERENT preconditions: free-prose territory has
+// measured-unreliable paths, so its "nothing live" verdict is about the wrong
 // files; a null base_sha has nothing conclusive to compare against.
-// NOTE the fixtures are otherwise CLEAN — the declared path is genuinely at its
-// base state in every arm — so the ONLY possible cause of a refusal is the
-// failed precondition, never a live-territory finding.
-test('discharge D6c: --class no-live-territory is REFUSED when a precondition fails — legacy v1 entry, free-prose territory, or absent base_sha — even though the declared path IS at base state', { skip: GIT_SKIP }, () => {
-  // Per-arm refusal wording. The legacy-v1 arm has a SECOND legitimate refusal
-  // cause: §3's "generated legacy handle" is unspecified (header ambiguity (b)),
-  // so a CLI that cannot address a v1 entry by entry_id at all refuses for an
-  // addressing reason rather than a precondition reason — both are correct
-  // refusals of the same request, so that arm accepts either wording.
-  const REFUSAL_WORDS = {
-    'legacy-v1': /class|structur|base|territor|ambig|v2|schema|entr|handle|not found|no match/i,
-    'free-prose': /class|structur|base|territor|ambig|free.?prose|attribution/i,
-    'no-base-sha': /class|structur|base|territor|ambig|base_sha/i,
-  };
-  for (const arm of ['legacy-v1', 'free-prose', 'no-base-sha']) {
+test('R1-C14: no-live-territory is [class_not_applicable] when a precondition fails — free-prose territory or an absent base_sha — even though the declared path IS at base state', { skip: GIT_SKIP }, () => {
+  for (const arm of ['free-prose', 'no-base-sha']) {
     const { dir, cleanup } = makeRepo();
     try {
       commitFile(dir, 'src/laneA.mjs', CODE);
       const baseSha = git(dir, ['rev-parse', 'HEAD']);
       commitFile(dir, 'src/unrelated.mjs', OTHER); // laneA untouched: genuinely at base state
 
-      let entry;
-      if (arm === 'legacy-v1') {
-        // A flat legacy receipt: no schema_version, no territory.source.
-        entry = { entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], at: isoAgo(60_000), session_id: SESSION, branch: 'main', base_sha: baseSha };
-      } else if (arm === 'free-prose') {
-        entry = v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], base_sha: baseSha, source: 'free-prose-fallback' });
-      } else {
-        entry = v2({ entry_id: TARGET_ID, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], base_sha: null });
-      }
+      const entry =
+        arm === 'free-prose'
+          ? v2({ entry_id: TARGET_ID, files: ['src/laneA.mjs'], base_sha: baseSha, source: 'free-prose-fallback' })
+          : v2({ entry_id: TARGET_ID, files: ['src/laneA.mjs'], base_sha: null });
       writeLedger(dir, [entry]);
       const before = readLedgerRaw(dir);
 
-      const r = runLedger(dir, [
-        'discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir),
-        '--class', 'no-live-territory', '--reason', `${arm}: preconditions for no-live are not met`,
-      ]);
-      assert.notEqual(r.code, 0, `[${arm}] any ambiguity yields 'unknown', never no-live — REFUSE — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      const r = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'no-live-territory', '--reason', `${arm}: preconditions for no-live are not met`]);
+      assert.equal(r.code, 1, `[${arm}] any ambiguity yields unknown, never no-live — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+      assert.equal(r.json.code, 'class_not_applicable', `[${arm}] got ${JSON.stringify(r.json)}`);
       assert.equal(readLedgerRaw(dir), before, `[${arm}] the ledger is byte-identical`);
-      assert.notEqual(readLedger(dir)[0].status, 'discharged', `[${arm}] the entry is NOT discharged`);
-      assert.match(r.stderr, REFUSAL_WORDS[arm], `[${arm}] the refusal names the failed precondition — stderr=${flat(r.stderr)}`);
     } finally {
       cleanup();
     }
+  }
+});
+
+// ===========================================================================
+// R1-C15 — A DISCHARGED RECEIPT IS INVISIBLE TO SPENDING, AND SURVIVES IT.
+// ===========================================================================
+
+// PLACED FIRST as R1-C16's control, and it must pass for the OPPOSITE reason:
+// two ACTIVE receipts both stamp and both reach status 'consumed'.
+// SABOTAGE: dedupe stamped receipts by agent_type, or stamp only the first
+// eligible receipt -> one trailer instead of two -> red, and R1-C16's green is
+// exposed as meaningless.
+// NOTE THE RE-CUT: a spend no longer removes the entry. It sets status
+// 'consumed' with consumption.commit_sha, so the ledger keeps the whole history
+// and `[]` is no longer the shape of a successful spend.
+test('R1-C15 (CONTROL, first): two ACTIVE receipts covering the staged file are BOTH stamped and BOTH end at status "consumed" bound to the new commit — a spend never deletes an entry', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs', CODE);
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const blobs = { 'src/laneA.mjs': stagedBlob(dir, 'src/laneA.mjs') };
+    writeLedger(dir, [
+      v2({ entry_id: TARGET_ID, files: ['src/laneA.mjs'], blobs, base_sha: head }),
+      v2({ entry_id: BYSTANDER_ID, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs, base_sha: head }),
+    ]);
+
+    const r = runCommitReviewed(dir, ['-m', 'R1-C15 control: both active']);
+    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir).sort(), ['reviewer-correctness', 'reviewer-security'], 'both ACTIVE receipts are stamped');
+    const sha = git(dir, ['rev-parse', 'HEAD']);
+    for (const e of readLedger(dir)) {
+      assert.equal(e.status, 'consumed', `every spent receipt ends CONSUMED, not removed — got ${JSON.stringify(e)}`);
+      assert.equal(e.consumption.commit_sha, sha, 'bound to the commit that spent it');
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+// SABOTAGE: stop reading `status` in the eligibility filter -> the discharged
+// receipt is stamped and the trailer deepEqual goes red.
+// SABOTAGE (the dangerous half): filter discharged entries out of the STAMPED
+// set but not out of the write-back -> the trailer assertion stays green while
+// the survival deepEqual goes red. Silently destroying preserved evidence is
+// exactly what "deletion is never silent" forbids, and the trailer pin alone
+// cannot see it.
+test('R1-C16: a DISCHARGED receipt covering the staged file is neither stamped nor spent, and survives the commit byte-identical with its disposition intact', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs', CODE);
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const blobs = { 'src/laneA.mjs': stagedBlob(dir, 'src/laneA.mjs') };
+    const dischargedEntry = v2({
+      entry_id: TARGET_ID,
+      files: ['src/laneA.mjs'],
+      blobs,
+      base_sha: head,
+      status: 'discharged',
+      disposition: { class: 'foreign-session', reason: 'the session that produced it ended', at: isoAgo(30_000), head_sha: head, classifier_version: 2, facts: { recorded_session: 'a-session-that-ended' } },
+    });
+    writeLedger(dir, [dischargedEntry, v2({ entry_id: BYSTANDER_ID, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs, base_sha: head })]);
+
+    const r = runCommitReviewed(dir, ['-m', 'R1-C16 discharged is not spendable']);
+    assert.equal(r.code, 0, `an active receipt covers the diff, so the commit lands — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness'], 'a discharged receipt never earns a Reviewed-By-Agent trailer — that would be an attestation from evidence already ruled unspendable');
+    const after = readLedger(dir);
+    assert.deepEqual(
+      after.find((e) => e.entry_id === TARGET_ID),
+      dischargedEntry,
+      `the discharged entry survives the spend byte-identical — preserved evidence is never collateral of a consume — got ${JSON.stringify(after)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// R1-C17 — NO SECOND FLIP.
+// ===========================================================================
+
+// SABOTAGE: make a repeat discharge idempotent by REWRITING the disposition ->
+// the deepEqual goes red while status stays 'discharged'. A silently rewritten
+// disposition is a second state flip wearing the first one's clothes: a later,
+// weaker justification overwrites the recorded one with no trace.
+test('R1-C17: a second discharge of an already-discharged entry is [entry_not_active] — the original disposition survives verbatim', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    const other = bystander(head);
+    writeLedger(dir, [v2({ entry_id: TARGET_ID, files: ['src/base.mjs'], base_sha: head, session_id: 'a-session-that-ended' }), other]);
+
+    const firstReason = 'the original, accountable justification';
+    const first = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'foreign-session', '--reason', firstReason]);
+    assert.equal(first.code, 0, `the first discharge succeeds — stdout=${first.stdout} stderr=${flat(first.stderr)}`);
+    const afterFirst = readLedger(dir).find((e) => e.entry_id === TARGET_ID);
+
+    // A FRESH digest — the ledger legitimately changed — so a refusal here can
+    // only be about the repeat, never about a stale token.
+    const second = runLedgerJson(dir, ['discharge', '--entry-id', TARGET_ID, '--digest', ledgerDigest(dir), '--class', 'no-live-territory', '--reason', 'a different, later justification']);
+    assert.equal(second.code, 1, `stdout=${second.stdout} stderr=${flat(second.stderr)}`);
+    assert.equal(second.json.code, 'entry_not_active', `got ${JSON.stringify(second.json)}`);
+    assert.equal(second.json.facts.status, 'discharged', `facts.status names the state — got ${JSON.stringify(second.json.facts)}`);
+
+    const afterSecond = readLedger(dir).find((e) => e.entry_id === TARGET_ID);
+    assert.deepEqual(afterSecond.disposition, afterFirst.disposition, `the ORIGINAL disposition survives verbatim — got ${JSON.stringify(afterSecond.disposition)}`);
+    assert.deepEqual(readLedger(dir).find((e) => e.entry_id === BYSTANDER_ID), other, 'and the bystander is still untouched');
+  } finally {
+    cleanup();
   }
 });

@@ -1,7 +1,24 @@
-// H22 TERRITORY-EVIDENCE UPGRADE — SPEC ONLY, red-first.
+// H22 TERRITORY-EVIDENCE — observed tool paths as CORROBORATION.
 // Governing decision: knowledge_get 9500cce1-f54b-450b-ae63-dd78ee53dbab
 // (slug review-territory-observed-evidence) — confirmed LIVE as of the
 // amendment below (it did not exist at this file's first draft).
+//
+// R1 PIN RE-CUT: this file is KEPT WHOLE. The contract sheet carries
+// observed_files / observed_reads / observed_source / observed_truncated
+// forward unchanged (§1.2, "as today"), including the null-vs-empty tri-state
+// this file IS the test base for, and it does not rebuild
+// scripts/hooks/lib/observed-territory.mjs. The round-scoped
+// observedToolPathsSince pins (PART 4) are likewise KEPT: the refresh path
+// they were first written for is retired by A4, but round-scoping becomes MORE
+// load-bearing under it, not less — round n+1 has its own receipt derived from
+// the SAME child transcript, so a round-2 receipt that counted round 1's reads
+// as its own would be exactly the false corroboration this file guards.
+//   RETIRED: nothing in this file.
+//   A11 NAMES THE CODE: PART 2's missing-declaration warning is
+//   `territory_declaration_missing` (H22 Start advisory), now a CODES member,
+//   so the positive arms assert that exact token. The negative arms keep the
+//   content discriminator alone, because "no warning fired" cannot be
+//   distinguished from "some other coded advisory fired" by a token alone.
 //
 // SPEC CORRECTION (post-first-draft amendment, verified against
 // research_finding 20b44518-39d0-4dd4-81b7-59a403ad09e1, a byte-exact live
@@ -254,6 +271,15 @@ const registerEntry = (over = {}) => ({
 // (P2-malformed-marker) pass even with no real absence warning present).
 const ABSENCE_INDICATOR_RE = /\b(no|missing|without)\b[^\n]{0,80}REVIEW-TERRITORY|REVIEW-TERRITORY[^\n]{0,80}\b(no|missing|without)\b/is;
 
+// A6 + A11: this advisory is rendered through the shared errors module and
+// carries exactly the code A11 names for it.
+// SABOTAGE: emit this warning as a bare console.error string, or render it
+// with `territory_declaration_malformed` (the sibling code for a line that IS
+// present but unparseable) — the token assertion goes red while the content
+// discriminator stays green, which is the confusion the two codes exist to
+// keep apart: nothing declared vs something declared badly.
+const token = (c) => new RegExp('\\[' + c + '\\]');
+
 function assertNoDeclarationWarning(stderr) {
   assert.match(stderr, /REVIEW-TERRITORY/, 'stderr names REVIEW-TERRITORY');
   assert.match(
@@ -261,6 +287,7 @@ function assertNoDeclarationWarning(stderr) {
     ABSENCE_INDICATOR_RE,
     'stderr carries a standalone absence indicator ("no"/"missing"/"without") near the REVIEW-TERRITORY marker'
   );
+  assert.match(stderr, token('territory_declaration_missing'), 'A11: the missing-declaration advisory carries its own code — not the malformed-declaration one');
 }
 function assertNoWarningAtAll(stderr) {
   assert.doesNotMatch(stderr, ABSENCE_INDICATOR_RE, 'no absence-declaration warning fires');
@@ -271,10 +298,11 @@ function assertNoWarningAtAll(stderr) {
 // ===========================================================================
 
 let observedToolPaths;
+let observedToolPathsSince;
 let importError = null;
 before(async () => {
   try {
-    ({ observedToolPaths } = await import(pathToFileURL(LIB_PATH).href));
+    ({ observedToolPaths, observedToolPathsSince } = await import(pathToFileURL(LIB_PATH).href));
   } catch (e) {
     importError = e;
   }
@@ -284,6 +312,18 @@ function requireLib() {
   if (importError || typeof observedToolPaths !== 'function') {
     assert.fail(
       `scripts/hooks/lib/observed-territory.mjs must export observedToolPaths(); import failed or the export is missing: ${importError?.message ?? 'observedToolPaths is not a function'}`
+    );
+  }
+}
+
+// (board 181d11e7 / brief item (a)) observedToolPathsSince is a NEW,
+// separate export added alongside the pre-existing observedToolPaths — its
+// own missing-export check, kept distinct from requireLib() so a PART 4
+// failure never masquerades as a PART 1 failure or vice versa.
+function requireSinceLib() {
+  if (importError || typeof observedToolPathsSince !== 'function') {
+    assert.fail(
+      `scripts/hooks/lib/observed-territory.mjs must export observedToolPathsSince(); import failed or the export is missing: ${importError?.message ?? 'observedToolPathsSince is not a function'}`
     );
   }
 }
@@ -952,7 +992,23 @@ test('(P3-main) a mixed departing transcript promotes the exact observed_files u
     assert.ok(!('observed_truncated' in entry), 'a normal-sized transcript never fabricates observed_truncated');
 
     assert.deepEqual(declaredFiles(entry), ['src/declared.mjs'], 'the Start-time declared territory is untouched by observed evidence');
-    assert.equal(declaredSource(entry), 'review-territory', 'files_source is untouched by observed evidence');
+    // RULING SUPERSEDED 2026-09-06 by decision edbaa38d
+    // (reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
+    // user-decided), recorded on 8f137474 under "NARROWED FOR REVIEWER
+    // CLASSES": for a reviewer-* agent_type, declaredSource() no longer
+    // travels unchanged from the register entry's seeded files_source — it
+    // binds at Stop from the child transcript's delivered brief, corroborated
+    // by the .meta.json sidecar's toolUseId. This fixture's `agentMain` child
+    // transcript (agent_transcript_path) is a tool-use-block transcript, not
+    // the required {parentUuid:null, isSidechain:true, type:'user',
+    // message:{content:<string>}} first record, AND carries no .meta.json
+    // sidecar at all — both are named fail-closed shapes in edbaa38d
+    // ("first record not a type:'user' record with string content"; "missing
+    // or malformed sidecar"), so the correct value is 'unattributable', never
+    // the register's seeded 'review-territory' guess. declaredFiles(entry)
+    // above is untouched by this change (per the launching brief) and stays
+    // pinned as-is.
+    assert.equal(declaredSource(entry), 'unattributable', "a reviewer-class Stop whose agent_transcript_path is not a valid Stop-bind child transcript (and carries no sidecar) fails closed — the register's seeded files_source is provisional only (decision edbaa38d)");
   } finally {
     cleanup();
   }
@@ -1065,3 +1121,393 @@ test('(P3-truncated) a departing transcript larger than the 1MB tail window prom
     cleanup();
   }
 });
+
+// ===========================================================================
+// PART 4 — observedToolPathsSince(transcriptPath, cwd, sinceIso) : round-
+// scoped read filtering (board 181d11e7, brief item (a) — the
+// round-scoping fix for the resumed-reviewer rebaseline). This is a NEW,
+// SEPARATE export added alongside the pre-existing observedToolPaths, which
+// keeps its EXACT prior behavior unmodified for its other callers
+// (P4-legacy-unchanged below is the regression guard for that half).
+//
+// INFERRED, NOT GIVEN (disclosed): the brief specifies filtering "to
+// transcript entries whose `timestamp` is AFTER [or, per its sinceIso
+// wording elsewhere, at/after] the receipt's prior finished_at" but does
+// not name where a per-JSONL-line timestamp lives in this test file's own
+// fixture shape (toolLine()/toolUse() carry no timestamp field at all
+// today). Read here as a top-level `timestamp` ISO-string key on the JSONL
+// line/entry object (`toolLineAt` below), mirroring the real Claude Code
+// transcript convention of one timestamp per line. If a landed
+// implementation reads the timestamp from a different location (e.g.
+// nested under `message`), that is a genuine reportable divergence from
+// this reading, not a reason to weaken the assertions below.
+// ===========================================================================
+
+const toolLineAt = (timestamp, blocks) => ({ type: 'assistant', timestamp, message: { content: blocks } });
+
+// ---------------------------------------------------------------------------
+// (P4-since-boundary) placed first as the load-bearing control+boundary pin:
+// three entries straddle sinceIso — clearly BEFORE (must be excluded),
+// exactly AT (pinned EXCLUDED — sinceIso is the PRIOR round's finished_at,
+// the instant that round ENDED, so a read timestamped exactly then belongs
+// to the round that just finished, not the new one; board 181d11e7's own
+// wording is "AFTER the receipt's prior finished_at", strictly), and clearly
+// AFTER (must be included). A stub unable to discriminate BEFORE from AFTER
+// fails on those two paths outright; the AT case is the boundary itself,
+// pinned in the same test so the boundary reading is asserted, not assumed.
+// PINNED DIRECTION (corrected — coordinator, board 181d11e7 wording):
+// AT-sinceIso is EXCLUDED. The comparison is strict `>`, not `>=`: crediting
+// the exact prior finished_at to the new round is the PERMISSIVE direction
+// on a check whose entire purpose is denying a resumed reviewer credit for
+// reads it did not perform this round — the wrong direction to default to
+// under fail-closed (P5).
+// SABOTAGE: use `>=` instead of a strict `>` — the AT-boundary entry
+// ('at-boundary.mjs') would then be wrongly INCLUDED, reddening the
+// deepEqual below; it is the AT-boundary entry specifically that
+// discriminates `>` from `>=` (the before/after entries pass under either
+// operator).
+// ===========================================================================
+
+test('(P4-since-boundary) observedToolPathsSince excludes strictly-before sinceIso AND exactly-at sinceIso; includes only strictly-after', () => {
+  requireSinceLib();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const sinceIso = '2026-09-01T00:00:00.000Z';
+    const before = new Date(Date.parse(sinceIso) - 60_000).toISOString();
+    const after = new Date(Date.parse(sinceIso) + 60_000).toISOString();
+    const t = writeToolTranscript(dir, [
+      toolLineAt(before, [toolUse('Read', { file_path: join(dir, 'before-excluded.mjs') })]),
+      toolLineAt(sinceIso, [toolUse('Read', { file_path: join(dir, 'at-boundary.mjs') })]),
+      toolLineAt(after, [toolUse('Read', { file_path: join(dir, 'after-included.mjs') })]),
+    ]);
+    const result = observedToolPathsSince(t, dir, sinceIso);
+    assert.ok(result, 'a well-formed transcript never degrades to null');
+    assert.deepEqual(
+      [...result.reads].sort(),
+      ['after-included.mjs'],
+      'strictly-before sinceIso is excluded; the entry exactly AT sinceIso belongs to the round that just ended and is ALSO excluded; only strictly-after is included'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// (P4-since-no-timestamp) an entry with NO timestamp field at all is
+// excluded — fail-closed: an entry whose time cannot be established is
+// never treated as belonging to "this round".
+// SABOTAGE: treat a missing timestamp as always-in-scope (or coerce it to a
+// value that resolves to inclusion either way, e.g. Date.now()) — this test
+// alone catches it; P4-since-boundary (every entry fully timestamped) stays
+// green regardless.
+// ===========================================================================
+
+test('(P4-since-no-timestamp) an entry with no timestamp field at all is excluded — fail-closed, never counted as "this round"', () => {
+  requireSinceLib();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const sinceIso = '2026-09-01T00:00:00.000Z';
+    const t = writeToolTranscript(dir, [
+      toolLine([toolUse('Read', { file_path: join(dir, 'no-timestamp.mjs') })]), // no top-level timestamp at all
+      toolLineAt(new Date(Date.parse(sinceIso) + 60_000).toISOString(), [toolUse('Read', { file_path: join(dir, 'timestamped-after.mjs') })]),
+    ]);
+    const result = observedToolPathsSince(t, dir, sinceIso);
+    assert.ok(result, 'a well-formed transcript never degrades to null');
+    assert.deepEqual(
+      result.reads,
+      ['timestamped-after.mjs'],
+      'the untimestamped entry contributes nothing at all; its properly-timestamped sibling still does'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// (P4-legacy-unchanged) the PRE-EXISTING observedToolPaths (no sinceIso
+// parameter) must be completely unaffected by the new timestamp-based
+// filtering added for observedToolPathsSince — the regression guard for
+// every OTHER caller of the legacy function, which the brief requires to
+// "keep its exact old behaviour".
+// SABOTAGE: make observedToolPaths internally share the new since-filtering
+// code path unconditionally (e.g. defaulting sinceIso to something that
+// silently drops untimestamped or oddly-timestamped entries) — entries with
+// no timestamp, or a far-past/far-future one, would then be dropped,
+// reddening the deepEqual below.
+// ===========================================================================
+
+test('(P4-legacy-unchanged) observedToolPaths (no sinceIso) is unaffected by timestamps — present, absent, past or future, every entry still counts', () => {
+  requireLib();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const farPast = '2000-01-01T00:00:00.000Z';
+    const farFuture = '2099-01-01T00:00:00.000Z';
+    const t = writeToolTranscript(dir, [
+      toolLineAt(farPast, [toolUse('Read', { file_path: join(dir, 'past.mjs') })]),
+      toolLineAt(farFuture, [toolUse('Read', { file_path: join(dir, 'future.mjs') })]),
+      toolLine([toolUse('Read', { file_path: join(dir, 'no-timestamp-at-all.mjs') })]),
+    ]);
+    const result = observedToolPaths(t, dir);
+    assert.ok(result, 'a well-formed transcript never degrades to null');
+    assert.deepEqual(
+      [...result.reads].sort(),
+      ['future.mjs', 'no-timestamp-at-all.mjs', 'past.mjs'],
+      'observedToolPaths ignores timestamps entirely — every entry counts regardless of when (or whether) it is timestamped, exactly as before this change'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// PART 5 — scripts/hooks/lib/transcript.mjs :: readFromStart(path, bytes)
+// throw-safety + completeness contract (slice 4A fix, two defects found by
+// security review — see the launching brief's CONTEXT / TWO DEFECTS
+// sections). H22 uses `complete` as a LOAD-BEARING signal: callers must
+// distinguish "the id is absent" from "the id is absent from the portion I
+// read" and refuse rather than conclude on an incomplete read, so a lying
+// `complete` becomes a false attestation on a review receipt.
+//
+// H4 BLINDNESS HONORED: scripts/hooks/lib/transcript.mjs was never opened by
+// me. The exported signature (`readFromStart(path, bytes) -> {text,
+// complete} | null`) and the two named defects are taken verbatim from the
+// launching brief, not read from source. A coder is fixing this file in
+// parallel; these pins are written blind to that work.
+//
+// Harness idioms below (makeScratch tmpdir fixtures, the IS_ROOT chmod-000
+// skip, requireX()-style guarded import) are copied from PART 1's
+// requireLib()/IS_ROOT usage above (siblings in the same scripts/hooks/lib/
+// directory) rather than invented fresh.
+//
+// readTail is explicitly OUT OF SCOPE per the brief (byte-unchanged) and is
+// not imported or exercised here.
+// ===========================================================================
+
+let readFromStart;
+let readFromStartImportError = null;
+before(async () => {
+  try {
+    ({ readFromStart } = await import(pathToFileURL(join(HOOKS, 'lib', 'transcript.mjs')).href));
+  } catch (e) {
+    readFromStartImportError = e;
+  }
+});
+
+function requireReadFromStart() {
+  if (readFromStartImportError || typeof readFromStart !== 'function') {
+    assert.fail(
+      `scripts/hooks/lib/transcript.mjs must export readFromStart(); import failed or the export is missing: ${readFromStartImportError?.message ?? 'readFromStart is not a function'}`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// (P5-directory-no-throw) DEFECT #1: a path that EXISTS but is a directory
+// must degrade to null, never throw. Today it guards only existsSync, then
+// calls openSync/readSync unguarded, so a directory (which exists) reaches
+// openSync and throws EISDIR — an unwrapped throw here aborts the whole
+// SubagentStop handler upstream (no receipt minted). assert.doesNotThrow is
+// used deliberately, not merely a null check, per the brief: "the throw is
+// the defect."
+// SABOTAGE: remove (or narrow to only existsSync-adjacent errors) the
+// open/read error guard so a directory path throws EISDIR uncaught —
+// assert.doesNotThrow fails immediately, loudly, on the thrown error.
+// ---------------------------------------------------------------------------
+
+test('(P5-directory-no-throw) readFromStart on a path that is a DIRECTORY returns null and does not throw', () => {
+  requireReadFromStart();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const subdir = join(dir, 'a-directory');
+    mkdirSync(subdir);
+    let result;
+    assert.doesNotThrow(() => {
+      result = readFromStart(subdir, 4096);
+    }, 'a directory path must degrade to null, never throw');
+    assert.equal(result, null, 'a directory is not a readable transcript file');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (P5-unreadable-no-throw) DEFECT #1's other named shape: mode-000 file
+// (EACCES on open). Skipped under root, matching the sibling
+// P1-degrade-unreadable idiom copied verbatim (root ignores mode bits, so
+// the arm would falsely fail, not falsely pass).
+// SABOTAGE: same as above — drop the open/read error guard so EACCES
+// propagates uncaught; assert.doesNotThrow fails on the thrown error.
+// ---------------------------------------------------------------------------
+
+test(
+  '(P5-unreadable-no-throw) readFromStart on a permission-denied file returns null and does not throw',
+  { skip: IS_ROOT ? 'running as root — chmod 0o000 does not block root reads' : false },
+  () => {
+    requireReadFromStart();
+    const { dir, cleanup } = makeScratch();
+    const p = join(dir, 'unreadable.txt');
+    try {
+      writeFileSync(p, 'content that would otherwise be perfectly readable');
+      chmodSync(p, 0o000);
+      let result;
+      assert.doesNotThrow(() => {
+        result = readFromStart(p, 4096);
+      }, 'a permission-denied file must degrade to null, never throw');
+      assert.equal(result, null, 'an unreadable file yields no read result');
+    } finally {
+      try {
+        chmodSync(p, 0o644);
+      } catch {
+        // already gone or already writable
+      }
+      cleanup();
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
+// (P5-nonexistent) pre-existing behaviour (per the brief, already correct
+// today via the existsSync guard) — pinned so the throw-safety fix cannot
+// regress it, e.g. by replacing the existsSync check with a bare try/catch
+// that behaves differently on ENOENT.
+// SABOTAGE: remove the existsSync short-circuit and let a bare open on a
+// missing path propagate anything other than a clean null (e.g. rethrow, or
+// return {text:'',complete:false} instead of null) — assert.equal(result,
+// null) fails.
+// ---------------------------------------------------------------------------
+
+test('(P5-nonexistent) readFromStart on a nonexistent path returns null', () => {
+  requireReadFromStart();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const result = readFromStart(join(dir, 'does-not-exist.txt'), 4096);
+    assert.equal(result, null);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (P5-smaller-complete) DEFECT #2, first half: a file SMALLER than the
+// requested byte count. A correct implementation reads fewer bytes than
+// requested (hits EOF first) and must report complete:true with the full,
+// exact text — no trailing padding.
+// This is the arm that catches the "buffer sliced to the REQUESTED length
+// instead of the actual bytesRead count" half of defect #2: Buffer.alloc
+// zero-fills, so slicing/stringifying the full requested length instead of
+// the actual read count would append trailing NUL bytes to `text`, breaking
+// the exact-equality assertion below even though `complete` might
+// (coincidentally) still read true.
+// SABOTAGE: build the returned string as
+// `buf.toString('utf8', 0, bytes)` (the requested length) instead of
+// `buf.toString('utf8', 0, bytesRead)` (the actual short-read count) — the
+// deepEqual/exact-text assertion goes red on the trailing '\x00' padding;
+// P5-larger-incomplete below is unaffected by this specific sabotage (its
+// read fills the buffer exactly, so no padding is introduced there).
+// ---------------------------------------------------------------------------
+
+test('(P5-smaller-complete) a file smaller than the requested byte count returns complete:true and the exact full text, no padding', () => {
+  requireReadFromStart();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const p = join(dir, 'small.txt');
+    const content = 'short content, well under the requested byte budget\n';
+    writeFileSync(p, content);
+    const result = readFromStart(p, content.length + 10_000);
+    assert.ok(result, 'a readable, undersized file never degrades to null');
+    assert.equal(result.complete, true, 'the entire file was read, so complete must be true');
+    assert.equal(result.text, content, 'text is the exact file content — no trailing padding from an over-sized read buffer');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (P5-empty-file) EMPTY FILE — the boundary of P5-smaller-complete (0 bytes
+// requested-vs-available, taken to the limit). CHOICE STATED: an empty file
+// is fully read by definition (there is nothing left to read), so it is
+// read as complete:true, text:'' — the same "smaller than requested" shape
+// as above, not a degrade-to-null case (the file exists and is readable;
+// zero length is not an error).
+// SABOTAGE: same buffer-slicing defect as P5-smaller-complete — text would
+// come back as a string of NUL bytes instead of '', which is trivially
+// distinguishable from '' and fails the exact-equality assertion.
+// ---------------------------------------------------------------------------
+
+test('(P5-empty-file) an empty file returns complete:true and text:\'\' (an empty file is trivially fully read)', () => {
+  requireReadFromStart();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const p = join(dir, 'empty.txt');
+    writeFileSync(p, '');
+    const result = readFromStart(p, 4096);
+    assert.ok(result, 'a readable empty file never degrades to null');
+    assert.equal(result.complete, true, 'zero bytes remaining is the definition of fully read');
+    assert.equal(result.text, '', 'no content, no padding');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// (P5-larger-incomplete) DEFECT #2, the load-bearing arm: "the flag reflects
+// reality rather than intent." A file LARGER than the requested byte count,
+// read on ordinary local disk, fills the read buffer completely in one
+// readSync call (bytesRead === bytes requested) — there is no short read to
+// construct here. A naive fix that derives `complete` from "did bytesRead
+// equal the requested length" (i.e. from the REQUESTED length, exactly the
+// defect named in the brief) would say complete:true, because the buffer
+// was filled — even though the file plainly continues past the returned
+// prefix. Correct behaviour must derive `complete` from whether the FILE
+// (not just the buffer) was exhausted — e.g. comparing against the file's
+// actual size — so this large-file case reports complete:false, and `text`
+// is exactly the requested-length prefix (no more, no less).
+// SABOTAGE: compute `complete` as `bytesRead === bytes` (or unconditionally
+// true whenever the read call itself succeeds) instead of checking whether
+// the read reached the end of the file — complete flips from false to true
+// here while P5-smaller-complete (whose bytesRead is intrinsically less
+// than the requested length) is unaffected by this specific sabotage,
+// proving the two arms are independently exercised.
+// ---------------------------------------------------------------------------
+
+test('(P5-larger-incomplete) a file larger than the requested byte count returns complete:false and text equal to the exact requested prefix', () => {
+  requireReadFromStart();
+  const { dir, cleanup } = makeScratch();
+  try {
+    const p = join(dir, 'large.txt');
+    const content = 'abcdefghij'.repeat(1000); // 10,000 bytes, well over the budget below
+    writeFileSync(p, content);
+    const budget = 100;
+    const result = readFromStart(p, budget);
+    assert.ok(result, 'a readable oversized file never degrades to null');
+    assert.equal(result.complete, false, 'the file continues past the requested prefix, so complete must be false — this is NOT the whole file');
+    assert.equal(result.text, content.slice(0, budget), 'text is exactly the requested-length prefix, nothing more');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// UNCONSTRUCTIBLE, DISCLOSED PER THE BRIEF'S INSTRUCTION: a genuine
+// short-read on a REGULAR file — a single readSync() call returning FEWER
+// bytes than requested despite the file having more data available past
+// that point (as opposed to hitting real EOF, which P5-smaller-complete and
+// P5-empty-file already cover) — is not deterministically constructible
+// with plain fs fixtures. On Linux, a single-threaded readSync against a
+// local regular file reliably fills the buffer up to EOF; producing an
+// actual partial fill mid-file requires a FIFO/pipe (which can hang without
+// a concurrent writer/reader pair and is not portable to how this suite
+// runs) or a mocked/monkey-patched fd (which this suite's harness has no
+// precedent for and which node:test's `mock` would tie to a specific
+// implementation shape I'm not allowed to read). Per the brief's own
+// guidance, this arm is deliberately NOT pinned rather than written flaky.
+// P5-larger-incomplete above already exercises the "complete computed from
+// requested length rather than reality" half of defect #2 deterministically
+// (no short read needed, since a single-call read of a normal file fills
+// the buffer completely); what remains uncovered is only the buffer
+// zero-padding sub-detail in the true short-read case specifically, which a
+// short-read loop would prevent by construction (each iteration reads only
+// what's still missing) and which P5-smaller-complete's "no padding"
+// assertion already exercises via the file-EOF-triggered short read, so
+// the same code path is exercised, only not via a mid-file short read.
+// ---------------------------------------------------------------------------

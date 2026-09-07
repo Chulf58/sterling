@@ -48,16 +48,20 @@
 // zero valid entries. H15 sanctions the invocation; the review-receipt ledger is
 // what stops it being abused. If that refusal is ever relaxed, this entry becomes
 // a real hole — so the two must be reviewed together, not independently.
+// scripts/test-repair.mjs (also sanctioned, below) is safe for a different reason: H5's frozen-tests wall does not consult session-events.json, so the two must be reviewed together if H5 ever gains an event-based exemption.
 //
-// KNOWN, BOARDED, DELIBERATELY NOT SOLVED HERE: H15's isSanctionedScript compares
-// a BARE REPO-RELATIVE STRING with no identity, existence or provenance check. In
-// a consuming project Sterling's own scripts live in the plugin clone, not in
-// <project>/scripts/, so these names are usually free there — a file planted at
-// <consuming-project>/scripts/init.mjs would match a sanctioned entry. The
-// name-only matching is PRE-EXISTING; what this module does is make it reachable
-// in configs that previously carried none of these names. User-ruled 2026-08-27:
-// ship this, board the hardening (resolve the matched path inside the plugin
-// clone) as its own slice rather than touching H15's matching path here.
+// CLOSED 2026-09-05 — the free-name hole this block used to disclose is FIXED
+// (decision 5b82e94f). It read: "H15's isSanctionedScript compares a BARE
+// REPO-RELATIVE STRING with no identity, existence or provenance check ... a
+// file planted at <consuming-project>/scripts/init.mjs would match a sanctioned
+// entry." H15 no longer compares spelling: scripts/hooks/lib/sanctioned-
+// provenance.mjs requires the fragment's executable candidate to realpath to a
+// REGULAR FILE inside the canonicalized ACTIVE PLUGIN ROOT at a clone-relative
+// path exactly equal to an entry, so a planted project-local file of the same
+// name is denied. Consequently EVERY ENTRY BELOW IS CLONE-RELATIVE, not
+// project-relative — identical on this authoring machine, where the active clone
+// and the project are one tree, and divergent in a consumer, where Sterling's
+// scripts live in the clone and never in <project>/scripts/.
 //
 // DEPENDENCY-FREE (node builtins only, no @sterling/schemas import): this
 // module is imported by BOTH scripts/init-impl.mjs (which may import @sterling/schemas
@@ -72,9 +76,11 @@
 // cannot import config.ts (bootstrap independence, above). The two literals are
 // therefore kept identical by a DRIFT PIN in scripts/tests/store-remediation.test.mjs
 // which fails the moment they diverge — that pin is the single-source guarantee.
-// Keep this list basename-free: every entry is a repo-relative path from the
-// project root, because that is exactly what H15's isSanctionedScript compares
-// against (whole-word equality, normalizing only a leading './').
+// Keep this list basename-free: every entry is a CLONE-RELATIVE path from the
+// active plugin root, because that is exactly what H15 compares against — the
+// clone-relative POSIX path of the realpath'd executable candidate, by EXACT,
+// case-sensitive equality (decision 5b82e94f). A bare basename sanctions
+// nothing, and there is no suffix, substring or bare-name fallback.
 
 export const SANCTIONED_SCRIPTS = Object.freeze([
   'scripts/dispose-run.mjs',
@@ -86,6 +92,44 @@ export const SANCTIONED_SCRIPTS = Object.freeze([
   'scripts/migration-preflight.mjs',
   'scripts/migrate-stores.mjs',
   'packages/tui/bundle/sterling-tui.mjs',
+  // INDIVIDUAL DISPOSITION, not a bulk add (decision 1434cd54 Ruling 6 forbids
+  // bulk-adding the 12 unsanctioned store-writers; this one earned its own).
+  // Decision 57984926 (3) makes `scripts/review-ledger.mjs discharge` the ONE
+  // explicit route for a receipt that can never be spent, and H1's SessionStart
+  // report PRINTS that route. Without this entry H15 denies it, which is exactly
+  // the shape Ruling 2 names as its sharpest finding — "the sanctioned recovery
+  // route ... is UNREACHABLE BY ITS OPERATOR" — and what the consuming project
+  // reported on 2026-09-03. A remedy the guard denies is not a remedy.
+  // The verb is not a general store-write grant: discharge refuses without a
+  // selector, a matching SHA-256 ledger digest, a recognized class and a reason,
+  // and it can only supersede an entry that already exists.
+  'scripts/review-ledger.mjs',
+  // INDIVIDUAL DISPOSITION (decision 1434cd54 Ruling 1 called this a TEMPORARY
+  // machine-local workaround; Ruling 6 forbids bulk-adding the unsanctioned
+  // writers). Decision 665be1f3 states it outright: "the writer is a small
+  // sanctioned CLI (scripts/rotation-note.mjs, no-capture.mjs precedent)" — it
+  // was DESIGNED as sanctioned and never wired in. Board 77fe18af, slice 1b.
+  'scripts/rotation-note.mjs',
+  // INDIVIDUAL DISPOSITION (decision 1434cd54): H10's Stop message prints the
+  // exact `node scripts/no-capture.mjs ...` command line as the sanctioned
+  // route to discharge a capture duty; a denied printed remedy is not a
+  // remedy. Board 77fe18af, slice 1b.
+  'scripts/no-capture.mjs',
+  // INDIVIDUAL DISPOSITION (decision 1434cd54): H5's frozen-test-wall denial
+  // names `scripts/test-repair.mjs` as THE sanctioned route past the wall.
+  // Board 77fe18af, slice 1b.
+  'scripts/test-repair.mjs',
+  // INDIVIDUAL DISPOSITION (board a6b118e4 point 9): the layer-1 conformance
+  // audit (scripts/delivery-oracle.mjs) must be runnable by a Bash-gated
+  // agent, not only by hand. Rides slice 1b's commit cycle as a fourth
+  // disposition.
+  'scripts/delivery-oracle.mjs',
+  // INDIVIDUAL DISPOSITION (decision plan-lock-approved-plan-bound-at-exit-plan-
+  // mode-delivered-at-every-reentry): the manual plan-lock writer is the ONLY
+  // route to release a lock, to record an observed plan edit, or to bind a plan
+  // when ExitPlanMode could not — and H1's PLAN LOCK section PRINTS those verbs
+  // as the remedy. A printed remedy the guard denies is not a remedy.
+  'scripts/plan-lock.mjs',
 ]);
 
 /**
