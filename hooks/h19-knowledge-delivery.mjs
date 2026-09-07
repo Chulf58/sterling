@@ -6085,11 +6085,11 @@ var SterlingStore = class _SterlingStore {
     return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
   }
   /** Typed edge write — record_relations is the authoritative home (contract 6). */
-  insertRelation(sourceId, rel2, targetId, at) {
+  insertRelation(sourceId, rel, targetId, at) {
     if (sourceId === targetId) {
-      throw new Error(`relation '${rel2}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
+      throw new Error(`relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
     }
-    this.db.prepare("INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)").run(sourceId, rel2, targetId, at);
+    this.db.prepare("INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)").run(sourceId, rel, targetId, at);
   }
   /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
    *
@@ -7337,14 +7337,14 @@ var SterlingStore = class _SterlingStore {
    *  the target across every mounted store — cross-store edges are a legitimate shape
    *  (promotion itself writes them: supersedes / informed_by across project↔domain)
    *  that a store-local get cannot see. Standalone usage keeps the local check. */
-  addLink(sourceId, rel2, targetId, targetValidated = false) {
+  addLink(sourceId, rel, targetId, targetValidated = false) {
     this.assertWritable("addLink");
     const source = this.get(sourceId);
     if (!source)
       throw new Error(`addLink: no record '${sourceId}'`);
     if (!targetValidated && !this.get(targetId))
       throw new Error(`addLink: no target record '${targetId}'`);
-    const parsedRel = linkSchema.shape.rel.parse(rel2);
+    const parsedRel = linkSchema.shape.rel.parse(rel);
     if (parsedRel === "supersedes") {
       throw new Error(`addLink: rel 'supersedes' cannot be written as a raw edge \u2014 supersession is a lifecycle transition, not a link. Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`);
     }
@@ -7616,13 +7616,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join2(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -7784,11 +7883,11 @@ function clip(text, cap) {
 function normalizeWs(text) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
-function pointerLine(store2, kind, slug) {
+function pointerLine(store, kind, slug) {
   let head = "(not in store)";
   let annotation = "";
   try {
-    const match = store2.articlesBySlug(slug).find((r) => !r.working_tree);
+    const match = store.articlesBySlug(slug).find((r) => !r.working_tree);
     if (match) {
       head = clip(match.what_it_does, 140);
       annotation = statusAnnotation(match);
@@ -7864,7 +7963,7 @@ function renderKnownGapsLines(article, info) {
   }
   return lines;
 }
-function renderArticle(store2, article, charCap, { gaps } = {}) {
+function renderArticle(store, article, charCap, { gaps } = {}) {
   const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
   const gapLines = renderKnownGapsLines(article, gaps);
@@ -7894,8 +7993,8 @@ function renderArticle(store2, article, charCap, { gaps } = {}) {
   const relied = article.dependencies?.relied_by ?? [];
   if (relies.length || relied.length) {
     lines.push("ONE-HOP (follow with knowledge_get/knowledge_query when it matters):");
-    for (const slug of relies) lines.push(pointerLine(store2, "relies_on", slug));
-    for (const slug of relied) lines.push(pointerLine(store2, "relied_by", slug));
+    for (const slug of relies) lines.push(pointerLine(store, "relies_on", slug));
+    for (const slug of relied) lines.push(pointerLine(store, "relied_by", slug));
   }
   lines.push(...gapLines);
   return lines.join("\n");
@@ -7945,7 +8044,7 @@ function rankFileDecisionPointers(decisions) {
 }
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
   const shown = decisions.slice(0, cap);
   const fullTotal = total ?? decisions.length;
   const dropped = suppressed ?? decisions.length - shown.length;
@@ -7959,7 +8058,7 @@ function renderDecisionPointers(rel2, decisions, cap = DECISION_POINTER_CAP, { r
     if (rejected) lines.push(`    \u2717 ALREADY REJECTED: ${clip(rejected, DECISION_REJECTED_CLIP)}`);
   }
   if (dropped > 0) {
-    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel2}"] cap:${fullTotal}`;
+    const widen = remedy ?? `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${fullTotal}`;
     lines.push(`  \u2026 ${dropped} more NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return lines.join("\n");
@@ -7984,16 +8083,16 @@ function joinSuspectBlock({ header, lines = [], footer } = {}) {
   if (!lines.length) return "";
   return [header, ...lines.map((l) => l.line), footer].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
-function renderPayload(rel2, blocks, { unowned = false, substantiveCount } = {}) {
+function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
   const substantive = substantiveCount ?? blocks.length;
   return [
-    unowned ? renderFrontier(rel2, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel2}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
+    unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
     ...blocks
   ].join("\n\n");
 }
 var DELIVERY_RECIPE_VERSION = 2;
 function rerenderRecipe({
-  rel: rel2,
+  rel,
   unowned,
   charCap,
   hazardIds,
@@ -8007,7 +8106,7 @@ function rerenderRecipe({
   return {
     version: DELIVERY_RECIPE_VERSION,
     mode: "rerender",
-    rel: rel2,
+    rel,
     unowned: !!unowned,
     char_cap: charCap,
     hazard_ids: hazardIds ?? [],
@@ -8022,112 +8121,121 @@ function rerenderRecipe({
     trailing_blocks: trailingBlocks ?? []
   };
 }
-function renderFrontier(rel2, { hasOtherKnowledge = false } = {}) {
-  return `STERLING FRONTIER SIGNAL (H19): territory '${rel2}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
+function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
+  return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
 }
 
 // scripts/hooks/h19-knowledge-delivery.mjs
 var input = readStdin();
-var rel = repoRel(input.tool_input?.file_path, input.cwd);
-if (!rel) allow();
-if (rel === ".git" || rel.startsWith(".git/")) allow();
-if (rel.startsWith(".sterling/")) allow();
-var store = openStore(input.cwd);
-if (!store) allow();
-try {
-  const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
-  const rung = ["prompt", "read", "edit"].includes(rawRung) ? rawRung : "prompt";
-  const event = input.hook_event_name;
-  let mode;
-  if (event === "PreToolUse") {
-    mode = rung === "edit" ? "inject" : null;
-  } else {
-    if (rung === "read") mode = "inject";
-    else if (rung === "prompt") mode = "enqueue";
-    else mode = input.tool_name === "Read" ? "enqueue" : null;
-  }
-  if (!mode) allow();
-  if (mode === "enqueue" && input.agent_id) allow();
-  const run = store.getRun();
-  if (run && input.agent_id) allow();
-  const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
-  const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-  const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
-  const gPath = guardPath(input.cwd, input.agent_id);
-  const guard = readGuard(gPath);
-  const freshOwners = owners.filter((r) => !isDelivered(guard, r));
-  const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
-  const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDelivered(guard, r)));
-  const bare = owners.length === 0;
-  const unowned = bare && !(gitIgnored([rel], input.cwd)?.has(rel) ?? false);
-  const frontierFresh = unowned && !guard.frontier_files.includes(rel);
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) allow();
-  const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const shownHazards = cappedHazards(freshHazards);
-  const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
-  const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
-  const gapsByOwner = budgetKnownGaps(freshOwners);
-  let suspectBlock = null;
+function main(input2) {
+  const rel = repoRel(input2.tool_input?.file_path, input2.cwd);
+  if (!rel) return allow();
+  if (rel === ".git" || rel.startsWith(".git/")) return allow();
+  if (rel.startsWith(".sterling/")) return allow();
+  const store = openStore(input2.cwd);
+  if (!store) return allow();
   try {
-    const mtimeMs = statSync3(join4(input.cwd, rel)).mtimeMs;
-    const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const lineTokenRe = new RegExp(`(?:(?<=\\\\[nt])|(?<![\\w./-]))${escapedRel}:\\d+(?:-\\d+)?`, "g");
-    const suspects = [];
-    for (const record of fresh) {
-      const { history: _history, ...liveBody } = record;
-      const tokens = [...new Set(JSON.stringify(liveBody).match(lineTokenRe) ?? [])];
-      if (!tokens.length) continue;
-      const updatedAtMs = Date.parse(record.updated_at ?? "");
-      if (!Number.isFinite(updatedAtMs) || updatedAtMs >= mtimeMs) continue;
-      suspects.push({ record, tokens });
+    const rawRung = loadConfig(input2.cwd)?.delivery?.injection_rung;
+    const rung = ["prompt", "read", "edit"].includes(rawRung) ? rawRung : "prompt";
+    const event = input2.hook_event_name;
+    let mode;
+    if (event === "PreToolUse") {
+      mode = rung === "edit" ? "inject" : null;
+    } else {
+      if (rung === "read") mode = "inject";
+      else if (rung === "prompt") mode = "enqueue";
+      else mode = input2.tool_name === "Read" ? "enqueue" : null;
     }
-    if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
-  } catch {
-  }
-  const blocks = [
-    ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-    ...freshOwners.map(
-      (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
-    ),
-    ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
-    // joinSuspectBlock returns '' when no line survives; the filter keeps an
-    // empty advisory shell out of the payload exactly as the drain does.
-    joinSuspectBlock(suspectBlock ?? {})
-  ].filter((b) => typeof b === "string" && b);
-  const payload = renderPayload(rel, blocks, { unowned });
-  if (mode === "enqueue") {
-    enqueuePending(pendingPath(input.cwd), {
-      kind: unowned ? "frontier" : "delivery",
-      rel,
-      payload,
-      recipe: rerenderRecipe({
+    if (!mode) return allow();
+    if (mode === "enqueue" && input2.agent_id) return allow();
+    const run = store.getRun();
+    if (run && input2.agent_id) return allow();
+    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+    const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
+    const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
+    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const guard = readGuard(gPath);
+    const freshOwners = owners.filter((r) => !isDelivered(guard, r));
+    const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
+    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDelivered(guard, r)));
+    const bare = owners.length === 0;
+    const unowned = bare && !(gitIgnored([rel], input2.cwd)?.has(rel) ?? false);
+    const frontierFresh = unowned && !guard.frontier_files.includes(rel);
+    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) return allow();
+    const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
+    const shownHazards = cappedHazards(freshHazards);
+    const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+    const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
+    const gapsByOwner = budgetKnownGaps(freshOwners);
+    let suspectBlock = null;
+    try {
+      const mtimeMs = statSync3(join4(input2.cwd, rel)).mtimeMs;
+      const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const lineTokenRe = new RegExp(`(?:(?<=\\\\[nt])|(?<![\\w./-]))${escapedRel}:\\d+(?:-\\d+)?`, "g");
+      const suspects = [];
+      for (const record of fresh) {
+        const { history: _history, ...liveBody } = record;
+        const tokens = [...new Set(JSON.stringify(liveBody).match(lineTokenRe) ?? [])];
+        if (!tokens.length) continue;
+        const updatedAtMs = Date.parse(record.updated_at ?? "");
+        if (!Number.isFinite(updatedAtMs) || updatedAtMs >= mtimeMs) continue;
+        suspects.push({ record, tokens });
+      }
+      if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
+    } catch {
+    }
+    const blocks = [
+      ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
+      ...freshOwners.map(
+        (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+      ),
+      ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
+      // joinSuspectBlock returns '' when no line survives; the filter keeps an
+      // empty advisory shell out of the payload exactly as the drain does.
+      joinSuspectBlock(suspectBlock ?? {})
+    ].filter((b) => typeof b === "string" && b);
+    const payload = renderPayload(rel, blocks, { unowned });
+    const recordDelivered = () => {
+      markDelivered(guard, fresh);
+      if (frontierFresh) guard.frontier_files.push(rel);
+      writeGuard(gPath, guard);
+    };
+    if (mode === "enqueue") {
+      enqueuePending(pendingPath(input2.cwd), {
+        kind: unowned ? "frontier" : "delivery",
         rel,
-        unowned,
-        charCap,
-        hazardIds: shownHazards.map((r) => r.id),
-        ownerIds: freshOwners.map((r) => r.id),
-        decisionIds: shownDecisions.map((r) => r.id),
-        hazardTail: freshHazards.length - shownHazards.length,
-        decisionTail: freshDecisions.length - shownDecisions.length,
-        // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
-        // It reads as a note about the FILE's line positions, but every one of its
-        // lines is labelled with the CITING RECORD's own title/slug/id, so
-        // replaying it verbatim at drain would serve cached per-record text for a
-        // record that may have been superseded or deleted meanwhile — the same leak
-        // the pointer channel was rebuilt to close. It therefore rides `suspects`
-        // as {id, line} entries and is re-resolved there; `trailing_blocks` is
-        // reserved for text with no record id in it at all.
-        suspects: suspectBlock
-      }),
-      agent_id: input.agent_id ?? "conductor"
-    });
-  } else {
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }));
+        payload,
+        recipe: rerenderRecipe({
+          rel,
+          unowned,
+          charCap,
+          hazardIds: shownHazards.map((r) => r.id),
+          ownerIds: freshOwners.map((r) => r.id),
+          decisionIds: shownDecisions.map((r) => r.id),
+          hazardTail: freshHazards.length - shownHazards.length,
+          decisionTail: freshDecisions.length - shownDecisions.length,
+          // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
+          // It reads as a note about the FILE's line positions, but every one of its
+          // lines is labelled with the CITING RECORD's own title/slug/id, so
+          // replaying it verbatim at drain would serve cached per-record text for a
+          // record that may have been superseded or deleted meanwhile — the same leak
+          // the pointer channel was rebuilt to close. It therefore rides `suspects`
+          // as {id, line} entries and is re-resolved there; `trailing_blocks` is
+          // reserved for text with no record id in it at all.
+          suspects: suspectBlock
+        }),
+        agent_id: input2.agent_id ?? "conductor"
+      });
+      recordDelivered();
+      return allow();
+    }
+    return exitAfterWrite(
+      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }),
+      0,
+      { onWritten: recordDelivered }
+    );
+  } catch (e) {
+    return warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${e && e.message || e}`);
   }
-  markDelivered(guard, fresh);
-  if (frontierFresh) guard.frontier_files.push(rel);
-  writeGuard(gPath, guard);
-  allow();
-} catch (e) {
-  warnNonBlocking(`H19: knowledge delivery failed for '${rel}': ${e && e.message || e}`);
 }
+main(input);

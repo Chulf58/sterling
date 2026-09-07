@@ -7886,17 +7886,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function deny(message) {
-  process.stderr.write(message);
-  process.exit(2);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish2() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish2();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish2();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish2();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function allow() {
-  process.exit(0);
-}
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join2(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -8316,241 +8411,236 @@ function envelopeFor(extraContext) {
   if (parts.length) hookSpecificOutput.additionalContext = parts.join("\n\n");
   return { hookSpecificOutput };
 }
-var emitted;
-function emitEnvelope(extraContext) {
-  if (emitted) {
-    process.stderr.write(
-      `H20: a SECOND stdout envelope was suppressed \u2014 the first write already carries the model pin, and two JSON objects on stdout would make the whole payload unparseable. Dropped payload: ${String(extraContext ?? "").slice(0, 400)}`
-    );
-    return;
-  }
-  emitted = true;
-  process.stdout.write(JSON.stringify(envelopeFor(extraContext)));
+function emitEnvelope(extraContext, opts) {
+  return exitAfterWrite(JSON.stringify(envelopeFor(extraContext)), 0, opts);
 }
 function finish(extraContext) {
   const pin = modelPin();
-  if (!pin?.line && !pin?.updatedInput && !extraContext) allow();
-  emitEnvelope(extraContext);
-  process.exit(0);
+  if (!pin?.line && !pin?.updatedInput && !extraContext) return allow();
+  return emitEnvelope(extraContext);
 }
 var isQuestion = Array.isArray(input.tool_input?.questions);
 var isConsult = typeof input.tool_name === "string" && input.tool_name.startsWith("mcp__codex__");
-try {
-  const outgoing = outgoingProposalText(input.tool_input);
-  if (!outgoing) finish();
-  const store = openStore(input.cwd);
-  if (!store) finish();
-  const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
-  if (terms.length < AXIS_MIN_HITS) finish();
-  const candidates = [
-    ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 }),
-    // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
-    // question and a disconfirmed_hypothesis an already-refuted trail — the two
-    // types a dispatch about to fan out on that question is about to RE-DERIVE
-    // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
-    // 6,142-file sweep on a question the store answered). Same floors as every
-    // other candidate; axisNarrowText matches their question fields.
-    ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
-    ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 }),
-    // OPEN QUESTIONS (board a9be48f2) ride the SAME surface for the adjacent
-    // question: not "was this answered?" but "is this ALREADY BEING
-    // INVESTIGATED?". A fan-out onto a live open_question duplicates an
-    // investigation instead of re-deriving a finished one — the same waste,
-    // one step earlier. NOTE the deny rung is deliberately untouched: an
-    // open_question is not a RULING, so it stays out of DENY_RULING_TYPES and
-    // can never deny a user's question.
-    ...store.query({ types: ["open_question"], rank_terms: terms, cap: 40 })
-  ];
-  if (isQuestion && input.tool_input.questions.length > 1) {
-    const seen = new Set(candidates.map((r) => r.id));
-    for (const q of input.tool_input.questions) {
-      const subTerms = extractAxisTerms(subQuestionText(q), MAX_RANK_TERMS);
-      if (subTerms.length < AXIS_MIN_HITS) continue;
-      for (const type of DENY_RULING_TYPES) {
-        for (const r of store.query({ types: [type], rank_terms: subTerms, cap: 40 })) {
-          if (!seen.has(r.id)) {
-            seen.add(r.id);
-            candidates.push(r);
+function main(input2) {
+  try {
+    const outgoing = outgoingProposalText(input2.tool_input);
+    if (!outgoing) return finish();
+    const store = openStore(input2.cwd);
+    if (!store) return finish();
+    const terms = extractAxisTerms(outgoing, MAX_RANK_TERMS);
+    if (terms.length < AXIS_MIN_HITS) return finish();
+    const candidates = [
+      ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
+      ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 }),
+      ...store.query({ types: ["feature_article"], rank_terms: terms, cap: 40 }),
+      // PRIOR ANSWERS (board e7157d0b): a research_finding is an already-answered
+      // question and a disconfirmed_hypothesis an already-refuted trail — the two
+      // types a dispatch about to fan out on that question is about to RE-DERIVE
+      // (measured: a 158k-token debugger re-deriving a recorded diagnosis; a
+      // 6,142-file sweep on a question the store answered). Same floors as every
+      // other candidate; axisNarrowText matches their question fields.
+      ...store.query({ types: ["research_finding"], rank_terms: terms, cap: 40 }),
+      ...store.query({ types: ["disconfirmed_hypothesis"], rank_terms: terms, cap: 40 }),
+      // OPEN QUESTIONS (board a9be48f2) ride the SAME surface for the adjacent
+      // question: not "was this answered?" but "is this ALREADY BEING
+      // INVESTIGATED?". A fan-out onto a live open_question duplicates an
+      // investigation instead of re-deriving a finished one — the same waste,
+      // one step earlier. NOTE the deny rung is deliberately untouched: an
+      // open_question is not a RULING, so it stays out of DENY_RULING_TYPES and
+      // can never deny a user's question.
+      ...store.query({ types: ["open_question"], rank_terms: terms, cap: 40 })
+    ];
+    if (isQuestion && input2.tool_input.questions.length > 1) {
+      const seen = new Set(candidates.map((r) => r.id));
+      for (const q of input2.tool_input.questions) {
+        const subTerms = extractAxisTerms(subQuestionText(q), MAX_RANK_TERMS);
+        if (subTerms.length < AXIS_MIN_HITS) continue;
+        for (const type of DENY_RULING_TYPES) {
+          for (const r of store.query({ types: [type], rank_terms: subTerms, cap: 40 })) {
+            if (!seen.has(r.id)) {
+              seen.add(r.id);
+              candidates.push(r);
+            }
           }
         }
       }
     }
-  }
-  if (!candidates.length) finish();
-  if (isQuestion) {
-    const questions = input.tool_input.questions;
-    const perQuestion = questions.map((q, index) => {
-      const subText = subQuestionText(q);
-      const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
-      const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
-        (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && // FULL coverage of the record's PRE-UNION narrow top-K. NOT
-        // hasRecordCentralityHit: this rung exits 2 and blocks the user's
-        // question, so it must never see the title-union central set (a
-        // bigger set makes full coverage a weaker per-term demand — see
-        // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
-        hasFullNarrowCentralityCoverage(x.record, subText)
-      );
-      return { index, label: q?.header || q?.question, subText, subTerms, strict };
-    });
-    const ledgerPath = denyLedgerPath(input.cwd, input.agent_id);
-    const ledger = readDenyLedger(ledgerPath);
-    const unresolved = [];
-    const openIndexes = /* @__PURE__ */ new Set();
-    const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
-    for (const p of perQuestion) {
-      const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
-      let overridden = null;
-      let shortfall = null;
-      let reseeded = false;
-      const citedUnresolvedIds = /* @__PURE__ */ new Set();
-      for (const [key2, entry] of Object.entries(ledger.entries)) {
-        if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
-        if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
-        if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
-          const carried = extractAxisTermsUncapped(
-            stripCitations(Array.isArray(entry.terms) ? entry.terms.join(" ") : "", entry.recordIds)
-          );
-          entry.terms = [.../* @__PURE__ */ new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
-          entry.terms_version = DELTA_TERMS_VERSION;
-          reseeded = true;
+    if (!candidates.length) return finish();
+    if (isQuestion) {
+      const questions = input2.tool_input.questions;
+      const perQuestion = questions.map((q, index) => {
+        const subText = subQuestionText(q);
+        const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
+        const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
+          (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && // FULL coverage of the record's PRE-UNION narrow top-K. NOT
+          // hasRecordCentralityHit: this rung exits 2 and blocks the user's
+          // question, so it must never see the title-union central set (a
+          // bigger set makes full coverage a weaker per-term demand — see
+          // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
+          hasFullNarrowCentralityCoverage(x.record, subText)
+        );
+        return { index, label: q?.header || q?.question, subText, subTerms, strict };
+      });
+      const ledgerPath = denyLedgerPath(input2.cwd, input2.agent_id);
+      const ledger = readDenyLedger(ledgerPath);
+      const unresolved = [];
+      const openIndexes = /* @__PURE__ */ new Set();
+      const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
+      for (const p of perQuestion) {
+        const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
+        let overridden = null;
+        let shortfall = null;
+        let reseeded = false;
+        const citedUnresolvedIds = /* @__PURE__ */ new Set();
+        for (const [key2, entry] of Object.entries(ledger.entries)) {
+          if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
+          if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
+          if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
+            const carried = extractAxisTermsUncapped(
+              stripCitations(Array.isArray(entry.terms) ? entry.terms.join(" ") : "", entry.recordIds)
+            );
+            entry.terms = [.../* @__PURE__ */ new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
+            entry.terms_version = DELTA_TERMS_VERSION;
+            reseeded = true;
+            for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
+            continue;
+          }
+          const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
+          if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
+            overridden = { key: key2, recordIds: entry.recordIds };
+            break;
+          }
+          if (shortfall === null || newTerms.length > shortfall.new_terms) {
+            shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
+          }
           for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
+        }
+        if ((reseeded || shortfall !== null) && p.strict.length === 0) {
+          const byId = new Map(candidates.map((r) => [r.id, r]));
+          const records = [...citedUnresolvedIds].map((id) => {
+            const pooled = byId.get(id);
+            if (pooled) return pooled;
+            try {
+              return store.get(id) ?? { id };
+            } catch {
+              return { id };
+            }
+          });
+          unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
           continue;
         }
-        const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
-        if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
-          overridden = { key: key2, recordIds: entry.recordIds };
-          break;
+        if (!reseeded && overridden) {
+          ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: (/* @__PURE__ */ new Date()).toISOString() });
+          openIndexes.add(p.index);
+          continue;
         }
-        if (shortfall === null || newTerms.length > shortfall.new_terms) {
-          shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
+        if (p.strict.length === 0) {
+          openIndexes.add(p.index);
+          continue;
         }
-        for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
+        const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
+        const key = denyIntentKey(recordIds);
+        if (!ledger.entries[key])
+          ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
+        unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
       }
-      if ((reseeded || shortfall !== null) && p.strict.length === 0) {
-        const byId = new Map(candidates.map((r) => [r.id, r]));
-        const records = [...citedUnresolvedIds].map((id) => {
-          const pooled = byId.get(id);
-          if (pooled) return pooled;
-          try {
-            return store.get(id) ?? { id };
-          } catch {
-            return { id };
-          }
-        });
-        unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
-        continue;
+      writeDenyLedger(ledgerPath, ledger);
+      if (unresolved.length) {
+        const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
+        recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
+        return deny(renderDenyOnceMessage(unresolved, questions.length, open));
       }
-      if (!reseeded && overridden) {
-        ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: (/* @__PURE__ */ new Date()).toISOString() });
-        openIndexes.add(p.index);
-        continue;
-      }
-      if (p.strict.length === 0) {
-        openIndexes.add(p.index);
-        continue;
-      }
-      const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
-      const key = denyIntentKey(recordIds);
-      if (!ledger.entries[key])
-        ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
-      unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
     }
-    writeDenyLedger(ledgerPath, ledger);
-    if (unresolved.length) {
-      const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
-      recordAdvisoryFire(input.cwd, "h20", input.session_id);
-      deny(renderDenyOnceMessage(unresolved, questions.length, open));
-    }
-  }
-  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
-  if (!scored.length) finish();
-  const gPath = guardPath(input.cwd, input.agent_id);
-  const guard = readGuard(gPath);
-  const fresh = scored.filter((x) => !isDelivered(guard, x.record));
-  if (!fresh.length) finish();
-  const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
-  const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
-  const articles = fresh.filter((x) => x.record.type === "feature_article");
-  const priorAnswers = fresh.filter(
-    (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
-  );
-  if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) finish();
-  const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
-  const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
-  const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
-  const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
-  const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
-  const hazardDecisionBlocks = [
-    ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
-      remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
-    }),
-    ...decisions.length ? [
-      renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, {
-        remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`
-      })
-    ] : []
-  ];
-  const articleBlocks = articles.length ? [
-    renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
-      remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
-    })
-  ] : [];
-  const PRIOR_ANSWER_CAP = 3;
-  const clip2 = (v, n = 160) => {
-    const t = String(v ?? "").replace(/\s+/g, " ").trim();
-    return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
-  };
-  const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
-  const priorBlocks = priorAnswers.length ? [
-    [
-      `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
-      ...shownPrior.map((x) => {
-        const r = x.record;
-        if (r.type === "research_finding") {
-          return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
-        }
-        if (r.type === "open_question") {
-          if (r.resolution_status === "closed") {
-            return `  \u2192 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"}): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
-          }
-          return `  \u2192 ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
-        }
-        return `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
-      }),
-      ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
-    ].join("\n")
-  ] : [];
-  const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
-  const blocks = [
-    header,
-    // A prior ANSWER outranks everything on a question-shaped prompt — it is
-    // the direct "don't re-derive" signal; on a change-shaped prompt hazards
-    // still lead (stop the mistake), answers ride with the article pointers.
-    ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
-  ];
-  recordAdvisoryFire(input.cwd, "h20", input.session_id);
-  emitEnvelope(blocks.join("\n\n"));
-  try {
-    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-    markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
-    writeGuard(gPath, guard);
-  } catch (e) {
-    process.stderr.write(
-      `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+    const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
+    if (!scored.length) return finish();
+    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const guard = readGuard(gPath);
+    const fresh = scored.filter((x) => !isDelivered(guard, x.record));
+    if (!fresh.length) return finish();
+    const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
+    const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
+    const articles = fresh.filter((x) => x.record.type === "feature_article");
+    const priorAnswers = fresh.filter(
+      (x) => x.record.type === "research_finding" || x.record.type === "disconfirmed_hypothesis" || x.record.type === "open_question"
     );
+    if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) return finish();
+    const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
+    const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
+    const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
+    const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input2.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
+    const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+    const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+    const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+    const hazardDecisionBlocks = [
+      ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
+        remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
+      }),
+      ...decisions.length ? [
+        renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, {
+          remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`
+        })
+      ] : []
+    ];
+    const articleBlocks = articles.length ? [
+      renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
+        remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
+      })
+    ] : [];
+    const PRIOR_ANSWER_CAP = 3;
+    const clip2 = (v, n = 160) => {
+      const t = String(v ?? "").replace(/\s+/g, " ").trim();
+      return t.length <= n ? t : `${t.slice(0, n)}\u2026`;
+    };
+    const shownPrior = priorAnswers.slice(0, PRIOR_ANSWER_CAP);
+    const priorBlocks = priorAnswers.length ? [
+      [
+        `\u25B8 PRIOR ANSWERS in the store (${priorAnswers.length}) \u2014 this dispatch may be about to RE-DERIVE one of these, or duplicate a question already under investigation. knowledge_get before fanning out:`,
+        ...shownPrior.map((x) => {
+          const r = x.record;
+          if (r.type === "research_finding") {
+            return `  \u2192 ANSWERED: ${clip2(r.question)} (source ${r.source_date ?? "?"}, captured ${r.capture_date ?? "?"}${r.status === "flagged_stale" ? ", FLAGGED STALE \u2014 re-verify before trusting" : ""}) \xB7 knowledge_get ${r.id}`;
+          }
+          if (r.type === "open_question") {
+            if (r.resolution_status === "closed") {
+              return `  \u2192 ANSWERED (question closed into ${r.closed_into ?? "an unnamed record"}): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
+            }
+            return `  \u2192 ALREADY UNDER INVESTIGATION (open, no answer yet): ${clip2(r.question)} \xB7 knowledge_get ${r.id}`;
+          }
+          return `  \u2192 REFUTED TRAIL: ${clip2(r.question)} \u2014 rejected: ${clip2(r.rejected_answer, 100)} \xB7 knowledge_get ${r.id}`;
+        }),
+        ...priorAnswers.length > PRIOR_ANSWER_CAP ? [`  (+${priorAnswers.length - PRIOR_ANSWER_CAP} more \u2014 knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",")}] cap:${priorAnswers.length})`] : []
+      ].join("\n")
+    ] : [];
+    const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+    const blocks = [
+      header,
+      // A prior ANSWER outranks everything on a question-shaped prompt — it is
+      // the direct "don't re-derive" signal; on a change-shaped prompt hazards
+      // still lead (stop the mistake), answers ride with the article pointers.
+      ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
+    ];
+    return emitEnvelope(blocks.join("\n\n"), {
+      onWritten: () => {
+        recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
+        try {
+          const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
+          markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
+          writeGuard(gPath, guard);
+        } catch (e) {
+          process.stderr.write(
+            `H20: delivery bookkeeping failed AFTER the envelope was written (${e && e.message || e}) \u2014 the payload above STANDS and the model pin applies; these records stay eligible for delivery again this session.`
+          );
+        }
+      }
+    });
+  } catch (e) {
+    const failure = `H20: mechanism-axis delivery failed: ${e && e.message || e}`;
+    const pin = modelPin();
+    if (pin?.line || pin?.updatedInput) {
+      process.stderr.write(failure);
+      return emitEnvelope(`\u26A0 ${failure} \u2014 the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
+    }
+    return warnNonBlocking(failure);
   }
-  allow();
-} catch (e) {
-  const failure = `H20: mechanism-axis delivery failed: ${e && e.message || e}`;
-  const pin = modelPin();
-  if (pin?.line || pin?.updatedInput) {
-    process.stderr.write(failure);
-    emitEnvelope(`\u26A0 ${failure} \u2014 the model pin above still applies; relevance carriage was SKIPPED for this consult.`);
-    process.exit(0);
-  }
-  warnNonBlocking(failure);
 }
+main(input);

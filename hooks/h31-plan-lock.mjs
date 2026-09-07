@@ -5233,9 +5233,112 @@ function readStdin() {
   if (root) input.cwd = root;
   return input;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 
 // scripts/hooks/lib/plan-lock.mjs
 import { createHash, randomUUID } from "node:crypto";

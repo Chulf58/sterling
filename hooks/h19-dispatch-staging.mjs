@@ -7889,13 +7889,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish2() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish2();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish2();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish2();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join2(cwd, ".sterling", "config.json");
   return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -8345,7 +8444,6 @@ try {
   }
 } catch {
 }
-var emitted = false;
 function combinedContext(payload) {
   const out = [];
   if (activePlanLine) out.push(activePlanLine);
@@ -8354,109 +8452,108 @@ function combinedContext(payload) {
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
   return out.join("\n\n");
 }
+function envelope(out) {
+  return JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } });
+}
 function finish(payload) {
   const out = combinedContext(payload);
-  if (out) {
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
-    emitted = true;
-  }
-  allow();
+  if (out) return exitAfterWrite(envelope(out), 0);
+  return allow();
 }
-try {
-  const store = openStore(input.cwd);
-  if (!store) finish("");
-  const prompts = lastDispatchPrompts(input.transcript_path);
-  const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
-  const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
-    (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
-  );
-  const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree) : [];
-  const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
-  const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
-  const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
-  const subjectMatches = [];
-  const seenSubject = /* @__PURE__ */ new Set();
-  for (const p of prompts) {
-    const terms = extractAxisTerms(p, MAX_RANK_TERMS);
-    if (terms.length < AXIS_MIN_HITS) continue;
-    const candidatesBySubject = [
-      ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
-      ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
-    ];
-    for (const r of candidatesBySubject) {
-      if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
-      const hits = axisHits(r, terms);
-      if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
-        seenSubject.add(r.id);
-        subjectMatches.push({ record: r, hits, prompt: p });
+function main(input2) {
+  try {
+    const store = openStore(input2.cwd);
+    if (!store) return finish("");
+    const prompts = lastDispatchPrompts(input2.transcript_path);
+    const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
+    const rels = [...new Set(candidates.map((c) => repoRel(c, input2.cwd)).filter(Boolean))].filter(
+      (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
+    );
+    const owners = rels.length ? store.query({ types: ["feature_article", "reference_material"], file_keys: rels, cap: 100 }).filter((r) => !r.working_tree) : [];
+    const hazards = rels.length ? store.query({ types: ["anti_pattern"], file_keys: rels, cap: 100 }) : [];
+    const decisions = rels.length ? store.query({ types: ["decision"], file_keys: rels, cap: 100 }) : [];
+    const pathIds = new Set([...owners, ...hazards, ...decisions].map((r) => r.id));
+    const subjectMatches = [];
+    const seenSubject = /* @__PURE__ */ new Set();
+    for (const p of prompts) {
+      const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+      if (terms.length < AXIS_MIN_HITS) continue;
+      const candidatesBySubject = [
+        ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
+        ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
+      ];
+      for (const r of candidatesBySubject) {
+        if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
+        const hits = axisHits(r, terms);
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+          seenSubject.add(r.id);
+          subjectMatches.push({ record: r, hits, prompt: p });
+        }
       }
     }
-  }
-  subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
-  if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) finish("");
-  const gPath = guardPath(input.cwd, input.agent_id);
-  const guard = readGuard(gPath);
-  const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-  const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-  const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !guard.records.includes(r.id)));
-  const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
-  if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) finish("");
-  const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
-  const parts = [];
-  if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-    const blocks = [
-      ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
-      ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
-      ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
-    ];
-    parts.push(renderPayload(rels.join(", "), blocks, { unowned: false }));
-  }
-  const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
-  const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
-  if (subjectHazards.length || subjectDecisions.length) {
-    const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
-    const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
-    const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
-    const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
-    const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
-    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
-    parts.push(
-      [
-        `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
-        ...renderHazards(subjectHazards, charCap, { remedy }),
-        ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy })] : []
-      ].join("\n\n")
-    );
-  }
-  const payload = parts.join("\n\n");
-  const fresh = [
-    ...freshOwners,
-    ...cappedHazards(freshHazards),
-    ...freshDecisions.slice(0, DECISION_POINTER_CAP),
-    ...cappedHazards(subjectHazards),
-    ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
-  ];
-  const out = combinedContext(payload);
-  if (out) {
-    process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
-    emitted = true;
-  }
-  guard.records.push(...fresh.map((r) => r.id));
-  writeGuard(gPath, guard);
-  allow();
-} catch (e) {
-  try {
-    process.stderr.write(`H19: dispatch staging failed: ${e && e.message || e}
-`);
-  } catch {
-  }
-  if (!emitted) {
-    const out = combinedContext("");
-    if (out) {
-      process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: out } }));
-      emitted = true;
+    subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
+    if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish("");
+    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const guard = readGuard(gPath);
+    const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
+    const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
+    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !guard.records.includes(r.id)));
+    const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
+    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
+    const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
+    const parts = [];
+    if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+      const blocks = [
+        ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+        ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
+        ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
+      ];
+      parts.push(renderPayload(rels.join(", "), blocks, { unowned: false }));
     }
+    const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
+    const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
+    if (subjectHazards.length || subjectDecisions.length) {
+      const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
+      const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
+      const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
+      const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
+      const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
+      const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
+      parts.push(
+        [
+          `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
+          ...renderHazards(subjectHazards, charCap, { remedy }),
+          ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy })] : []
+        ].join("\n\n")
+      );
+    }
+    const payload = parts.join("\n\n");
+    const fresh = [
+      ...freshOwners,
+      ...cappedHazards(freshHazards),
+      ...freshDecisions.slice(0, DECISION_POINTER_CAP),
+      ...cappedHazards(subjectHazards),
+      ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
+    ];
+    const recordStaged = () => {
+      guard.records.push(...fresh.map((r) => r.id));
+      writeGuard(gPath, guard);
+    };
+    const out = combinedContext(payload);
+    if (!out) {
+      recordStaged();
+      return allow();
+    }
+    return exitAfterWrite(envelope(out), 0, { onWritten: recordStaged });
+  } catch (e) {
+    try {
+      process.stderr.write(`H19: dispatch staging failed: ${e && e.message || e}
+`);
+    } catch {
+    }
+    const out = combinedContext("");
+    if (out) return exitAfterWrite(envelope(out), 0);
+    return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
   }
-  if (emitted) allow();
-  warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
 }
+main(input);

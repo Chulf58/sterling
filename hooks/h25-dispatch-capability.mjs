@@ -5270,13 +5270,112 @@ function readStdin() {
   if (root) input2.cwd = root;
   return input2;
 }
-function allow() {
-  process.exit(0);
+function makeExitHelpers({ stdout, stderr, exit }) {
+  let stdoutWritten = false;
+  let pending = 0;
+  let exitCode = 0;
+  let finished = false;
+  const note = (message) => {
+    try {
+      stderr.write(message);
+    } catch {
+    }
+  };
+  function finish() {
+    if (finished) return;
+    finished = true;
+    exit(exitCode);
+  }
+  function exitAfterWrite2(payload, code, { onWritten } = {}) {
+    const text = typeof payload === "string" ? payload : String(payload ?? "");
+    if (!text) {
+      if (pending > 0) return;
+      exitCode = code;
+      finish();
+      return;
+    }
+    if (stdoutWritten) {
+      note(
+        `hook stdout: a SECOND stdout payload was SUPPRESSED \u2014 the first write already owns this process's single envelope, and two JSON objects on stdout parse as nothing at all. Dropped payload: ${text.slice(0, 400)}`
+      );
+      if (pending === 0) finish();
+      return;
+    }
+    stdoutWritten = true;
+    exitCode = code;
+    pending += 1;
+    let settled = false;
+    const settle = (err) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (typeof stdout.removeListener === "function") {
+          try {
+            stdout.removeListener("error", onError);
+          } catch {
+          }
+        }
+        if (err) {
+          if (exitCode === 0) exitCode = 1;
+          note(
+            `hook stdout: the payload could NOT be written (${err && err.message || err}) \u2014 exiting ${exitCode}; the envelope was not delivered and any delivery bookkeeping was skipped, so its records stay eligible.`
+          );
+        } else if (typeof onWritten === "function") {
+          try {
+            onWritten();
+          } catch (e) {
+            note(
+              `hook stdout: post-write bookkeeping threw (${e && e.message || e}) \u2014 the payload above STANDS and the exit code is unchanged.`
+            );
+          }
+        }
+      } finally {
+        pending -= 1;
+        finish();
+      }
+    };
+    const onError = (err) => settle(err || new Error("stdout error"));
+    if (typeof stdout.once === "function") stdout.once("error", onError);
+    try {
+      stdout.write(text, (err) => settle(err || null));
+    } catch (e) {
+      settle(e || new Error("stdout write threw"));
+    }
+  }
+  function allow2() {
+    return exitAfterWrite2("", 0);
+  }
+  function deny2(message) {
+    if (pending > 0) {
+      note(
+        `hook stdout: a BLOCKING denial was issued while a stdout write was still in flight \u2014 that payload is TRUNCATED by design (a block is never lowered, and stdout is ignored on exit 2).
+`
+      );
+    }
+    note(message);
+    finished = true;
+    exit(2);
+  }
+  function warnNonBlocking2(message) {
+    if (pending > 0) {
+      note(
+        `${message}
+hook stdout: the above is DISCLOSED ONLY \u2014 a stdout payload is already in flight and its own exit (${exitCode}) carries, because a delivered envelope outranks an advisory failure.
+`
+      );
+      return;
+    }
+    note(message);
+    finished = true;
+    exit(1);
+  }
+  return { exitAfterWrite: exitAfterWrite2, allow: allow2, deny: deny2, warnNonBlocking: warnNonBlocking2 };
 }
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
+var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
+  stdout: process.stdout,
+  stderr: process.stderr,
+  exit: (code) => process.exit(code)
+});
 function loadConfig(cwd) {
   const p = join(cwd, ".sterling", "config.json");
   return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
@@ -5763,66 +5862,75 @@ function tddPostureAdvisory(subagentType, prompt, cwd) {
   }
   return parts.length ? parts.join("\n\n") : null;
 }
-var input;
-try {
-  input = readStdin();
-} catch {
-  allow();
+function readInputOrAllow() {
+  try {
+    return readStdin();
+  } catch {
+    return allow();
+  }
 }
+var input = readInputOrAllow();
 function emit(additionalContext) {
-  recordAdvisoryFire(input.cwd, "h25", input.session_id);
-  process.stdout.write(
+  return exitAfterWrite(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
-    })
+    }),
+    0,
+    {
+      onWritten: () => recordAdvisoryFire(input.cwd, "h25", input.session_id)
+      // expiring campaign scaffolding — see lib/advisory-counter.mjs
+    }
   );
 }
-try {
-  let finish = function(capabilityMessage) {
-    const parts = [];
-    if (capabilityMessage) parts.push(capabilityMessage);
-    if (commandShapeMsg) parts.push(commandShapeMsg);
-    if (taAdvisory) parts.push(taAdvisory);
-    if (citeAdvisory) parts.push(citeAdvisory);
-    if (tddAdvisory) parts.push(tddAdvisory);
-    if (parts.length) emit(parts.join("\n\n"));
-    allow();
-  };
-  const subagentType = input.tool_input?.subagent_type;
-  if (!subagentType) allow();
-  const taAdvisory = testAuthoringAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  const citeAdvisory = citationStalenessAdvisory(input.tool_input?.prompt, input.cwd);
-  const tddAdvisory = tddPostureAdvisory(subagentType, input.tool_input?.prompt, input.cwd);
-  let commandShapeMsg;
-  const agentPath = join4(input.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
-  if (!existsSync4(agentPath)) {
-    if (BUILTIN_AGENT_TYPES.has(subagentType)) finish();
-    finish(
-      `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
-    );
-  }
-  let content;
+function main(input2) {
   try {
-    content = readFileSync4(agentPath, "utf8");
-  } catch (e) {
-    warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
-  }
-  const toolsRaw = parseToolsLine(content);
-  if (toolsRaw === void 0) finish();
-  const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (!grantList.length) finish();
-  if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input.tool_input?.prompt);
-  const mentioned = findMentionedTools(input.tool_input?.prompt);
-  if (!mentioned.length) finish();
-  const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
-  if (!missing.length) finish();
-  const missingLines = missing.map((tool) => `  - '${tool}' \u2014 not held by this agent's grant`).join("\n");
-  finish(
-    `H25 DISPATCH CAPABILITY ADVISORY \u2014 you are about to dispatch '${subagentType}', and the brief mentions tool(s) its installed grant does not hold:
+    let finish = function(capabilityMessage) {
+      const parts = [];
+      if (capabilityMessage) parts.push(capabilityMessage);
+      if (commandShapeMsg) parts.push(commandShapeMsg);
+      if (taAdvisory) parts.push(taAdvisory);
+      if (citeAdvisory) parts.push(citeAdvisory);
+      if (tddAdvisory) parts.push(tddAdvisory);
+      if (parts.length) return emit(parts.join("\n\n"));
+      return allow();
+    };
+    const subagentType = input2.tool_input?.subagent_type;
+    if (!subagentType) return allow();
+    const taAdvisory = testAuthoringAdvisory(subagentType, input2.tool_input?.prompt, input2.cwd);
+    const citeAdvisory = citationStalenessAdvisory(input2.tool_input?.prompt, input2.cwd);
+    const tddAdvisory = tddPostureAdvisory(subagentType, input2.tool_input?.prompt, input2.cwd);
+    let commandShapeMsg;
+    const agentPath = join4(input2.cwd ?? ".", ".claude", "agents", `${subagentType}.md`);
+    if (!existsSync4(agentPath)) {
+      if (BUILTIN_AGENT_TYPES.has(subagentType)) return finish();
+      return finish(
+        `H25: dispatch capability for subagent_type '${subagentType}' cannot be checked \u2014 no installed agent definition was found at .claude/agents/${subagentType}.md on this machine. Confirm the type is correct before relying on this dispatch, or install the agent definition.`
+      );
+    }
+    let content;
+    try {
+      content = readFileSync4(agentPath, "utf8");
+    } catch (e) {
+      return warnNonBlocking(`H25: dispatch-capability advisory failed reading '${agentPath}': ${e && e.message || e}`);
+    }
+    const toolsRaw = parseToolsLine(content);
+    if (toolsRaw === void 0) return finish();
+    const grantList = toolsRaw.replace(/^\[/, "").replace(/\]$/, "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (!grantList.length) return finish();
+    if (!hasShellCapability(grantList)) commandShapeMsg = commandShapeAdvisory(input2.tool_input?.prompt);
+    const mentioned = findMentionedTools(input2.tool_input?.prompt);
+    if (!mentioned.length) return finish();
+    const missing = mentioned.filter((tool) => !isGranted(tool, grantList));
+    if (!missing.length) return finish();
+    const missingLines = missing.map((tool) => `  - '${tool}' \u2014 not held by this agent's grant`).join("\n");
+    return finish(
+      `H25 DISPATCH CAPABILITY ADVISORY \u2014 you are about to dispatch '${subagentType}', and the brief mentions tool(s) its installed grant does not hold:
 ${missingLines}
 Agent '${subagentType}' actual grant (frontmatter tools:): ${toolsRaw}
 This is the warn-only dispatch-capability preflight (decision dc6c1afb) \u2014 never a block, and it intentionally reports ungranted mentions even though a mention is not proof of a requirement (a prohibition or passing context can read identically). Remedy: re-target the dispatch to an agent holding ${missing.join(", ")}, re-scope the brief so it is not needed, or state explicitly why the mention is not a requirement.`
-  );
-} catch (e) {
-  warnNonBlocking(`H25: dispatch-capability advisory failed: ${e && e.message || e}`);
+    );
+  } catch (e) {
+    return warnNonBlocking(`H25: dispatch-capability advisory failed: ${e && e.message || e}`);
+  }
 }
+main(input);

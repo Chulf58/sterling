@@ -636,7 +636,22 @@ const BASELINE = {
     // static imports extractAxisTermsUncapped/stripCitations, which are safe-listed),
     // one entry in, one stale entry out, total unmoved at 102. Verified by RUNNING
     // the check (via scripts/tests/check-failclosed-boundary.test.mjs AC7).
-    { statement: 'try { // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where // they were not … #11759a8c' },
+    // R0 (2026-09-07, decision hook-stdout-exit-after-write-callback-bound-exit-
+    // deny-stays-synchronous): the hook's whole body moved inside function
+    // main(input) so every terminal helper call can be a `return` — the former
+    // top-level `try { … }` is now inside main and the ONE unguarded top-level
+    // statement is the call itself. One entry in, one out, total unmoved at 102.
+    // COVERAGE LOSS, stated flatly (reviewer-security HIGH-1 on R0): the retired
+    // `try {…}` identity digested h20's WHOLE guarded body, so any edit inside
+    // it re-digested the entry and forced a reviewed rotation; `main(input);`
+    // is a constant identity that can never rotate, and this detector does not
+    // descend into function bodies (isSafeOutsideBoundary credits every
+    // FunctionDeclaration; the scan iterates sourceFile.statements only). Until
+    // board 250f5774 teaches it to treat an invoked top-level main()'s body as
+    // top-level statements, edits inside h20's body are invisible to the ratchet
+    // — and wrapping a BLOCKING gate this way would shrink its baseline to one
+    // entry and read as a fix. Do not migrate a blocking hook onto main() first.
+    { statement: 'main(input);' },
   ],
   // The two entries the outside review named: under the old first-line identity
   // BOTH were the bare string 'try {', so the multiset could not tell them apart
