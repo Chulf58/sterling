@@ -93,6 +93,7 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import {
   extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, hasRecordCentralityHit, MAX_RANK_TERMS,
+  decodeLiveRecordRow, classifyClaimPath,
 } from '@sterling/store';
 
 export const ORACLE_VERSION = 1;
@@ -396,18 +397,25 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
   //     the descendant's own claimant(s), and the file claim proceeds as an
   //     ordinary case. A real owned file must never be dropped because some
   //     OTHER record's bad descendant claim happens to nest under it.
-  const excluded = new Map(); // rel -> { reason }
+  const excluded = new Map(); // rel -> { reason, errno? }
   for (const rel of allRels) {
     if (excluded.has(rel)) continue;
-    let isRealDir = false;
-    let isRealFile = false;
-    try {
-      const st = statSync(join(root, rel));
-      isRealDir = st.isDirectory();
-      isRealFile = st.isFile();
-    } catch { /* absent or unreadable is neither */ }
+    // THE SHARED CLASSIFIER (decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]):
+    // the same @sterling/store function the MCP write boundary refuses on, so
+    // the census and the gate can never disagree about what a directory claim
+    // is. It replaced a hand-rolled statSync whose bare `catch {}` collapsed
+    // "unreadable" into "absent" — the one verdict the write boundary REFUSES
+    // was invisible here, so a claim the gate would reject read as a healthy
+    // absent path. An unverifiable verdict now gets its own named exclusion
+    // carrying the errno, never silence.
+    const verdict = classifyClaimPath(root, rel);
+    const isRealDir = verdict === 'real_directory';
+    const isRealFile = verdict === 'leaf';
     const descendants = allRels.filter((other) => other !== rel && other.startsWith(`${rel}/`));
-    if (isRealDir) {
+    if (typeof verdict === 'object') {
+      excluded.set(rel, { reason: 'unverifiable_claim', errno: verdict.errno });
+    } else if (isRealDir) {
       excluded.set(rel, { reason: 'real_directory' });
     } else if (descendants.length) {
       if (isRealFile) {
@@ -465,6 +473,9 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
       record_type: claims[0]?.record_type ?? null,
       raw: claims[0]?.raw ?? rel,
       reason: x.reason,
+      // Only 'unverifiable_claim' carries one — the errno the shared classifier
+      // could not see past, so the census says WHY rather than just excluding.
+      ...(x.errno ? { errno: x.errno } : {}),
     });
   }
   // FRONTIER SUPPRESSION, recorded by name. An UNOWNED path that git ignores is
@@ -1347,23 +1358,29 @@ function isEligibleForRel(store, id, rel) {
 // it as a caller option only invited exactly this confusion, so hook
 // resolution now ALWAYS uses the module constant; nothing a caller can pass
 // changes it.
-/** Minimal, SYNCHRONOUS, read-only `.get(id)` shim over the records table's
- *  own `body` column (JSON.parse(row.body) IS the full record — verified
- *  against packages/store/src/index.ts's own read paths, which return
- *  exactly that with no further merge). Deliberately NOT SterlingStore: that
- *  class only loads via a dynamic `import()`, which is asynchronous and would
- *  force this function's whole call signature to become async — breaking
- *  every existing SYNCHRONOUS caller for the sake of one optional fallback
- *  path. node:sqlite's DatabaseSync is already a static, synchronous import
- *  at the top of this file; this shim exists ONLY to answer `isEligibleForRel`
- *  and is never a general store surface. */
+/** Minimal, SYNCHRONOUS, read-only `.get(id)` shim over the records table.
+ *  Deliberately NOT SterlingStore: that class only loads via a dynamic
+ *  `import()`, which is asynchronous and would force this function's whole
+ *  call signature to become async — breaking every existing SYNCHRONOUS
+ *  caller for the sake of one optional fallback path. node:sqlite's
+ *  DatabaseSync is already a static, synchronous import at the top of this
+ *  file; this shim exists ONLY to answer `isEligibleForRel` and is never a
+ *  general store surface.
+ *
+ *  IT SELECTS `body, scope` AND DECODES THROUGH THE STORE'S OWN EXPORTED
+ *  DECODER (decision
+ *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary],
+ *  the residual it closes). It previously selected `body` alone and
+ *  JSON.parse'd it, which materialises a LIVE record carrying whatever scope
+ *  the body happens to hold — the exact body/column disagreement
+ *  column-authoritative reads exist to make unrepresentable. */
 function openFallbackReader(snapshotDb) {
   const db = new DatabaseSync(snapshotDb, { readOnly: true });
-  const stmt = db.prepare('SELECT body FROM records WHERE id = ?');
+  const stmt = db.prepare('SELECT body, scope FROM records WHERE id = ?');
   return {
     get(id) {
       const row = stmt.get(id);
-      return row ? JSON.parse(row.body) : undefined;
+      return row ? decodeLiveRecordRow('delivery-oracle fallback reader', row) : undefined;
     },
     close() { db.close(); },
   };

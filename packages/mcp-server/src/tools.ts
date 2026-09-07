@@ -17,6 +17,7 @@ import {
   hasDiscriminatingHit,
   hasRecordCentralityHit,
   recordCentralityHits,
+  classifyClaimPath,
   type QueryOptions,
   type RecordedExit,
   type ToolStore,
@@ -56,6 +57,16 @@ export interface CreateResult {
    * responses stay byte-identical. Advisory only, never gates the write.
    */
   same_subject?: SameSubjectEntry[];
+  /**
+   * THE CLAIM-CHECK DISCLOSURE (decision
+   * [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+   * Present ONLY as 'unavailable:no_repo_root': without a repo root there is
+   * nothing to classify a claimed path against, so the write is ADMITTED and
+   * the ABSENT CAPABILITY is disclosed — the same shape the drift provenance
+   * uses. When the capability exists the write either passed the check or was
+   * refused, so silence here means "checked".
+   */
+  claims_check?: string;
 }
 
 /**
@@ -422,6 +433,17 @@ export interface BaselineDrift {
    * own F3 fix exists to prevent.
    */
   unverifiable?: string[];
+  /**
+   * The SAME paths as `unverifiable`, each with a TYPED reason (decision
+   * [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+   * A parallel array rather than a change to `unverifiable`'s shape, so existing
+   * consumers of the string list keep working: 'directory' is the claim that can
+   * never deliver anything (every delivery join is exact), 'absent' is gone from
+   * this tree, 'no_baseline' is present and readable but was never baselined
+   * (nothing to compare — not a defect in the file), and 'unreadable' is
+   * everything else this read could not settle.
+   */
+  unverifiable_detail?: { path: string; reason: 'directory' | 'absent' | 'unreadable' | 'no_baseline' }[];
   /** what the verdict means, in one sentence per arm */
   note: string;
 }
@@ -1254,7 +1276,10 @@ export class SterlingTools {
     const { root, unresolved } = this.treeRootFor(record);
     if (unresolved || !root) return undefined;
     const baselines: Record<string, string> = {};
-    for (const rel of RECORD_TYPES[type].fileKeys(record)) {
+    // ONE definition of "which paths can be baselined", shared with the
+    // read-time drift check (baselineablePaths) so the writer of these hashes
+    // and the reader that re-checks them cannot drift apart.
+    for (const rel of SterlingTools.baselineablePaths(record)) {
       // lstat, not stat: the question is what the PATH ITSELF is, and a symlink
       // to a regular file passes `stat`. Absent → skip, same as before.
       const shape = lstatSync(join(root, rel), { throwIfNoEntry: false });
@@ -2275,15 +2300,17 @@ export class SterlingTools {
   private computeBaselineDrift(records: DurableRecord[]): { status: string; annotations: Map<string, BaselineDrift> } {
     const annotations = new Map<string, BaselineDrift>();
     if (!this.repoRoot) return { status: 'unavailable:no_repo_root', annotations };
-    // BASELINE-CAPABLE TYPES ONLY (the two computeBaselines mints for): over a
-    // window of decisions there is nothing to compare and never will be, so they
-    // stay OUT of `eligible` and the envelope keeps saying 'unavailable:no_baselines'
-    // rather than annotating every file_key as undetermined.
-    const ownedPaths = (r: Record<string, unknown>): string[] => {
-      const type = r.type as string;
-      if (type !== 'feature_article' && type !== 'reference_material') return [];
-      return RECORD_TYPES[type].fileKeys(r);
-    };
+    // BASELINEABLE PATHS ONLY — EXACTLY what computeBaselines hashes, and
+    // deliberately NOT the write boundary's wider claimedPaths() (M2, final
+    // delta review). The drift check reports "could not be re-read", so its
+    // path set must be the set that can HAVE a baseline: widening it to every
+    // claimed path made every decision/anti_pattern/research_finding/todo
+    // file_key and every live_test_refs[].test_paths report as unverifiable on
+    // EVERY knowledge_query — 70+ decisions on tools.ts alone — which is noise,
+    // not a finding. The two enumerators answer two different questions: what a
+    // record CLAIMS (the write boundary refuses a directory there) versus what
+    // this read can COMPARE.
+    const ownedPaths = (r: Record<string, unknown>): string[] => SterlingTools.baselineablePaths(r);
     const eligible = (records as unknown as Record<string, unknown>[]).filter((r) => {
       const baselines = r.file_baselines as Record<string, string> | undefined;
       const baselined = baselines !== undefined && Object.keys(baselines).length > 0;
@@ -2302,12 +2329,29 @@ export class SterlingTools {
       const paths = [...new Set([...Object.keys(baselines), ...ownedPaths(rec)])].sort();
       const changed: string[] = [];
       const unverifiable: string[] = [];
+      // WHY each unverifiable path could not be settled, decided AT THE SITE
+      // that abstained rather than re-derived afterwards — the only place that
+      // knows whether the path had a baseline at all (item 5: a present,
+      // readable file with no baseline is 'no_baseline', never 'unreadable').
+      const unverifiableDetail: { path: string; reason: 'directory' | 'absent' | 'unreadable' | 'no_baseline' }[] = [];
+      const abstain = (rel: string, hadBaseline: boolean): void => {
+        unverifiable.push(rel);
+        if (!tree.root || tree.unresolved) {
+          unverifiableDetail.push({ path: rel, reason: 'unreadable' });
+          return;
+        }
+        const verdict = classifyClaimPath(tree.root, rel);
+        if (verdict === 'real_directory') unverifiableDetail.push({ path: rel, reason: 'directory' });
+        else if (verdict === 'absent') unverifiableDetail.push({ path: rel, reason: 'absent' });
+        else if (verdict === 'leaf' && !hadBaseline) unverifiableDetail.push({ path: rel, reason: 'no_baseline' });
+        else unverifiableDetail.push({ path: rel, reason: 'unreadable' });
+      };
       // Detached-working-tree resolution, same as every other baseline consumer:
       // an unmapped working_tree name is never checked against the wrong tree —
       // it abstains, LOUDLY, as the whole record's unverifiable set.
       const tree = this.treeRootFor(rec);
       if (tree.unresolved || !tree.root) {
-        unverifiable.push(...paths);
+        for (const rel of paths) abstain(rel, baselines[rel] !== undefined);
       } else {
         for (const rel of paths) {
           const baseline = baselines[rel];
@@ -2315,15 +2359,21 @@ export class SterlingTools {
           // drift: reporting it as changed would be a positive claim the record
           // cannot support (board edf13edf).
           if (baseline === undefined) {
-            unverifiable.push(rel);
+            abstain(rel, false);
             continue;
           }
           const current = this.hashFile(rel, tree.root);
-          if (current === undefined) unverifiable.push(rel);
+          if (current === undefined) abstain(rel, true);
           else if (current !== baseline) changed.push(rel);
         }
       }
       if (!changed.length && !unverifiable.length) continue; // unmoved: say nothing (P1)
+      // `unverifiable` keeps its string[] shape for existing consumers;
+      // `unverifiable_detail` (filled by `abstain` above) says WHY each entry
+      // could not be settled — a claim that has BECOME a directory since it was
+      // written is the case the write boundary cannot catch until the next
+      // write, so a reader can tell it from an absent file, an unreadable one
+      // and one that simply has no baseline. Reads never refuse.
       const notes: string[] = [];
       if (changed.length) {
         notes.push(
@@ -2331,17 +2381,209 @@ export class SterlingTools {
         );
       }
       if (unverifiable.length) {
-        notes.push(
-          `⚠ ${unverifiable.length} owned file(s) could not be re-read, so their freshness is NOT verified (${unverifiable.join(', ')}) — absent from this tree, unreadable, or in an unmapped working_tree`
-        );
+        // M1: 'no_baseline' is a DIFFERENT fact from the other three and must
+        // read as one. "Could not be re-read" is false for a file that is
+        // present and perfectly readable — what is missing is the recorded
+        // baseline, and the remedy is to reconcile the record, not to go
+        // looking for a lost file. When EVERY entry is that case the whole note
+        // says so; a mixed set keeps the original sentence and names which
+        // paths are which, so neither cause hides behind the other.
+        const byReason = (want: string): string[] => unverifiableDetail.filter((d) => d.reason === want).map((d) => d.path);
+        const neverBaselined = byReason('no_baseline');
+        if (neverBaselined.length === unverifiable.length) {
+          notes.push(
+            `⚠ ${unverifiable.length} owned file(s) have NEVER been baselined (${neverBaselined.join(', ')}) — they are present and readable, but this record carries nothing to compare them against, so their freshness is UNKNOWN rather than drifted; reconcile the record to baseline them`
+          );
+        } else {
+          const parts: string[] = [];
+          for (const [reason, label] of [
+            ['directory', 'a DIRECTORY on disk, which can never be a claim that delivers'],
+            ['absent', 'absent from this tree'],
+            ['unreadable', 'unreadable, or in an unmapped working_tree'],
+            ['no_baseline', 'never baselined — present and readable, nothing to compare against'],
+          ] as const) {
+            const hits = byReason(reason);
+            if (hits.length) parts.push(`${hits.join(', ')}: ${label}`);
+          }
+          notes.push(
+            `⚠ ${unverifiable.length} owned file(s) could not be re-read, so their freshness is NOT verified (${unverifiable.join(', ')}) — ${parts.join('; ')}`
+          );
+        }
       }
       annotations.set(rec.id as string, {
         changed,
-        ...(unverifiable.length ? { unverifiable } : {}),
+        ...(unverifiable.length ? { unverifiable, unverifiable_detail: unverifiableDetail } : {}),
         note: notes.join('; '),
       });
     }
     return { status: 'checked', annotations };
+  }
+
+  /**
+   * EVERY repo-relative path a record of this type CLAIMS — the ONE enumerator
+   * the write-boundary claim check runs over, on every mutation surface
+   * (decision [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]:
+   * "enumerated ONCE ... never a hand-listed subset per mutation surface").
+   *
+   * It is the REGISTRY's per-type `fileKeys` extractor (feature_article
+   * files[].path, decision/anti_pattern/research_finding/todo file_keys[],
+   * reference_material's repo-located location, brief blast_radius.files[].path
+   * — packages/schemas/src/records.ts) PLUS the one path-bearing field no
+   * consumer of `fileKeys` wants folded into it: a feature_article's
+   * live_test_refs[].test_paths. Those are claims under the same contract but
+   * are NOT baselined (computeBaselines mints hashes for fileKeys only), so
+   * widening the registry extractor itself would make every read-time drift
+   * check report them as permanently unverifiable.
+   *
+   * WRITE BOUNDARY ONLY. The read-time drift check deliberately does NOT use
+   * this set — it uses baselineablePaths below. Widening the drift check to
+   * every claimed path was tried and reverted (M2, final delta review) for
+   * exactly the reason the paragraph above gives: it turns every file_key on
+   * every ruling type, and every test path, into a permanent "could not be
+   * re-read" line on every knowledge_query.
+   */
+  private static claimedPaths(record: Record<string, unknown>): { path: string; field: string }[] {
+    const type = record.type as string;
+    const registered = RECORD_TYPES[type as keyof typeof RECORD_TYPES];
+    // The FIELD is a LABEL for the refusal message, not a second enumerator:
+    // the paths themselves always come from the registry extractor above, so a
+    // schema change moves them without touching this map.
+    const field =
+      type === 'feature_article' ? 'files[].path' : type === 'reference_material' ? 'location' : type === 'brief' ? 'blast_radius.files[].path' : 'file_keys';
+    const claims = registered ? registered.fileKeys(record).map((path) => ({ path, field })) : [];
+    if (type === 'feature_article' && Array.isArray(record.live_test_refs)) {
+      for (const ref of record.live_test_refs as { test_paths?: unknown }[]) {
+        if (Array.isArray(ref?.test_paths)) {
+          for (const p of ref.test_paths as unknown[]) {
+            if (typeof p === 'string') claims.push({ path: p, field: 'live_test_refs[].test_paths' });
+          }
+        }
+      }
+    }
+    const seen = new Set<string>();
+    return claims.filter((c) => (seen.has(c.path) ? false : (seen.add(c.path), true)));
+  }
+
+  /**
+   * The paths a record can HAVE A BASELINE for — EXACTLY the set
+   * computeBaselines hashes (a feature_article's files[].path, a repo-located
+   * reference_material's location; the registry extractor answers both). One
+   * definition, two consumers, so the writer of baselines and the reader that
+   * re-checks them can never disagree about which paths were ever measured.
+   *
+   * The complement of claimedPaths above: what this read can COMPARE, versus
+   * what a record CLAIMS.
+   */
+  private static baselineablePaths(record: Record<string, unknown>): string[] {
+    const type = record.type as string;
+    if (type !== 'feature_article' && type !== 'reference_material') return [];
+    return RECORD_TYPES[type].fileKeys(record);
+  }
+
+  /** Bound a caller-supplied path before it is interpolated into a refusal the
+   *  MODEL reads: control characters stripped, length clipped. A claim string is
+   *  untrusted input on its way to an agent's context. */
+  private static safeClaimText(value: string): string {
+    const stripped = value.replace(SterlingTools.CLAIM_CONTROL_CHARS, '␦');
+    return stripped.length > 512 ? `${stripped.slice(0, 512)}… (clipped from ${stripped.length} chars)` : stripped;
+  }
+
+  /** C0 + DEL — the characters that can move a cursor or forge structure inside
+   *  the agent-visible refusal text a claim path is interpolated into. Built
+   *  from escapes via RegExp() so the pattern itself stays readable in source. */
+  private static readonly CLAIM_CONTROL_CHARS = new RegExp('[\\u0000-\\u001f\\u007f]', 'g');
+
+  /**
+   * THE WRITE-BOUNDARY CLAIM CHECK (decision
+   * [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+   *
+   * Every path a record claims must name a NON-DIRECTORY LEAF or a path that
+   * does not exist yet. A path that IS a directory on disk is refused: it is
+   * schema-valid and behaviourally meaningless, because every delivery join,
+   * every baseline hash and board_query's lane advisory compare EXACT file
+   * paths — so a directory claim never delivers, never baselines, and reads as
+   * ownership it does not have.
+   *
+   * RUN OVER THE FULLY MERGED CANDIDATE, so an unrelated update of a record
+   * still carrying a stale directory claim refuses too — by design: the
+   * measured offenders are migrated by hand before this goes live, and the
+   * refusal names the exact remedy.
+   *
+   * IT RETURNS THE RECEIPT DISCLOSURE, so the caller cannot report a check that
+   * did not run. Two shapes are ABNORMAL and neither refuses, because in both
+   * the CAPABILITY — not the claim — is what is missing: no repoRoot →
+   * `claims_check:'unavailable:no_repo_root'`; a candidate declaring a
+   * working_tree this config does not map → `unavailable:unmapped_working_tree`
+   * (an abstention computeBaselines and the drift check already make, but a
+   * SILENT skip here would be a caller-supplied field switching the gate off
+   * with nothing said — the disclosure keys on the SAME resolution the check
+   * used, never on repoRoot alone).
+   *
+   * A stat that throws for ONE claim (EACCES/ELOOP/ENOTDIR) is the opposite
+   * case — the capability exists and this claim cannot be classified — so it
+   * REFUSES naming the errno (P5).
+   *
+   * NORMALIZATION FIRST, THEN STAT. The candidate reaching an update/board
+   * write is CALLER INPUT that zod has not parsed yet (the store parses later),
+   * so an escaping claim like '../../../../home/x' would otherwise be stat'ed
+   * OUTSIDE the repo and its existence, type and errno reported back. Every
+   * claim goes through the shared normalizeRepoPath first and a path that
+   * cannot be normalized is refused NAMING THE FIELD, before any filesystem
+   * contact. (knowledge_create already schema-parses before calling here; the
+   * second pass is idempotent.)
+   *
+   * COST, ACCEPTED AND STATED: one stat per claimed path, no cap and no cache —
+   * linear in the record's own claim count, which the record schema already
+   * bounds. There is deliberately no store-wide ancestor scan (the decision
+   * rejected it).
+   *
+   * WHERE, AND ONLY HERE: the tool layer is the only layer holding a repo root.
+   * Never in the shared zod path normalization (no repo context), never inside
+   * packages/store (which exports the classifier and decides nothing).
+   */
+  private assertClaimedPaths(op: string, candidate: Record<string, unknown>): { claims_check?: string } {
+    if (!this.repoRoot) return { claims_check: 'unavailable:no_repo_root' };
+    const { root, unresolved } = this.treeRootFor(candidate);
+    if (unresolved || !root) return { claims_check: 'unavailable:unmapped_working_tree' };
+    const id = candidate.id as string | undefined;
+    const subject = id ? `record '${id}'` : `this ${String(candidate.type)}`;
+    // A write reached from ANOTHER write (a mechanism-minted maintenance item)
+    // cannot promise that nothing at all was written — only that THIS write did
+    // not land. Stated rather than asserted, so the sentence is never false.
+    const nothingWritten =
+      `Nothing was written by this ${op} call (if it was a maintenance item minted as a side effect of another write, that other ` +
+      `record may already have landed — re-read before retrying).`;
+    for (const claim of SterlingTools.claimedPaths(candidate)) {
+      const shown = SterlingTools.safeClaimText(claim.path);
+      let rel: string;
+      try {
+        rel = normalizeRepoPath(claim.path);
+      } catch (err) {
+        throw new Error(
+          `${op}: ${subject} claims the path '${shown}' in ${claim.field}, which is not a repo-relative path — ` +
+            `${(err as Error).message}. A claim must name a path INSIDE this project (no absolute path, no '..' escape); it is refused ` +
+            `before the filesystem is consulted at all, so nothing outside the project is even looked at. ${nothingWritten}`
+        );
+      }
+      const verdict = classifyClaimPath(root, rel);
+      if (verdict === 'real_directory') {
+        throw new Error(
+          `${op}: ${subject} claims the path '${shown}' in ${claim.field}, which is an existing DIRECTORY in this working tree — a claimed ` +
+            `path must be a non-directory leaf, or a path that does not exist yet. A directory claim delivers NOTHING: every knowledge ` +
+            `join, every content baseline and the board's lane advisory match exact file paths, so the claim reads as ownership it does ` +
+            `not have. REMEDY: name the specific files beneath '${shown}' that this record actually discusses, or drop the claim. ${nothingWritten}`
+        );
+      }
+      if (typeof verdict === 'object') {
+        throw new Error(
+          `${op}: ${subject} claims the path '${shown}' in ${claim.field}, which could NOT be classified — reading it failed with ` +
+            `${verdict.errno}. A claim that cannot be checked is not admitted: unlike an absent repo root (an absent CAPABILITY, which is ` +
+            `disclosed on the receipt), this capability exists and this one claim is unverifiable. Fix the path or its readability and ` +
+            `retry. ${nothingWritten}`
+        );
+      }
+    }
+    return {};
   }
 
   // -- knowledge CRUD ---------------------------------------------------------
@@ -2710,7 +2952,20 @@ export class SterlingTools {
     };
   }
 
-  knowledgeCreate(type: string, fields: Record<string, unknown>, opts?: { deferCheckSkipped?: boolean }): CreateResult {
+  knowledgeCreate(
+    type: string,
+    fields: Record<string, unknown>,
+    opts?: {
+      deferCheckSkipped?: boolean;
+      /**
+       * INTERNAL MECHANISM MINT — not reachable from the tool surface: it is a
+       * separate PARAMETER, never a field inside `fields`, so no caller payload
+       * can set it. Only maintenanceEnqueue passes it; see the exemption ruling
+       * quoted there.
+       */
+      internalMint?: boolean;
+    }
+  ): CreateResult {
     // deferCheckSkipped (default false): when true, the check_skipped audit rows
     // are NOT persisted here — they are still returned on the result so the
     // caller records them itself. Only knowledge_extract sets this, and only so a
@@ -2754,11 +3009,6 @@ export class SterlingTools {
     // dedup_override is a create-time directive, never a stored field
     const dedupOverride = candidate.dedup_override === true;
     delete candidate.dedup_override;
-    // record the owned-file content baseline at birth (server-computed, never
-    // author-supplied) so the read-time drift check is content-aware (§3.2.3)
-    if (type === 'feature_article' || type === 'reference_material') {
-      candidate.file_baselines = this.computeBaselines(candidate);
-    }
     // validate BEFORE any dedup logic: a schema-invalid candidate gets the
     // schema error, never a dedup refusal (board 3f9591e9 defect 3); unknown
     // types fall through to store.create for its canonical rejection.
@@ -2780,6 +3030,30 @@ export class SterlingTools {
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, type, 'knowledge_create');
       throw err;
+    }
+    // THE CLAIM CHECK, on the parsed candidate (paths already normalized) and
+    // before ANY write, so a refused create leaves nothing behind — including
+    // the create knowledge_extract and knowledge_split perform inside their own
+    // transaction, which rolls back with it (assertClaimedPaths).
+    //
+    // AND BEFORE computeBaselines, deliberately: baselining lstat's every owned
+    // path, so an unreadable claim surfaced a RAW EACCES from that call instead
+    // of this check's named refusal. The named refusal always wins now.
+    //
+    // RULING (amending decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]):
+    // the claim check governs CALLER writes through the tool surface; an
+    // INTERNAL mechanism mint is EXEMPT, because its file_keys come from records
+    // already admitted or from git touches, and a mint must never make a READ
+    // throw or lose detected debt.
+    const claimsCheck = opts?.internalMint === true ? {} : this.assertClaimedPaths('knowledge_create', parsed);
+    // record the owned-file content baseline at birth (server-computed, never
+    // author-supplied) so the read-time drift check is content-aware (§3.2.3).
+    // Written onto BOTH views: `candidate` is what the store persists, `parsed`
+    // is the dedup-comparison view.
+    if (type === 'feature_article' || type === 'reference_material') {
+      candidate.file_baselines = this.computeBaselines(candidate);
+      parsed.file_baselines = candidate.file_baselines;
     }
     const skipped: SkippedCheck[] = [];
 
@@ -2940,6 +3214,7 @@ export class SterlingTools {
         ...(res.deduped ? { deduped: true } : {}),
         ...(res.text_updated ? { text_updated: true } : {}),
         warnings: citationWarnings,
+        ...claimsCheck,
       };
     }
     const record = this.store.create(candidate);
@@ -2952,7 +3227,13 @@ export class SterlingTools {
     const sameSubject = SterlingTools.SAME_SUBJECT_TYPES.includes(type)
       ? this.sameSubjectDigest(registered ? registered.fts(parsed) : '', new Set([record.id]))
       : undefined;
-    return { record, check_skipped: skipped, warnings: citationWarnings, ...(sameSubject ? { same_subject: sameSubject } : {}) };
+    return {
+      record,
+      check_skipped: skipped,
+      warnings: citationWarnings,
+      ...(sameSubject ? { same_subject: sameSubject } : {}),
+      ...claimsCheck,
+    };
   }
 
   /**
@@ -3376,7 +3657,7 @@ export class SterlingTools {
     field: string,
     entries: unknown[],
     resolves?: string[]
-  ): { record: DurableRecord; warnings: string[] } {
+  ): { record: DurableRecord; warnings: string[]; claims_check?: string } {
     const old = this.resolveRecordId(id, 'knowledge_append');
     this.refuseStaleAddress(old, id, 'knowledge_append');
     if (!Array.isArray(entries) || entries.length === 0) {
@@ -3430,7 +3711,7 @@ export class SterlingTools {
             retained: [] as { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[],
           }
         : undefined;
-    const { record } = this.splitSameSubject(
+    const { record, claims_check } = this.splitSameSubject(
       this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_append', appendJoin)
     );
     // Cited-id scan (board fc053051 extension): only the newly APPENDED
@@ -3457,6 +3738,7 @@ export class SterlingTools {
               : '')
         ),
       ],
+      ...(claims_check ? { claims_check } : {}),
     };
   }
 
@@ -3535,6 +3817,7 @@ export class SterlingTools {
     record: DurableRecord;
     replaced: { field: string; chars_before: number; chars_after: number };
     warnings: string[];
+    claims_check?: string;
   } {
     const old = this.resolveRecordId(id, 'knowledge_edit');
     this.refuseStaleAddress(old, id, 'knowledge_edit');
@@ -3596,9 +3879,10 @@ export class SterlingTools {
       const nextArr = arr.map((e) => (e === el ? nextEl : e));
       // same_subject (ruling types only) is split off rather than left
       // inside `record` — see splitSameSubject.
-      const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+      const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
       return {
         record,
+        ...(claims_check ? { claims_check } : {}),
         replaced: { field, chars_before: cur.length, chars_after: (nextEl[sub] as string).length },
         // Cited-id scan (board fc053051 extension): the REPLACE text only —
         // never `find`, never the rest of the record, which was already
@@ -3639,9 +3923,10 @@ export class SterlingTools {
     const next = SterlingTools.spliceOnce(current, find, replace);
     // same_subject (ruling types only) is split off rather than left inside
     // `record` — see splitSameSubject.
-    const { record } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
+    const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [field]: next }, resolves, undefined, 'knowledge_edit'));
     return {
       record,
+      ...(claims_check ? { claims_check } : {}),
       replaced: { field, chars_before: current.length, chars_after: next.length },
       // Cited-id scan (board fc053051 extension): the REPLACE text only —
       // never `find`, never the rest of the record (scope guarantee: an edit
@@ -3695,7 +3980,7 @@ export class SterlingTools {
     selector: string,
     expectedVersion: number,
     resolves?: string[]
-  ): { record: DurableRecord; removed: { selector: string; element: unknown }; warnings: string[] } {
+  ): { record: DurableRecord; removed: { selector: string; element: unknown }; warnings: string[]; claims_check?: string } {
     // EXACT FULL ID ONLY — checked FIRST, before any lookup, so a prefix is
     // refused on its SHAPE and never gets the chance to resolve to something.
     if (!SterlingTools.FULL_UUID_RE.test(id)) {
@@ -3858,11 +4143,12 @@ export class SterlingTools {
     // elements are the same object references in their original order, so
     // nothing is reordered, renormalised, or re-serialised on the way through.
     const nextArr = arr.filter((e) => e !== el);
-    const { record } = this.splitSameSubject(
+    const { record, claims_check } = this.splitSameSubject(
       this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, expectedVersion, 'knowledge_array_remove')
     );
     return {
       record,
+      ...(claims_check ? { claims_check } : {}),
       removed: { selector, element: el },
       warnings: [...this.articleOversizeWarnings(record), ...this.openReconcileLaneWarnings(this.supersedeChain(old))],
     };
@@ -4026,7 +4312,7 @@ export class SterlingTools {
     body: Record<string, unknown>,
     resolves?: string[],
     expectedVersion?: number
-  ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[] } {
+  ): { record: DurableRecord; warnings: string[]; same_subject?: SameSubjectEntry[]; claims_check?: string } {
     // Resolved the SAME way knowledgeUpdate resolves its own `id` (uuid/slug/
     // 8-char-prefix ladder) — review finding, 2026-08-21: a raw store.get(id)
     // here only matches an exact uuid, so a slug- or prefix-addressed write
@@ -4042,7 +4328,7 @@ export class SterlingTools {
     // wraps it as `record`. Left inside, the digest write-projection
     // (writeProjected -> digestRecord's field whitelist) silently drops it,
     // and projection:'full' would echo it back as a fake record field.
-    const { record, same_subject } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves, expectedVersion));
+    const { record, same_subject, claims_check } = this.splitSameSubject(this.knowledgeUpdate(id, body, resolves, expectedVersion));
     const warnings: string[] = before ? this.historyRotationWarnings(this.attemptedHistoryLen(before, body), record) : [];
     // A SMUGGLED `version` IS STRIPPED, AND SAID SO ([stable-identity-design-v2]
     // contract 1): the counter is server-owned, so the caller's value never
@@ -4078,7 +4364,7 @@ export class SterlingTools {
     // debt — named here so it is visible at the exact moment the writer is
     // looking, never silent (P5). Empty when nothing is owed (P1).
     if (before) warnings.push(...this.openReconcileLaneWarnings(this.supersedeChain(before)));
-    return { record, warnings, ...(same_subject ? { same_subject } : {}) };
+    return { record, warnings, ...(same_subject ? { same_subject } : {}), ...(claims_check ? { claims_check } : {}) };
   }
 
   /**
@@ -4136,6 +4422,13 @@ export class SterlingTools {
     // previous_version is here: a receipt that dropped it would hide the single
     // fact the caller cannot reconstruct from what it sent.
     if (record.identity_moved !== undefined) digested.identity_moved = record.identity_moved;
+    // THE CLAIM-CHECK DISCLOSURE SURVIVES THE DIGEST for the same reason
+    // previous_version and identity_moved do: it is a fact about the WRITE that
+    // the caller cannot reconstruct from what it sent, and digestRecord's field
+    // whitelist would otherwise drop it. This is the ONLY carriage for a receipt
+    // that is a BARE record rather than an envelope with a `record` key —
+    // board_update — where writeProjected digests the whole return value.
+    if (record.claims_check !== undefined) digested.claims_check = record.claims_check;
     return digested;
   }
 
@@ -5354,9 +5647,14 @@ export class SterlingTools {
    * internal re-wrapper (knowledgeAppend, knowledgeEdit, knowledgeUpdateResult)
    * splits it off here first and puts it on its own envelope instead.
    */
-  private splitSameSubject(rec: DurableRecord & { same_subject?: SameSubjectEntry[] }): { record: DurableRecord; same_subject?: SameSubjectEntry[] } {
-    const { same_subject, ...record } = rec;
-    return { record: record as DurableRecord, same_subject };
+  private splitSameSubject(
+    rec: DurableRecord & { same_subject?: SameSubjectEntry[]; claims_check?: string }
+  ): { record: DurableRecord; same_subject?: SameSubjectEntry[]; claims_check?: string } {
+    // `claims_check` rides out on the same envelope-sibling principle as
+    // same_subject: it is a receipt disclosure, not a record field, so a
+    // re-wrapper must lift it out rather than echo it back as one.
+    const { same_subject, claims_check, ...record } = rec;
+    return { record: record as DurableRecord, same_subject, claims_check };
   }
 
   /**
@@ -5592,12 +5890,51 @@ export class SterlingTools {
     `implies the other (anti_pattern [record-body-scope-is-not-physical-store-identity]). Close those items separately with maintenance_remove, ` +
     `or claim them from a write to a record that passes BOTH checks.`;
 
+  /**
+   * THE ONE NAMED MOUNT REFUSAL (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]).
+   * Both sites that can refuse a `resolves` claim on mount grounds build their
+   * message HERE — knowledgeUpdate's ordinary-lane guard and the append-join
+   * discharge's in-transaction guard inside validateResolveClaim — so the two
+   * can never drift into naming different things.
+   *
+   * It always states: the TARGET id and the PHYSICAL scope of the store holding
+   * it (store.scopeOfHolder — never a bare projectStoreHolds:false, because a
+   * body label is not a mount), the fault that was detected, every claimed item
+   * with its LANE, and the TWO-STEP remedy in order — write first, close second,
+   * so a crash between them leaves extra VISIBLE debt rather than falsely
+   * discharged debt. It deliberately never uses the store's generic
+   * 'nested transaction' wording: that guard is the backstop, not the message.
+   */
+  private mountRefusalMessage(args: {
+    lane: string;
+    targetId: string;
+    fault: string;
+    claims: { id: string; system_reason?: string }[];
+    why: string;
+  }): string {
+    const holder = this.store.scopeOfHolder(args.targetId);
+    const items = args.claims.map((c) => `'${c.id}' (${c.system_reason ?? 'unknown'} lane)`).join(', ');
+    const removals = args.claims.map((c) => `maintenance_remove ${c.id}`).join('; ');
+    return (
+      `${args.lane}: 'resolves' names ${args.claims.length} maintenance item(s) — ${items} — but the target record '${args.targetId}' is ` +
+      `physically held by the '${holder}' store (it ${args.fault}). Maintenance items are PROJECT-LOCAL, so ${args.why} ` +
+      `REMEDY (two steps, in this order): perform the write WITHOUT resolves; verify it paid this lane; then close the item with ` +
+      `${removals}. Nothing was written.`
+    );
+  }
+
   private validateResolveClaim(
     id: string,
     chain: Set<string>,
     options?: {
       splitMarker?: string;
       appendedArticlePaths?: string[];
+      /** the append-join target's id — the refusal names WHICH record is in the
+       *  wrong mount, and resolves its physical holder through scopeOfHolder */
+      targetId?: string;
+      /** the lane label the refusal names (the tool the caller invoked) */
+      targetLane?: string;
       targetWorkingTree?: unknown;
       targetScope?: unknown;
       /** Whether the PROJECT store physically holds the target article — read
@@ -5730,10 +6067,25 @@ export class SterlingTools {
       ? SterlingTools.targetMountFault(options?.targetScope, options?.targetProjectHeld === true)
       : undefined;
     if (fault) {
+      // ONE BUILDER, TWO CALL SITES (see mountRefusalMessage): this refusal used
+      // to name neither the target record nor its physical holder nor the
+      // two-step remedy, so the append lane told a caller strictly less than the
+      // ordinary lanes did about the same fault. `targetId` is supplied by
+      // dischargeAppendJoin from the record it re-read under the write lock.
       throw new Error(
-        `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane), but the article this append targets ${fault}. ` +
-          `The discharge must close the item and write the article in ONE project-store transaction, and a transaction cannot span ` +
-          `two mounts, so this join can never be atomic. ${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
+        options?.targetId
+          ? this.mountRefusalMessage({
+              lane: options.targetLane ?? 'knowledge_append',
+              targetId: options.targetId,
+              fault,
+              claims: [{ id, system_reason: it.system_reason }],
+              why:
+                `the discharge must close the item and write the article in ONE project-store transaction, and a transaction cannot ` +
+                `span two mounts — this join can never be atomic.`,
+            })
+          : `resolves: names '${id}' (${it.system_reason ?? 'unknown'} lane), but the article this append targets ${fault}. ` +
+            `The discharge must close the item and write the article in ONE project-store transaction, and a transaction cannot span ` +
+            `two mounts, so this join can never be atomic. ${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
       );
     }
     // FOREIGN-TREE ARTICLES CANNOT DISCHARGE ROOT OWNERSHIP DEBT (review
@@ -6044,6 +6396,10 @@ export class SterlingTools {
         targetWorkingTree: fresh.working_tree,
         targetScope: fresh.scope,
         targetProjectHeld,
+        // Named so the mount refusal can report WHICH record is in the wrong
+        // mount and resolve its physical holder (shared mountRefusalMessage).
+        targetId: fresh.id,
+        targetLane: toolName,
       })
     );
 
@@ -6182,7 +6538,13 @@ export class SterlingTools {
       appendedPaths: string[];
       retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[];
     }
-  ): DurableRecord & { same_subject?: SameSubjectEntry[]; previous_version?: number; identity_moved?: { previous_id: string; note: string } } {
+  ): DurableRecord & {
+    same_subject?: SameSubjectEntry[];
+    previous_version?: number;
+    identity_moved?: { previous_id: string; note: string };
+    /** see CreateResult.claims_check — the same disclosure on this write's receipt */
+    claims_check?: string;
+  } {
     const old = this.resolveRecordId(id, toolName);
     this.refuseStaleAddress(old, id, toolName);
     this.refuseServerOwnedFields(body, 'knowledge_update');
@@ -6227,31 +6589,47 @@ export class SterlingTools {
     // that performs it, and a second copy of the decision on this side of the
     // boundary is exactly what the rebuild removed. See dischargeAppendJoin.
     const isAppendJoinWrite = appendJoin !== undefined && (resolves?.length ?? 0) > 0;
+    const claims = isAppendJoinWrite ? [] : (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
     // A CLAIM CAN ONLY RIDE A WRITE THE PROJECT STORE WILL RECEIVE (mount-
-    // boundary review, 2026-09-06). The append-join path makes this decision
-    // ONCE, inside its transaction, from a re-read under the write lock — so
-    // this pre-write copy is deliberately NOT applied to it (a second copy of
-    // the same decision on the other side of the lock is exactly what the
-    // rebuild removed). The ORDINARY path had no such guard at all: a claim
-    // against a DOMAIN-held record sent the drain to that domain store's
-    // connection, where a project-local item does not exist, and the caller got
-    // the store's "names no open item" message — which reads as "your item id
-    // is wrong" when the truth is "this target is in the wrong mount". Refused
-    // here by name instead, wording mirroring knowledge_extract's identical
-    // refusal for a domain-scoped source.
-    if (!isAppendJoinWrite && (resolves?.length ?? 0) > 0) {
+    // boundary review, 2026-09-06; NAMED and reordered per decision
+    // [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]).
+    // The append-join path makes this decision ONCE, inside its transaction,
+    // from a re-read under the write lock — so this pre-write copy is
+    // deliberately NOT applied to it (a second copy of the same decision on the
+    // other side of the lock is exactly what the rebuild removed).
+    //
+    // IT FIRES ON EVERY ORDINARY resolves-BEARING LANE — knowledge_update,
+    // _append, _edit and _array_remove all land here — and it fires AFTER the
+    // items are resolved and lane-validated above: an unknown id or a lane the
+    // item's system_reason forbids is a more fundamental problem and keeps its
+    // own, more useful refusal. It also fires BEFORE the store's generic
+    // cross-mount transaction guard, which is the BACKSTOP and never the
+    // message: that wording reads as "your item id is wrong" when the truth is
+    // "this target is in a different mount".
+    //
+    // THE MESSAGE NAMES THE PHYSICAL HOLDER (scopeOfHolder), never a bare
+    // projectStoreHolds:false — a body label is not a mount (anti_pattern
+    // [record-body-scope-is-not-physical-store-identity]) — plus each item, its
+    // lane, and the TWO-STEP remedy: the knowledge write first, the queue close
+    // second, so a crash between them leaves extra VISIBLE debt rather than
+    // falsely discharged debt.
+    if (!isAppendJoinWrite && claims.length > 0) {
       const fault = SterlingTools.targetMountFault(
         (old as unknown as { scope?: unknown }).scope,
         this.store.projectStoreHolds(old.id)
       );
       if (fault) {
         throw new Error(
-          `${toolName}: 'resolves' names ${resolves!.length} maintenance item(s), but the record this write targets ('${old.id}') ${fault}. ` +
-            `${SterlingTools.TARGET_MOUNT_FAULT_TAIL} Nothing was written.`
+          this.mountRefusalMessage({
+            lane: toolName,
+            targetId: old.id,
+            fault,
+            claims: claims as unknown as { id: string; system_reason?: string }[],
+            why: `the item's deletion and this write would land on two different SQLite connections and could never commit together.`,
+          })
         );
       }
     }
-    const claims = isAppendJoinWrite ? [] : (resolves ?? []).map((rid) => this.validateResolveClaim(rid, chain));
     // ATTESTATION ONLY: a new id, a new birth clock, a retired predecessor.
     // Every other type keeps its id and its created_at — identity and birth are
     // properties of the RECORD, not of the version being written.
@@ -6286,6 +6664,15 @@ export class SterlingTools {
         next.history = [...hist.slice(0, genesis), ...hist.slice(hist.length - recentKeep)];
       }
     }
+    // THE CLAIM CHECK, over the FULLY MERGED CANDIDATE and before any write:
+    // an update of a record that still carries a stale directory claim refuses
+    // even when the patch touches an unrelated field, by design (decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+    // Placed here so knowledge_append / _edit / _array_remove — which all merge
+    // through this one path — are covered by the same call, never by a second
+    // per-surface copy; and BEFORE the re-baseline below, whose lstat would
+    // otherwise surface a raw EACCES ahead of this check's named refusal.
+    const claimsCheck = this.assertClaimedPaths(toolName, next);
     // re-baseline on every reconcile: the new version's owned-file hashes become
     // the truth the next read-time drift check compares against, so reconciling
     // an article both clears its current flag and immunizes it against the next
@@ -6424,13 +6811,14 @@ export class SterlingTools {
     const bumpedTo = (updated as unknown as { version?: number }).version;
     const echo = replaced
       ? {
+          ...claimsCheck,
           ...updated,
           identity_moved: {
             previous_id: old.id,
             note: `an attestation update is a CONCEPT REPLACEMENT, not an in-place version bump (an inspection verdict is immutable by construction): this is a NEW record with a new id, and '${old.id}' was retired pointing at it. Cite '${updated.id}' from here on.`,
           },
         }
-      : { ...updated, previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined) };
+      : { ...claimsCheck, ...updated, previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined) };
     if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
       const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
       const excludeIds = new Set(chain);
@@ -6487,7 +6875,11 @@ export class SterlingTools {
    * marker for this parent's slug. An item left unnamed stays open, exactly
    * the explicit-claim posture decision 68988832 established.
    */
-  knowledgeSplit(input: KnowledgeSplitInput): { parent: { id: string; slug: string; version: number }; children: { id: string; slug: string }[] } {
+  knowledgeSplit(input: KnowledgeSplitInput): {
+    parent: { id: string; slug: string; version: number };
+    children: { id: string; slug: string }[];
+    claims_check?: string;
+  } {
     const { id, children, parent_what_it_does, parent_intended_behavior, reason, resolves } = input;
 
     if (!Array.isArray(children) || children.length === 0) {
@@ -6701,6 +7093,11 @@ export class SterlingTools {
         version: (parentResult as unknown as { version: number }).version,
       },
       children: childResults,
+      // Reported from the parent update's own receipt — the check that ran, not
+      // a second derivation of it.
+      ...((parentResult as unknown as { claims_check?: string }).claims_check
+        ? { claims_check: (parentResult as unknown as { claims_check?: string }).claims_check }
+        : {}),
     };
   }
 
@@ -6720,6 +7117,7 @@ export class SterlingTools {
     parent: { id: string; slug: string; version: number };
     children: { id: string; slug: string }[];
     warnings: string[];
+    claims_check?: string;
   } {
     const result = this.knowledgeSplit(input);
     const warnings: string[] = [];
@@ -6788,7 +7186,7 @@ export class SterlingTools {
     new_record: { type: string; fields: Record<string, unknown> };
     reason?: string;
     resolves?: string[];
-  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string } } {
+  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string }; claims_check?: string } {
     const { id, field, find, new_record, reason, resolves } = input;
     const replace = input.replace ?? '';
 
@@ -6967,6 +7365,11 @@ export class SterlingTools {
     let newId!: string;
     let sourceVersion!: number;
     let deferredSkips: SkippedCheck[] = [];
+    // The claim-check disclosure is taken from the create this extract performs,
+    // never re-derived here: the receipt must report the check that actually ran
+    // (including 'unavailable:unmapped_working_tree', which only the candidate
+    // being written can decide).
+    let claimsCheck: { claims_check?: string } = {};
     // FIXER-MODE (converging review finding, project-scope regression): only a
     // DOMAIN-HELD source needs the defer-then-flush dance below — its
     // transaction opens on the domain mount, while recordCheckSkipped always
@@ -7014,6 +7417,7 @@ export class SterlingTools {
       // flush; collecting them unconditionally would double-write the audit
       // row for project scope.
       deferredSkips = isDomainScope ? (created.check_skipped ?? []) : [];
+      claimsCheck = created.claims_check ? { claims_check: created.claims_check } : {};
       newId = created.record.id;
       const updateBody: Record<string, unknown> = { [field]: splicedValue };
       if (typeHasHistory) {
@@ -7048,6 +7452,7 @@ export class SterlingTools {
       extracted: find,
       source: { id: original.id, version: sourceVersion },
       edges: { informed_by: original.id, cites: newId },
+      ...claimsCheck,
     };
   }
 
@@ -7067,7 +7472,13 @@ export class SterlingTools {
     new_record: { type: string; fields: Record<string, unknown> };
     reason?: string;
     resolves?: string[];
-  }): { extracted: string; source: { id: string; version: number }; edges: { informed_by: string; cites: string }; warnings: string[] } {
+  }): {
+    extracted: string;
+    source: { id: string; version: number };
+    edges: { informed_by: string; cites: string };
+    warnings: string[];
+    claims_check?: string;
+  } {
     const result = this.knowledgeExtract(input);
     const warnings: string[] = [];
     const newRecord = this.store.get(result.edges.cites);
@@ -7576,7 +7987,16 @@ export class SterlingTools {
     ].some((re) => re.test(text));
   }
 
-  boardAdd(args: Record<string, unknown>): CreateResult & { notice?: string } {
+  boardAdd(
+    args: Record<string, unknown>,
+    /**
+     * SECOND PARAMETER, never part of `args` — the tool surface passes the
+     * caller's payload as `args` alone (server.ts board_add), so an internal
+     * mint cannot be impersonated by anything a caller sends. Only
+     * maintenanceEnqueue sets it.
+     */
+    opts?: { internalMint?: boolean }
+  ): CreateResult & { notice?: string } {
     const { text, source, objective, measured_at_head, ...rest } = args;
     // Objective grouping (decision a8d2ce6c): a grouping key for the human's
     // board only — maintenance items are lane-keyed by system_reason.
@@ -7620,13 +8040,19 @@ export class SterlingTools {
       const head = this.currentHeadSha(this.repoRoot);
       stampedHead = head !== undefined && MEASURED_AT_HEAD_RE.test(head) ? head : undefined;
     }
-    const res = this.knowledgeCreate('todo', {
-      text,
-      source,
-      ...(normalized !== undefined ? { objective: normalized } : {}),
-      ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
-      ...rest,
-    });
+    const res = this.knowledgeCreate(
+      'todo',
+      {
+        text,
+        source,
+        ...(normalized !== undefined ? { objective: normalized } : {}),
+        ...(stampedHead !== undefined ? { measured_at_head: stampedHead } : {}),
+        ...rest,
+      },
+      // Forwarded, never derived from `args`: a board_add from the TOOL SURFACE
+      // keeps the claim check for every source, system items included.
+      opts?.internalMint === true ? { internalMint: true } : undefined
+    );
     const notices: string[] = [];
     if (source === 'user' && objective === undefined) {
       // Never a throw on the capture path — the item is saved; the default is
@@ -8279,7 +8705,7 @@ export class SterlingTools {
    */
   private static readonly BOARD_UPDATABLE_FIELDS = ['text', 'priority', 'file_keys', 'objective', 'measured_at_head'] as const;
 
-  boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord {
+  boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
     // exact slug, 8-char citation prefix — resolveRecordId, decision 2debab53):
     // board_update previously used a raw store.get(id), so an unresolved
@@ -8339,8 +8765,20 @@ export class SterlingTools {
     // boundary — caught and re-rendered the same way as knowledgeUpdate's
     // own store-validation catch, rather than leaking the raw issue array on
     // a caller-triggerable, constantly-used surface.
+    // A board item's file_keys are claims under the same leaf-or-absent
+    // contract as any other record's (decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]:
+    // "board AND maintenance items"), and board_update is the one write to them
+    // that does not funnel through knowledgeCreate/knowledgeUpdate — so the
+    // merged candidate is checked here.
+    const claimsCheck = this.assertClaimedPaths('board_update', next);
     try {
-      return this.store.updateTodo(old.id, next as typeof old);
+      const updated = this.store.updateTodo(old.id, next as typeof old);
+      // The disclosure rides the record itself because board_update's receipt IS
+      // the bare record (its frozen callers read fields straight off the return),
+      // and digestWriteEcho carries claims_check through the DEFAULT digest
+      // projection for exactly that reason — see its own comment.
+      return claimsCheck.claims_check ? { ...updated, ...claimsCheck } : updated;
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, 'todo', 'board_update');
       throw err;
@@ -9905,13 +10343,25 @@ export class SterlingTools {
     record: DurableRecord;
     check_skipped: SkippedCheck[];
   } {
-    return this.boardAdd({
-      text: args.text,
-      source: 'system',
-      system_reason: args.reason,
-      file_keys: args.file_keys,
-      feature_link: args.feature_link,
-    });
+    // THE CLAIM-CHECK EXEMPTION (ruling amending decision
+    // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]):
+    // the leaf-or-absent check governs CALLER writes through the tool surface,
+    // and an INTERNAL mechanism mint is exempt — its file_keys come from records
+    // already admitted or from git touches, and a mint must never make a READ
+    // throw (this path is reached from read-time drift) or lose detected debt.
+    // A board_add arriving from the tool surface keeps the refusal for EVERY
+    // source, system items included: `internalMint` is a second parameter, so
+    // nothing in a caller's payload can reach it.
+    return this.boardAdd(
+      {
+        text: args.text,
+        source: 'system',
+        system_reason: args.reason,
+        file_keys: args.file_keys,
+        feature_link: args.feature_link,
+      },
+      { internalMint: true }
+    );
   }
 
   maintenanceQuery(

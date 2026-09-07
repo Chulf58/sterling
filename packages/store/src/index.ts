@@ -8,7 +8,7 @@
 // inside this module; swapping drivers is a one-file change.
 
 import { DatabaseSync } from 'node:sqlite';
-import { mkdirSync, existsSync, realpathSync } from 'node:fs';
+import { mkdirSync, existsSync, realpathSync, statSync } from 'node:fs';
 import { dirname, basename, join, resolve as resolvePath } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
@@ -32,6 +32,58 @@ import {
 export { MountedStores, type DomainMount, resolveDomainMounts } from './mounted.js';
 export { ProjectRegistry, registryPath, type RegisterInput } from './registry.js';
 export * from './axis.js';
+
+/** The verdict on ONE claimed repo-relative path (decision
+ *  [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]). */
+export type ClaimPathVerdict = 'leaf' | 'absent' | 'real_directory' | { kind: 'unverifiable'; errno: string };
+
+/**
+ * THE ONE CLASSIFIER for a path a knowledge record CLAIMS — shared by the MCP
+ * tool layer's write boundary and scripts/delivery-oracle.mjs's census, so the
+ * gate and the census can never disagree about what a directory claim is
+ * (decision [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
+ *
+ * It CLASSIFIES ONLY; the tool layer decides that 'real_directory' refuses a
+ * write. `statSync` FOLLOWS symlinks deliberately: the contract is "a
+ * non-directory LEAF, or a symlink whose target is not a directory", so a
+ * symlink to a file is a leaf and a symlink to a directory is refused-shaped —
+ * lstat would report both as the link itself and lose that distinction.
+ *
+ * ENOENT is 'absent', a legitimate forward-looking claim. Every OTHER errno is
+ * 'unverifiable' NAMING the errno rather than being collapsed into 'absent':
+ * an unclassifiable claim is not admitted either way (P5).
+ */
+export function classifyClaimPath(repoRoot: string, path: string): ClaimPathVerdict {
+  try {
+    return statSync(join(repoRoot, path)).isDirectory() ? 'real_directory' : 'leaf';
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | undefined)?.code;
+    if (code === 'ENOENT') return 'absent';
+    return { kind: 'unverifiable', errno: code ?? String(err) };
+  }
+}
+
+/**
+ * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER, as a standalone export — the
+ * body of SterlingStore.decodeLiveRecord (see its full contract there), lifted
+ * so a reader OUTSIDE this class that materialises a live DurableRecord from a
+ * `records` row (scripts/delivery-oracle.mjs's read-only fallback reader) can
+ * decode IDENTICALLY instead of parsing `body` alone and inheriting whatever
+ * scope the body happens to carry.
+ */
+export function decodeLiveRecordRow(op: string, row: { body: string; scope: string }): DurableRecord {
+  const record = JSON.parse(row.body) as DurableRecord;
+  if (typeof row.scope !== 'string' || row.scope.length === 0) {
+    throw new Error(
+      `${op}: record '${(record as { id?: string }).id ?? 'unknown'}' was read with an EMPTY records.scope column. ` +
+        `That column is NOT NULL, so this row cannot exist in a well-formed store — refusing rather than defaulting to ` +
+        `'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent ` +
+        `(decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`
+    );
+  }
+  record.scope = row.scope;
+  return record;
+}
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS records (
@@ -438,12 +490,6 @@ export type ToolStore = Pick<
   // needs one atomic boundary spanning several store calls (decision
   // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
   | 'withTransaction'
-  // Per-mount transaction boundary (board d47a9e2d): knowledge_extract's
-  // domain-scoped create+update+links must commit atomically on the ONE
-  // mount that owns the source record. On plain SterlingStore (one physical
-  // store) this is just an alias for withTransaction; MountedStores routes it
-  // to the store holding `scope` and rejects cross-mount nesting.
-  | 'withTransactionForScope'
   // TRANSACTION-TO-HOLDER AFFINITY (decision
   // [scope-drift-closed-by-column-authoritative-reads-not-format-change]): the
   // record-routed form of the above, for a tool-layer operation whose owning
@@ -1538,19 +1584,13 @@ export class SterlingStore {
    * must be labelled for the mount it is physically inserted into.
    *
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
    */
   private static decodeLiveRecord(op: string, row: { body: string; scope: string }): DurableRecord {
-    const record = JSON.parse(row.body) as DurableRecord;
-    if (typeof row.scope !== 'string' || row.scope.length === 0) {
-      throw new Error(
-        `${op}: record '${(record as { id?: string }).id ?? 'unknown'}' was read with an EMPTY records.scope column. ` +
-          `That column is NOT NULL, so this row cannot exist in a well-formed store — refusing rather than defaulting to ` +
-          `'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent ` +
-          `(decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`
-      );
-    }
-    record.scope = row.scope;
-    return record;
+    return decodeLiveRecordRow(op, row);
   }
 
   /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
@@ -3759,19 +3799,6 @@ export class SterlingStore {
   }
 
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
-   */
-  withTransactionForScope<T>(_scope: string, fn: () => T): T {
-    return this.withTransaction(fn);
-  }
-
-  /**
    * PER-RECORD transaction boundary — the ToolStore sibling that routes by
    * PHYSICAL IDENTITY rather than by a label (decision
    * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
@@ -3781,6 +3808,11 @@ export class SterlingStore {
    * holder makes the two agree by construction. On a plain SterlingStore there
    * is only ONE physical store, so this is a straight alias for withTransaction
    * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
   withTransactionForRecord<T>(_id: string, fn: () => T): T {
     return this.withTransaction(fn);

@@ -1602,7 +1602,24 @@ test('mount-boundary: a DOMAIN-scoped target cannot enter a resolves transaction
     assert.throws(
       () => widen(tools).knowledgeUpdate(article.id, { what_it_does: 'reconciled' }, [item.id]),
       (err: Error) => {
-        assert.match(err.message, /scope/i, 'the refusal names scope — a domain-scoped target is a different physical connection and cannot join this transaction, regardless of claim type');
+        // TIGHTENED 2026-09-06 per decision `domain-held-subject-queue-items-
+        // close-two-step-named-mount-refusal-on-every-lane-label-routed-
+        // transaction-retired` (knowledge_get f2c61919-59ca-482e-8fab-
+        // 53a7ddf13a2f): a bare /scope/i is satisfied by the store's generic
+        // 'nested transaction'-class guard too (that guard happens to mention
+        // "scope" incidentally), so it cannot discriminate the NAMED refusal
+        // this decision requires from the backstop it must fire ahead of.
+        // Tightened to the full named shape: target id, its PHYSICAL scope
+        // (from scopeOfHolder — never a bare projectStoreHolds:false), the
+        // item id, the lane, and the lane-qualified remedy — and an explicit
+        // NEGATIVE check that the generic guard's own wording is absent.
+        assert.match(err.message, new RegExp(article.id), 'names the target id');
+        assert.match(err.message, /domain:node/, "names the target's PHYSICAL scope — a project LABEL over a domain-held row is not project membership");
+        assert.match(err.message, new RegExp(item.id), 'names the item id');
+        assert.match(err.message, /update/i, 'names the lane');
+        assert.match(err.message, /without resolves/i, 'remedy: perform the write WITHOUT resolves');
+        assert.match(err.message, /maintenance_remove/, 'remedy: then close with maintenance_remove');
+        assert.doesNotMatch(err.message, /nested transaction/i, "the NAMED refusal fires BEFORE the store's generic guard — that wording is the backstop, never the message a caller should have to parse");
         return true;
       },
       'a domain-scoped target refuses a resolves claim of ANY lane, not just article_missing — the cross-store write would commit on a second connection independently of the open project transaction'

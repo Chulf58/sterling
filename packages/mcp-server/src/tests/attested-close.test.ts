@@ -130,6 +130,73 @@ const mkArticle = (tools: SterlingTools, slug: string, files: { path: string; ro
     } as unknown as Parameters<SterlingTools['knowledgeCreate']>[1]) as unknown as { record: Loose }
   ).record;
 
+/** TEST REPAIR 2026-09-07 (conductor-adjudicated, fix-forward of the pins'
+ *  PRECONDITION, not their subject): since decision
+ *  path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary
+ *  (7933e3a8) knowledge_create REFUSES an article claiming an existing
+ *  directory, so [R9-14b]/[R9-14c] can no longer build their fixture through
+ *  the tool surface. A raw envelope written below the write boundary is the
+ *  only way such a record can exist (legacy data); mirrors
+ *  directory-claims.test.ts / resolves-append-join.test.ts field-for-field. */
+const mkRawArticle = (store: SterlingStore, slug: string, filePaths: string[]): Loose => {
+  const h = createHash('sha1').update(slug).digest('hex'); // deterministic, all-hex → a valid v4-shaped uuid
+  const id = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(12, 15)}-8${h.slice(15, 18)}-${h.slice(18, 30)}`;
+  const rec: Loose = {
+    id,
+    type: 'feature_article',
+    created_at: NOW,
+    updated_at: NOW,
+    author: 'conductor',
+    status: 'active',
+    superseded_by: null,
+    links: [],
+    scope: 'project',
+    stack_tags: [],
+    slug,
+    title: slug,
+    what_it_does: 'x',
+    intended_behavior: 'x',
+    files: filePaths.map((path) => ({ path, role: 'impl' })),
+    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: NOW, event: 'seed' }],
+    live_test_refs: [],
+  };
+  store.create(rec as never);
+  return rec;
+};
+
+/** Same repair for the ITEM half of the precondition: maintenanceEnqueue funnels
+ *  through knowledge_create, which now refuses a directory file_key, so the
+ *  reconcile_needed item is minted raw below the boundary too. */
+const mkRawItem = (store: SterlingStore, text: string, fileKeys: string[], featureLink: string): Loose => {
+  const h = createHash('sha1').update(`item:${text}`).digest('hex');
+  const id = `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(12, 15)}-8${h.slice(15, 18)}-${h.slice(18, 30)}`;
+  const rec: Loose = {
+    id,
+    type: 'todo',
+    created_at: NOW,
+    updated_at: NOW,
+    author: 'system',
+    status: 'active',
+    superseded_by: null,
+    links: [],
+    scope: 'project',
+    stack_tags: [],
+    version: 1,
+    text,
+    source: 'system',
+    system_reason: 'reconcile_needed',
+    file_keys: fileKeys,
+    feature_link: featureLink,
+    priority: 'normal',
+  };
+  store.create(rec as never);
+  return rec;
+};
+
 const mkRefMaterial = (tools: SterlingTools, location: string, extra: Loose = {}): Loose =>
   (
     tools.knowledgeCreate('reference_material', {
@@ -682,19 +749,14 @@ test('[R9-14a] a path that is a SYMLINK at attestation time is refused, and the 
 // like an EISDIR crash rather than a named refusal).
 // ===========================================================================
 test('[R9-14b] a path that resolves to a DIRECTORY (not a file) is refused rather than hashed', () => {
-  const { dir, tools, git, cleanup } = gitFixture();
+  const { dir, store, tools, git, cleanup } = gitFixture();
   try {
     mkdirSync(join(dir, 'src', 'adir', 'inner'), { recursive: true });
     writeFileSync(join(dir, 'src', 'adir', 'inner', 'x.ts'), 'inner content');
     git('add', '-A');
     git('commit', '-qm', 'commit a nested dir');
-    const article = mkArticle(tools, 'directory-shape', [{ path: 'src/adir' }]); // owns a DIRECTORY path
-    const { record: item } = tools.maintenanceEnqueue({
-      reason: 'reconcile_needed',
-      text: `reconcile 'directory-shape'`,
-      file_keys: ['src/adir'],
-      feature_link: article.id as string,
-    });
+    const article = mkRawArticle(store, 'directory-shape', ['src/adir']); // owns a DIRECTORY path — raw envelope, see mkRawArticle
+    const item = mkRawItem(store, `reconcile 'directory-shape'`, ['src/adir'], article.id as string);
 
     assert.throws(
       () => tools.maintenanceRemove(item.id as string),
@@ -726,19 +788,14 @@ test('[R9-14b] a path that resolves to a DIRECTORY (not a file) is refused rathe
 // fails.
 // ===========================================================================
 test('[R9-14c] a path that is a git SUBMODULE (gitlink, tree mode 160000) is refused rather than hashed', () => {
-  const { dir, tools, git, cleanup } = gitFixture();
+  const { dir, store, tools, git, cleanup } = gitFixture();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     mkdirSync(join(dir, 'src', 'sub'), { recursive: true }); // present, empty — the un-checked-out submodule shape
     git('update-index', '--add', '--cacheinfo', `160000,${'1'.repeat(40)},src/sub`);
     git('commit', '-qm', 'add a gitlink entry (plumbing-level, not a full submodule checkout)');
-    const article = mkArticle(tools, 'gitlink-shape', [{ path: 'src/sub' }]);
-    const { record: item } = tools.maintenanceEnqueue({
-      reason: 'reconcile_needed',
-      text: `reconcile 'gitlink-shape'`,
-      file_keys: ['src/sub'],
-      feature_link: article.id as string,
-    });
+    const article = mkRawArticle(store, 'gitlink-shape', ['src/sub']); // raw envelope, see mkRawArticle
+    const item = mkRawItem(store, `reconcile 'gitlink-shape'`, ['src/sub'], article.id as string);
 
     assert.throws(
       () => tools.maintenanceRemove(item.id as string),

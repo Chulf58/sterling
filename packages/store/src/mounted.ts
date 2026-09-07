@@ -580,26 +580,15 @@ export class MountedStores {
     return this.runScopedTransaction(this.project, fn);
   }
 
-  /** Per-mount transaction boundary (board d47a9e2d): routes to the SterlingStore
-   *  holding `scope` (project → the project store; domain:<name> → that domain
-   *  store, storeFor's existing routing — an unmounted domain throws loudly
-   *  BEFORE any transaction opens) so a tool-layer write whose records all
-   *  belong to one owning mount (e.g. a domain-scoped knowledge_extract) can
-   *  commit create/update/link atomically on that mount, exactly as
-   *  withTransaction does for the project store. Guarded against CROSS-MOUNT
-   *  nesting the same way withTransaction is (see runScopedTransaction) —
-   *  same-store nesting still joins via the physical store's own txDepth. */
-  withTransactionForScope<T>(scope: string, fn: () => T): T {
-    return this.runScopedTransaction(this.storeFor(scope), fn);
-  }
-
   /** PER-RECORD transaction boundary — the affinity fix (decision
    *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
    *  Routes by `storeHolding(id)`, the SAME physical resolution every record
    *  mutation uses, so the transaction and the writes inside it can never open
-   *  on different mounts. The label-routed sibling above resolves by
-   *  storeFor(scope), and a record's body `scope` is caller-writable and not
-   *  the routing key for anything after creation (anti_pattern
+   *  on different mounts. The retired label-routed sibling
+   *  (`withTransactionForScope`, deleted per decision
+   *  [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired])
+   *  resolved by storeFor(scope), and a record's body `scope` is caller-writable
+   *  and not the routing key for anything after creation (anti_pattern
    *  [record-body-scope-is-not-physical-store-identity]) — so a drifted label
    *  put the transaction on the wrong database while the write went to the
    *  right one. A record that no record exists for throws loudly BEFORE any
