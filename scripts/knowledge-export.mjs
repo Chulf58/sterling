@@ -70,7 +70,7 @@ const LONG_TEXT_FIELDS = ['statement', 'rationale', 'what_it_does', 'intended_be
 // One entry per durable long-text field PLUS one per history[].event — kept
 // SEPARATE (never pre-joined) so an origin-ids region is matched and balance-
 // checked within a single field's own text, never across fields (review
-// finding, c3705a15: proseOf used to join every field into one string before
+// finding during the export build: proseOf used to join every field into one string before
 // matching, so an unclosed '[origin-ids:' in one field could silently pair
 // with an unrelated '[/origin-ids]' in a LATER field of the same record).
 function proseFieldsOf(record) {
@@ -176,7 +176,7 @@ export function exportPayload({ ids, filter, outDir }, { cwd = process.cwd() } =
     // the live record's id — so membership in the exported set must be
     // checked against the CANONICAL id the alias forwards to, or an in-set
     // citation reads as collateral just because it named the record's old id
-    // (review finding, c3705a15).
+    // (review finding during the export build).
     let aliasCanonical = null;
     const canonicalIdOf = (hit) => {
       if (hit.type !== 'alias') return hit.id;
