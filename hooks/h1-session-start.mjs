@@ -6,11 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash as createHash2 } from "node:crypto";
-import { readFileSync as readFileSync4, existsSync as existsSync4, mkdirSync as mkdirSync5, readdirSync as readdirSync2, renameSync as renameSync2, statSync as statSync3, writeFileSync as writeFileSync3, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
+import { randomUUID as randomUUID4, createHash as createHash3 } from "node:crypto";
+import { readFileSync as readFileSync4, existsSync as existsSync5, mkdirSync as mkdirSync6, readdirSync as readdirSync2, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync4, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename as basename2, dirname as dirname5, join as join6 } from "node:path";
+import { basename as basename2, dirname as dirname5, join as join7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -5275,7 +5275,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5392,7 +5392,7 @@ function stalenessVerdict(currentBuildId, marker, markerPidAlive = null) {
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync2, existsSync, realpathSync } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname as dirname3, basename, join as join3, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -5463,6 +5463,14 @@ var ProjectRegistry = class {
 };
 
 // packages/store/dist/index.js
+function decodeLiveRecordRow(op, row) {
+  const record = JSON.parse(row.body);
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -6158,14 +6166,13 @@ var SterlingStore = class _SterlingStore {
    * must be labelled for the mount it is physically inserted into.
    *
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
    */
   static decodeLiveRecord(op, row) {
-    const record = JSON.parse(row.body);
-    if (typeof row.scope !== "string" || row.scope.length === 0) {
-      throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-    }
-    record.scope = row.scope;
-    return record;
+    return decodeLiveRecordRow(op, row);
   }
   /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
   static decodeLiveRecords(op, rows) {
@@ -7666,18 +7673,6 @@ var SterlingStore = class _SterlingStore {
     return result;
   }
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
-   */
-  withTransactionForScope(_scope, fn) {
-    return this.withTransaction(fn);
-  }
-  /**
    * PER-RECORD transaction boundary — the ToolStore sibling that routes by
    * PHYSICAL IDENTITY rather than by a label (decision
    * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
@@ -7687,6 +7682,11 @@ var SterlingStore = class _SterlingStore {
    * holder makes the two agree by construction. On a plain SterlingStore there
    * is only ONE physical store, so this is a straight alias for withTransaction
    * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
   withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);
@@ -7720,6 +7720,139 @@ function loadConfig(cwd) {
 function openStore(cwd) {
   const p = join4(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
+}
+
+// scripts/hooks/lib/plan-lock.mjs
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { closeSync, constants as FS, existsSync as existsSync3, fstatSync, mkdirSync as mkdirSync3, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join as join5 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var TITLE_MAX = 200;
+var PATH_MAX = 512;
+var REASON_MAX = 400;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
+}
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function sha256Of(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join5(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+function computeStatus(lock) {
+  const read = readBounded(lock?.plan_path, PLAN_MAX_BYTES, "plan");
+  if (read.unreadable) {
+    return { status: read.code === "ENOENT" ? "MISSING" : "UNREADABLE", sha256: null, reason: read.unreadable };
+  }
+  const sha = sha256Of(read.bytes);
+  return { status: sha === lock.file_sha256_at_approval ? "UNCHANGED" : "MODIFIED", sha256: sha };
+}
+function claimMarker(path) {
+  const claimed = `${path}.claimed-${randomUUID2()}`;
+  try {
+    renameSync(path, claimed);
+  } catch {
+    return null;
+  }
+  const read = readStoreFileBounded(claimed, MARKER_MAX_BYTES);
+  try {
+    unlinkSync(claimed);
+  } catch {
+  }
+  return read.unreadable ? { unreadable: read.unreadable } : read.text;
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
@@ -7788,29 +7921,29 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 }
 
 // scripts/hooks/lib/dispatch-register-lock.mjs
-import { mkdirSync as mkdirSync3, rmSync, renameSync, statSync, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
-import { join as join5 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { mkdirSync as mkdirSync4, rmSync, renameSync as renameSync2, statSync as statSync2, writeFileSync as writeFileSync2, readFileSync as readFileSync2 } from "node:fs";
+import { join as join6 } from "node:path";
+import { randomUUID as randomUUID3 } from "node:crypto";
 var DEFAULT_RETRY_MS = 1e3;
 var DEFAULT_STALE_MS = 1e4;
 var POLL_MS = 20;
 var OWNER_FILE = "owner";
 function registerLockDir(projectRoot2) {
-  return join5(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+  return join6(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
 }
 function sleep(ms) {
   return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
 function readOwnerNonce(lockDir) {
   try {
-    return readFileSync2(join5(lockDir, OWNER_FILE), "utf8");
+    return readFileSync2(join6(lockDir, OWNER_FILE), "utf8");
   } catch {
     return null;
   }
 }
 function tombAndRemove(lockDir) {
-  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID2()}`;
-  renameSync(lockDir, tomb);
+  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID3()}`;
+  renameSync2(lockDir, tomb);
   try {
     rmSync(tomb, { recursive: true, force: true });
   } catch {
@@ -7831,13 +7964,13 @@ function makeLock(lockDir, nonce) {
 async function acquireLock(lockDir, opts = {}) {
   const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
   const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
-  const nonce = randomUUID2();
+  const nonce = randomUUID3();
   const deadline = Date.now() + retryMs;
-  const ownerPath = join5(lockDir, OWNER_FILE);
+  const ownerPath = join6(lockDir, OWNER_FILE);
   for (; ; ) {
-    mkdirSync3(lockDir, { recursive: true });
+    mkdirSync4(lockDir, { recursive: true });
     try {
-      writeFileSync(ownerPath, nonce, { flag: "wx" });
+      writeFileSync2(ownerPath, nonce, { flag: "wx" });
       return makeLock(lockDir, nonce);
     } catch (e) {
       if (e.code === "ENOENT") continue;
@@ -7845,7 +7978,7 @@ async function acquireLock(lockDir, opts = {}) {
     }
     let ageMs = null;
     try {
-      ageMs = Date.now() - statSync(ownerPath).mtimeMs;
+      ageMs = Date.now() - statSync2(ownerPath).mtimeMs;
     } catch {
       continue;
     }
@@ -8227,11 +8360,11 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, readdirSync, existsSync as existsSync3, mkdirSync as mkdirSync4, statSync as statSync2 } from "node:fs";
+import { createHash as createHash2 } from "node:crypto";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync, existsSync as existsSync4, mkdirSync as mkdirSync5, statSync as statSync3 } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
-  return createHash("sha256").update(normalize(text), "utf8").digest("hex");
+  return createHash2("sha256").update(normalize(text), "utf8").digest("hex");
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 function parseInstalledHeader(content) {
@@ -8275,10 +8408,10 @@ var RESTART_INSTRUCTION = [
 
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join6(cwd, ".sterling", "transient");
+  const transientDir = join7(cwd, ".sterling", "transient");
   const lockDir = registerLockDir(cwd);
   try {
-    mkdirSync5(transientDir, { recursive: true });
+    mkdirSync6(transientDir, { recursive: true });
     const lock = await acquireLock(lockDir, { retryMs: 1e3, staleMs: 1e4 });
     if (!lock) {
       process.stderr.write(
@@ -8287,9 +8420,9 @@ async function deleteRegisterUnderLock(cwd) {
       return;
     }
     try {
-      rmSync2(join6(transientDir, "dispatch-register.json"), { force: true });
+      rmSync2(join7(transientDir, "dispatch-register.json"), { force: true });
       for (const f of readdirSync2(transientDir)) {
-        if (f.startsWith("dispatch-register.json.tmp-")) rmSync2(join6(transientDir, f), { force: true });
+        if (f.startsWith("dispatch-register.json.tmp-")) rmSync2(join7(transientDir, f), { force: true });
       }
     } finally {
       lock.release();
@@ -8386,7 +8519,7 @@ function pluginRoot() {
 function walkUpPluginRoot() {
   let dir = dirname5(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync4(join6(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync5(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname5(dir);
   }
   return null;
@@ -8399,7 +8532,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot();
     if (!root) return null;
-    const v = JSON.parse(readFileSync4(join6(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync4(join7(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -8407,10 +8540,10 @@ function pluginVersion() {
 }
 function computeH1DeadDispatchResidue(cwd, source) {
   if (source !== "startup" && source !== "clear") return [];
-  const registerPath = join6(cwd, ".sterling", "transient", "dispatch-register.json");
+  const registerPath = join7(cwd, ".sterling", "transient", "dispatch-register.json");
   let raw = [];
   try {
-    if (existsSync4(registerPath)) {
+    if (existsSync5(registerPath)) {
       const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
       if (Array.isArray(parsed)) raw = parsed;
     }
@@ -8438,8 +8571,8 @@ function safeReceiptField(v) {
   return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}\u2026(truncated)` : cleaned;
 }
 function reviewReceiptLines(cwd) {
-  const ledgerPath = join6(cwd, ".sterling", "review-ledger.json");
-  if (!existsSync4(ledgerPath)) return [];
+  const ledgerPath = join7(cwd, ".sterling", "review-ledger.json");
+  if (!existsSync5(ledgerPath)) return [];
   let entries = [];
   try {
     const parsed = JSON.parse(readFileSync4(ledgerPath, "utf8"));
@@ -8466,16 +8599,16 @@ function reviewReceiptLines(cwd) {
   });
 }
 var input = readStdin();
-var sessionMarkerPath = join6(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join6(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+var sessionMarkerPath = join7(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join7(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync4(join6(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync5(join6(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync3(
+  if (existsSync5(join7(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync6(join7(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync4(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync2(sessionMarkerTmp, sessionMarkerPath);
+    renameSync3(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
@@ -8517,12 +8650,22 @@ A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scri
 Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):
   node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"
 A LEGACY v1 receipt (no schema_version) has no entry_id \u2014 select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` : "";
+var planLockContext = "";
+var planLock = null;
+var planLockMalformed = false;
+try {
+  const section = planLockSection({ cwd: input.cwd, source: input.source });
+  planLockContext = section.context;
+  planLock = section.lock;
+  planLockMalformed = section.malformed === true;
+} catch {
+}
 var store = openStore(input.cwd);
 if (!store) {
-  if (dispatchResidueLines.length || receiptContext) {
+  if (planLockContext || dispatchResidueLines.length || receiptContext) {
     process.stdout.write(
       JSON.stringify({
-        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: dispatchResidueLines.join("\n\n") + receiptContext }
+        hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + dispatchResidueLines.join("\n\n") + receiptContext }
       })
     );
   }
@@ -8576,11 +8719,11 @@ var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
-  const gitDir = root ? join6(root, ".git") : null;
-  if (gitDir && existsSync4(gitDir) && statSync3(gitDir).isDirectory()) {
+  const gitDir = root ? join7(root, ".git") : null;
+  if (gitDir && existsSync5(gitDir) && statSync4(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync4(join6(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync4(join7(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
@@ -8592,7 +8735,7 @@ try {
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join6(gitDir, "sterling-update-check.json");
+        const cachePath = join7(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
@@ -8602,7 +8745,7 @@ try {
         if (!fresh) {
           spawnSync3("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync3(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync4(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -8618,11 +8761,127 @@ STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit
   }
 } catch {
 }
+function planLockSection(ctx) {
+  const TITLE_MAX2 = TITLE_MAX;
+  const PATH_MAX2 = PATH_MAX;
+  const REASON_MAX2 = REASON_MAX;
+  const STALE_DAYS = 14;
+  const DAY_MS = 24 * 60 * 60 * 1e3;
+  const clean = sanitizeForContext;
+  const sterlingDir = join7(ctx.cwd, ".sterling");
+  const transientDir = join7(sterlingDir, "transient");
+  const blocks = [];
+  const MARKERS = [
+    {
+      file: "plan-lock-unresolved.json",
+      render: (body) => `PLAN LOCK NOT BOUND (one-shot): an ExitPlanMode approval could not be bound to a plan file \u2014 ${clean(body?.reason, REASON_MAX2) || "no reason recorded"}. Any earlier lock was preserved unchanged. Re-bind by hand with plan-lock.mjs --plan <absolute path> if this objective still has an approved plan.`
+    },
+    {
+      file: "plan-lock-released.json",
+      render: (body) => `PLAN LOCK RELEASED (one-shot): the plan lock was released \u2014 ${clean(body?.reason, REASON_MAX2) || "no reason recorded"}. No plan governs this objective's scope and ordering until a new plan is approved.`
+    },
+    {
+      file: "plan-lock-previous.json",
+      render: (body) => `PLAN LOCK SUPERSEDED (one-shot): the previous plan was "${clean(body?.title, TITLE_MAX2) || "untitled"}" (${clean(body?.plan_path, PATH_MAX2) || "no path recorded"}). The lock above replaced it \u2014 work planned under the old plan is no longer governed by it.`
+    }
+  ];
+  const markerLines = [];
+  for (const marker of MARKERS) {
+    let raw = null;
+    try {
+      raw = claimMarker(join7(transientDir, marker.file));
+    } catch {
+      raw = null;
+    }
+    if (raw === null) continue;
+    let body = null;
+    if (typeof raw === "string") {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = null;
+      }
+    }
+    markerLines.push(marker.render(body && typeof body === "object" ? body : null));
+  }
+  let read = { absent: true };
+  try {
+    read = readLock(sterlingDir);
+  } catch (e) {
+    read = { malformed: `could not be read (${e && e.message || e})` };
+  }
+  const lock = read.lock ?? null;
+  const malformed = Boolean(read.malformed);
+  if (malformed) {
+    blocks.push(
+      `PLAN LOCK MALFORMED: .sterling/plan-lock.json exists but ${clean(read.malformed, REASON_MAX2)}, so it is not a usable lock record. Inspect it with \`plan-lock.mjs --show\`, or clear it with \`plan-lock.mjs --release --reason "<why>"\`. Nothing else in this session start is affected.`
+    );
+  } else if (lock) {
+    const planPath = clean(lock.plan_path, PATH_MAX2);
+    let status = "MISSING";
+    try {
+      const live = computeStatus(lock);
+      status = live.status === "MODIFIED" ? "MODIFIED since approval" : live.status;
+    } catch {
+      status = "UNREADABLE";
+    }
+    let branchNow = "unknown";
+    try {
+      const r = spawnSync3("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
+      const approved = clean(lock.approved_branch, 120);
+      if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
+    } catch {
+      branchNow = "unknown";
+    }
+    const source = lock.source === "manual" ? "manual" : "exit_plan_mode";
+    blocks.push(
+      `PLAN LOCK: ${clean(lock.title, TITLE_MAX2) || "(untitled plan)"} \u2014 ${planPath || "(no path recorded)"} (approved ${clean(lock.approved_at, 40).slice(0, 10) || "unknown date"} on ${clean(lock.approved_branch, 120) || "no branch recorded"}, ${source}) \xB7 plan file ${status} \xB7 branch now ${branchNow}`
+    );
+    blocks.push(
+      `THE APPROVED PLAN GOVERNS THIS OBJECTIVE'S SCOPE, ORDERING AND SLICES; STANDING STORE DECISIONS STILL GOVERN MECHANISMS UNLESS THE PLAN RECORDS A LATER USER RULING; THE BOARD IS INVENTORY; READ THE PLAN BEFORE THE FIRST DISPATCH. (The plan is the only surface carrying ORDER and the user's written rulings \u2014 the board holds inventory, the store holds design.)`
+    );
+    if (source === "manual") {
+      blocks.push(`This lock was written by hand (plan-lock.mjs --plan) \u2014 approval provenance is the operator's word, not an ExitPlanMode approval.`);
+    }
+    if (lock.text_file_mismatch === true) {
+      blocks.push(
+        `At approval the approved text and the file on disk already differed (text_file_mismatch) \u2014 the live status above is judged against the FILE's bytes at that moment, which is the only honest baseline.`
+      );
+    }
+    if (status === "MODIFIED since approval") {
+      blocks.push(
+        `The plan file has changed since it was approved. Approval provenance is never re-stamped: record the change with plan-lock.mjs --observe, or have the user approve a new plan.`
+      );
+    }
+    const ageMs = Date.now() - Date.parse(clean(lock.approved_at, 40));
+    if (Number.isFinite(ageMs) && ageMs > STALE_DAYS * DAY_MS) {
+      blocks.push(
+        `STALE: approved ~${Math.round(ageMs / DAY_MS)} days ago. Staleness is a DISCLOSURE, never a clear \u2014 only a later approval or plan-lock.mjs --release clears a lock.`
+      );
+    }
+  }
+  blocks.push(...markerLines);
+  return { context: blocks.length ? blocks.join("\n") + "\n\n" : "", lock: malformed ? null : lock, malformed };
+}
+var NOTE_PROSE_MAX = 2e3;
+var LIVE_DISPATCH_MAX = 20;
+var LIVE_TERRITORY_MAX = 40;
+var LIVE_TERRITORY_LINE_MAX = PATH_MAX * 4;
+var NOTE_FIELD_MAX = {
+  objective: NOTE_PROSE_MAX,
+  next_slice: NOTE_PROSE_MAX,
+  risks: NOTE_PROSE_MAX,
+  pointers: NOTE_PROSE_MAX,
+  branch: PATH_MAX,
+  head_sha: PATH_MAX,
+  at: PATH_MAX
+};
 var rotationContext = "";
 try {
   if (input.source === "clear") {
-    const notePath = join6(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync4(notePath)) {
+    const notePath = join7(input.cwd, ".sterling", "transient", "rotation-note.json");
+    if (existsSync5(notePath)) {
       const note = JSON.parse(readFileSync4(notePath, "utf8"));
       rmSync2(notePath, { force: true });
       const head = (() => {
@@ -8635,8 +8894,9 @@ try {
       })();
       const cautions = [];
       if (note.head_sha && head && head !== note.head_sha) {
-        cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
+        cautions.push(`HEAD has MOVED since the note (${sanitizeForContext(String(note.head_sha), PATH_MAX).slice(0, 8)} \u2192 ${head.slice(0, 8)}) \u2014 re-verify repository state before acting on it`);
       }
+      const noteBaseBranch = sanitizeForContext(note.base_branch, PATH_MAX);
       let commitsAheadUnverified = false;
       if (typeof note.commits_ahead === "number") {
         if (!note.base_branch) {
@@ -8647,7 +8907,7 @@ try {
             const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
             if (Number.isFinite(actual)) {
               if (actual !== note.commits_ahead) {
-                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+                cautions.push(`commits_ahead drift \u2014 note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || "unknown base"})`);
               }
             } else {
               commitsAheadUnverified = true;
@@ -8661,19 +8921,43 @@ try {
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1e3) {
         cautions.push(`the note is ~${Math.round(ageMs / 36e5)}h old`);
       }
-      const fields = ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${note[k]}`).concat(
-        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
+      const notePlanRaw = typeof note.plan_path === "string" && note.plan_path ? note.plan_path : null;
+      const livePlanRaw = typeof planLock?.plan_path === "string" && planLock.plan_path ? planLock.plan_path : null;
+      const notePlan = notePlanRaw ? sanitizeForContext(notePlanRaw, PATH_MAX) : null;
+      const livePlan = livePlanRaw ? sanitizeForContext(livePlanRaw, PATH_MAX) : null;
+      if (notePlanRaw && planLockMalformed) {
+        cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it \u2014 inspect it with \`plan-lock.mjs --show\``);
+      } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
+        cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) \u2014 a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
+      } else if (notePlanRaw && !livePlanRaw) {
+        cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now \u2014 it was released, or .sterling/ was recreated`);
+      }
+      const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+      const fields = planField.concat(
+        ["objective", "next_slice", "risks", "pointers", "branch", "head_sha", "at"].filter((k) => note[k]).map((k) => `- ${k}: ${sanitizeForContext(String(note[k]), NOTE_FIELD_MAX[k])}`)
+      ).concat(
+        typeof note.commits_ahead === "number" ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || "unknown base"})${commitsAheadUnverified ? " (unverified \u2014 base unavailable)" : ""}`] : []
       ).join("\n");
       const liveDispatches = note.live_dispatches;
       let liveLine = "";
       if (Array.isArray(liveDispatches) && liveDispatches.length) {
-        const rendered = liveDispatches.map((d) => {
-          const territory = Array.isArray(d?.territory) && d.territory.length ? d.territory.join(", ") : "no declared territory";
-          return `- ${d?.agent_type ?? "agent"} (${d?.agent_id ?? "unknown id"}) \u2014 ${territory}`;
+        const rendered = liveDispatches.slice(0, LIVE_DISPATCH_MAX).map((d) => {
+          const entries = Array.isArray(d?.territory) ? d.territory : [];
+          let territory = "no declared territory";
+          if (entries.length) {
+            const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => sanitizeForContext(String(t), PATH_MAX));
+            const dropped = entries.length - shown.length;
+            let joined = shown.join(", ");
+            if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}\u2026`;
+            territory = dropped > 0 ? `${joined}\u2026 (+${dropped} more)` : joined;
+          }
+          return `- ${sanitizeForContext(String(d?.agent_type ?? "agent"), PATH_MAX) || "agent"} (${sanitizeForContext(String(d?.agent_id ?? "unknown id"), PATH_MAX) || "unknown id"}) \u2014 ${territory}`;
         }).join("\n");
+        const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
         liveLine = `
 ${liveDispatches.length} dispatch(es) were live at rotation \u2014 check ListAgents before re-dispatching:
-${rendered}`;
+${rendered}` + (omitted > 0 ? `
+\u2026 (+${omitted} more)` : "");
       } else if (liveDispatches === null) {
         liveLine = `
 LIVE DISPATCHES: UNKNOWN \u2014 the dispatch register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching.`;
@@ -8689,7 +8973,7 @@ Resume from next_slice. The board and knowledge store remain the authorities for
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join6(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    const conductorLedger = join7(input.cwd, ".sterling", "transient", "conductor-reads.json");
     rmSync2(conductorLedger, { force: true });
   }
 } catch {
@@ -8707,7 +8991,7 @@ try {
     tagRoot = realpathSync2(input.cwd);
   } catch {
   }
-  const projectTag = createHash2("sha256").update(tagRoot).digest("hex").slice(0, 16);
+  const projectTag = createHash3("sha256").update(tagRoot).digest("hex").slice(0, 16);
   const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
   const tmp = tmpdir();
   const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
@@ -8715,9 +8999,9 @@ try {
   for (const name of readdirSync2(tmp)) {
     if (removed >= PERCALL_TMP_SWEEP_CAP) break;
     if (!percallRe.test(name)) continue;
-    const p = join6(tmp, name);
+    const p = join7(tmp, name);
     try {
-      if (statSync3(p).mtimeMs >= cutoff) continue;
+      if (statSync4(p).mtimeMs >= cutoff) continue;
       rmSync2(p, { force: true });
       removed++;
     } catch {
@@ -8728,15 +9012,15 @@ try {
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join6(input.cwd, ".sterling", "transient");
-    const regPaths = [join6(transient, "touches.json"), join6(transient, "session-events.json"), join6(transient, "capture-nagged.json")];
+    const transient = join7(input.cwd, ".sterling", "transient");
+    const regPaths = [join7(transient, "touches.json"), join7(transient, "session-events.json"), join7(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync4(p))) {
+    if (regPaths.some((p) => existsSync5(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync4(touchesPath)) {
+        if (existsSync5(touchesPath)) {
           const raw = JSON.parse(readFileSync4(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
@@ -8745,7 +9029,7 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync4(eventsPath)) {
+        if (existsSync5(eventsPath)) {
           const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
@@ -8772,7 +9056,7 @@ try {
           if (!open) {
             const now = (/* @__PURE__ */ new Date()).toISOString();
             store.enqueueSystemTodo({
-              id: randomUUID3(),
+              id: randomUUID4(),
               type: "todo",
               created_at: now,
               updated_at: now,
@@ -8846,12 +9130,12 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
   queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
 }
 var registryContext = "";
-if (existsSync4(registryPath())) {
+if (existsSync5(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   const registry = new ProjectRegistry(registryPath());
   try {
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync4(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync5(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -8879,11 +9163,11 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join6(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync4(buildIdPath(serverDist)) ? readFileSync4(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join7(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync5(buildIdPath(serverDist)) ? readFileSync4(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join6(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync4(markerPath)) {
+  const markerPath = runtimeMarkerPath(join7(input.cwd, ".sterling", "sterling.db"));
+  if (existsSync5(markerPath)) {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync4(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
@@ -8896,7 +9180,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join6(input.cwd, ".claude", "agents");
+  const agentsDir = join7(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -8912,7 +9196,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync4(join6(agentsDir, f), "utf8");
+      content = readFileSync4(join7(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -8925,7 +9209,7 @@ try {
       }
       continue;
     }
-    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync4(p));
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync5(p));
     if (unresolved) dead.push({ agent: f, node: unresolved });
   }
   if (dead.length || unknown.length) {
@@ -8941,7 +9225,7 @@ MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.le
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join6(input.cwd, ".claude", "agents");
+  const agentsDir = join7(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -8957,7 +9241,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync4(join6(agentsDir, n), "utf8");
+      content = readFileSync4(join7(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -8976,11 +9260,11 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot();
-    const templatesDir = root ? join6(root, "agent-templates") : null;
+    const templatesDir = root ? join7(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join6(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join7(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
@@ -9006,7 +9290,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync4(join6(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync4(join7(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -9070,7 +9354,9 @@ try {
 var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
+  // session may take on, so it is read before the conventions, not after them.
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
 process.stdout.write(JSON.stringify(output));
 allow();

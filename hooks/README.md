@@ -10,9 +10,9 @@ Counts measured 2026-09-06 (branch `fix/issues-log-2026-09-05`):
 
 | Surface | Distinct hook files |
 |---|---|
-| `hooks/*.mjs` bundles on disk | 32 |
-| registered in `hooks.json` | 26 |
+| `hooks/*.mjs` bundles on disk | 33 |
+| registered in `hooks.json` | 27 |
 | registered in agent-template frontmatter | 9 (`h3-contract-gate`, `h4-read-wall`, `h5-frozen-tests`, `h6-context-watch`, `h7-file-touch`, `h13-reads-ledger`, `h14-bash-allowlist`, `h17-bash-write-sweep`, `h18-test-write-wall`) |
 | frontmatter-only, never in `hooks.json` | 6 (`h4`, `h5`, `h6-context-watch`, `h14`, `h17`, `h18`) |
 
-So a reader counting `hooks.json` sees 26 of 32 and should not conclude the other six are unregistered (a consuming project did exactly that, issue log 2026-09-01). To see the whole roster, grep both surfaces: `grep -l '^hooks:' agent-templates/*.md` for the frontmatter side and `hooks.json` for the conductor side; the knowledge-store article `hooks-suite` is the per-hook census.
+So a reader counting `hooks.json` sees 27 of 33 and should not conclude the other six are unregistered (a consuming project did exactly that, issue log 2026-09-01). To see the whole roster, grep both surfaces: `grep -l '^hooks:' agent-templates/*.md` for the frontmatter side and `hooks.json` for the conductor side; the knowledge-store article `hooks-suite` is the per-hook census.

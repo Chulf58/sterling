@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { liveDispatchesOrUnknown } from './lib/dispatch-register.mjs';
+import { readLock } from './hooks/lib/plan-lock.mjs';
 
 function arg(name) {
   const i = process.argv.indexOf(`--${name}`);
@@ -124,7 +125,29 @@ const liveDispatches =
       }))
     : null;
 
+// PLAN PATH (decision `plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry`):
+// EXACTLY ONE new field, and no flag — the note copies the live lock's
+// plan_path at write time so a fresh session's restore can point at the plan
+// that governs the next slice. Title and status are deliberately NOT duplicated:
+// they are reconstructable from the lock, and the note's contract stays thin.
+// null is written EXPLICITLY when there is no lock (or it cannot be read) —
+// absent and "no plan" must not be the same shape to a reader.
+// Read through the SHARED validating reader — the same one H31, H1, H19 and
+// the plan-lock CLI use — so this file holds no second idea of what a lock is.
+// plan_path is copied ONLY from a VALID lock; absent, malformed or unreadable
+// all yield null, because a note pointing at a plan the lock cannot vouch for
+// is worse than a note with no plan.
+const planPath = (() => {
+  try {
+    const read = readLock(join(cwd, '.sterling'));
+    return read.lock ? read.lock.plan_path : null;
+  } catch {
+    return null; // a broken lock costs this field, never the note
+  }
+})();
+
 const note = {
+  plan_path: planPath,
   next_slice: nextSlice,
   objective: (arg('objective') ?? '').trim() || null,
   risks: (arg('risks') ?? '').trim() || null,

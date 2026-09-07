@@ -5274,7 +5274,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5379,7 +5379,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync, realpathSync } from "node:fs";
+import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, basename, join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -5387,6 +5387,14 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+function decodeLiveRecordRow(op, row) {
+  const record = JSON.parse(row.body);
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -6082,14 +6090,13 @@ var SterlingStore = class _SterlingStore {
    * must be labelled for the mount it is physically inserted into.
    *
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
    */
   static decodeLiveRecord(op, row) {
-    const record = JSON.parse(row.body);
-    if (typeof row.scope !== "string" || row.scope.length === 0) {
-      throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-    }
-    record.scope = row.scope;
-    return record;
+    return decodeLiveRecordRow(op, row);
   }
   /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
   static decodeLiveRecords(op, rows) {
@@ -7590,18 +7597,6 @@ var SterlingStore = class _SterlingStore {
     return result;
   }
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
-   */
-  withTransactionForScope(_scope, fn) {
-    return this.withTransaction(fn);
-  }
-  /**
    * PER-RECORD transaction boundary — the ToolStore sibling that routes by
    * PHYSICAL IDENTITY rather than by a label (decision
    * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
@@ -7611,6 +7606,11 @@ var SterlingStore = class _SterlingStore {
    * holder makes the two agree by construction. On a plain SterlingStore there
    * is only ONE physical store, so this is a straight alias for withTransaction
    * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
   withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);
@@ -7684,7 +7684,7 @@ function openStore(cwd) {
 }
 
 // scripts/hooks/lib/dispatch-register-lock.mjs
-import { mkdirSync as mkdirSync2, rmSync, renameSync, statSync, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, rmSync, renameSync, statSync as statSync2, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
 import { join as join3 } from "node:path";
 import { randomUUID as randomUUID2 } from "node:crypto";
 var DEFAULT_RETRY_MS = 1e3;
@@ -7741,7 +7741,7 @@ async function acquireLock(lockDir, opts = {}) {
     }
     let ageMs = null;
     try {
-      ageMs = Date.now() - statSync(ownerPath).mtimeMs;
+      ageMs = Date.now() - statSync2(ownerPath).mtimeMs;
     } catch {
       continue;
     }
@@ -7759,7 +7759,7 @@ async function acquireLock(lockDir, opts = {}) {
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash, randomUUID as randomUUID3 } from "node:crypto";
-import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
@@ -7779,7 +7779,7 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
+        if (Date.now() - statSync3(lockPath).mtimeMs > LOCK_STALE_MS) {
           console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
           rmSync2(lockPath, { recursive: true, force: true });
           continue;
@@ -7915,7 +7915,7 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync3, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync4, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync3(path)) return null;
@@ -7952,7 +7952,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync3(path).size > TAIL_BYTES;
+  const exhausted = statSync4(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {

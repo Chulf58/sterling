@@ -5254,7 +5254,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5356,7 +5356,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync, realpathSync } from "node:fs";
+import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
 import { dirname, basename, join, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -5642,6 +5642,14 @@ function hasRecordCentralityHit(record, outgoingText, opts = {}) {
 }
 
 // packages/store/dist/index.js
+function decodeLiveRecordRow(op, row) {
+  const record = JSON.parse(row.body);
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -6337,14 +6345,13 @@ var SterlingStore = class _SterlingStore {
    * must be labelled for the mount it is physically inserted into.
    *
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
    */
   static decodeLiveRecord(op, row) {
-    const record = JSON.parse(row.body);
-    if (typeof row.scope !== "string" || row.scope.length === 0) {
-      throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-    }
-    record.scope = row.scope;
-    return record;
+    return decodeLiveRecordRow(op, row);
   }
   /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
   static decodeLiveRecords(op, rows) {
@@ -7845,18 +7852,6 @@ var SterlingStore = class _SterlingStore {
     return result;
   }
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
-   */
-  withTransactionForScope(_scope, fn) {
-    return this.withTransaction(fn);
-  }
-  /**
    * PER-RECORD transaction boundary — the ToolStore sibling that routes by
    * PHYSICAL IDENTITY rather than by a label (decision
    * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
@@ -7866,6 +7861,11 @@ var SterlingStore = class _SterlingStore {
    * holder makes the two agree by construction. On a plain SterlingStore there
    * is only ONE physical store, so this is a straight alias for withTransaction
    * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
   withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);
@@ -7915,23 +7915,130 @@ function repoRel(toolPath, cwd) {
   }
 }
 
+// scripts/hooks/lib/plan-lock.mjs
+import { closeSync, constants as FS, existsSync as existsSync3, fstatSync, mkdirSync as mkdirSync2, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join as join3 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
+}
+function sterlingDirOf(cwd) {
+  return join3(cwd, ".sterling");
+}
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
+  let out = "";
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
+    out += ch;
+  }
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
+}
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
+  }
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
+    }
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+  }
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join3(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+
 // scripts/hooks/lib/dispatch-prompt.mjs
-import { existsSync as existsSync4 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync, readdirSync } from "node:fs";
+import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, fstatSync as fstatSync2, existsSync as existsSync4, statSync as statSync2, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync3(path)) return null;
-  const fd = openSync(path, "r");
+  if (!existsSync4(path)) return null;
+  const fd = openSync2(path, "r");
   try {
-    const size = fstatSync(fd).size;
+    const size = fstatSync2(fd).size;
     const len = Math.min(size, bytes);
     const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, size - len);
+    readSync2(fd, buf, 0, len, size - len);
     return buf.toString("utf8");
   } finally {
-    closeSync(fd);
+    closeSync2(fd);
   }
 }
 
@@ -7942,7 +8049,7 @@ function extractPathCandidates(text) {
   return [...new Set(found)];
 }
 function lastDispatchPrompts(transcriptPath) {
-  if (!transcriptPath || !existsSync4(transcriptPath)) return [];
+  if (!transcriptPath || !existsSync5(transcriptPath)) return [];
   const tail = readTail(transcriptPath);
   if (tail === null) return [];
   const lines = tail.split("\n");
@@ -7966,20 +8073,20 @@ function lastDispatchPrompts(transcriptPath) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync5, rmSync, renameSync, statSync as statSync2, readdirSync as readdirSync2 } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync6, rmSync, renameSync as renameSync2, statSync as statSync3, readdirSync as readdirSync2 } from "node:fs";
+import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
-  return join3(cwd, ".sterling", "transient", "delivery");
+  return join4(cwd, ".sterling", "transient", "delivery");
 }
 function guardPath(cwd, agentId) {
-  return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+  return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function readGuard(path) {
   try {
-    if (!existsSync5(path)) return emptyGuard();
+    if (!existsSync6(path)) return emptyGuard();
     return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
@@ -7988,10 +8095,10 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
-  mkdirSync2(dirname3(path), { recursive: true });
+  mkdirSync3(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(guard));
-  renameSync(tmp, path);
+  writeFileSync2(tmp, JSON.stringify(guard));
+  renameSync2(tmp, path);
 }
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
@@ -8221,9 +8328,27 @@ try {
   }
 } catch {
 }
+var PLAN_LINE_AGENT_TYPES = /* @__PURE__ */ new Set(["coder", "debugger", "test-writer"]);
+var PLAN_TITLE_MAX = 120;
+var PLAN_PATH_MAX = 320;
+var activePlanLine = "";
+try {
+  if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
+    const read = readLock(sterlingDirOf(input.cwd));
+    if (read.lock) {
+      const title = sanitizeForContext(read.lock.title, PLAN_TITLE_MAX);
+      const path = sanitizeForContext(read.lock.plan_path, PLAN_PATH_MAX);
+      if (title || path) {
+        activePlanLine = `ACTIVE PLAN: ${title || "(untitled plan)"} (${path || "no path recorded"}) \u2014 this lane belongs to one of its slices; the plan governs the objective's scope and ordering, standing store decisions still govern mechanisms.`;
+      }
+    }
+  }
+} catch {
+}
 var emitted = false;
 function combinedContext(payload) {
   const out = [];
+  if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine) out.push(tddPostureLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);

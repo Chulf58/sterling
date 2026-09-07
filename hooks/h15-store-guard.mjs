@@ -5106,7 +5106,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5307,7 +5307,13 @@ var SANCTIONED_SCRIPTS = Object.freeze([
   // audit (scripts/delivery-oracle.mjs) must be runnable by a Bash-gated
   // agent, not only by hand. Rides slice 1b's commit cycle as a fourth
   // disposition.
-  "scripts/delivery-oracle.mjs"
+  "scripts/delivery-oracle.mjs",
+  // INDIVIDUAL DISPOSITION (decision plan-lock-approved-plan-bound-at-exit-plan-
+  // mode-delivered-at-every-reentry): the manual plan-lock writer is the ONLY
+  // route to release a lock, to record an observed plan edit, or to bind a plan
+  // when ExitPlanMode could not — and H1's PLAN LOCK section PRINTS those verbs
+  // as the remedy. A printed remedy the guard denies is not a remedy.
+  "scripts/plan-lock.mjs"
 ]);
 function appendMissingSanctioned(allowScripts2) {
   if (!Array.isArray(allowScripts2)) {

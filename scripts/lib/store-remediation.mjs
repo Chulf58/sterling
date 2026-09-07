@@ -124,6 +124,12 @@ export const SANCTIONED_SCRIPTS = Object.freeze([
   // agent, not only by hand. Rides slice 1b's commit cycle as a fourth
   // disposition.
   'scripts/delivery-oracle.mjs',
+  // INDIVIDUAL DISPOSITION (decision plan-lock-approved-plan-bound-at-exit-plan-
+  // mode-delivered-at-every-reentry): the manual plan-lock writer is the ONLY
+  // route to release a lock, to record an observed plan edit, or to bind a plan
+  // when ExitPlanMode could not — and H1's PLAN LOCK section PRINTS those verbs
+  // as the remedy. A printed remedy the guard denies is not a remedy.
+  'scripts/plan-lock.mjs',
 ]);
 
 /**

@@ -34,6 +34,9 @@
 // file's existing try/warnNonBlocking shape — the fold does not change h19's
 // own failure posture.
 import { readStdin, allow, warnNonBlocking, openStore, loadConfig, repoRel } from './lib/common.mjs';
+// Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
+// h1-session-start.mjs and scripts/plan-lock.mjs.
+import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
 // Prompt recovery + path extraction moved to lib/dispatch-prompt.mjs when H22's
 // dispatch register became a second consumer — one mechanism, imported never
 // reimplemented (decision f5638a84). Behavior here is unchanged.
@@ -141,6 +144,35 @@ try {
   // fail-open — a malformed config costs only this line, never h19's other staging
 }
 
+// ACTIVE PLAN (decision `plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry`):
+// one bounded line telling a WRITING lane which approved plan its slice belongs
+// to. Scoped to coder/debugger/test-writer — a reviewer judges a diff against
+// the store and the brief, not against the plan's ordering, so the line would be
+// noise there. Omitted entirely with no lock (P1, no ceremony). Bounded here as
+// well as at the write, because the lock file is not necessarily H31's.
+const PLAN_LINE_AGENT_TYPES = new Set(['coder', 'debugger', 'test-writer']);
+const PLAN_TITLE_MAX = 120;
+const PLAN_PATH_MAX = 320;
+let activePlanLine = '';
+try {
+  if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
+    // The shared VALIDATING reader: a record that is JSON but not a lock stages
+    // no line at all, rather than a confident line built from junk fields.
+    const read = readPlanLock(sterlingDirOf(input.cwd));
+    if (read.lock) {
+      // RENDERED copy — sanitised and bounded tighter than the store bound,
+      // because this rides inside another agent's context window.
+      const title = sanitizeForContext(read.lock.title, PLAN_TITLE_MAX);
+      const path = sanitizeForContext(read.lock.plan_path, PLAN_PATH_MAX);
+      if (title || path) {
+        activePlanLine = `ACTIVE PLAN: ${title || '(untitled plan)'} (${path || 'no path recorded'}) — this lane belongs to one of its slices; the plan governs the objective's scope and ordering, standing store decisions still govern mechanisms.`;
+      }
+    }
+  }
+} catch {
+  // fail-open — a malformed lock costs only this line, never h19's other staging
+}
+
 // Set the moment ANY additionalContext actually reaches stdout — guards the
 // catch block below against a double-emit (review finding, S7 fixer-mode):
 // once something has gone out, a later throw must never write a second time.
@@ -150,6 +182,7 @@ let emitted = false;
 // contract (h28 fold — omitted only for EXEMPT_AGENT_TYPES) into one string.
 function combinedContext(payload) {
   const out = [];
+  if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine) out.push(tddPostureLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);

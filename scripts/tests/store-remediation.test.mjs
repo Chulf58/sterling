@@ -104,6 +104,7 @@ const SHIPPED = [
   'scripts/no-capture.mjs',
   'scripts/test-repair.mjs',
   'scripts/delivery-oracle.mjs',
+  'scripts/plan-lock.mjs',
 ];
 
 /**
@@ -234,6 +235,7 @@ test('appendMissingSanctioned: none present — appends all shipped sanctioned s
     'scripts/no-capture.mjs',
     'scripts/test-repair.mjs',
     'scripts/delivery-oracle.mjs',
+    'scripts/plan-lock.mjs',
   ]);
   assert.deepEqual(added, SHIPPED);
   assert.deepEqual(input, ['scripts/some-other-script.mjs'], 'input array is not mutated (pure function)');
@@ -280,6 +282,7 @@ test('appendMissingSanctioned: exactly one missing — only that one is appended
     'scripts/no-capture.mjs',
     'scripts/test-repair.mjs',
     'scripts/delivery-oracle.mjs',
+    'scripts/plan-lock.mjs',
     'scripts/consume-exit.mjs',
     'scripts/architecture-projection.mjs',
     'scripts/domain-doctor.mjs',
@@ -319,6 +322,7 @@ test('appendMissingSanctioned: a partially-covered config gains exactly the gap,
     'scripts/no-capture.mjs',
     'scripts/test-repair.mjs',
     'scripts/delivery-oracle.mjs',
+    'scripts/plan-lock.mjs',
   ], 'the gap only — the two already-present migration scripts are not re-added, and the added set is in SANCTIONED_SCRIPTS order');
   assert.deepEqual(next, [...input, ...added]);
 });
@@ -365,6 +369,7 @@ test('appendMissingSanctioned: fully covered (scrambled order, unrelated entry i
     'scripts/init.mjs',
     'scripts/dispose-run.mjs',
     'scripts/delivery-oracle.mjs',
+    'scripts/plan-lock.mjs',
   ];
   const { next, added } = appendMissingSanctioned(input);
   assert.deepEqual(added, [], 'nothing appended — every shipped sanctioned script is present, regardless of its position');

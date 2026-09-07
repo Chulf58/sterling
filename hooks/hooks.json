@@ -109,6 +109,12 @@
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h29-codex-consult-failure.mjs\"" }
         ]
+      },
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h31-plan-lock.mjs\"" }
+        ]
       }
     ],
     "PostToolUseFailure": [

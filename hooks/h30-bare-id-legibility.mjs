@@ -5240,7 +5240,7 @@ var configSchema = external_exports.object({
   // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
   // fails the moment the two literals diverge. Edit BOTH, in the same order.
   store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs"])
+    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
   }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
@@ -5345,7 +5345,7 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync as mkdirSync2, existsSync as existsSync2, realpathSync } from "node:fs";
+import { mkdirSync as mkdirSync2, existsSync as existsSync2, realpathSync, statSync } from "node:fs";
 import { dirname as dirname2, basename, join as join2, resolve as resolvePath } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -5827,25 +5827,15 @@ var MountedStores = class {
   withTransaction(fn) {
     return this.runScopedTransaction(this.project, fn);
   }
-  /** Per-mount transaction boundary (board d47a9e2d): routes to the SterlingStore
-   *  holding `scope` (project → the project store; domain:<name> → that domain
-   *  store, storeFor's existing routing — an unmounted domain throws loudly
-   *  BEFORE any transaction opens) so a tool-layer write whose records all
-   *  belong to one owning mount (e.g. a domain-scoped knowledge_extract) can
-   *  commit create/update/link atomically on that mount, exactly as
-   *  withTransaction does for the project store. Guarded against CROSS-MOUNT
-   *  nesting the same way withTransaction is (see runScopedTransaction) —
-   *  same-store nesting still joins via the physical store's own txDepth. */
-  withTransactionForScope(scope, fn) {
-    return this.runScopedTransaction(this.storeFor(scope), fn);
-  }
   /** PER-RECORD transaction boundary — the affinity fix (decision
    *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
    *  Routes by `storeHolding(id)`, the SAME physical resolution every record
    *  mutation uses, so the transaction and the writes inside it can never open
-   *  on different mounts. The label-routed sibling above resolves by
-   *  storeFor(scope), and a record's body `scope` is caller-writable and not
-   *  the routing key for anything after creation (anti_pattern
+   *  on different mounts. The retired label-routed sibling
+   *  (`withTransactionForScope`, deleted per decision
+   *  [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired])
+   *  resolved by storeFor(scope), and a record's body `scope` is caller-writable
+   *  and not the routing key for anything after creation (anti_pattern
    *  [record-body-scope-is-not-physical-store-identity]) — so a drifted label
    *  put the transaction on the wrong database while the write went to the
    *  right one. A record that no record exists for throws loudly BEFORE any
@@ -5904,6 +5894,14 @@ var MountedStores = class {
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
+function decodeLiveRecordRow(op, row) {
+  const record = JSON.parse(row.body);
+  if (typeof row.scope !== "string" || row.scope.length === 0) {
+    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
+  }
+  record.scope = row.scope;
+  return record;
+}
 var DDL = `
 CREATE TABLE IF NOT EXISTS records (
   id TEXT PRIMARY KEY,
@@ -6599,14 +6597,13 @@ var SterlingStore = class _SterlingStore {
    * must be labelled for the mount it is physically inserted into.
    *
    * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
+   *
+   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
+   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
+   * decodes through the same function rather than re-parsing `body` alone.
    */
   static decodeLiveRecord(op, row) {
-    const record = JSON.parse(row.body);
-    if (typeof row.scope !== "string" || row.scope.length === 0) {
-      throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-    }
-    record.scope = row.scope;
-    return record;
+    return decodeLiveRecordRow(op, row);
   }
   /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
   static decodeLiveRecords(op, rows) {
@@ -8107,18 +8104,6 @@ var SterlingStore = class _SterlingStore {
     return result;
   }
   /**
-   * Per-mount transaction boundary (board d47a9e2d, ToolStore Pick sibling of
-   * withTransaction above): on a plain SterlingStore there is only ONE
-   * physical store, so routing by scope is a no-op — this is a straight alias
-   * for withTransaction, kept as its own method so SterlingStore and
-   * MountedStores satisfy the same ToolStore surface and the tool layer never
-   * has to know whether domains are mounted. MountedStores overrides this to
-   * actually route by scope and to guard against cross-mount nesting.
-   */
-  withTransactionForScope(_scope, fn) {
-    return this.withTransaction(fn);
-  }
-  /**
    * PER-RECORD transaction boundary — the ToolStore sibling that routes by
    * PHYSICAL IDENTITY rather than by a label (decision
    * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
@@ -8128,6 +8113,11 @@ var SterlingStore = class _SterlingStore {
    * holder makes the two agree by construction. On a plain SterlingStore there
    * is only ONE physical store, so this is a straight alias for withTransaction
    * — MountedStores overrides it to resolve the holding mount.
+   *
+   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
+   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
+   * it had zero production callers once knowledge_extract moved here, and its
+   * shape was exactly the defect this method closed.
    */
   withTransactionForRecord(_id, fn) {
     return this.withTransaction(fn);

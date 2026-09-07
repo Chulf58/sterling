@@ -5,9 +5,13 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 
+// scripts/hooks/h31-plan-lock.mjs
+import { spawnSync } from "node:child_process";
+import { basename } from "node:path";
+
 // scripts/hooks/lib/common.mjs
-import { readFileSync, existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, join as join2, resolve } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 // node_modules/zod/v3/external.js
 var external_exports = {};
@@ -545,12 +549,12 @@ var ParseStatus = class _ParseStatus {
   }
   static mergeArray(status, results) {
     const arrayValue = [];
-    for (const s2 of results) {
-      if (s2.status === "aborted")
+    for (const s of results) {
+      if (s.status === "aborted")
         return INVALID;
-      if (s2.status === "dirty")
+      if (s.status === "dirty")
         status.dirty();
-      arrayValue.push(s2.value);
+      arrayValue.push(s.value);
     }
     return { status: status.value, value: arrayValue };
   }
@@ -668,41 +672,41 @@ var ZodType = class {
   get description() {
     return this._def.description;
   }
-  _getType(input2) {
-    return getParsedType(input2.data);
+  _getType(input) {
+    return getParsedType(input.data);
   }
-  _getOrReturnCtx(input2, ctx) {
+  _getOrReturnCtx(input, ctx) {
     return ctx || {
-      common: input2.parent.common,
-      data: input2.data,
-      parsedType: getParsedType(input2.data),
+      common: input.parent.common,
+      data: input.data,
+      parsedType: getParsedType(input.data),
       schemaErrorMap: this._def.errorMap,
-      path: input2.path,
-      parent: input2.parent
+      path: input.path,
+      parent: input.parent
     };
   }
-  _processInputParams(input2) {
+  _processInputParams(input) {
     return {
       status: new ParseStatus(),
       ctx: {
-        common: input2.parent.common,
-        data: input2.data,
-        parsedType: getParsedType(input2.data),
+        common: input.parent.common,
+        data: input.data,
+        parsedType: getParsedType(input.data),
         schemaErrorMap: this._def.errorMap,
-        path: input2.path,
-        parent: input2.parent
+        path: input.path,
+        parent: input.parent
       }
     };
   }
-  _parseSync(input2) {
-    const result = this._parse(input2);
+  _parseSync(input) {
+    const result = this._parse(input);
     if (isAsync(result)) {
       throw new Error("Synchronous parse encountered promise.");
     }
     return result;
   }
-  _parseAsync(input2) {
-    const result = this._parse(input2);
+  _parseAsync(input) {
+    const result = this._parse(input);
     return Promise.resolve(result);
   }
   parse(data, params) {
@@ -1028,13 +1032,13 @@ function isValidCidr(ip, version) {
   return false;
 }
 var ZodString = class _ZodString extends ZodType {
-  _parse(input2) {
+  _parse(input) {
     if (this._def.coerce) {
-      input2.data = String(input2.data);
+      input.data = String(input.data);
     }
-    const parsedType = this._getType(input2);
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.string) {
-      const ctx2 = this._getOrReturnCtx(input2);
+      const ctx2 = this._getOrReturnCtx(input);
       addIssueToContext(ctx2, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.string,
@@ -1046,8 +1050,8 @@ var ZodString = class _ZodString extends ZodType {
     let ctx = void 0;
     for (const check of this._def.checks) {
       if (check.kind === "min") {
-        if (input2.data.length < check.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (input.data.length < check.value) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_small,
             minimum: check.value,
@@ -1059,8 +1063,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "max") {
-        if (input2.data.length > check.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (input.data.length > check.value) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_big,
             maximum: check.value,
@@ -1072,10 +1076,10 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "length") {
-        const tooBig = input2.data.length > check.value;
-        const tooSmall = input2.data.length < check.value;
+        const tooBig = input.data.length > check.value;
+        const tooSmall = input.data.length < check.value;
         if (tooBig || tooSmall) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           if (tooBig) {
             addIssueToContext(ctx, {
               code: ZodIssueCode.too_big,
@@ -1098,8 +1102,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "email") {
-        if (!emailRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!emailRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "email",
             code: ZodIssueCode.invalid_string,
@@ -1111,8 +1115,8 @@ var ZodString = class _ZodString extends ZodType {
         if (!emojiRegex) {
           emojiRegex = new RegExp(_emojiRegex, "u");
         }
-        if (!emojiRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!emojiRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "emoji",
             code: ZodIssueCode.invalid_string,
@@ -1121,8 +1125,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "uuid") {
-        if (!uuidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!uuidRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "uuid",
             code: ZodIssueCode.invalid_string,
@@ -1131,8 +1135,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "nanoid") {
-        if (!nanoidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!nanoidRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "nanoid",
             code: ZodIssueCode.invalid_string,
@@ -1141,8 +1145,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "cuid") {
-        if (!cuidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!cuidRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "cuid",
             code: ZodIssueCode.invalid_string,
@@ -1151,8 +1155,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "cuid2") {
-        if (!cuid2Regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!cuid2Regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "cuid2",
             code: ZodIssueCode.invalid_string,
@@ -1161,8 +1165,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "ulid") {
-        if (!ulidRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!ulidRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "ulid",
             code: ZodIssueCode.invalid_string,
@@ -1172,9 +1176,9 @@ var ZodString = class _ZodString extends ZodType {
         }
       } else if (check.kind === "url") {
         try {
-          new URL(input2.data);
+          new URL(input.data);
         } catch {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "url",
             code: ZodIssueCode.invalid_string,
@@ -1184,9 +1188,9 @@ var ZodString = class _ZodString extends ZodType {
         }
       } else if (check.kind === "regex") {
         check.regex.lastIndex = 0;
-        const testResult = check.regex.test(input2.data);
+        const testResult = check.regex.test(input.data);
         if (!testResult) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "regex",
             code: ZodIssueCode.invalid_string,
@@ -1195,10 +1199,10 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "trim") {
-        input2.data = input2.data.trim();
+        input.data = input.data.trim();
       } else if (check.kind === "includes") {
-        if (!input2.data.includes(check.value, check.position)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!input.data.includes(check.value, check.position)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_string,
             validation: { includes: check.value, position: check.position },
@@ -1207,12 +1211,12 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "toLowerCase") {
-        input2.data = input2.data.toLowerCase();
+        input.data = input.data.toLowerCase();
       } else if (check.kind === "toUpperCase") {
-        input2.data = input2.data.toUpperCase();
+        input.data = input.data.toUpperCase();
       } else if (check.kind === "startsWith") {
-        if (!input2.data.startsWith(check.value)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!input.data.startsWith(check.value)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_string,
             validation: { startsWith: check.value },
@@ -1221,8 +1225,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "endsWith") {
-        if (!input2.data.endsWith(check.value)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!input.data.endsWith(check.value)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_string,
             validation: { endsWith: check.value },
@@ -1232,8 +1236,8 @@ var ZodString = class _ZodString extends ZodType {
         }
       } else if (check.kind === "datetime") {
         const regex = datetimeRegex(check);
-        if (!regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_string,
             validation: "datetime",
@@ -1243,8 +1247,8 @@ var ZodString = class _ZodString extends ZodType {
         }
       } else if (check.kind === "date") {
         const regex = dateRegex;
-        if (!regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_string,
             validation: "date",
@@ -1254,8 +1258,8 @@ var ZodString = class _ZodString extends ZodType {
         }
       } else if (check.kind === "time") {
         const regex = timeRegex(check);
-        if (!regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_string,
             validation: "time",
@@ -1264,8 +1268,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "duration") {
-        if (!durationRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!durationRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "duration",
             code: ZodIssueCode.invalid_string,
@@ -1274,8 +1278,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "ip") {
-        if (!isValidIP(input2.data, check.version)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!isValidIP(input.data, check.version)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "ip",
             code: ZodIssueCode.invalid_string,
@@ -1284,8 +1288,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "jwt") {
-        if (!isValidJWT(input2.data, check.alg)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!isValidJWT(input.data, check.alg)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "jwt",
             code: ZodIssueCode.invalid_string,
@@ -1294,8 +1298,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "cidr") {
-        if (!isValidCidr(input2.data, check.version)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!isValidCidr(input.data, check.version)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "cidr",
             code: ZodIssueCode.invalid_string,
@@ -1304,8 +1308,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "base64") {
-        if (!base64Regex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!base64Regex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "base64",
             code: ZodIssueCode.invalid_string,
@@ -1314,8 +1318,8 @@ var ZodString = class _ZodString extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "base64url") {
-        if (!base64urlRegex.test(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!base64urlRegex.test(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             validation: "base64url",
             code: ZodIssueCode.invalid_string,
@@ -1327,7 +1331,7 @@ var ZodString = class _ZodString extends ZodType {
         util.assertNever(check);
       }
     }
-    return { status: status.value, value: input2.data };
+    return { status: status.value, value: input.data };
   }
   _regex(regex, validation, message) {
     return this.refinement((data) => regex.test(data), {
@@ -1588,13 +1592,13 @@ var ZodNumber = class _ZodNumber extends ZodType {
     this.max = this.lte;
     this.step = this.multipleOf;
   }
-  _parse(input2) {
+  _parse(input) {
     if (this._def.coerce) {
-      input2.data = Number(input2.data);
+      input.data = Number(input.data);
     }
-    const parsedType = this._getType(input2);
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.number) {
-      const ctx2 = this._getOrReturnCtx(input2);
+      const ctx2 = this._getOrReturnCtx(input);
       addIssueToContext(ctx2, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.number,
@@ -1606,8 +1610,8 @@ var ZodNumber = class _ZodNumber extends ZodType {
     const status = new ParseStatus();
     for (const check of this._def.checks) {
       if (check.kind === "int") {
-        if (!util.isInteger(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!util.isInteger(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.invalid_type,
             expected: "integer",
@@ -1617,9 +1621,9 @@ var ZodNumber = class _ZodNumber extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "min") {
-        const tooSmall = check.inclusive ? input2.data < check.value : input2.data <= check.value;
+        const tooSmall = check.inclusive ? input.data < check.value : input.data <= check.value;
         if (tooSmall) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_small,
             minimum: check.value,
@@ -1631,9 +1635,9 @@ var ZodNumber = class _ZodNumber extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "max") {
-        const tooBig = check.inclusive ? input2.data > check.value : input2.data >= check.value;
+        const tooBig = check.inclusive ? input.data > check.value : input.data >= check.value;
         if (tooBig) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_big,
             maximum: check.value,
@@ -1645,8 +1649,8 @@ var ZodNumber = class _ZodNumber extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "multipleOf") {
-        if (floatSafeRemainder(input2.data, check.value) !== 0) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (floatSafeRemainder(input.data, check.value) !== 0) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.not_multiple_of,
             multipleOf: check.value,
@@ -1655,8 +1659,8 @@ var ZodNumber = class _ZodNumber extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "finite") {
-        if (!Number.isFinite(input2.data)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (!Number.isFinite(input.data)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.not_finite,
             message: check.message
@@ -1667,7 +1671,7 @@ var ZodNumber = class _ZodNumber extends ZodType {
         util.assertNever(check);
       }
     }
-    return { status: status.value, value: input2.data };
+    return { status: status.value, value: input.data };
   }
   gte(value, message) {
     return this.setLimit("min", value, true, errorUtil.toString(message));
@@ -1819,25 +1823,25 @@ var ZodBigInt = class _ZodBigInt extends ZodType {
     this.min = this.gte;
     this.max = this.lte;
   }
-  _parse(input2) {
+  _parse(input) {
     if (this._def.coerce) {
       try {
-        input2.data = BigInt(input2.data);
+        input.data = BigInt(input.data);
       } catch {
-        return this._getInvalidInput(input2);
+        return this._getInvalidInput(input);
       }
     }
-    const parsedType = this._getType(input2);
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.bigint) {
-      return this._getInvalidInput(input2);
+      return this._getInvalidInput(input);
     }
     let ctx = void 0;
     const status = new ParseStatus();
     for (const check of this._def.checks) {
       if (check.kind === "min") {
-        const tooSmall = check.inclusive ? input2.data < check.value : input2.data <= check.value;
+        const tooSmall = check.inclusive ? input.data < check.value : input.data <= check.value;
         if (tooSmall) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_small,
             type: "bigint",
@@ -1848,9 +1852,9 @@ var ZodBigInt = class _ZodBigInt extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "max") {
-        const tooBig = check.inclusive ? input2.data > check.value : input2.data >= check.value;
+        const tooBig = check.inclusive ? input.data > check.value : input.data >= check.value;
         if (tooBig) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_big,
             type: "bigint",
@@ -1861,8 +1865,8 @@ var ZodBigInt = class _ZodBigInt extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "multipleOf") {
-        if (input2.data % check.value !== BigInt(0)) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (input.data % check.value !== BigInt(0)) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.not_multiple_of,
             multipleOf: check.value,
@@ -1874,10 +1878,10 @@ var ZodBigInt = class _ZodBigInt extends ZodType {
         util.assertNever(check);
       }
     }
-    return { status: status.value, value: input2.data };
+    return { status: status.value, value: input.data };
   }
-  _getInvalidInput(input2) {
-    const ctx = this._getOrReturnCtx(input2);
+  _getInvalidInput(input) {
+    const ctx = this._getOrReturnCtx(input);
     addIssueToContext(ctx, {
       code: ZodIssueCode.invalid_type,
       expected: ZodParsedType.bigint,
@@ -1986,13 +1990,13 @@ ZodBigInt.create = (params) => {
   });
 };
 var ZodBoolean = class extends ZodType {
-  _parse(input2) {
+  _parse(input) {
     if (this._def.coerce) {
-      input2.data = Boolean(input2.data);
+      input.data = Boolean(input.data);
     }
-    const parsedType = this._getType(input2);
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.boolean) {
-      const ctx = this._getOrReturnCtx(input2);
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.boolean,
@@ -2000,7 +2004,7 @@ var ZodBoolean = class extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
 };
 ZodBoolean.create = (params) => {
@@ -2011,13 +2015,13 @@ ZodBoolean.create = (params) => {
   });
 };
 var ZodDate = class _ZodDate extends ZodType {
-  _parse(input2) {
+  _parse(input) {
     if (this._def.coerce) {
-      input2.data = new Date(input2.data);
+      input.data = new Date(input.data);
     }
-    const parsedType = this._getType(input2);
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.date) {
-      const ctx2 = this._getOrReturnCtx(input2);
+      const ctx2 = this._getOrReturnCtx(input);
       addIssueToContext(ctx2, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.date,
@@ -2025,8 +2029,8 @@ var ZodDate = class _ZodDate extends ZodType {
       });
       return INVALID;
     }
-    if (Number.isNaN(input2.data.getTime())) {
-      const ctx2 = this._getOrReturnCtx(input2);
+    if (Number.isNaN(input.data.getTime())) {
+      const ctx2 = this._getOrReturnCtx(input);
       addIssueToContext(ctx2, {
         code: ZodIssueCode.invalid_date
       });
@@ -2036,8 +2040,8 @@ var ZodDate = class _ZodDate extends ZodType {
     let ctx = void 0;
     for (const check of this._def.checks) {
       if (check.kind === "min") {
-        if (input2.data.getTime() < check.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (input.data.getTime() < check.value) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_small,
             message: check.message,
@@ -2049,8 +2053,8 @@ var ZodDate = class _ZodDate extends ZodType {
           status.dirty();
         }
       } else if (check.kind === "max") {
-        if (input2.data.getTime() > check.value) {
-          ctx = this._getOrReturnCtx(input2, ctx);
+        if (input.data.getTime() > check.value) {
+          ctx = this._getOrReturnCtx(input, ctx);
           addIssueToContext(ctx, {
             code: ZodIssueCode.too_big,
             message: check.message,
@@ -2067,7 +2071,7 @@ var ZodDate = class _ZodDate extends ZodType {
     }
     return {
       status: status.value,
-      value: new Date(input2.data.getTime())
+      value: new Date(input.data.getTime())
     };
   }
   _addCheck(check) {
@@ -2120,10 +2124,10 @@ ZodDate.create = (params) => {
   });
 };
 var ZodSymbol = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.symbol) {
-      const ctx = this._getOrReturnCtx(input2);
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.symbol,
@@ -2131,7 +2135,7 @@ var ZodSymbol = class extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
 };
 ZodSymbol.create = (params) => {
@@ -2141,10 +2145,10 @@ ZodSymbol.create = (params) => {
   });
 };
 var ZodUndefined = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.undefined) {
-      const ctx = this._getOrReturnCtx(input2);
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.undefined,
@@ -2152,7 +2156,7 @@ var ZodUndefined = class extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
 };
 ZodUndefined.create = (params) => {
@@ -2162,10 +2166,10 @@ ZodUndefined.create = (params) => {
   });
 };
 var ZodNull = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.null) {
-      const ctx = this._getOrReturnCtx(input2);
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.null,
@@ -2173,7 +2177,7 @@ var ZodNull = class extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
 };
 ZodNull.create = (params) => {
@@ -2187,8 +2191,8 @@ var ZodAny = class extends ZodType {
     super(...arguments);
     this._any = true;
   }
-  _parse(input2) {
-    return OK(input2.data);
+  _parse(input) {
+    return OK(input.data);
   }
 };
 ZodAny.create = (params) => {
@@ -2202,8 +2206,8 @@ var ZodUnknown = class extends ZodType {
     super(...arguments);
     this._unknown = true;
   }
-  _parse(input2) {
-    return OK(input2.data);
+  _parse(input) {
+    return OK(input.data);
   }
 };
 ZodUnknown.create = (params) => {
@@ -2213,8 +2217,8 @@ ZodUnknown.create = (params) => {
   });
 };
 var ZodNever = class extends ZodType {
-  _parse(input2) {
-    const ctx = this._getOrReturnCtx(input2);
+  _parse(input) {
+    const ctx = this._getOrReturnCtx(input);
     addIssueToContext(ctx, {
       code: ZodIssueCode.invalid_type,
       expected: ZodParsedType.never,
@@ -2230,10 +2234,10 @@ ZodNever.create = (params) => {
   });
 };
 var ZodVoid = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.undefined) {
-      const ctx = this._getOrReturnCtx(input2);
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.void,
@@ -2241,7 +2245,7 @@ var ZodVoid = class extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
 };
 ZodVoid.create = (params) => {
@@ -2251,8 +2255,8 @@ ZodVoid.create = (params) => {
   });
 };
 var ZodArray = class _ZodArray extends ZodType {
-  _parse(input2) {
-    const { ctx, status } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx, status } = this._processInputParams(input);
     const def = this._def;
     if (ctx.parsedType !== ZodParsedType.array) {
       addIssueToContext(ctx, {
@@ -2392,10 +2396,10 @@ var ZodObject = class _ZodObject extends ZodType {
     this._cached = { shape, keys };
     return this._cached;
   }
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.object) {
-      const ctx2 = this._getOrReturnCtx(input2);
+      const ctx2 = this._getOrReturnCtx(input);
       addIssueToContext(ctx2, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.object,
@@ -2403,7 +2407,7 @@ var ZodObject = class _ZodObject extends ZodType {
       });
       return INVALID;
     }
-    const { status, ctx } = this._processInputParams(input2);
+    const { status, ctx } = this._processInputParams(input);
     const { shape, keys: shapeKeys } = this._getCached();
     const extraKeys = [];
     if (!(this._def.catchall instanceof ZodNever && this._def.unknownKeys === "strip")) {
@@ -2716,8 +2720,8 @@ ZodObject.lazycreate = (shape, params) => {
   });
 };
 var ZodUnion = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     const options = this._def.options;
     function handleResults(results) {
       for (const result of results) {
@@ -2838,8 +2842,8 @@ var getDiscriminator = (type) => {
   }
 };
 var ZodDiscriminatedUnion = class _ZodDiscriminatedUnion extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.object) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -2952,8 +2956,8 @@ function mergeValues(a, b) {
   }
 }
 var ZodIntersection = class extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     const handleParsed = (parsedLeft, parsedRight) => {
       if (isAborted(parsedLeft) || isAborted(parsedRight)) {
         return INVALID;
@@ -3005,8 +3009,8 @@ ZodIntersection.create = (left, right, params) => {
   });
 };
 var ZodTuple = class _ZodTuple extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.array) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -3078,8 +3082,8 @@ var ZodRecord = class _ZodRecord extends ZodType {
   get valueSchema() {
     return this._def.valueType;
   }
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.object) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -3131,8 +3135,8 @@ var ZodMap = class extends ZodType {
   get valueSchema() {
     return this._def.valueType;
   }
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.map) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -3191,8 +3195,8 @@ ZodMap.create = (keyType, valueType, params) => {
   });
 };
 var ZodSet = class _ZodSet extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.set) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -3280,8 +3284,8 @@ var ZodFunction = class _ZodFunction extends ZodType {
     super(...arguments);
     this.validate = this.implement;
   }
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.function) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -3384,8 +3388,8 @@ var ZodLazy = class extends ZodType {
   get schema() {
     return this._def.getter();
   }
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     const lazySchema = this._def.getter();
     return lazySchema._parse({ data: ctx.data, path: ctx.path, parent: ctx });
   }
@@ -3398,9 +3402,9 @@ ZodLazy.create = (getter, params) => {
   });
 };
 var ZodLiteral = class extends ZodType {
-  _parse(input2) {
-    if (input2.data !== this._def.value) {
-      const ctx = this._getOrReturnCtx(input2);
+  _parse(input) {
+    if (input.data !== this._def.value) {
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         received: ctx.data,
         code: ZodIssueCode.invalid_literal,
@@ -3408,7 +3412,7 @@ var ZodLiteral = class extends ZodType {
       });
       return INVALID;
     }
-    return { status: "valid", value: input2.data };
+    return { status: "valid", value: input.data };
   }
   get value() {
     return this._def.value;
@@ -3429,9 +3433,9 @@ function createZodEnum(values, params) {
   });
 }
 var ZodEnum = class _ZodEnum extends ZodType {
-  _parse(input2) {
-    if (typeof input2.data !== "string") {
-      const ctx = this._getOrReturnCtx(input2);
+  _parse(input) {
+    if (typeof input.data !== "string") {
+      const ctx = this._getOrReturnCtx(input);
       const expectedValues = this._def.values;
       addIssueToContext(ctx, {
         expected: util.joinValues(expectedValues),
@@ -3443,8 +3447,8 @@ var ZodEnum = class _ZodEnum extends ZodType {
     if (!this._cache) {
       this._cache = new Set(this._def.values);
     }
-    if (!this._cache.has(input2.data)) {
-      const ctx = this._getOrReturnCtx(input2);
+    if (!this._cache.has(input.data)) {
+      const ctx = this._getOrReturnCtx(input);
       const expectedValues = this._def.values;
       addIssueToContext(ctx, {
         received: ctx.data,
@@ -3453,7 +3457,7 @@ var ZodEnum = class _ZodEnum extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
   get options() {
     return this._def.values;
@@ -3494,9 +3498,9 @@ var ZodEnum = class _ZodEnum extends ZodType {
 };
 ZodEnum.create = createZodEnum;
 var ZodNativeEnum = class extends ZodType {
-  _parse(input2) {
+  _parse(input) {
     const nativeEnumValues = util.getValidEnumValues(this._def.values);
-    const ctx = this._getOrReturnCtx(input2);
+    const ctx = this._getOrReturnCtx(input);
     if (ctx.parsedType !== ZodParsedType.string && ctx.parsedType !== ZodParsedType.number) {
       const expectedValues = util.objectValues(nativeEnumValues);
       addIssueToContext(ctx, {
@@ -3509,7 +3513,7 @@ var ZodNativeEnum = class extends ZodType {
     if (!this._cache) {
       this._cache = new Set(util.getValidEnumValues(this._def.values));
     }
-    if (!this._cache.has(input2.data)) {
+    if (!this._cache.has(input.data)) {
       const expectedValues = util.objectValues(nativeEnumValues);
       addIssueToContext(ctx, {
         received: ctx.data,
@@ -3518,7 +3522,7 @@ var ZodNativeEnum = class extends ZodType {
       });
       return INVALID;
     }
-    return OK(input2.data);
+    return OK(input.data);
   }
   get enum() {
     return this._def.values;
@@ -3535,8 +3539,8 @@ var ZodPromise = class extends ZodType {
   unwrap() {
     return this._def.type;
   }
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     if (ctx.parsedType !== ZodParsedType.promise && ctx.common.async === false) {
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
@@ -3568,8 +3572,8 @@ var ZodEffects = class extends ZodType {
   sourceType() {
     return this._def.schema._def.typeName === ZodFirstPartyTypeKind.ZodEffects ? this._def.schema.sourceType() : this._def.schema;
   }
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     const effect = this._def.effect || null;
     const checkCtx = {
       addIssue: (arg) => {
@@ -3701,12 +3705,12 @@ ZodEffects.createWithPreprocess = (preprocess, schema, params) => {
   });
 };
 var ZodOptional = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType === ZodParsedType.undefined) {
       return OK(void 0);
     }
-    return this._def.innerType._parse(input2);
+    return this._def.innerType._parse(input);
   }
   unwrap() {
     return this._def.innerType;
@@ -3720,12 +3724,12 @@ ZodOptional.create = (type, params) => {
   });
 };
 var ZodNullable = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType === ZodParsedType.null) {
       return OK(null);
     }
-    return this._def.innerType._parse(input2);
+    return this._def.innerType._parse(input);
   }
   unwrap() {
     return this._def.innerType;
@@ -3739,8 +3743,8 @@ ZodNullable.create = (type, params) => {
   });
 };
 var ZodDefault = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     let data = ctx.data;
     if (ctx.parsedType === ZodParsedType.undefined) {
       data = this._def.defaultValue();
@@ -3764,8 +3768,8 @@ ZodDefault.create = (type, params) => {
   });
 };
 var ZodCatch = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     const newCtx = {
       ...ctx,
       common: {
@@ -3817,10 +3821,10 @@ ZodCatch.create = (type, params) => {
   });
 };
 var ZodNaN = class extends ZodType {
-  _parse(input2) {
-    const parsedType = this._getType(input2);
+  _parse(input) {
+    const parsedType = this._getType(input);
     if (parsedType !== ZodParsedType.nan) {
-      const ctx = this._getOrReturnCtx(input2);
+      const ctx = this._getOrReturnCtx(input);
       addIssueToContext(ctx, {
         code: ZodIssueCode.invalid_type,
         expected: ZodParsedType.nan,
@@ -3828,7 +3832,7 @@ var ZodNaN = class extends ZodType {
       });
       return INVALID;
     }
-    return { status: "valid", value: input2.data };
+    return { status: "valid", value: input.data };
   }
 };
 ZodNaN.create = (params) => {
@@ -3839,8 +3843,8 @@ ZodNaN.create = (params) => {
 };
 var BRAND = /* @__PURE__ */ Symbol("zod_brand");
 var ZodBranded = class extends ZodType {
-  _parse(input2) {
-    const { ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { ctx } = this._processInputParams(input);
     const data = ctx.data;
     return this._def.type._parse({
       data,
@@ -3853,8 +3857,8 @@ var ZodBranded = class extends ZodType {
   }
 };
 var ZodPipeline = class _ZodPipeline extends ZodType {
-  _parse(input2) {
-    const { status, ctx } = this._processInputParams(input2);
+  _parse(input) {
+    const { status, ctx } = this._processInputParams(input);
     if (ctx.common.async) {
       const handleAsync = async () => {
         const inResult = await this._def.in._parseAsync({
@@ -3908,8 +3912,8 @@ var ZodPipeline = class _ZodPipeline extends ZodType {
   }
 };
 var ZodReadonly = class extends ZodType {
-  _parse(input2) {
-    const result = this._def.innerType._parse(input2);
+  _parse(input) {
+    const result = this._def.innerType._parse(input);
     const freeze = (data) => {
       if (isValid(data)) {
         data.value = Object.freeze(data.value);
@@ -4051,25 +4055,25 @@ var coerce = {
 var NEVER = INVALID;
 
 // packages/schemas/dist/paths.js
-function normalizeRepoPath(input2) {
-  const fwd = input2.replace(/\\/g, "/");
+function normalizeRepoPath(input) {
+  const fwd = input.replace(/\\/g, "/");
   if (/^[A-Za-z]:/.test(fwd)) {
-    throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input2}'`);
+    throw new Error(`path invariant violation: drive-prefixed path is not repo-relative: '${input}'`);
   }
   if (fwd.startsWith("/")) {
-    throw new Error(`path invariant violation: absolute path is not repo-relative: '${input2}'`);
+    throw new Error(`path invariant violation: absolute path is not repo-relative: '${input}'`);
   }
   const parts = [];
   for (const seg of fwd.split("/")) {
     if (seg === "" || seg === ".")
       continue;
     if (seg === "..") {
-      throw new Error(`path invariant violation: parent-escaping path: '${input2}'`);
+      throw new Error(`path invariant violation: parent-escaping path: '${input}'`);
     }
     parts.push(seg);
   }
   if (parts.length === 0) {
-    throw new Error(`path invariant violation: empty path: '${input2}'`);
+    throw new Error(`path invariant violation: empty path: '${input}'`);
   }
   return parts.join("/");
 }
@@ -4081,20 +4085,6 @@ var repoPath = external_exports.string().transform((value, ctx) => {
     return external_exports.NEVER;
   }
 });
-var normSep = (p) => String(p ?? "").replace(/\\/g, "/").replace(/\/+$/, "");
-function foldPairForCompare(a, b) {
-  const drivePrefixed = /^[A-Za-z]:/.test(a) || /^[A-Za-z]:/.test(b);
-  return drivePrefixed ? [a.toLowerCase(), b.toLowerCase()] : [a, b];
-}
-function toRepoRelative(absolutePath, repoRoot) {
-  const abs = normSep(absolutePath);
-  const root = normSep(repoRoot);
-  const [a, r] = foldPairForCompare(abs, root);
-  if (!(a === r || a.startsWith(r + "/"))) {
-    throw new Error(`path invariant violation: '${absolutePath}' is not under repo root '${repoRoot}'`);
-  }
-  return normalizeRepoPath(abs.slice(root.length + 1));
-}
 
 // packages/schemas/dist/envelope.js
 var LINK_RELS = ["cites", "informed_by", "fulfills", "supersedes", "falsified_by"];
@@ -4636,144 +4626,6 @@ var AGENT_CLASS = {
   debugger: "conductor_direct"
 };
 var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
-var s = (v) => typeof v === "string" ? v : "";
-var RECORD_TYPES = {
-  decision: {
-    schema: decisionSchema,
-    immutable: true,
-    fts: (r) => [s(r.slug), s(r.title), s(r.statement), s(r.rationale)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // slug leads for the same reason it does on feature_article: it is the
-    // handle that survives supersession (board 1e639f32); the title states the ruling.
-    // authority (board 055cfb6a): surfaced on the digest line so a capped scan
-    // shows scope alongside the ruling, not only on knowledge_get.
-    digest: { slug: "plain", title: "plain", authority: "plain" }
-  },
-  anti_pattern: {
-    schema: antiPatternSchema,
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.trigger), s(r.guidance), s(r.wrong_way), s(r.right_way)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // trigger is the field that tells a reader whether the hazard applies to
-    // what they are about to do — the whole point of scanning hazards — and
-    // severity is the order H19 already renders them in.
-    digest: { slug: "plain", title: "plain", trigger: "clip", severity: "plain" }
-  },
-  research_finding: {
-    schema: researchFindingSchema,
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.question), s(r.answer)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // No title on this type — the question IS the identity. Both clocks ride
-    // along because a finding's currency decides whether it may be used at all.
-    digest: { slug: "plain", question: "clip", source_date: "plain", capture_date: "plain" }
-  },
-  reference_material: {
-    schema: referenceMaterialSchema,
-    immutable: false,
-    fts: (r) => [s(r.title), s(r.summary)].join("\n"),
-    // §3.2.5: repo-located docs join the reconcile economy — for kind:doc a
-    // repo-relative location doubles as a file_key (H7 pressure applies);
-    // pdf/url locations are external and carry none.
-    fileKeys: (r) => {
-      if (r.kind !== "doc")
-        return [];
-      try {
-        return [normalizeRepoPath(r.location)];
-      } catch {
-        return [];
-      }
-    },
-    // location is this type's path-bearing field (§3.2.5), so it is what a
-    // reader needs to go open the thing.
-    digest: { title: "plain", kind: "plain", location: "plain" }
-  },
-  disconfirmed_hypothesis: {
-    schema: disconfirmedHypothesisSchema,
-    immutable: false,
-    fts: (r) => [s(r.question), s(r.rejected_answer), s(r.evidence)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The rejected answer is the reusable half — it stops the question being
-    // re-asked and re-answered the same wrong way.
-    digest: { question: "clip", rejected_answer: "clip" }
-  },
-  open_question: {
-    schema: openQuestionSchema,
-    // MUTABLE, unlike decision/attestation: an open question is a LIVE working
-    // record — hypotheses get added and struck, evidence accumulates, and it
-    // eventually flips to closed. Supersession would mint a new record per
-    // measurement, which is exactly the churn the type exists to absorb.
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.question), r.hypotheses?.join("\n") ?? "", s(r.evidence)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The question is the identity (research_finding's rule); resolution_status
-    // rides along because whether a question is still OPEN decides whether it is
-    // worth reading at all — the same role research_finding's clocks play.
-    digest: { slug: "plain", question: "clip", resolution_status: "plain" }
-  },
-  attestation: {
-    schema: attestationSchema,
-    // Point-in-time human ruling: supersession is the only change path, exactly
-    // the decision contract (§3.2.1 analog; board 259a455f).
-    immutable: true,
-    fts: (r) => [s(r.slug), s(r.artifact_key), s(r.verdict), s(r.inspector), s(r.notes)].join("\n"),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The progress-surface read: artifact + verdict + who + when answer the
-    // ledger question without opening the record.
-    digest: { artifact_key: "plain", verdict: "plain", inspector: "plain", inspected_at: "plain" }
-  },
-  feature_article: {
-    schema: featureArticleSchema,
-    immutable: false,
-    // concept_family joins the FTS text so a family query ranks its concept
-    // article (class enumeration stays a consumer-side filter on the field).
-    fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
-    fileKeys: (r) => (r.files ?? []).map((f) => f.path),
-    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
-    // and the id in the envelope beside it is not. version + state say whether
-    // this is a moving target and whether it is wired yet.
-    digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
-  },
-  todo: {
-    schema: todoSchema,
-    immutable: false,
-    fts: (r) => s(r.text),
-    fileKeys: (r) => r.file_keys ?? [],
-    // The measured worst case for full bodies: board items run to ~8 KB each,
-    // so a whole-board read spilled 478 KB. system_reason is what sorts the
-    // maintenance queue into lanes; priority/source sort the board.
-    //
-    // slug LEADS, exactly as it does on decision/feature_article, and is
-    // 'plain' rather than 'clip' (decision human-readable-ids-for-board-items,
-    // 2e8c30e4): it is the ADDRESSABLE handle a reader cites, and a clipped
-    // address does not resolve. Names clip only in the composed `name (id8)`
-    // DISPLAY form (headlineRecord / TUI card titles) — never in the field.
-    // Absent for a legacy slugless item: digestRecord omits empty headline
-    // fields, and an absent name is safer than a fabricated one (df361a0f).
-    digest: { slug: "plain", text: "clip", source: "plain", priority: "plain", system_reason: "plain", objective: "plain" }
-  },
-  brief: {
-    schema: briefSchema,
-    immutable: false,
-    fts: (r) => [s(r.slug), s(r.title), s(r.problem), s(r.feature)].join("\n"),
-    fileKeys: (r) => {
-      const br = r.blast_radius;
-      return (br?.files ?? []).map((f) => f.path);
-    },
-    digest: { slug: "plain", title: "plain", problem: "clip" }
-  }
-};
-function validateRecord(input2) {
-  if (typeof input2 !== "object" || input2 === null || typeof input2.type !== "string") {
-    throw new Error("validateRecord: input has no record type");
-  }
-  const type = input2.type;
-  const entry = RECORD_TYPES[type];
-  if (!entry) {
-    throw new Error(`validateRecord: unregistered record type '${type}' \u2014 register it in RECORD_TYPES (spec \xA715) before writing`);
-  }
-  return entry.schema.parse(input2);
-}
 
 // packages/schemas/dist/transient.js
 var SIGNALS = [
@@ -5356,2613 +5208,269 @@ var runtimeMarkerSchema = external_exports.object({
 
 // packages/store/dist/index.js
 import { DatabaseSync as DatabaseSync2 } from "node:sqlite";
-import { mkdirSync, existsSync, realpathSync, statSync } from "node:fs";
-import { dirname, basename, join, resolve as resolvePath } from "node:path";
-import { randomUUID } from "node:crypto";
 
 // packages/store/dist/registry.js
 import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
-function decodeLiveRecordRow(op, row) {
-  const record = JSON.parse(row.body);
-  if (typeof row.scope !== "string" || row.scope.length === 0) {
-    throw new Error(`${op}: record '${record.id ?? "unknown"}' was read with an EMPTY records.scope column. That column is NOT NULL, so this row cannot exist in a well-formed store \u2014 refusing rather than defaulting to 'project', because a guessed scope is the exact drift column-authoritative reads exist to prevent (decision [scope-drift-closed-by-column-authoritative-reads-not-format-change]).`);
-  }
-  record.scope = row.scope;
-  return record;
-}
-var DDL = `
-CREATE TABLE IF NOT EXISTS records (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  status TEXT NOT NULL,
-  superseded_by TEXT,
-  lifecycle TEXT NOT NULL DEFAULT 'live',
-  freshness TEXT NOT NULL DEFAULT 'fresh',
-  version INTEGER NOT NULL DEFAULT 1,
-  scope TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  author TEXT NOT NULL,
-  derived_unconfirmed INTEGER NOT NULL DEFAULT 0,
-  body TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_records_type_status ON records(type, status);
--- Schema v2 identity tables [stable-identity-design-v2].
--- record_versions: FULL-RECORD JSON snapshots, one per (record_id, version).
--- Append-only and permanent \u2014 NEVER indexed into records_fts, so an archived
--- version's text can never rank in query() (the whole point of contract 1).
-CREATE TABLE IF NOT EXISTS record_versions (
-  record_id TEXT NOT NULL,
-  version INTEGER NOT NULL,
-  archived_at TEXT NOT NULL,
-  body TEXT NOT NULL,
-  PRIMARY KEY (record_id, version)
-);
--- record_aliases: dead-id lookup (historical_id -> canonical_id + the version
--- archived under that historical id). NOTHING writes it in S2 \u2014 the S4
--- migration runner populates it once; it is an index, not a namespace.
-CREATE TABLE IF NOT EXISTS record_aliases (
-  historical_id TEXT PRIMARY KEY,
-  canonical_id TEXT NOT NULL,
-  archived_version INTEGER NOT NULL,
-  created_at TEXT NOT NULL
-);
--- remove() deletes aliases by canonical_id.
-CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON record_aliases(canonical_id);
--- record_relations: the AUTHORITATIVE home of typed edges (supersedes,
--- cites, ...). Replaces record_links: served links[] materializes from here,
--- and supersession is a relation rather than a column value a caller sets.
-CREATE TABLE IF NOT EXISTS record_relations (
-  source_id TEXT NOT NULL,
-  rel TEXT NOT NULL,
-  target_id TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  PRIMARY KEY (source_id, rel, target_id)
-);
-CREATE INDEX IF NOT EXISTS idx_relations_target ON record_relations(target_id);
-CREATE INDEX IF NOT EXISTS idx_relations_rel_target ON record_relations(rel, target_id);
-CREATE TABLE IF NOT EXISTS record_stack_tags (
-  record_id TEXT NOT NULL,
-  tag TEXT NOT NULL,
-  PRIMARY KEY (record_id, tag)
-);
-CREATE TABLE IF NOT EXISTS record_file_keys (
-  record_id TEXT NOT NULL,
-  path TEXT NOT NULL,
-  PRIMARY KEY (record_id, path)
-);
-CREATE INDEX IF NOT EXISTS idx_file_keys_path ON record_file_keys(path);
-CREATE VIRTUAL TABLE IF NOT EXISTS records_fts USING fts5(record_id UNINDEXED, text);
-CREATE TABLE IF NOT EXISTS runs (
-  id TEXT PRIMARY KEY,
-  machine_state TEXT NOT NULL,
-  pending_exit TEXT,
-  body TEXT NOT NULL,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS handoffs (
-  run_id TEXT NOT NULL,
-  phase_id TEXT NOT NULL,
-  agent_role TEXT NOT NULL,
-  body TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_handoffs_run_phase ON handoffs(run_id, phase_id);
-CREATE TABLE IF NOT EXISTS check_skipped (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_id TEXT,
-  check_name TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS selection (
-  slot INTEGER PRIMARY KEY CHECK (slot = 1),
-  type TEXT NOT NULL,
-  record_id TEXT NOT NULL,
-  at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS queue_drain_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  drained_at TEXT NOT NULL,
-  system_reason TEXT NOT NULL,
-  text TEXT NOT NULL,
-  file_keys TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS activity_log (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  at TEXT NOT NULL,
-  verb TEXT NOT NULL,
-  type TEXT NOT NULL,
-  record_id TEXT NOT NULL,
-  title TEXT NOT NULL
-);
-`;
-var SUPPORTED_SCHEMA_VERSION = 2;
-var UnsupportedSchemaVersionError = class extends Error {
-  found;
-  supported;
-  constructor(found, supported) {
-    super(`Unsupported schema version: this store's user_version (${found}) is newer than the schema version this build supports (${supported}). This store was likely migrated by a newer build of Sterling. Do not open it with an older/downgraded build \u2014 writing with a downgraded build over a newer schema risks corrupting the store. Upgrade this build (or restore from a backup taken before the migration) before continuing.`);
-    this.name = "UnsupportedSchemaVersionError";
-    this.found = found;
-    this.supported = supported;
-  }
-};
-function shellQuoteSingle(value) {
-  return `'${value.split("'").join(`'\\''`)}'`;
-}
-var SchemaMigrationRequiredError = class extends Error {
-  found;
-  supported;
-  /**
-   * The absolute path of the store file that needs migrating (measured
-   * defect, Salesforce consumer 2026-08-26): without this a hook surfacing
-   * the error showed only a bare bundle line number, and the user could not
-   * tell WHICH of several candidate stores on the machine to migrate.
-   */
-  db_path;
-  constructor(found, supported, operation, dbPath) {
-    super(`Schema migration required: the store at '${dbPath}' is at schema version ${found}, but this build requires version ${supported}. The store is open READ-ONLY \u2014 '${operation}' and every other write refuses until the stable-identity migration has run. Run from the Sterling clone: node scripts/migrate-stores.mjs --db ${shellQuoteSingle(dbPath)} (decision stable-identity-design-v2; the runner takes a VACUUM INTO backup first, and bumps user_version last). Nothing was written.`);
-    this.name = "SchemaMigrationRequiredError";
-    this.found = found;
-    this.supported = supported;
-    this.db_path = dbPath;
-  }
-};
-var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
-function activityTitleOf(record) {
-  const r = record;
-  const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
-  return raw.slice(0, 80);
-}
-function deepReplaceString(value, from, to) {
-  if (typeof value === "string")
-    return value === from ? to : value;
-  if (Array.isArray(value))
-    return value.map((v) => deepReplaceString(v, from, to));
-  if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k === from ? to : k, deepReplaceString(v, from, to)]));
-  }
-  return value;
-}
 var MAX_RANK_TERMS = 16;
 var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
-var DEFAULT_QUERY_CAP = 20;
-var MAX_BODY_COMPARE_DEPTH = 64;
-var COMPARE_WORK_BUDGET = 1e7;
-var COMPARE_OUTPUT_BUDGET = 5e4;
-var COMPARE_PATH_LENGTH_BUDGET = 1e6;
-var ComparisonBudgetExceededError = class extends Error {
-};
-function newComparisonBudget() {
-  let work = 0;
-  let output = 0;
-  return {
-    chargeWork() {
-      work += 1;
-      if (work > COMPARE_WORK_BUDGET) {
-        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its comparison work budget (${COMPARE_WORK_BUDGET} nodes/edges visited) \u2014 refusing rather than continuing an unaffordable comparison. This usually means the record body shares structure by reference in a way that re-walks the same subtree many times over; there is no partial result to return. Nothing was written \u2014 this throw always precedes the write transaction.`);
-      }
-    },
-    chargeOutput() {
-      output += 1;
-      if (output > COMPARE_OUTPUT_BUDGET) {
-        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its output-path budget (${COMPARE_OUTPUT_BUDGET} lost paths) \u2014 refusing rather than returning a partial loss list. A legitimate loss report never needs this many entries; this means the comparison is enumerating a pathologically large or heavily-shared subtree. Nothing was written \u2014 this throw always precedes the write transaction.`);
-      }
-    },
-    chargePathLength(prospectiveLength) {
-      if (prospectiveLength > COMPARE_PATH_LENGTH_BUDGET) {
-        throw new ComparisonBudgetExceededError(`droppedKeyPaths exceeded its path-length budget (${COMPARE_PATH_LENGTH_BUDGET} characters in one accumulated key path) \u2014 refusing rather than building or returning an oversized path string. This means the record body's own keys are themselves very large strings, nested deep enough that concatenating them into one addressable path has grown past what any legitimate record address needs. Nothing was written \u2014 this throw always precedes the write transaction.`);
-      }
-    }
-  };
-}
-function depthBoundError() {
-  return new Error(`record body nesting exceeds the depth bound of ${MAX_BODY_COMPARE_DEPTH} levels, deeper than any legal record shape`);
-}
-function appendPathSegment(path, segment, budget) {
-  if (typeof segment === "number") {
-    if (budget)
-      budget.chargePathLength(path.length + 2 + String(segment).length);
-    return `${path}[${segment}]`;
-  }
-  const prospectiveLength = path ? path.length + 1 + segment.length : segment.length;
-  if (budget)
-    budget.chargePathLength(prospectiveLength);
-  return path ? `${path}.${segment}` : segment;
-}
-function emitTotalLoss(value, path, depth, out, budget) {
-  if (depth > MAX_BODY_COMPARE_DEPTH)
-    throw depthBoundError();
-  budget.chargePathLength(path.length);
-  budget.chargeWork();
-  if (path !== "") {
-    budget.chargeOutput();
-    out.push(path);
-  }
-  if (value === null || typeof value !== "object")
-    return;
-  if (Array.isArray(value)) {
-    for (let i = 0; i < value.length; i++) {
-      emitTotalLoss(value[i], appendPathSegment(path, i, budget), depth + 1, out, budget);
-    }
-    return;
-  }
-  for (const key in value) {
-    if (!Object.prototype.hasOwnProperty.call(value, key))
-      continue;
-    emitTotalLoss(value[key], appendPathSegment(path, key, budget), depth + 1, out, budget);
-  }
-}
-function walkDropped(before, after, path, depth, out, budget) {
-  if (depth > MAX_BODY_COMPARE_DEPTH)
-    throw depthBoundError();
-  budget.chargePathLength(path.length);
-  budget.chargeWork();
-  if (before === null || typeof before !== "object")
-    return;
-  if (Array.isArray(before)) {
-    if (!Array.isArray(after)) {
-      emitTotalLoss(before, path, depth, out, budget);
-      return;
-    }
-    for (let i = 0; i < before.length; i++) {
-      const here = appendPathSegment(path, i, budget);
-      if (i >= after.length)
-        emitTotalLoss(before[i], here, depth + 1, out, budget);
-      else
-        walkDropped(before[i], after[i], here, depth + 1, out, budget);
-    }
-    return;
-  }
-  if (after === null || typeof after !== "object" || Array.isArray(after)) {
-    emitTotalLoss(before, path, depth, out, budget);
-    return;
-  }
-  const parsed = after;
-  for (const key in before) {
-    if (!Object.prototype.hasOwnProperty.call(before, key))
-      continue;
-    const here = appendPathSegment(path, key, budget);
-    if (!Object.prototype.hasOwnProperty.call(parsed, key))
-      emitTotalLoss(before[key], here, depth + 1, out, budget);
-    else
-      walkDropped(before[key], parsed[key], here, depth + 1, out, budget);
-  }
-}
-function droppedKeyPaths(before, after) {
-  const out = [];
-  const budget = newComparisonBudget();
-  walkDropped(before, after, "", 0, out, budget);
-  return out;
-}
-function renderCappedPathList(dropped, cap = 20) {
-  if (dropped.length <= cap)
-    return dropped.join(", ");
-  const remaining = dropped.length - cap;
-  return `${dropped.slice(0, cap).join(", ")}, \u2026 and ${remaining} more lost ${remaining === 1 ? "path" : "paths"}`;
-}
-function assertNoFieldLoss(op, before, after) {
-  const dropped = droppedKeyPaths(before, after);
-  if (dropped.length === 0)
-    return;
-  const type = typeof before.type === "string" ? before.type : "unknown";
-  const pathList = renderCappedPathList(dropped);
-  throw new Error(`${op}: record type '${type}' would DROP ${dropped.length === 1 ? "this field" : "these fields"} on the way in \u2014 either the field is not defined by the schema, or its value's shape no longer matches the schema's definition (e.g. an object/array in place of the other) \u2014 and the schema parse would DROP ${dropped.length === 1 ? "it" : "them"} silently: ${pathList}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`);
-}
-function unrecognizedKeyPaths(error) {
-  const issues = error?.issues;
-  if (!Array.isArray(issues))
-    return [];
-  const out = [];
-  for (const raw of issues) {
-    const issue = raw;
-    if (issue.code !== "unrecognized_keys" || !Array.isArray(issue.keys))
-      continue;
-    const segments = Array.isArray(issue.path) ? issue.path : [];
-    const base2 = segments.reduce((acc, segment) => appendPathSegment(acc, typeof segment === "number" ? segment : String(segment)), "");
-    for (const key of issue.keys)
-      out.push(appendPathSegment(base2, String(key)));
-  }
-  return out;
-}
-function journalDemotionRequired(absPath, platform = process.platform) {
-  if (platform !== "linux")
-    return false;
-  return /^\/mnt\/[a-zA-Z]\//.test(absPath.replace(/\\/g, "/"));
-}
-var JournalDemotionRefusedError = class extends Error {
-  dbPath;
-  returnedMode;
-  constructor(dbPath, returnedMode, options) {
-    super(options?.message ?? `journal_mode=DELETE demotion refused for '${dbPath}' (PRAGMA returned '${returnedMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`, options?.cause !== void 0 ? { cause: options.cause } : void 0);
-    this.dbPath = dbPath;
-    this.returnedMode = returnedMode;
-    this.name = "JournalDemotionRefusedError";
-  }
-};
-var SterlingStore = class _SterlingStore {
-  db;
-  /**
-   * Set ONLY when an existing, non-empty store below SUPPORTED_SCHEMA_VERSION
-   * was opened ([stable-identity-design-v2]): the connection is read-only and
-   * assertWritable() refuses every write naming the required migration.
-   * undefined = a normal, writable store at the supported version.
-   */
-  legacySchemaVersion;
-  /**
-   * PRAGMA user_version as of the moment this handle finished opening (board
-   * d5942fa0 gap (b) — the LIVE write guard, extending the open-time guard
-   * above to a store that stays open across a migration). undefined ONLY
-   * during the brief window inside the constructor itself: assertLiveSchemaVersion
-   * no-ops then, because the open-time guard already owns that window and the
-   * fresh-store stamp-forward transaction below would otherwise be comparing
-   * against a baseline it hasn't captured yet. Every public write re-reads
-   * PRAGMA user_version against this captured baseline immediately before
-   * mutating; a mismatch means a SECOND process (MCP server or TUI) migrated
-   * the file while this handle stayed open, and the write is refused with
-   * nothing written — matching the open-time guard's loud-failure style.
-   */
-  openedSchemaVersion;
-  /**
-   * The absolute path of this store's database file, retained for
-   * SchemaMigrationRequiredError (measured defect, Salesforce consumer
-   * 2026-08-26): the constructor received the path but never kept it, so a
-   * migration refusal named only found/supported versions — a hook surfacing
-   * the error showed a bare bundle line number and the user could not tell
-   * WHICH store to migrate.
-   */
-  dbPath;
-  constructor(path) {
-    this.dbPath = resolvePath(path);
-    this.db = new DatabaseSync2(path);
-    let classifiedPath = this.dbPath;
-    try {
-      classifiedPath = join(realpathSync(dirname(this.dbPath)), basename(this.dbPath));
-    } catch {
-    }
-    this.db.exec("PRAGMA busy_timeout=5000");
-    const foundSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
-    if (foundSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
-      this.db.close();
-      throw new UnsupportedSchemaVersionError(foundSchemaVersion, SUPPORTED_SCHEMA_VERSION);
-    }
-    let isFresh = false;
-    if (foundSchemaVersion < SUPPORTED_SCHEMA_VERSION) {
-      const objects = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n;
-      if (objects > 0) {
-        if (journalDemotionRequired(classifiedPath)) {
-          let legacyMode;
-          try {
-            legacyMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
-          } catch (e) {
-            this.db.close();
-            throw e;
-          }
-          if (legacyMode === "wal") {
-            this.db.close();
-            throw new JournalDemotionRefusedError(this.dbPath, legacyMode, {
-              message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (legacy schema store, PRAGMA journal_mode='${legacyMode}') \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p), but it predates the supported schema version and opens READ-ONLY; demotion WRITES to the file, so a legacy open can never perform it. Migrate the store first (\`node scripts/migrate-stores.mjs\`) or open it from a non-9p context \u2014 closing other connections will not help here.`
-            });
-          }
-        }
-        this.legacySchemaVersion = foundSchemaVersion;
-        this.openedSchemaVersion = foundSchemaVersion;
-        return;
-      }
-      isFresh = true;
-    }
-    if (journalDemotionRequired(classifiedPath)) {
-      let returnedMode;
-      try {
-        returnedMode = this.db.prepare("PRAGMA journal_mode=DELETE").get().journal_mode;
-      } catch (e) {
-        this.db.close();
-        const detail = e instanceof Error ? e.message : String(e);
-        throw new JournalDemotionRefusedError(this.dbPath, detail, {
-          cause: e,
-          message: `journal_mode=DELETE demotion refused for '${this.dbPath}' (PRAGMA threw: ${detail}) \u2014 this store is reached over a 9p mount where WAL is unsupported (decision store-journal-policy-delete-on-9p); close every other connection (MCP server, TUI, hooks) and retry.`
-        });
-      }
-      if (returnedMode !== "delete") {
-        this.db.close();
-        throw new JournalDemotionRefusedError(this.dbPath, returnedMode);
-      }
-    } else {
-      const currentMode = this.db.prepare("PRAGMA journal_mode").get().journal_mode;
-      if (currentMode !== "delete") {
-        this.db.exec("PRAGMA journal_mode=WAL");
-      } else if (isFresh) {
-        const stillFresh = this.db.prepare("SELECT COUNT(*) AS n FROM sqlite_master").get().n === 0;
-        if (stillFresh) {
-          this.db.exec("PRAGMA journal_mode=WAL");
-        }
-      }
-    }
-    this.db.exec("PRAGMA foreign_keys=ON");
-    this.db.exec(DDL);
-    try {
-      this.db.exec("ALTER TABLE queue_drain_log ADD COLUMN record_id TEXT");
-    } catch {
-    }
-    if (foundSchemaVersion !== SUPPORTED_SCHEMA_VERSION) {
-      try {
-        this.tx(() => {
-          const current = this.db.prepare("PRAGMA user_version").get().user_version;
-          if (current > SUPPORTED_SCHEMA_VERSION) {
-            throw new UnsupportedSchemaVersionError(current, SUPPORTED_SCHEMA_VERSION);
-          }
-          if (current < SUPPORTED_SCHEMA_VERSION) {
-            this.db.exec(`PRAGMA user_version = ${SUPPORTED_SCHEMA_VERSION}`);
-          }
-        });
-      } catch (e) {
-        this.db.close();
-        throw e;
-      }
-    }
-    this.openedSchemaVersion = this.db.prepare("PRAGMA user_version").get().user_version;
-    if (this.openedSchemaVersion > SUPPORTED_SCHEMA_VERSION) {
-      this.db.close();
-      throw new UnsupportedSchemaVersionError(this.openedSchemaVersion, SUPPORTED_SCHEMA_VERSION);
-    }
-  }
-  journalMode() {
-    return this.db.prepare("PRAGMA journal_mode").get().journal_mode;
-  }
-  // -------------------------------------------------------------------------
-  // Schema v2 identity core [stable-identity-design-v2]
-  // -------------------------------------------------------------------------
-  /**
-   * The ONE refusal for anything a pre-migration store cannot answer — one
-   * definition, two callers below (writes, and the v2-only read surfaces).
-   */
-  assertV2Surface(operation) {
-    if (this.legacySchemaVersion !== void 0) {
-      throw new SchemaMigrationRequiredError(this.legacySchemaVersion, SUPPORTED_SCHEMA_VERSION, operation, this.dbPath);
-    }
-  }
-  /**
-   * The LIVE write guard (board d5942fa0 gap (b), pin group B): re-reads
-   * PRAGMA user_version fresh and compares it against the baseline captured
-   * at open. A process that ALREADY HOLDS the store open when another process
-   * (MCP server or TUI) migrates the file underneath it would otherwise keep
-   * serving writes on a stale in-memory handle with no re-check until a full
-   * restart — this closes that gap. Reads are deliberately NOT re-checked
-   * (spec: read exemption) — only assertWritable's write callers reach this.
-   *
-   * No-ops while `openedSchemaVersion` is still undefined (mid-constructor):
-   * the open-time guard above already owns that narrow window, and the
-   * fresh-store stamp-forward transaction is itself a write that runs before
-   * the baseline can be captured.
-   */
-  assertLiveSchemaVersion(operation) {
-    if (this.openedSchemaVersion === void 0)
-      return;
-    const current = this.db.prepare("PRAGMA user_version").get().user_version;
-    if (current !== this.openedSchemaVersion) {
-      throw new Error(`Live schema version drift: this store was opened at schema version ${this.openedSchemaVersion}, but the file is now at version ${current} \u2014 another process (MCP server or TUI) migrated it while this session's handle stayed open. '${operation}' and every other write are refused until this session is closed. EXIT AND RELAUNCH this session to reopen against the current schema. Nothing was written.`);
-    }
-  }
-  /**
-   * The refusal seam for a pre-migration store, extended to the live write
-   * guard above. Called at the top of every public write and, as a backstop,
-   * from tx() — reads stay allowed on purpose (AC3: read-only pre-migration;
-   * live re-check exemption: pin group B).
-   */
-  assertWritable(operation) {
-    this.assertV2Surface(operation);
-    this.assertLiveSchemaVersion(operation);
-  }
-  /**
-   * The DERIVED served status: the whole API-compatibility hinge of the v2
-   * model. Nothing stores this — it is computed from (lifecycle, freshness) on
-   * every read, so a caller that has always read `status` keeps working while
-   * the store stops holding two versions of the same truth.
-   */
-  static derivedStatus(lifecycle, freshness) {
-    if (lifecycle === "retired")
-      return "superseded";
-    return freshness === "flagged_stale" ? "flagged_stale" : "active";
-  }
-  /**
-   * Resolves the v2 identity trio from a caller's input, accepting BOTH
-   * envelope shapes (write-side compatibility, pin S2-5b):
-   *   * lifecycle/freshness given directly → used as given;
-   *   * only the legacy `status` given → 'active' → live+fresh,
-   *     'superseded' → retired+fresh, 'flagged_stale' → live+flagged_stale.
-   * An out-of-enum lifecycle/freshness is refused loudly rather than coerced.
-   *
-   * It then writes the DERIVED status/superseded_by back onto the candidate,
-   * because the schemas registry still declares those two envelope fields (see
-   * envelope.ts) — a new-shape record must satisfy the same validator every
-   * legacy caller does, and the stored body drops them again afterwards.
-   */
-  static resolveIdentity(raw, defaults) {
-    const input2 = { ...raw };
-    const readEnum = (field, allowed) => {
-      const value = input2[field];
-      if (value === void 0 || value === null)
-        return void 0;
-      if (typeof value !== "string" || !allowed.includes(value)) {
-        throw new Error(`invalid ${field} '${String(value)}' \u2014 expected one of ${allowed.join(" | ")} (stable-identity-design-v2)`);
-      }
-      return value;
-    };
-    let lifecycle = readEnum("lifecycle", LIFECYCLE_VALUES);
-    let freshness = readEnum("freshness", FRESHNESS_VALUES);
-    if (lifecycle === void 0 || freshness === void 0) {
-      const status = typeof input2.status === "string" ? input2.status : void 0;
-      if (status === "superseded") {
-        lifecycle ??= "retired";
-        freshness ??= "fresh";
-      } else if (status === "flagged_stale") {
-        lifecycle ??= "live";
-        freshness ??= "flagged_stale";
-      } else if (status === "active") {
-        lifecycle ??= "live";
-        freshness ??= "fresh";
-      } else {
-        lifecycle ??= defaults.lifecycle;
-        freshness ??= defaults.freshness;
-      }
-    }
-    const rawVersion = input2.version;
-    let version = defaults.version;
-    if (typeof rawVersion === "number") {
-      if (!Number.isInteger(rawVersion) || rawVersion < 1) {
-        throw new Error(`invalid version ${rawVersion} \u2014 version is a positive integer (stable-identity-design-v2)`);
-      }
-      version = rawVersion;
-    }
-    input2.lifecycle = lifecycle;
-    input2.freshness = freshness;
-    input2.version = version;
-    input2.status = _SterlingStore.derivedStatus(lifecycle, freshness);
-    if (input2.superseded_by === void 0)
-      input2.superseded_by = null;
-    return { input: input2, lifecycle, freshness, version };
-  }
-  /**
-   * The identity normalization every write-side caller shares, exposed for the
-   * ONE consumer that validates BEFORE it reaches a store: MountedStores, which
-   * routes on the validated record's `scope` and so must run validateRecord
-   * itself (invariant 1 — this is the single definition, never a second copy of
-   * the lifecycle→status derivation). Without it a lifecycle-only envelope that
-   * SterlingStore.create accepts was rejected through the mounted surface,
-   * because the schemas registry still declares status/superseded_by.
-   * Idempotent: normalizing an already-normalized envelope changes nothing, so
-   * the store's own resolveIdentity re-run downstream is a no-op.
-   */
-  static normalizeIdentityEnvelope(raw) {
-    return _SterlingStore.resolveIdentity(raw, {
-      lifecycle: "live",
-      freshness: "fresh",
-      version: 1
-    }).input;
-  }
-  /**
-   * The body actually persisted: lifecycle/freshness/version are the stored
-   * truth, status/superseded_by are dropped because they are derived at read.
-   * A pre-v2 body (no lifecycle) passes through untouched, so a legacy store
-   * read through this code path is never rewritten in shape.
-   */
-  static storableBody(record) {
-    if (typeof record.lifecycle !== "string")
-      return record;
-    const body = { ...record };
-    delete body.status;
-    delete body.superseded_by;
-    return body;
-  }
-  /**
-   * Re-attaches everything derived at read: the SERVED status/superseded_by,
-   * and links[] MATERIALIZED from record_relations (the authoritative edge
-   * home). Batched — one relations query for a whole result set, plus one more
-   * for the successor of any retired record in it — so a capped query() costs
-   * two extra reads rather than 2N.
-   *
-   * A pre-v2 body carries no `lifecycle` and is passed through verbatim: that
-   * is what keeps a pre-migration store READABLE (AC3) with no branch at every
-   * call site.
-   */
-  hydrateAll(records) {
-    const v2 = records.filter((r) => typeof r.lifecycle === "string");
-    if (!v2.length)
-      return records;
-    const ids = [...new Set(v2.map((r) => r.id))];
-    const linkRows = this.db.prepare(`SELECT source_id, rel, target_id FROM record_relations WHERE source_id IN (${ids.map(() => "?").join(",")}) ORDER BY rowid`).all(...ids);
-    const bySource = /* @__PURE__ */ new Map();
-    for (const row of linkRows) {
-      const list = bySource.get(row.source_id) ?? [];
-      list.push({ rel: row.rel, target_id: row.target_id });
-      bySource.set(row.source_id, list);
-    }
-    const retiredIds = v2.filter((r) => r.lifecycle === "retired").map((r) => r.id);
-    const successor = /* @__PURE__ */ new Map();
-    if (retiredIds.length) {
-      const rows = this.db.prepare(`SELECT source_id, target_id FROM record_relations
-            WHERE rel = 'supersedes' AND target_id IN (${retiredIds.map(() => "?").join(",")}) ORDER BY rowid`).all(...retiredIds);
-      for (const row of rows) {
-        if (!successor.has(row.target_id))
-          successor.set(row.target_id, row.source_id);
-      }
-    }
-    return records.map((record) => {
-      const meta = record;
-      if (typeof meta.lifecycle !== "string")
-        return record;
-      const lifecycle = meta.lifecycle;
-      const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
-      return {
-        ...record,
-        links: bySource.get(record.id) ?? [],
-        status: _SterlingStore.derivedStatus(lifecycle, freshness),
-        superseded_by: lifecycle === "retired" ? successor.get(record.id) ?? null : null
-      };
-    });
-  }
-  /** The server-owned identity columns of a live row — the CAS + lifecycle source.
-   *
-   *  `scope` joins them (decision
-   *  [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 3):
-   *  the records.scope COLUMN is NOT NULL and is written once, at insert, from the
-   *  routing decision that chose this physical store — while the JSON body's own
-   *  `scope` is caller-writable and can drift away from it (anti_pattern
-   *  [record-body-scope-is-not-physical-store-identity]). Every in-place write and
-   *  supersession below pins the candidate's scope FROM HERE, so the field is
-   *  CREATION-ONLY input and immutable afterwards. Column authoritative on disk. */
-  identityOf(id) {
-    const row = this.db.prepare("SELECT version, lifecycle, freshness, scope, body FROM records WHERE id = ?").get(id);
-    if (!row)
-      return void 0;
-    return {
-      version: row.version,
-      lifecycle: row.lifecycle === "retired" ? "retired" : "live",
-      freshness: row.freshness === "flagged_stale" ? "flagged_stale" : "fresh",
-      scope: row.scope,
-      body: row.body
-    };
-  }
-  /**
-   * THE COLUMN-AUTHORITATIVE LIVE-RECORD DECODER — the ONE place a stored
-   * `records` row becomes a DurableRecord (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change] part 4).
-   *
-   * Every live materializing read selects `body, scope` and comes through here,
-   * so the parsed body's `scope` is OVERWRITTEN by the row's NOT NULL column
-   * before any caller sees it. Body/column disagreement is therefore
-   * unrepresentable on read: column authoritative on disk, and now on read too
-   * (anti_pattern [record-body-scope-is-not-physical-store-identity]). A sixth
-   * read path added later is hard to write wrongly because there is no other
-   * body→record parse to copy.
-   *
-   * TOTAL by construction — both drifted shapes normalize to the column with no
-   * branch: a legacy body that OMITS `scope` entirely (reachable and real) gets
-   * it, and a body that CONTRADICTS the column loses. Both are silent by design;
-   * `domain-doctor.mjs scope-audit` (part 1) is the surface that makes them
-   * visible, and it read zero of either across all four stores before this
-   * activated.
-   *
-   * FAILS CLOSED on the impossible case. WHAT ACTUALLY MAKES IT IMPOSSIBLE is
-   * the anchored SCOPE_RE (`^(project|domain:[a-z0-9_-]+)$`, envelope.ts) that
-   * every write funnels through via validateRecord, together with insertRecord
-   * writing the column from that validated record.scope: no store write can
-   * produce an empty or whitespace column. `records.scope` being NOT NULL is
-   * NOT the guarantee on its own — NOT NULL does not exclude '' — and this
-   * comment previously said it was (corrected 2026-09-06 on independent
-   * review; a comment that misattributes its own guarantee is how the real one
-   * gets removed later by someone who reads only the comment). If an empty or
-   * non-string column is nonetheless read, refuse loudly naming the row rather
-   * than inventing 'project' — a default here would re-create exactly the
-   * guess this decoder exists to delete.
-   *
-   * READ-SIDE ONLY: it never changes what is WRITTEN. The write side pins scope
-   * from identityOf's column in applyInPlace/supersede (part 3) — except that
-   * supersede takes an optional `authoritativeScope` from the layer that knows
-   * about MOUNTS (MountedStores), because the column is authoritative over the
-   * BODY while the MOUNT is authoritative over the COLUMN, and a replacement row
-   * must be labelled for the mount it is physically inserted into.
-   *
-   * DELIBERATELY NOT APPLIED TO HISTORICAL SNAPSHOTS — see getRecordVersion.
-   *
-   * THE IMPLEMENTATION LIVES IN THE MODULE-LEVEL `decodeLiveRecordRow` EXPORT
-   * above, so an out-of-class reader (the delivery oracle's read-only fallback)
-   * decodes through the same function rather than re-parsing `body` alone.
-   */
-  static decodeLiveRecord(op, row) {
-    return decodeLiveRecordRow(op, row);
-  }
-  /** Plural form of decodeLiveRecord — every row-set read funnels through it. */
-  static decodeLiveRecords(op, rows) {
-    return rows.map((r) => _SterlingStore.decodeLiveRecord(op, r));
-  }
-  /** Typed edge write — record_relations is the authoritative home (contract 6). */
-  insertRelation(sourceId, rel, targetId, at) {
-    if (sourceId === targetId) {
-      throw new Error(`relation '${rel}' from '${sourceId}' to itself is a self-cycle in the relation graph \u2014 refused (stable-identity-design-v2)`);
-    }
-    this.db.prepare("INSERT OR IGNORE INTO record_relations (source_id, rel, target_id, created_at) VALUES (?, ?, ?, ?)").run(sourceId, rel, targetId, at);
-  }
-  /** The one validated write path. Unregistered type or malformed record throws; nothing is written.
-   *
-   *  NOTE (S3 boundary): a caller-supplied `version` is still honored here (the
-   *  legacy feature_article field, and the pin fixtures that pass version: 1).
-   *  S3 STRIPS it — version becomes server-owned at every surface — so nothing
-   *  new should start relying on setting it. */
-  create(input2) {
-    this.assertWritable("create");
-    const prepared = _SterlingStore.resolveIdentity(input2, {
-      lifecycle: "live",
-      freshness: "fresh",
-      version: 1
-    });
-    if (prepared.lifecycle === "retired" && !prepared.input.superseded_by) {
-      throw new Error(`create: lifecycle 'retired' cannot be requested at creation without a successor \u2014 such a record is born dead (hidden from queries, refused by in-place writes, and unsupersedable: one successor maximum is already spent). Retirement happens ONLY through supersede/retireInFavorOf. Nothing was written.`);
-    }
-    let record;
-    try {
-      record = validateRecord(prepared.input);
-    } catch (err) {
-      const refused = unrecognizedKeyPaths(err);
-      if (refused.length === 0)
-        throw err;
-      const type = typeof prepared.input.type === "string" ? prepared.input.type : "unknown";
-      throw new Error(`create: record type '${type}' does not define ${refused.length === 1 ? "this field" : "these fields"}, and the schema REFUSED the write rather than storing ${refused.length === 1 ? "it" : "them"}: ${refused.join(", ")}. Refused before the write \u2014 NOTHING WAS WRITTEN. Fix the field name (knowledge_schema '${type}' lists the valid set) or add the field to the registered schema; a write must never report success for what it discarded.`, { cause: err });
-    }
-    assertNoFieldLoss("create", prepared.input, record);
-    this.tx(() => {
-      this.insertRecord(record);
-      this.logActivity("created", record, record.created_at);
-    });
-    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.storableBody(record)])[0]);
-  }
-  /**
-   * The full record archived at (id, version) — a permanent, append-only
-   * snapshot from record_versions, returned exactly as it was stored (no
-   * derivation), so repeated reads of one version are byte-identical forever
-   * (pin S2-2c). A version that was never archived resolves to undefined —
-   * never fabricated.
-   *
-   * A V2-ONLY SURFACE: record_versions does not exist on a pre-migration store,
-   * so this refuses loudly naming the migration (P5) instead of letting a raw
-   * SQLite "no such table: record_versions" escape. Reads that a pre-v2 store
-   * CAN answer stay allowed (AC3) — version history simply is not one of them.
-   */
-  getRecordVersion(id, version) {
-    this.assertV2Surface("getRecordVersion");
-    const row = this.db.prepare("SELECT body FROM record_versions WHERE record_id = ? AND version = ?").get(id, version);
-    return row ? JSON.parse(row.body) : void 0;
-  }
-  /**
-   * The dead-id INDEX, whole ([stable-identity-design-v2] contract 3): every
-   * record_aliases row as (historical_id, canonical_id, archived_version). The
-   * shape mirrors recordIdIndex — no body fetch, the full set, so the id
-   * resolution ladder above the store can match an exact historical id AND a
-   * citation PREFIX of one in the same pass it already makes over live ids.
-   *
-   * READ-ONLY and empty-tolerant by design: nothing writes to this table after
-   * the migration, and a PRE-MIGRATION store (where the table does not exist)
-   * returns [] rather than refusing — a legacy store is readable (AC3), and it
-   * has no historical ids to resolve because nothing has been collapsed yet.
-   */
-  recordAliases() {
-    if (this.legacySchemaVersion !== void 0)
-      return [];
-    return this.db.prepare("SELECT historical_id, canonical_id, archived_version FROM record_aliases ORDER BY rowid").all();
-  }
-  /**
-   * knowledge_update-shaped IN-PLACE write, generalized from updateTodo to
-   * EVERY record type (contract 2). `patch` is the FULL merged candidate (old
-   * record + the caller's changes), mirroring supersede/updateTodo's existing
-   * convention: this method validates and persists, the layer above decides
-   * which fields may change.
-   *
-   * The id, type and created_at are pinned to the stored record — an in-place
-   * write can never re-mint identity, which is the entire point of stable
-   * identity. lifecycle is likewise preserved: retirement happens ONLY through
-   * supersede/retireInFavorOf.
-   */
-  updateRecord(id, patch, opts = {}) {
-    return this.applyInPlace("updateRecord", id, () => ({ ...patch }), opts);
-  }
-  /**
-   * knowledge_edit-shaped write: replace ONE passage inside a long string
-   * field without retransmitting it. `find` must match EXACTLY ONCE — zero and
-   * multiple matches are both refused NAMING THE COUNT, with nothing written,
-   * because a blind replace inside a field too large to read is an
-   * unreviewable write.
-   */
-  editRecordField(id, field, find, replace, opts = {}) {
-    if (find === "")
-      throw new Error(`editRecordField: 'find' is empty \u2014 an empty find matches everywhere and nowhere; nothing was written`);
-    return this.applyInPlace("editRecordField", id, (current) => {
-      const value = current[field];
-      if (typeof value !== "string") {
-        throw new Error(`editRecordField: field '${field}' on ${current.type} '${id}' is ${value === void 0 ? "not set" : `a ${Array.isArray(value) ? "array" : typeof value}`}, not a string \u2014 an in-place passage replace applies to string fields only (use appendRecordField for arrays). Nothing was written.`);
-      }
-      const matches = value.split(find).length - 1;
-      if (matches !== 1) {
-        throw new Error(`editRecordField: 'find' matched ${matches} time(s) in field '${field}' of record '${id}' \u2014 exactly one match is required (${matches === 0 ? "no match: check whitespace and the exact passage" : `${matches} matches: extend 'find' until it is unique`}). Nothing was written.`);
-      }
-      return { ...current, [field]: value.split(find).join(replace) };
-    }, opts);
-  }
-  /**
-   * The SERVER-OWNED metadata fields updateRecordMetadata may write. A short,
-   * closed list is what makes that method NARROW rather than a second content
-   * write path that happens to skip the clock: anything outside it is refused by
-   * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
-   * neither is ever caller-supplied.
-   */
-  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations"];
-  /**
-   * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
-   * write of server-owned drift metadata that DELIBERATELY PRESERVES the
-   * record's `updated_at`.
-   *
-   * It bumps `version`, archives the prior body and honours `expected_version`
-   * exactly like every other in-place write: the baselines live in the record
-   * BODY and the body is authoritative, so a same-version body mutation would
-   * evade the CAS and version signal entirely. (addLink's precedent does NOT
-   * apply — its body copy of links[] is non-authoritative and re-hydrated from
-   * record_relations.)
-   *
-   * WHY THE CLOCK IS PRESERVED. `updated_at` is not a "last written" stamp here:
-   * the read-time drift check treats it as THE INSTANT THE BASELINES WERE TAKEN
-   * and uses it as a cheap mtime prefilter — a file whose mtime is no newer than
-   * `updated_at` is reported clean WITHOUT hashing. Advancing the clock while
-   * re-stamping only SOME owned paths therefore masks real, already-standing
-   * drift on the OTHERS: article baselined at T0 for `a` and `b`; `b` drifts at
-   * T1; a metadata write for `a` alone advances the clock to T2; a later read
-   * stats `b`, sees mtime(b) = T1 <= T2 and returns clean without ever comparing
-   * `b` to its stale hash. Preserving the clock keeps every un-restamped path
-   * judged against exactly the instant its own baseline was taken.
-   *
-   * `activity_at` is the REAL time, recorded on the activity row (and used for
-   * any `resolves` drain) so the chronology stays true — see applyInPlace's
-   * `internal.activityAt`. It is required in practice for every caller; it
-   * defaults to now rather than to the preserved clock, because silently
-   * back-dating an activity row is the failure this parameter exists to prevent.
-   */
-  updateRecordMetadata(id, fields, opts = {}) {
-    const refused = Object.keys(fields).filter((k) => !_SterlingStore.METADATA_WRITE_FIELDS.includes(k));
-    if (refused.length) {
-      throw new Error(`updateRecordMetadata: ${refused.map((k) => `'${k}'`).join(", ")} ${refused.length === 1 ? "is" : "are"} not a server-owned metadata field \u2014 this write PRESERVES updated_at, so it must never carry content. The writable set is ${_SterlingStore.METADATA_WRITE_FIELDS.join(", ")}; use updateRecord for anything else. Nothing was written.`);
-    }
-    return this.applyInPlace("updateRecordMetadata", id, (current) => ({
-      ...current,
-      ...fields,
-      // From the IN-TRANSACTION read, never a caller's copy: the whole point is
-      // that the stored clock does not move.
-      updated_at: current.updated_at
-    }), opts, { activityAt: opts.activity_at ?? (/* @__PURE__ */ new Date()).toISOString() });
-  }
-  /**
-   * knowledge_append-shaped write: grow an ARRAY field in place (history,
-   * files, current_ac, …) without retransmitting the existing entries. One
-   * transaction, one version bump, prior array archived.
-   */
-  appendRecordField(id, field, entry, opts = {}) {
-    return this.applyInPlace("appendRecordField", id, (current) => {
-      const value = current[field];
-      if (value !== void 0 && value !== null && !Array.isArray(value)) {
-        throw new Error(`appendRecordField: field '${field}' on ${current.type} '${id}' is a ${typeof value}, not an array \u2014 append grows array fields only (use editRecordField for a string passage). Nothing was written.`);
-      }
-      const existing = Array.isArray(value) ? value : [];
-      return { ...current, [field]: [...existing, entry] };
-    }, opts);
-  }
-  /**
-   * THE in-place write core shared by updateRecord / editRecordField /
-   * appendRecordField / updateTodo / renameFileKey / the enqueueSystemTodo
-   * text-update branch (contracts 2-4, 7):
-   *
-   *  1. resolve the live record + its server-owned identity columns;
-   *  2. CAS on expected_version when supplied — a stale token refuses naming
-   *     BOTH versions and writes nothing, not even a snapshot row;
-   *  3. archive the FULL prior body into record_versions (append-only);
-   *  4. UPDATE ... WHERE id = ? AND version = ? — the real CAS, kept as a
-   *     backstop now that step 1 reads under the write lock;
-   *  5. rebuild the join indexes and REPLACE the single records_fts row, so an
-   *     archived version's text can never rank (contract 1/7);
-   *  6. drain any claimed `resolves` items INSIDE the same transaction — a
-   *     refused claim rolls the whole write back (contract 4).
-   *
-   * EVERY step, step 1 included, runs inside ONE transaction. BEGIN IMMEDIATE
-   * takes the write lock before the identity read, so no committed concurrent
-   * write can land between the CAS check and the snapshot INSERT. Reading
-   * outside the transaction cost two things: a CAS loser died on the
-   * record_versions (record_id, version) primary key with a raw constraint
-   * error instead of the pinned refusal naming both versions, and the body it
-   * archived could be a stale generation of the record.
-   *
-   * `internal.allowRetired` is for the ONE path that legitimately rewrites a
-   * tombstone: renameFileKey, whose contract is that a move orphans no owning
-   * record's paths, retired ones included. It is deliberately not reachable
-   * from the public triad — a content write still goes to the live successor.
-   *
-   * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
-   * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
-   * caller that deliberately preserves the stored `updated_at` — see
-   * updateRecordMetadata — writes a new version WITHOUT advancing the record's
-   * content clock. The activity row must NOT inherit that preserved value: the
-   * activity log is a chronology of when things actually happened, and
-   * back-dating an entry to the previous write's timestamp makes it false. So
-   * the metadata write passes the REAL time here while the body keeps the old
-   * one. Absent (every ordinary write), behaviour is exactly as before: the
-   * activity row is stamped from the body's own updated_at.
-   */
-  applyInPlace(op, id, buildPatch, opts, internal = {}) {
-    this.assertWritable(op);
-    let served;
-    this.tx(() => {
-      const current = this.get(id);
-      if (!current)
-        throw new Error(`${op}: no record '${id}'`);
-      const identity = this.identityOf(id);
-      if (!identity)
-        throw new Error(`${op}: no record '${id}'`);
-      if (identity.lifecycle === "retired" && !internal.allowRetired) {
-        throw new Error(`${op}: record '${id}' is retired (served status 'superseded') \u2014 an in-place write goes to the live successor, never to a retired record`);
-      }
-      if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
-        throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
-      }
-      const candidate = buildPatch(current);
-      candidate.id = id;
-      candidate.type = current.type;
-      candidate.created_at = current.created_at;
-      candidate.scope = identity.scope;
-      const freshness = candidate.freshness === "fresh" || candidate.freshness === "flagged_stale" ? candidate.freshness : candidate.status === "flagged_stale" ? "flagged_stale" : identity.freshness;
-      const supersededBy = identity.lifecycle === "retired" ? current.superseded_by ?? null : null;
-      const nextVersion = identity.version + 1;
-      const prepared = _SterlingStore.resolveIdentity(candidate, {
-        lifecycle: identity.lifecycle,
-        freshness,
-        version: nextVersion
-      });
-      prepared.input.lifecycle = identity.lifecycle;
-      prepared.input.freshness = freshness;
-      prepared.input.version = nextVersion;
-      prepared.input.status = _SterlingStore.derivedStatus(identity.lifecycle, freshness);
-      prepared.input.superseded_by = supersededBy;
-      const validated = validateRecord(prepared.input);
-      if (validated.type !== current.type) {
-        throw new Error(`${op}: type mismatch ('${validated.type}' cannot replace '${current.type}' in place)`);
-      }
-      const entry = RECORD_TYPES[validated.type];
-      const stored = _SterlingStore.storableBody(validated);
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      this.db.prepare("INSERT INTO record_versions (record_id, version, archived_at, body) VALUES (?, ?, ?, ?)").run(id, identity.version, now, identity.body);
-      const res = this.db.prepare(`UPDATE records SET version = ?, status = ?, lifecycle = ?, freshness = ?, superseded_by = ?,
-             updated_at = ?, body = ? WHERE id = ? AND version = ?`).run(nextVersion, _SterlingStore.derivedStatus(identity.lifecycle, freshness), identity.lifecycle, freshness, supersededBy, stored.updated_at ?? now, JSON.stringify(stored), id, identity.version);
-      if (res.changes === 0) {
-        throw new Error(`${op}: record '${id}' was concurrently written (it is no longer at version ${identity.version}) \u2014 re-read and retry`);
-      }
-      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
-      for (const tag of new Set(validated.stack_tags)) {
-        this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
-      }
-      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      for (const path of new Set(entry.fileKeys(stored))) {
-        this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
-      }
-      for (const link of validated.links)
-        this.insertRelation(id, link.rel, link.target_id, now);
-      this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
-      this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
-      if (opts.resolves?.length)
-        this.drainResolves(op, opts.resolves, now);
-      served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
-    });
-    return served;
-  }
-  /**
-   * The `resolves` drain (contract 4): the maintenance items a write CLAIMS to
-   * close, closed inside the write's own transaction. An unresolvable or
-   * already-closed claim throws, which rolls the ENTIRE write back — an
-   * unclaimed write must never appear to succeed against a dead reference, and
-   * a partial drain is worse than none.
-   */
-  drainResolves(op, ids, at) {
-    for (const claimed of new Set(ids)) {
-      const item = this.get(claimed);
-      if (!item) {
-        throw new Error(`${op}: resolves claim '${claimed}' names no open item \u2014 it was never created, or it is already closed. The whole write rolled back (no version bump, no snapshot, no other item drained); re-read the queue and claim only open ids.`);
-      }
-      if (item.type !== "todo") {
-        throw new Error(`${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) \u2014 the whole write rolled back`);
-      }
-      this.remove(claimed, at);
-    }
-  }
-  /**
-   * ATOMIC check-and-insert for a SYSTEM maintenance item — the ONE dedup
-   * definition, replacing four hand-rolled copies (board 2ded3b4b).
-   *
-   * THE BUG THIS CLOSES IS TWO BUGS. Four producers minted maintenance items
-   * (h7-file-touch, the read-time drift check in tools.ts, fs-remove, fs-move),
-   * each with its own copy-pasted "does an open item already exist?" query
-   * followed by a separate insert, and no uniqueness constraint anywhere:
-   *
-   *  (1) DUPLICATES. Two producers both read "no open item" before either insert
-   *      committed, and both inserted — classic TOCTOU. A consuming project
-   *      measured SEVEN byte-identical pairs created 2-3 MILLISECONDS apart, 52%
-   *      of a 27-item queue. The cost was judgement rather than writes: the
-   *      deep-queue threshold trips early, and anyone sizing a drain from the raw
-   *      count sees double the work that exists.
-   *  (2) SILENT LOSS — the worse half, and not in the report. All four checks
-   *      keyed on (feature_link, system_reason) and OMITTED the file, so a second
-   *      drifting file on the same article was suppressed. And because
-   *      knowledge_update re-baselines EVERY owned file, reconciling the first
-   *      file absorbed the second file's drift into a fresh baseline: the finding
-   *      neither queued nor survived.
-   *
-   * The key is therefore (system_reason, feature_link, file_keys SET), and the
-   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
-   * concurrent caller blocks on the write lock and then SEES the committed row
-   * instead of racing it.
-   *
-   * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
-   * severity — edited today, deleted tomorrow, both reconcile_needed, the first
-   * not yet drained — would otherwise be swallowed as a duplicate, losing the more
-   * urgent fact. Since S2 that update goes through the versioned in-place core
-   * like every other write ([stable-identity-design-v2]): todos DO carry the
-   * universal version counter now, so the escalation bumps the version and
-   * archives the prior text instead of overwriting the body invisibly (a bare
-   * body UPDATE was invisible to expected_version, so a concurrent in-place
-   * write could silently revert it, and the FTS row kept the old text).
-   */
-  enqueueSystemTodo(input2) {
-    this.assertWritable("enqueueSystemTodo");
-    const prepared = _SterlingStore.resolveIdentity(input2, {
-      lifecycle: "live",
-      freshness: "fresh",
-      version: 1
-    });
-    const candidate = validateRecord(prepared.input);
-    if (candidate.type !== "todo" || candidate.source !== "system") {
-      throw new Error(`enqueueSystemTodo: expects a system-source todo, got ${candidate.type}/${candidate.source ?? "no source"}`);
-    }
-    if (candidate.system_reason === "state_review" && !candidate.feature_link) {
-      throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
-    }
-    const keyOf = (t) => {
-      const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
-      const identified = !!t.feature_link || files.length > 0;
-      return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
-    };
-    const wantKey = keyOf(candidate);
-    const textsEquivalent = (a, b) => {
-      if (candidate.system_reason !== "state_review")
-        return a === b;
-      const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
-      return strip(a) === strip(b);
-    };
-    let existing;
-    let textUpdated = false;
-    this.tx(() => {
-      const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
-      for (const r of rows) {
-        const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
-        if (t.source !== "system")
-          continue;
-        if (keyOf(t) !== wantKey)
-          continue;
-        existing = t;
-        break;
-      }
-      if (!existing) {
-        this.insertRecord(candidate);
-        return;
-      }
-      const priorFiles = [...existing.file_keys ?? []].sort();
-      const nextFiles = [...candidate.file_keys ?? []].sort();
-      const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(nextFiles);
-      const textChanged = !textsEquivalent(existing.text ?? "", candidate.text ?? "");
-      if (textChanged || filesChanged) {
-        existing = this.applyInPlace("enqueueSystemTodo", existing.id, (cur) => ({
-          ...cur,
-          updated_at: candidate.updated_at,
-          ...textChanged ? { text: candidate.text } : {},
-          ...filesChanged ? { file_keys: candidate.file_keys } : {}
-        }), {});
-        textUpdated = textChanged;
-      }
-    });
-    return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
-      record: this.hydrateAll([_SterlingStore.storableBody(candidate)])[0],
-      deduped: false,
-      text_updated: false
-    };
-  }
-  get(id) {
-    const row = this.db.prepare("SELECT body, scope FROM records WHERE id = ?").get(id);
-    if (!row)
-      return void 0;
-    return this.withDerivedReliedBy(this.hydrateAll([_SterlingStore.decodeLiveRecord("get", row)])[0]);
-  }
-  /**
-   * PHYSICAL MOUNT MEMBERSHIP — "does the PROJECT database hold this record?"
-   * (anti_pattern [record-body-scope-is-not-physical-store-identity]).
-   *
-   * The record's body `scope` does NOT answer this and must never be used to:
-   * `scope` routes a record at CREATE time (MountedStores.storeFor) while every
-   * later write routes by the store PHYSICALLY HOLDING the id
-   * (MountedStores.storeHolding); `scope` is caller-writable through
-   * knowledge_update (it is not a refused server-owned field); and the in-place
-   * update path above pins id/type/created_at but never re-derives or validates
-   * the row's mount. So a domain-held record can carry scope 'project' and a
-   * project-held one can carry 'domain:x'. Only the storage layer can answer the
-   * question, so it answers it here rather than leaving callers to guess.
-   *
-   * On a bare SterlingStore this is plain existence — the tool layer's ONE store
-   * is then the project store (server.ts mounts MountedStores; the tests wrap
-   * either). MountedStores overrides it to ask its project mount ALONE, never
-   * the fan. Existence only: a tombstoned/retired row still counts as held.
-   */
-  projectStoreHolds(id) {
-    return this.db.prepare("SELECT 1 FROM records WHERE id = ?").get(id) !== void 0;
-  }
-  /**
-   * THE SCOPE OF THE STORE THAT PHYSICALLY HOLDS `id` — the naming companion of
-   * projectStoreHolds (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
-   *
-   * projectStoreHolds answers a YES/NO ("is this the project mount?"), which is
-   * all an atomicity or an H10-parity question needs. A caller that has to
-   * SUPPLY a scope — the replacement minted by a supersession, the new record an
-   * extraction creates — needs the mount NAMED, and until this existed there was
-   * no way to get one: both call sites reconstructed it as
-   * `heldByProject ? 'project' : record.scope`, which is physically derived for
-   * the project case and straight back to the body for every DOMAIN case. In a
-   * design whose whole thesis is that the body is not the routing key, that is
-   * the trap itself (anti_pattern
-   * [record-body-scope-is-not-physical-store-identity]).
-   *
-   * CONTRACT (both implementations):
-   *  - returns 'project' or 'domain:<name>' — never undefined, never a default;
-   *  - an id NO store holds THROWS, naming the id. It never falls back to
-   *    'project': "probably project" is exactly the fail-open the anti-pattern
-   *    forbids, and a caller that cannot locate its own record must not go on to
-   *    label a new one;
-   *  - an id MULTIPLE stores hold throws too (MountedStores only — see
-   *    storeHolding there): one id names one row, and every routing guarantee in
-   *    this design assumes a single holder.
-   *
-   * ON A BARE SterlingStore there are no mounts, so the physical answer is this
-   * row's own `scope` COLUMN — NOT NULL, written once at insert from the routing
-   * decision that chose this store, and never touched by an in-place update
-   * (see identityOf). It is the same value column-authoritative reads already
-   * serve, so a bare-store caller sees no behaviour change; what changes is that
-   * the value now arrives from the column BY CONSTRUCTION rather than by a body
-   * parse that happens to have been corrected. MountedStores overrides this with
-   * the MOUNT the record actually lives in, which is strictly stronger: the
-   * column can still contradict the mount (the third drift class
-   * `domain-doctor.mjs scope-audit` reports), and where they disagree the mount
-   * is the physical fact and the column is a label.
-   */
-  scopeOfHolder(id) {
-    const identity = this.identityOf(id);
-    if (!identity) {
-      throw new Error(`scopeOfHolder: no record '${id}' in this store \u2014 the scope of a record's holder cannot be derived from a record that is not held. Refusing rather than defaulting to 'project' (anti_pattern [record-body-scope-is-not-physical-store-identity]: a guard on scope fails closed on undefined).`);
-    }
-    return identity.scope;
-  }
-  /**
-   * feature_article.dependencies.relied_by is DERIVED AT READ TIME (board
-   * 9641e01b, the conductor's option (b)) from the union of every OTHER active
-   * feature_article's relies_on naming this article's slug — not the stored
-   * field. relies_on stays author-written; relied_by cannot drift because it is
-   * no longer authored at all past this read. PROJECT-STORE SCOPE ONLY:
-   * domain-mounted articles are out of scope for this derivation (each mounted
-   * store derives its own; MountedStores does not cross-join relies_on across
-   * stores) — the same store-locality choice articlesBySlug/knowledge_create's
-   * slug-collision check already make.
-   *
-   * Never a hidden lie (constraint 2 of the board item): when the stored
-   * relied_by differs from the derived set (as a sorted-deduped set — order and
-   * duplicates in the stored array don't count as drift), the returned record
-   * carries dependencies.relied_by_stored_stale: true alongside the derived
-   * value actually served. The stored field is left untouched in the DB — this
-   * derivation never writes.
-   */
-  withDerivedReliedBy(record, relations) {
-    if (record.type !== "feature_article")
-      return record;
-    const article = record;
-    const derived = this.deriveReliedBy(article.slug, relations);
-    const storedSorted = [...new Set(article.dependencies?.relied_by ?? [])].sort();
-    const stale = JSON.stringify(storedSorted) !== JSON.stringify(derived);
-    return {
-      ...record,
-      dependencies: {
-        relies_on: article.dependencies?.relies_on ?? [],
-        relied_by: derived,
-        ...stale ? { relied_by_stored_stale: true } : {}
-      }
-    };
-  }
-  /**
-   * Every active feature_article's slug + relies_on, in ONE scan — shared by
-   * withDerivedReliedBy across a whole query() result so a capped list of N
-   * articles costs one table scan, not N.
-   *
-   * NOT a materializing read, so it does not go through decodeLiveRecord: it
-   * projects two fields out of each body and never yields a DurableRecord to a
-   * caller. Nothing here reads or reports `scope`.
-   */
-  activeArticleRelations() {
-    const rows = this.db.prepare(`SELECT body FROM records WHERE type = 'feature_article' AND status != 'superseded'`).all();
-    return rows.map((r) => {
-      const rec = JSON.parse(r.body);
-      return { slug: rec.slug ?? "", reliesOn: rec.dependencies?.relies_on ?? [] };
-    });
-  }
-  /** Sorted, deduped slugs of every active article whose relies_on names `slug`. */
-  deriveReliedBy(slug, relations) {
-    const rels = relations ?? this.activeArticleRelations();
-    const set = /* @__PURE__ */ new Set();
-    for (const r of rels) {
-      if (r.slug === slug)
-        continue;
-      if (r.reliesOn.includes(slug))
-        set.add(r.slug);
-    }
-    return [...set].sort();
-  }
-  /**
-   * Every record id in this store at ANY status, tombstones included, with its
-   * type — the resolution surface for id CITATIONS in tracked source
-   * (check-record-citations). It exists because neither existing read serves
-   * that need: query() deliberately excludes superseded records (AC4), yet
-   * citing a superseded record is legitimate and common — a comment names the
-   * decision that ORIGINALLY justified a design, and history is exactly what it
-   * should cite — while get() resolves any status but only from a FULL id, and
-   * citations in prose are 8-char prefixes. No body fetch, no JSON.parse: ids
-   * and types only, so scanning the whole tree stays cheap.
-   */
-  recordIdIndex() {
-    return this.db.prepare("SELECT id, type, status FROM records").all();
-  }
-  /**
-   * Every non-superseded feature_article carrying this EXACT slug, newest first.
-   * A deterministic identity lookup, deliberately NOT a search (decision
-   * 3db7095f). H19's one-hop pointerLine used to resolve sibling slugs through
-   * query({rank_terms:[slug], cap:5}) and then look for an exact match among
-   * those five, which reported LIVE articles as '(not in store)': bm25 ranks by
-   * term frequency over the FTS blob, so a popular slug is cited more often in
-   * OTHER articles' prose than in the article that owns it, and the owner falls
-   * outside its own top-5 — measured against 'hooks-suite' at v46. Raising the
-   * cap was rejected because the cause is the RANKING, not the number 5, and the
-   * miss gets likelier as the store grows.
-   *
-   * Returns an ARRAY so the caller keeps applying its own working_tree exclusion.
-   * More than one active record per slug is a store-integrity fault rather than a
-   * normal state; it resolves newest-first here instead of arbitrarily, and is
-   * not raised on this path because delivery must never fail (AC7) — an opaque
-   * '(lookup failed)' would trade one false payload for another.
-   */
-  articlesBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE type = 'feature_article' AND status != 'superseded' AND json_extract(body, '$.slug') = ?
-          ORDER BY updated_at DESC`).all(slug);
-    const records = this.hydrateAll(_SterlingStore.decodeLiveRecords("articlesBySlug", rows));
-    if (!records.length)
-      return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
-  }
-  /**
-   * Every non-superseded record of ANY type carrying this exact slug, newest
-   * first (board 1e639f32 — decision/anti_pattern/research_finding gained the
-   * stable handle feature_article and brief already had). The type-agnostic
-   * sibling of articlesBySlug: it backs knowledge_create's cross-type slug
-   * uniqueness and knowledge_get's slug resolution, both of which must see
-   * EVERY slug-bearing record or a clash slips through. Excluding superseded
-   * rows is the point — a slug names the CONCEPT, so resolving it serves the
-   * live head while a version-pinned citation keeps using the id.
-   */
-  recordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status != 'superseded' AND json_extract(body, '$.slug') = ?
-          ORDER BY updated_at DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("recordsBySlug", rows));
-  }
-  /**
-   * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
-   * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
-   * uses this ONLY after live-slug and id-prefix resolution both fail, so it
-   * can never shadow a live record: a slug still carried by a non-superseded
-   * row belongs to recordsBySlug, not here. The write surface never calls
-   * this — a dead slug addresses no write handle, fix-forward goes to the
-   * live head via recordsBySlug's own resolution.
-   */
-  supersededRecordsBySlug(slug) {
-    const rows = this.db.prepare(`SELECT body, scope FROM records
-          WHERE status = 'superseded' AND json_extract(body, '$.slug') = ?
-          ORDER BY updated_at DESC, rowid DESC`).all(slug);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
-  }
-  /**
-   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
-   * stay version-pinned — this DISCLOSES where the chain currently ends, it
-   * never redirects the pinned record itself). A live (non-superseded)
-   * record resolves to itself at hops:0. Unknown id -> null. Never throws
-   * and never hangs on a malformed chain: a cycle or a chain deeper than the
-   * 32-hop cap stops traversal and reports the LAST record reached (before
-   * the revisit, or at the cap) with truncated:true — it never claims to be
-   * the true, unreached terminus.
-   */
-  resolveTerminus(id) {
-    const MAX_HOPS = 32;
-    const stmt = this.db.prepare("SELECT id, status, superseded_by FROM records WHERE id = ?");
-    const row = stmt.get(id);
-    if (!row)
-      return null;
-    const visited = /* @__PURE__ */ new Set([row.id]);
-    let current = row;
-    let hops = 0;
-    while (current.status === "superseded" && current.superseded_by) {
-      const next = stmt.get(current.superseded_by);
-      if (!next || visited.has(next.id) || hops + 1 > MAX_HOPS) {
-        return { id: current.id, status: current.status, hops, truncated: true };
-      }
-      visited.add(next.id);
-      current = next;
-      hops += 1;
-    }
-    return { id: current.id, status: current.status, hops };
-  }
-  /**
-   * INBOUND rel:'supersedes' edges — every record elsewhere holding a
-   * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
-   * it only ever has something to say about a record that was itself retired
-   * via supersede(). A record can also be named the target of a rel:'supersedes'
-   * link WITHOUT ever being retired — a clause-level or partial override
-   * recorded via knowledge_link — and that leaves no trace on the target's own
-   * status/terminus. This is the read-time counterpart that makes such edges
-   * visible from the target side. Purely additive/advisory: never mutates
-   * status, never feeds resolveTerminus, never touches the terminus block.
-   * LOCAL to this store only — MountedStores.inboundSupersedes fans every
-   * mount, because an edge lives with its SOURCE record (addLink routes by
-   * source), which may sit in a different store than the target.
-   */
-  inboundSupersedes(id) {
-    const rows = this.db.prepare(`SELECT DISTINCT source_id FROM record_relations WHERE rel = 'supersedes' AND target_id = ? ORDER BY rowid`).all(id);
-    return rows.map((r) => this.get(r.source_id)).filter((r) => r !== void 0);
-  }
-  /**
-   * The §3.4 base filter (status + type + stack-tag + file-key join) shared
-   * by query() and count() — everything EXCEPT the rank (FTS), ordering, and
-   * cap. One definition so count() can never drift from what query() would
-   * actually return.
-   */
-  baseFilter(opts) {
-    const params = [];
-    const where = ["r.status != 'superseded'"];
-    if (opts.types?.length) {
-      where.push(`r.type IN (${opts.types.map(() => "?").join(",")})`);
-      params.push(...opts.types);
-    }
-    if (opts.stack_tags?.length) {
-      where.push(`EXISTS (SELECT 1 FROM record_stack_tags t WHERE t.record_id = r.id AND t.tag IN (${opts.stack_tags.map(() => "?").join(",")}))`);
-      params.push(...opts.stack_tags);
-    }
-    const fileKeys = (opts.file_keys ?? []).map(normalizeRepoPath);
-    if (fileKeys.length) {
-      where.push(`EXISTS (SELECT 1 FROM record_file_keys k WHERE k.record_id = r.id AND k.path IN (${fileKeys.map(() => "?").join(",")}))`);
-      params.push(...fileKeys);
-    }
-    if (opts.source) {
-      where.push("json_extract(r.body, '$.source') = ?");
-      params.push(opts.source);
-    }
-    return { where, params, fileKeys };
-  }
-  /**
-   * COUNT(*) over the §3.4 base filter — the number of records query() WOULD
-   * return ignoring rank/cap (rank_terms is a no-op here). No body fetch, no
-   * JSON.parse: the TUI Knowledge tree's collapsed category/source badges call
-   * this every 1 Hz frame instead of fetching + parsing hundreds of bodies.
-   */
-  count(opts = {}) {
-    const { where, params } = this.baseFilter(opts);
-    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM records r WHERE ${where.join(" AND ")}`).get(...params);
-    return row.n;
-  }
-  /**
-   * ABSENCE QUERY (board a577a69d): "is anything ruled about X" needs a
-   * usable "nothing", and a capped/ranked window can never establish one —
-   * this counts over the FULL rank_terms match set (uncapped, never the
-   * window query() returns) how many score at least `minScore`, using the
-   * SAME base filter and match expression query() ranks by, so this can never
-   * disagree with what a caller would see if it raised cap far enough.
-   *
-   * SCALE: SQLite FTS5's bm25() returns a value where LOWER (more negative) is
-   * MORE relevant, and it is otherwise unbounded — the opposite of what a
-   * caller reading "min_score" would expect. The score this thresholds is
-   * `-bm25(records_fts)`: HIGHER is more relevant, a bare keyword match sits
-   * near 0, and there is no fixed upper bound (a longer/rarer/more-repeated
-   * match scores higher). `min_score` is a floor on `-bm25`, never on bm25
-   * itself — knowledge_query's tool description names this scale so a caller
-   * never has to reverse-engineer bm25's own sign convention.
-   *
-   * Requires rank_terms — a threshold on a filter with no ranking has nothing
-   * to threshold, so this refuses loudly rather than silently answering 0
-   * (P5): a caller reading above_threshold:0 must be able to trust it means
-   * "nothing scored that high", not "nothing was rankable in the first place".
-   */
-  countAboveScore(opts, minScore) {
-    const terms = rankTerms.parse(opts.rank_terms ?? []);
-    if (!terms.length) {
-      throw new Error("min_score requires rank_terms \u2014 there is no ranked score to threshold without them.");
-    }
-    const { where, params } = this.baseFilter(opts);
-    const match = this.ftsMatchExpr(terms, opts.match_all);
-    const sql = `SELECT COUNT(*) AS n FROM records r JOIN records_fts f ON f.record_id = r.id
-      WHERE ${where.join(" AND ")} AND records_fts MATCH ? AND (-bm25(records_fts)) >= ?`;
-    const row = this.db.prepare(sql).get(...params, match, minScore);
-    return row.n;
-  }
-  /**
-   * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
-   * countAboveScore() so the two can never rank two different match sets. A
-   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
-   * star must sit OUTSIDE the quoted token to act as the prefix operator.
-   */
-  ftsMatchExpr(terms, matchAll) {
-    const joiner = matchAll ? " AND " : " OR ";
-    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
-  }
-  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
-  query(opts = {}) {
-    const cap = opts.cap ?? DEFAULT_QUERY_CAP;
-    const { where, params, fileKeys } = this.baseFilter(opts);
-    if (opts.rank_terms !== void 0) {
-      const terms = rankTerms.parse(opts.rank_terms);
-      if (terms.length) {
-        const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql2 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
-          WHERE ${where.join(" AND ")} AND records_fts MATCH ?
-          ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
-        const rows2 = this.db.prepare(sql2).all(...params, match, cap);
-        return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
-      }
-    }
-    const orderBy = [];
-    const overlapParams = [];
-    if (fileKeys.length) {
-      orderBy.push(`(SELECT COUNT(*) FROM record_file_keys k2 WHERE k2.record_id = r.id AND k2.path IN (${fileKeys.map(() => "?").join(",")})) DESC`);
-      overlapParams.push(...fileKeys);
-    }
-    orderBy.push("r.updated_at DESC", "r.id DESC");
-    const sql = `SELECT r.body, r.scope FROM records r WHERE ${where.join(" AND ")}
-      ORDER BY ${orderBy.join(", ")} LIMIT ?`;
-    const rows = this.db.prepare(sql).all(...params, ...overlapParams, cap);
-    return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows));
-  }
-  /** query()'s two return paths share this: one relations scan for the whole
-   *  result set (not one per feature_article row) before applying the derived
-   *  relied_by to each. */
-  withDerivedReliedByAll(input2) {
-    const records = this.hydrateAll(input2);
-    if (!records.some((r) => r.type === "feature_article"))
-      return records;
-    const relations = this.activeArticleRelations();
-    return records.map((r) => this.withDerivedReliedBy(r, relations));
-  }
-  /**
-   * Versioned change (§3.2.3, §3.1 criterion 3): the new record supersedes the
-   * old; the old is retained with status 'superseded' + superseded_by set.
-   * This is the ONLY change path for immutable types (decision, §3.2.1).
-   */
-  supersede(oldId, newInput, authoritativeScope) {
-    this.assertWritable("supersede");
-    const oldRecord = this.get(oldId);
-    if (!oldRecord)
-      throw new Error(`supersede: no record '${oldId}'`);
-    const oldIdentity = this.identityOf(oldId);
-    if (!oldIdentity)
-      throw new Error(`supersede: no record '${oldId}'`);
-    if (oldIdentity.lifecycle === "retired" || oldRecord.status === "superseded") {
-      throw new Error(`supersede: record '${oldId}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const candidate = { ...newInput };
-    if (candidate.id === oldId) {
-      throw new Error(`supersede: the replacement carries the SAME id as '${oldId}' \u2014 that is a self-cycle in the relation graph, not a supersession. Use updateRecord for an in-place change, or mint a genuinely new id for a concept replacement.`);
-    }
-    const links = Array.isArray(candidate.links) ? [...candidate.links] : [];
-    if (!links.some((l) => l.rel === "supersedes" && l.target_id === oldId)) {
-      links.push({ rel: "supersedes", target_id: oldId });
-    }
-    candidate.links = links;
-    candidate.scope = authoritativeScope ?? oldIdentity.scope;
-    const prepared = _SterlingStore.resolveIdentity(candidate, { lifecycle: "live", freshness: "fresh", version: 1 });
-    const newRecord = validateRecord(prepared.input);
-    if (newRecord.type !== oldRecord.type) {
-      throw new Error(`supersede: type mismatch ('${newRecord.type}' cannot supersede '${oldRecord.type}')`);
-    }
-    if (newRecord.type === "feature_article" && oldRecord.type === "feature_article" && newRecord.version <= oldRecord.version) {
-      throw new Error(`supersede: feature_article version must increase (old v${oldRecord.version}, new v${newRecord.version})`);
-    }
-    const storedOld = _SterlingStore.storableBody({
-      ...oldRecord,
-      lifecycle: "retired",
-      updated_at: newRecord.updated_at
-    });
-    this.tx(() => {
-      this.insertRecord(newRecord);
-      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", newRecord.id, newRecord.updated_at, JSON.stringify(storedOld), oldId);
-      if (res.changes === 0) {
-        throw new Error(`supersede: record '${oldId}' was concurrently superseded \u2014 retry against the current version`);
-      }
-      this.logActivity("updated", newRecord, newRecord.updated_at);
-    });
-    return this.hydrateAll([_SterlingStore.storableBody(newRecord)])[0];
-  }
-  /**
-   * IN-PLACE todo mutation (§3.2.7 board_update, work order 9a06b6aa) — the one
-   * exception to "every change is a supersession". todo is deliberately NOT in
-   * the immutable set (only decision is), and every board item is a DURABLE
-   * record in the same store as knowledge, so the established change primitive
-   * (supersede: mint a new id, retain the old) would rot every reference keyed
-   * on the item's id (feature_link, H7/H10 maintenance items) on every edit. The
-   * id, created_at, status and superseded_by stay exactly as they were; only the
-   * caller's patched fields and updated_at change — same row, same identity.
-   *
-   * `newInput` is the FULL merged candidate (old record + patch), mirroring
-   * supersede's own calling convention: this method validates and persists, the
-   * tool layer decides which fields may be patched and builds the merge. A
-   * terminal (superseded) record is refused, same as supersede/retireInFavorOf,
-   * and the UPDATE is guarded on that status inside the transaction to close the
-   * same concurrent-supersede race.
-   */
-  updateTodo(id, newInput, opts = {}) {
-    const old = this.get(id);
-    if (!old)
-      throw new Error(`updateTodo: no record '${id}'`);
-    if (old.type !== "todo")
-      throw new Error(`updateTodo: '${id}' is a ${old.type}, not a todo \u2014 board_update only mutates todos`);
-    const candidate = { ...newInput };
-    if (typeof candidate.type === "string" && candidate.type !== "todo") {
-      throw new Error(`updateTodo: type mismatch ('${candidate.type}' is not 'todo')`);
-    }
-    return this.applyInPlace("updateTodo", id, () => candidate, opts);
-  }
-  /**
-   * Promotion tombstone (§3.3 project→domain): retire a record IN FAVOR OF a
-   * replacement that lives in ANOTHER store (the promoted copy in a domain
-   * store). supersede can't cross stores and always inserts a same-store
-   * replacement; this sets the existing record to superseded + superseded_by =
-   * the cross-store id with NO new row. Provenance and inbound links survive;
-   * default queries already hide superseded records, so it never double-serves.
-   */
-  /**
-   * `verb` names what this retirement IS for the activity feed (board
-   * 39d6462d): 'retired' for the genuine-duplicate path (knowledge_retire) and
-   * 'promoted' for the project→domain copy's tombstone (knowledgePromote) — the
-   * two existing callers, distinguished so a promotion reads as "promoted",
-   * not as an unrelated-looking "retired". Defaults to 'retired' so the
-   * pre-promotion caller (and any future one) keeps that meaning without
-   * having to know the parameter exists.
-   */
-  retireInFavorOf(id, replacementId, at, verb = "retired") {
-    this.assertWritable("retireInFavorOf");
-    const record = this.get(id);
-    if (!record)
-      throw new Error(`retireInFavorOf: no record '${id}'`);
-    const identity = this.identityOf(id);
-    if (identity?.lifecycle === "retired" || record.status === "superseded") {
-      throw new Error(`retireInFavorOf: record '${id}' is already superseded (retired) \u2014 one successor maximum`);
-    }
-    const replacement = this.identityOf(replacementId);
-    if (replacement?.lifecycle === "retired") {
-      throw new Error(`retireInFavorOf: replacement '${replacementId}' is itself retired \u2014 retiring '${id}' in favour of it would leave both records dead and forward the reader to a tombstone (a supersession cycle). Name the LIVE survivor. Nothing was written.`);
-    }
-    const retired = { ...record, status: "superseded", superseded_by: replacementId, lifecycle: "retired", updated_at: at };
-    const stored = _SterlingStore.storableBody(retired);
-    this.tx(() => {
-      const res = this.db.prepare(`UPDATE records SET status = ?, superseded_by = ?, lifecycle = 'retired', updated_at = ?, body = ?
-             WHERE id = ? AND lifecycle != 'retired'`).run("superseded", replacementId, at, JSON.stringify(stored), id);
-      if (res.changes === 0) {
-        throw new Error(`retireInFavorOf: record '${id}' was concurrently superseded \u2014 retry`);
-      }
-      this.insertRelation(replacementId, "supersedes", id, at);
-      this.logActivity(verb, retired, at);
-    });
-    return this.hydrateAll([stored])[0];
-  }
-  /**
-   * Hard removal — the P4 path for todos (done = removed by the artifact-write
-   * event) . Policy for everything else (gated cleanup, §8.4) lives above the store.
-   * Removing a SYSTEM-source todo appends to the capped queue drain log
-   * (§3.2.7 audit projection — "was X handled?"); user todos are never logged.
-   */
-  remove(id, drainedAt) {
-    this.assertWritable("remove");
-    this.tx(() => {
-      const record = this.get(id);
-      const isSystemDrain = record && record.type === "todo" && record.source === "system";
-      if (isSystemDrain && record) {
-        this.db.prepare("INSERT INTO queue_drain_log (drained_at, system_reason, text, file_keys, record_id) VALUES (?, ?, ?, ?, ?)").run(drainedAt ?? (/* @__PURE__ */ new Date()).toISOString(), record.system_reason ?? "", record.text ?? "", JSON.stringify(record.file_keys ?? []), record.id);
-        this.db.prepare("DELETE FROM queue_drain_log WHERE seq NOT IN (SELECT seq FROM queue_drain_log ORDER BY seq DESC LIMIT 50)").run();
-      }
-      if (record && !isSystemDrain) {
-        this.logActivity("removed", record, drainedAt ?? (/* @__PURE__ */ new Date()).toISOString());
-      }
-      this.db.prepare("DELETE FROM records WHERE id = ?").run(id);
-      this.db.prepare("DELETE FROM record_stack_tags WHERE record_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_relations WHERE source_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_relations WHERE target_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_versions WHERE record_id = ?").run(id);
-      this.db.prepare("DELETE FROM record_aliases WHERE canonical_id = ?").run(id);
-      this.db.prepare("DELETE FROM records_fts WHERE record_id = ?").run(id);
-    });
-  }
-  /** Newest-first drained queue items (§3.2.7 drain log) — the TUI's completed section. */
-  listQueueDrain(limit = 15) {
-    const rows = this.db.prepare("SELECT drained_at, system_reason, text, file_keys FROM queue_drain_log ORDER BY seq DESC LIMIT ?").all(limit);
-    return rows.map((r) => ({ ...r, file_keys: JSON.parse(r.file_keys) }));
-  }
-  /**
-   * The drain-log trace for ONE removed item id, newest first (board 97d773ef):
-   * lets a remove on a gone id say "already removed <when>" instead of a bare
-   * "no record". Returns undefined when no trace remains — which, because the
-   * log keeps only the newest 50 rows, means "no RECENT trace", never proof the
-   * id never existed.
-   */
-  drainLogEntry(id) {
-    try {
-      return this.db.prepare("SELECT drained_at, system_reason FROM queue_drain_log WHERE record_id = ? ORDER BY seq DESC LIMIT 1").get(id);
-    } catch (e) {
-      if (this.legacySchemaVersion !== void 0 && /record_id/.test(String(e.message)))
-        return void 0;
-      throw e;
-    }
-  }
-  /**
-   * Board 39d6462d activity feed — the ONE seam every knowledge write lands
-   * through, so the Queue tab's activity section shows "what has been done"
-   * without a second, separate write path (§3.1 invariant: one write path).
-   * Called directly by create/supersede/addLink/remove/retireInFavorOf with the
-   * verb that primitive actually performed; NOT called from insertRecord
-   * itself, because supersede/enqueueSystemTodo also insert rows and each needs
-   * its own verb (or, for enqueueSystemTodo, no activity-log entry at all — see
-   * remove()'s system-todo branch, which already has a completed-section home
-   * in queue_drain_log and would otherwise double-log). Same capped-at-50,
-   * pruned-in-tx retention policy as queue_drain_log (§3.2.7), so completed
-   * items never build up here either.
-   */
-  logActivity(verb, record, at) {
-    this.db.prepare("INSERT INTO activity_log (at, verb, type, record_id, title) VALUES (?, ?, ?, ?, ?)").run(at, verb, record.type, record.id, activityTitleOf(record));
-    this.db.prepare("DELETE FROM activity_log WHERE seq NOT IN (SELECT seq FROM activity_log ORDER BY seq DESC LIMIT 50)").run();
-  }
-  /** Newest-first activity rows (board 39d6462d) — the TUI Queue tab's activity section. */
-  listActivityLog(limit = 15) {
-    return this.db.prepare("SELECT at, verb, type, record_id AS id, title FROM activity_log ORDER BY seq DESC LIMIT ?").all(limit);
-  }
-  /** Backup snapshot (§2.3): VACUUM INTO the configured backup path. Refuses to overwrite. */
-  snapshot(targetPath) {
-    const target = targetPath.replace(/\\/g, "/");
-    if (existsSync(target)) {
-      throw new Error(`snapshot: target already exists, refusing to overwrite: '${target}'`);
-    }
-    mkdirSync(dirname(target), { recursive: true });
-    this.db.exec(`VACUUM INTO '${target.replace(/'/g, "''")}'`);
-  }
-  close() {
-    this.db.close();
-  }
-  // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
-  // -------------------------------------------------------------------------
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input2) {
-    const run = runRecordSchema.parse(input2);
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-      }
-      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-  /** By id, or the single active run when no id is given. */
-  getRun(id) {
-    const row = id ? this.db.prepare("SELECT body FROM runs WHERE id = ?").get(id) : this.db.prepare(`SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).get(...ACTIVE_STATES);
-    return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
-  }
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  static parsePendingQueue(raw) {
-    if (!raw)
-      return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-  static serializePendingQueue(queue) {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed, next) {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-    });
-    return run;
-  }
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed, runId, mutate, attempts = 5) {
-    this.assertWritable("casTransitionMerge");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`casTransitionMerge: no run '${runId}'`);
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      if (row.machine_state !== observed) {
-        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body));
-      const next = runRecordSchema.parse(mutate(current));
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId, exit) {
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = _SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(`recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? "unknown"} on phase '${dup.phase_id ?? "?"}' ('${dup.signal}') \u2014 one exit per dispatched agent; call run_signal (or consume-exit) first`);
-      }
-      this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(_SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId) {
-    const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-    if (!row)
-      throw new Error(`getPendingExit: no run '${runId}'`);
-    return _SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId, input2, at) {
-    this.assertWritable("writeHandoff");
-    const handoff = handoffSchema.parse(input2);
-    if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    this.tx(() => {
-      this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-  readHandoffs(runId, filter = {}) {
-    const rows = filter.phase_id ? this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at").all(runId, filter.phase_id) : this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at").all(runId);
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId, mutate, attempts = 5) {
-    this.assertWritable("updateRunOptimistic");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const current = JSON.parse(row.body);
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
-      }
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId, entry) {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId, articleId) {
-    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
-  }
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId, amendment) {
-    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
-  }
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId, phaseId, items) {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId, agentType) {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
-    }));
-    return next.dispatch_counts[agentType];
-  }
-  /**
-   * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
-   * transactionally — read + delete in one transaction, never a signal file (P4).
-   */
-  writeSelection(type, recordId, at) {
-    this.assertWritable("writeSelection");
-    this.tx(() => {
-      this.db.prepare("INSERT INTO selection (slot, type, record_id, at) VALUES (1, ?, ?, ?) ON CONFLICT(slot) DO UPDATE SET type = excluded.type, record_id = excluded.record_id, at = excluded.at").run(type, recordId, at);
-    });
-  }
-  takeSelection() {
-    let row;
-    this.tx(() => {
-      row = this.db.prepare("SELECT type, record_id, at FROM selection WHERE slot = 1").get();
-      if (row)
-        this.db.prepare("DELETE FROM selection WHERE slot = 1").run();
-    });
-    return row;
-  }
-  /**
-   * fs-move support (§7.1): renames inside the machinery never orphan
-   * knowledge — every owning record's stored paths are rewritten as part of
-   * the move (exact normalized-path matches only), revalidated, and the
-   * file-key index updated, in one transaction.
-   *
-   * It goes through the VERSIONED in-place core ([stable-identity-design-v2]):
-   * a rename is a real change to the record's content, so it bumps the version,
-   * archives the prior body, rebuilds record_file_keys and refreshes the FTS
-   * row like every other write. As a bare body UPDATE it was invisible to
-   * expected_version — a concurrent updateRecord holding a pre-rename read
-   * silently reverted the rename with no CAS conflict — and left the old path
-   * ranking in records_fts. allowRetired keeps the contract intact for
-   * tombstones: a move must orphan NO owning record's paths.
-   */
-  renameFileKey(oldPath, newPath) {
-    this.assertWritable("renameFileKey");
-    const from = normalizeRepoPath(oldPath);
-    const to = normalizeRepoPath(newPath);
-    const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
-    this.tx(() => {
-      for (const { record_id } of rows) {
-        if (!this.get(record_id))
-          continue;
-        this.applyInPlace("renameFileKey", record_id, (current) => deepReplaceString(current, from, to), {}, { allowRetired: true });
-      }
-    });
-    return rows.length;
-  }
-  /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
-   *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
-   *  the target across every mounted store — cross-store edges are a legitimate shape
-   *  (promotion itself writes them: supersedes / informed_by across project↔domain)
-   *  that a store-local get cannot see. Standalone usage keeps the local check. */
-  addLink(sourceId, rel, targetId, targetValidated = false) {
-    this.assertWritable("addLink");
-    const source = this.get(sourceId);
-    if (!source)
-      throw new Error(`addLink: no record '${sourceId}'`);
-    if (!targetValidated && !this.get(targetId))
-      throw new Error(`addLink: no target record '${targetId}'`);
-    const parsedRel = linkSchema.shape.rel.parse(rel);
-    if (parsedRel === "supersedes") {
-      throw new Error(`addLink: rel 'supersedes' cannot be written as a raw edge \u2014 supersession is a lifecycle transition, not a link. Use supersede(oldId, newRecord) for concept replacement, or retireInFavorOf(id, survivor) for duplicate consolidation. Nothing was written.`);
-    }
-    if (source.links.some((l) => l.rel === parsedRel && l.target_id === targetId))
-      return source;
-    const updated = { ...source, links: [...source.links, { rel: parsedRel, target_id: targetId }] };
-    const at = (/* @__PURE__ */ new Date()).toISOString();
-    const stored = _SterlingStore.storableBody(updated);
-    this.tx(() => {
-      this.db.prepare("UPDATE records SET body = ? WHERE id = ?").run(JSON.stringify(stored), sourceId);
-      this.insertRelation(sourceId, parsedRel, targetId, at);
-      this.logActivity("linked", updated, at);
-    });
-    return this.hydrateAll([stored])[0];
-  }
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId, summaries) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "completing") {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
-    this.tx(() => {
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
-      if (res.changes === 0)
-        throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-    return next;
-  }
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-  }
-  /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
-  recordCheckSkipped(check, reason, runId, at) {
-    this.assertWritable("recordCheckSkipped");
-    this.tx(() => {
-      this.db.prepare("INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)").run(runId ?? null, check, reason, at);
-      if (!runId) {
-        this.db.prepare("DELETE FROM check_skipped WHERE run_id IS NULL AND seq NOT IN (SELECT seq FROM check_skipped WHERE run_id IS NULL ORDER BY seq DESC LIMIT 50)").run();
-      }
-    });
-  }
-  listCheckSkipped(runId) {
-    return runId ? this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped WHERE run_id = ? ORDER BY seq").all(runId) : this.db.prepare("SELECT run_id, check_name, reason, at FROM check_skipped ORDER BY seq").all();
-  }
-  // -------------------------------------------------------------------------
-  // AC8: catalog bootstrap + maintenance enqueue (run r-ea9e, phase 3)
-  // -------------------------------------------------------------------------
-  /**
-   * Idempotent bootstrap: if no project-scoped reference_material carrying a
-   * `catalog` payload exists, create one seeded from config.models' DISTINCT
-   * pinned model IDs. No network; no fabrication — day-one entries are the IDs
-   * already in use by the installed agents.
-   */
-  bootstrapCatalogIfAbsent(config, nowISO) {
-    const existing = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
-    if (existing.length > 0)
-      return;
-    const cfg = config;
-    const models = cfg.models ?? {};
-    const ids = /* @__PURE__ */ new Set();
-    for (const v of Object.values(models)) {
-      if (v?.model)
-        ids.add(v.model);
-    }
-    const dateStr = nowISO.slice(0, 10);
-    this.create({
-      id: randomUUID(),
-      type: "reference_material",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      title: "Models catalog",
-      kind: "doc",
-      location: ".sterling/models-catalog",
-      summary: "KB-maintained model catalog for the TUI System tab.",
-      source_date: dateStr,
-      capture_date: dateStr,
-      catalog: {
-        entries: [...ids].map((id) => ({ id, label: id, tier: "unknown", status: "active" }))
-      }
-    });
-  }
-  /**
-   * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
-   * Dedup: if a pending item with system_reason='refresh_reference' already exists,
-   * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
-   */
-  enqueueRefreshReferenceOnce(nowISO) {
-    const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
-    if (pending.length > 0)
-      return;
-    const catalogs = this.query({ types: ["reference_material"], cap: 200 }).filter((r) => r.catalog);
-    const todo = {
-      id: randomUUID(),
-      type: "todo",
-      created_at: nowISO,
-      updated_at: nowISO,
-      author: "system",
-      status: "active",
-      superseded_by: null,
-      links: [],
-      scope: "project",
-      stack_tags: [],
-      text: "Refresh the KB models catalog",
-      source: "system",
-      system_reason: "refresh_reference"
-    };
-    if (catalogs.length > 0) {
-      todo.feature_link = catalogs[0].id;
-    }
-    this.create(todo);
-  }
-  /**
-   * The one row-insert. Since S2 ([stable-identity-design-v2]) the stored BODY
-   * carries lifecycle/freshness/version and NOT status/superseded_by — those two
-   * are derived at read. They survive as records COLUMNS because they are the
-   * §3.4 filter surface every read SQL already joins on (and the shape a
-   * pre-migration store still has): written here from the derived values in the
-   * same statement, never read back as the served truth.
-   */
-  insertRecord(record) {
-    const entry = RECORD_TYPES[record.type];
-    const meta = record;
-    const lifecycle = meta.lifecycle === "retired" ? "retired" : "live";
-    const freshness = meta.freshness === "flagged_stale" ? "flagged_stale" : "fresh";
-    const version = typeof meta.version === "number" ? meta.version : 1;
-    const stored = _SterlingStore.storableBody(record);
-    this.db.prepare(`INSERT INTO records (id, type, status, superseded_by, lifecycle, freshness, version, scope, created_at, updated_at, author, body)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(record.id, record.type, _SterlingStore.derivedStatus(lifecycle, freshness), meta.superseded_by ?? null, lifecycle, freshness, version, record.scope, record.created_at, record.updated_at, record.author, JSON.stringify(stored));
-    for (const tag of new Set(record.stack_tags)) {
-      this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(record.id, tag);
-    }
-    for (const path of new Set(entry.fileKeys(stored))) {
-      this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(record.id, path);
-    }
-    for (const link of record.links) {
-      if (link.target_id === record.id)
-        continue;
-      this.insertRelation(record.id, link.rel, link.target_id, record.updated_at);
-    }
-    if (lifecycle === "retired" && meta.superseded_by && meta.superseded_by !== record.id) {
-      this.insertRelation(meta.superseded_by, "supersedes", record.id, record.updated_at);
-    }
-    this.db.prepare("INSERT INTO records_fts (record_id, text) VALUES (?, ?)").run(record.id, entry.fts(stored));
-  }
-  /**
-   * REENTRANT — every other write primitive (create, supersede, …) already
-   * calls this internally, so a multi-record tool-layer write (knowledge_split:
-   * N child creates + one parent supersession, decision
-   * compaction-tooling-windowed-read-plus-split) that must land atomically
-   * cannot simply wrap several such calls in a second BEGIN — SQLite does not
-   * nest transactions. `txDepth` makes a NESTED call join the already-open
-   * transaction instead of attempting a second one: only the outermost call
-   * issues BEGIN/COMMIT/ROLLBACK, so a failure anywhere inside unwinds the
-   * whole thing exactly once.
-   */
-  txDepth = 0;
-  tx(fn) {
-    this.assertV2Surface("transaction");
-    if (this.txDepth > 0) {
-      fn();
-      return;
-    }
-    this.db.exec("BEGIN IMMEDIATE");
-    this.txDepth++;
-    try {
-      this.assertLiveSchemaVersion("transaction");
-      fn();
-      this.db.exec("COMMIT");
-    } catch (e) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {
-      }
-      throw e;
-    } finally {
-      this.txDepth--;
-    }
-  }
-  /**
-   * PUBLIC transaction boundary for the tool layer (decision
-   * compaction-tooling-windowed-read-plus-split): the store is the one write
-   * path (invariant 3 / CLAUDE.md §"Store writes"), so a tool-layer operation
-   * that must write several records atomically — knowledge_split's N children
-   * plus one parent supersession — gets the transaction FROM the store rather
-   * than reimplementing BEGIN/COMMIT/ROLLACK above it. Reentrant via `tx`:
-   * every store write primitive called from `fn` joins this same transaction.
-   */
-  withTransaction(fn) {
-    let result;
-    this.tx(() => {
-      result = fn();
-    });
-    return result;
-  }
-  /**
-   * PER-RECORD transaction boundary — the ToolStore sibling that routes by
-   * PHYSICAL IDENTITY rather than by a label (decision
-   * [scope-drift-closed-by-column-authoritative-reads-not-format-change]). A
-   * label-routed transaction opens on the store the label NAMES while every
-   * record mutation independently opens on the store that HOLDS the id, so a
-   * drifted label put the transaction on the wrong database; routing by the
-   * holder makes the two agree by construction. On a plain SterlingStore there
-   * is only ONE physical store, so this is a straight alias for withTransaction
-   * — MountedStores overrides it to resolve the holding mount.
-   *
-   * ITS LABEL-ROUTED SIBLING (`withTransactionForScope`) IS RETIRED (decision
-   * [domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired]):
-   * it had zero production callers once knowledge_extract moved here, and its
-   * shape was exactly the defect this method closed.
-   */
-  withTransactionForRecord(_id, fn) {
-    return this.withTransaction(fn);
-  }
-};
 
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
   if (!from) return null;
   let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync2(join2(dir, ".sterling", "sterling.db"))) return dir;
-    const parent = dirname2(dir);
+    if (existsSync(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
 function readStdin() {
-  const input2 = JSON.parse(readFileSync(0, "utf8"));
-  const root = projectRoot(input2.cwd);
-  if (root) input2.cwd = root;
-  return input2;
+  const input = JSON.parse(readFileSync(0, "utf8"));
+  const root = projectRoot(input.cwd);
+  if (root) input.cwd = root;
+  return input;
 }
 function allow() {
   process.exit(0);
 }
-function warnNonBlocking(message) {
-  process.stderr.write(message);
-  process.exit(1);
-}
-function openStore(cwd) {
-  const p = join2(cwd, ".sterling", "sterling.db");
-  return existsSync2(p) ? new SterlingStore(p) : null;
-}
-function repoRel(toolPath, cwd) {
-  if (!toolPath) return null;
-  const fwd = String(toolPath).replace(/\\/g, "/");
-  try {
-    if (/^[A-Za-z]:/.test(fwd) || fwd.startsWith("/")) return toRepoRelative(fwd, cwd);
-    return normalizeRepoPath(fwd);
-  } catch {
-    return null;
-  }
-}
 
-// scripts/hooks/h19-bash-delivery.mjs
-import { existsSync as existsSync4, statSync as statSync3 } from "node:fs";
-import { join as join4 } from "node:path";
-
-// scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
-import { join as join3, dirname as dirname3 } from "node:path";
-function deliveryDir(cwd) {
-  return join3(cwd, ".sterling", "transient", "delivery");
+// scripts/hooks/lib/plan-lock.mjs
+import { createHash, randomUUID } from "node:crypto";
+import { closeSync, constants as FS, existsSync as existsSync2, fstatSync, mkdirSync, openSync, readSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { join as join2 } from "node:path";
+var PLAN_MAX_BYTES = 4 * 1024 * 1024;
+var LOCK_MAX_BYTES = 64 * 1024;
+var MARKER_MAX_BYTES = 64 * 1024;
+var TITLE_MAX = 200;
+var PATH_MAX = 512;
+var REASON_MAX = 400;
+var LOCK_FILE = "plan-lock.json";
+var HEX64 = /^[0-9a-f]{64}$/i;
+function isAbsolutePlanPath(p) {
+  return typeof p === "string" && (p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p));
 }
-function guardPath(cwd, agentId) {
-  return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+function isSterlingProject(cwd) {
+  return typeof cwd === "string" && existsSync2(join2(cwd, ".sterling", "sterling.db"));
 }
-function pendingPath(cwd) {
-  return join3(deliveryDir(cwd), "pending.json");
+function sterlingDirOf(cwd) {
+  return join2(cwd, ".sterling");
 }
-function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
-}
-function lineageKey(record) {
-  return record?.slug ?? record?.id;
-}
-function isGapDelivered(guard, record) {
-  return guard.gap_articles.includes(lineageKey(record));
-}
-function markGapDelivered(guard, records) {
-  for (const r of records) {
-    const key = lineageKey(r);
-    if (!guard.gap_articles.includes(key)) guard.gap_articles.push(key);
-  }
-}
-function readGuard(path) {
-  try {
-    if (!existsSync3(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
-  } catch {
-    process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
-`);
-    return emptyGuard();
-  }
-}
-function writeGuard(path, guard) {
-  mkdirSync2(dirname3(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(guard));
-  renameSync(tmp, path);
-}
-var CITATION_BOILERPLATE_WORDS = [
-  "knowledge_get",
-  "anti_pattern",
-  "decisions",
-  "decision",
-  "rulings",
-  "ruling",
-  "overriding",
-  "overrides",
-  "override",
-  "ids",
-  "id"
-];
-var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
-var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
-function statusBracket(record) {
-  const status = record?.status ?? "unknown";
-  const scope = record?.scope ?? "unknown";
-  return `${status}\xB7${scope}${record?.superseded_by ? `, superseded_by: ${record.superseded_by}` : ""}`;
-}
-function statusAnnotation(record) {
-  return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
-}
-var LOCK_DEADLINE_MS = 2e3;
-var LOCK_STALE_MS = 5e3;
-var LOCK_POLL_MS = 5;
-function acquireLock(lockPath) {
-  const deadline = Date.now() + LOCK_DEADLINE_MS;
-  while (Date.now() < deadline) {
-    try {
-      mkdirSync2(lockPath);
-      return true;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
-    }
-  }
-  return false;
-}
-function releaseLock(lockPath) {
-  try {
-    rmSync(lockPath, { recursive: true, force: true });
-  } catch {
-  }
-}
-function withFileLock(targetPath, fn) {
-  mkdirSync2(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
-  const acquired = acquireLock(lockPath);
-  try {
-    return fn();
-  } finally {
-    if (acquired) releaseLock(lockPath);
-  }
-}
-function enqueuePending(path, entry) {
-  withFileLock(path, () => {
-    const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
-    entries.push(entry);
-    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(entries));
-    renameSync(tmp, path);
-  });
-}
-function clip(text, cap) {
-  const s2 = String(text ?? "");
+function sanitizeForContext(value, max) {
+  if (typeof value !== "string") return "";
   let out = "";
-  let count = 0;
-  for (const ch of s2) {
-    if (count === cap) return `${out}\u2026`;
+  for (const ch of value) {
+    const code = ch.codePointAt(0);
+    if (code < 32 || code === 127 || code >= 128 && code <= 159) continue;
     out += ch;
-    count++;
   }
-  return out;
+  out = out.trim();
+  return out.length > max ? out.slice(0, max) : out;
 }
-function normalizeWs(text) {
-  return String(text ?? "").replace(/\s+/g, " ").trim();
-}
-var GAP_GLOBAL_BUDGET = 3;
-var GAP_EVIDENCE_CHAR_CAP = 400;
-var GAP_KIND_RANK = { mutation_survivor: 0, other: 1 };
-var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
-var SENTENCE_END_RE = /^.*?[.!?]["'”’)\]]*(?=\s|$)/;
-function firstSentence(text) {
-  const raw = String(text ?? "");
-  const bounded = raw.length > FIRST_SENTENCE_SCAN_CAP ? raw.slice(0, FIRST_SENTENCE_SCAN_CAP) : raw;
-  const s2 = normalizeWs(bounded);
-  const m = SENTENCE_END_RE.exec(s2);
-  return m ? m[0] : s2;
-}
-var GAP_SITE_CLIP = 120;
-function renderGapLine(gap) {
-  const site = clip(normalizeWs(gap.site), GAP_SITE_CLIP);
-  const sentence = clip(firstSentence(gap.evidence), GAP_EVIDENCE_CHAR_CAP);
-  const prefix = gap.kind === "mutation_survivor" ? "WRONG-ON-PURPOSE test survivor: " : "";
-  return `  - ${site}: ${prefix}${sentence}`;
-}
-function budgetKnownGaps(owners, budget = GAP_GLOBAL_BUDGET) {
-  const totals = /* @__PURE__ */ new Map();
-  const candidates = [];
-  owners.forEach((owner, ownerIndex) => {
-    const raw = Array.isArray(owner.known_gaps) ? owner.known_gaps : [];
-    if (!raw.length) return;
-    totals.set(owner.id, raw.length);
-    raw.forEach((gap, gapIndex) => candidates.push({ owner, gap, ownerIndex, gapIndex }));
-  });
-  if (!candidates.length) return /* @__PURE__ */ new Map();
-  const ranked = [...candidates].sort((a, b) => {
-    const rankDiff = (GAP_KIND_RANK[a.gap.kind] ?? 1) - (GAP_KIND_RANK[b.gap.kind] ?? 1);
-    if (rankDiff !== 0) return rankDiff;
-    if (a.ownerIndex !== b.ownerIndex) return a.ownerIndex - b.ownerIndex;
-    return a.gapIndex - b.gapIndex;
-  });
-  const byOwner = /* @__PURE__ */ new Map();
-  for (const owner of owners) {
-    if (totals.has(owner.id)) byOwner.set(owner.id, { shown: [], dropped: 0, total: totals.get(owner.id) });
+function readBounded(path, maxBytes, noun) {
+  if (typeof path !== "string" || !path) return { unreadable: `no ${noun} path recorded`, code: "ENOENT" };
+  let fd;
+  try {
+    fd = openSync(path, FS.O_RDONLY | (FS.O_NOFOLLOW ?? 0) | (FS.O_NONBLOCK ?? 0));
+  } catch (e) {
+    return { unreadable: `could not be opened (${e && e.message || e})`, code: e && e.code || null };
   }
-  ranked.forEach((c, i) => {
-    const info = byOwner.get(c.owner.id);
-    if (i < budget) info.shown.push(c.gap);
-    else info.dropped += 1;
-  });
-  const totalDropped = [...byOwner.values()].reduce((sum, info) => sum + info.dropped, 0);
-  for (const info of byOwner.values()) info.totalDropped = totalDropped;
-  return byOwner;
-}
-function renderKnownGapsLines(article, info) {
-  if (!info) return [];
-  const lines = ["KNOWN GAPS recorded for this territory:"];
-  for (const gap of info.shown) lines.push(renderGapLine(gap));
-  if (info.dropped > 0) {
-    const totalNote = info.totalDropped > info.dropped ? `; ${info.totalDropped} total omitted across this delivery` : "";
-    lines.push(
-      `  \u2026 ${info.shown.length} of ${info.total} known gap(s) shown for this article (global budget ${GAP_GLOBAL_BUDGET} per delivery); ${info.dropped} not shown${totalNote} \u2014 knowledge_get ${article.id} for the full set`
-    );
-  } else {
-    lines.push(`  (full record: knowledge_get ${article.id})`);
-  }
-  return lines;
-}
-var BASH_POINTER_PATH_CAP = 8;
-var COMMAND_PATH_SKIP = /* @__PURE__ */ new Set(["--", "-", ".", "./", "..", "../"]);
-function extractCommandPathCandidates(command2) {
-  const text = String(command2 ?? "");
-  const tokens = text.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
-  const out = [];
-  const seen = /* @__PURE__ */ new Set();
-  for (const raw of tokens) {
-    let t = raw;
-    if (t.startsWith('"') && t.endsWith('"') || t.startsWith("'") && t.endsWith("'")) t = t.slice(1, -1);
-    t = t.replace(/^[(<]+/, "").replace(/[),;:'"]+$/, "");
-    t = t.replace(/:\d+(:\d+)?$/, "");
-    if (!t || COMMAND_PATH_SKIP.has(t)) continue;
-    if (t.startsWith("-")) continue;
-    if (/[*?$`!]/.test(t)) continue;
-    if (!(t.includes("/") || /\.[A-Za-z0-9]{1,8}$/.test(t))) continue;
-    if (seen.has(t)) continue;
-    seen.add(t);
-    out.push(t);
-  }
-  return out;
-}
-function bashPointerBlock(entries, { gapsByOwner } = {}) {
-  const header = [
-    "STERLING KNOWLEDGE POINTERS (H19) \u2014 governed paths named in a Bash command.",
-    "This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here."
-  ].join("\n");
-  const lines = [];
-  const gapAttached = /* @__PURE__ */ new Set();
-  for (const e of entries) {
-    for (const h of e.hazards) {
-      const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : h.title ?? h.slug ?? h.id;
-      lines.push({
-        id: h.id,
-        line: `  \u2022 ${e.rel} \u2014 \u26A0 HAZARD anti_pattern '${hazardLabel}' \xB7 knowledge_get ${h.id}${statusAnnotation(h)}`
-      });
+  try {
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { unreadable: "is not a regular file (a directory, FIFO, socket or device cannot hold it)", code: "ENOTFILE" };
+    if (st.size > maxBytes) return { unreadable: `is ${st.size} bytes, past the ${maxBytes}-byte bound`, code: "EFBIG" };
+    const buf = Buffer.allocUnsafe(st.size);
+    let read = 0;
+    while (read < st.size) {
+      const n = readSync(fd, buf, read, st.size - read, read);
+      if (n <= 0) break;
+      read += n;
     }
-    for (const o of e.owners) {
-      const kind = o.type === "reference_material" ? "reference" : "article";
-      const label = o.title && o.slug ? `${o.title} [${o.slug}]` : o.slug ?? o.title ?? o.id;
-      const state = o.state ? ` (${o.state})` : "";
-      const line = `  \u2022 ${e.rel} \u2014 ${kind} '${label}'${state} \xB7 knowledge_get ${o.id}${statusAnnotation(o)}`;
-      const entry = { id: o.id, line };
-      const gapInfo = gapsByOwner?.get(o.id);
-      if (gapInfo && !gapAttached.has(o.id)) {
-        gapAttached.add(o.id);
-        const gapLines = renderKnownGapsLines(o, gapInfo);
-        if (gapLines.length) entry.gapLines = gapLines;
-      }
-      lines.push(entry);
+    if (read < st.size) return { unreadable: `shrank from ${st.size} to ${read} bytes during the read`, code: "EIO" };
+    const probe = Buffer.allocUnsafe(1);
+    let extra = 0;
+    try {
+      extra = readSync(fd, probe, 0, 1, st.size);
+    } catch {
+      extra = 0;
+    }
+    if (extra > 0) return { unreadable: `grew past its ${st.size}-byte size during the read`, code: "EFBIG" };
+    return { bytes: buf };
+  } catch (e) {
+    return { unreadable: `could not be read (${e && e.message || e})`, code: e && e.code || null };
+  } finally {
+    try {
+      closeSync(fd);
+    } catch {
     }
   }
-  return { header, lines };
 }
-function joinPointerBlock({ header, lines = [], tail } = {}) {
-  const body = [];
-  for (const l of lines) {
-    body.push(l.line);
-    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
+function readPlanFileBounded(absPath) {
+  return readBounded(absPath, PLAN_MAX_BYTES, "plan");
+}
+function readStoreFileBounded(path, maxBytes) {
+  const read = readBounded(path, maxBytes, "record");
+  if (read.unreadable) return read;
+  return { text: read.bytes.toString("utf8") };
+}
+function hashPlanFile(absPath) {
+  const read = readPlanFileBounded(absPath);
+  if (read.unreadable) return { unreadable: read.unreadable };
+  return { sha256: createHash("sha256").update(read.bytes).digest("hex") };
+}
+function sha256Of(data) {
+  return createHash("sha256").update(data).digest("hex");
+}
+function extractTitle(text, fallbackBasename) {
+  for (const line of String(text ?? "").split("\n")) {
+    if (!line.startsWith("# ")) continue;
+    const title = sanitizeForContext(line.slice(2), TITLE_MAX);
+    if (title) return title;
   }
-  return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
+  return sanitizeForContext(fallbackBasename ?? "", TITLE_MAX);
 }
-var DELIVERY_RECIPE_VERSION = 2;
-function pointerVerifyRecipe({ header, entries, tail } = {}) {
-  return {
-    version: DELIVERY_RECIPE_VERSION,
-    mode: "pointer_verify",
-    header: typeof header === "string" ? header : "",
-    entries: (entries ?? []).map((e) => {
-      const out = { id: e?.id, line: e?.line };
-      if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
-      return out;
-    }),
-    tail: typeof tail === "string" ? tail : ""
-  };
+function invalidReason(l) {
+  if (l.schema_version !== 1) return `schema_version is ${JSON.stringify(l.schema_version)}, not 1`;
+  if (!isAbsolutePlanPath(l.plan_path)) return "plan_path is not an absolute path string";
+  if (typeof l.approved_sha256 !== "string" || !HEX64.test(l.approved_sha256)) return "approved_sha256 is not a 64-character hex digest";
+  if (l.file_sha256_at_approval !== null && (typeof l.file_sha256_at_approval !== "string" || !HEX64.test(l.file_sha256_at_approval))) {
+    return "file_sha256_at_approval is neither null nor a 64-character hex digest";
+  }
+  if (typeof l.approved_at !== "string" || !/^\d{4}-\d{2}-\d{2}T/.test(l.approved_at) || !Number.isFinite(Date.parse(l.approved_at))) {
+    return "approved_at is not an ISO-8601 timestamp";
+  }
+  if (l.source !== "exit_plan_mode" && l.source !== "manual") return `source is ${JSON.stringify(l.source)}, not 'exit_plan_mode' or 'manual'`;
+  if (typeof l.title !== "string") return "title is not a string";
+  for (const key of ["approved_session_id", "approved_branch", "approved_head"]) {
+    if (l[key] !== null && typeof l[key] !== "string") return `${key} is neither null nor a string`;
+  }
+  if (l.text_file_mismatch !== void 0 && typeof l.text_file_mismatch !== "boolean") return "text_file_mismatch is neither absent nor a boolean";
+  if (l.observed_at !== void 0 && typeof l.observed_at !== "string") return "observed_at is neither absent nor a string";
+  if (l.observed_sha256 !== void 0 && l.observed_sha256 !== null && typeof l.observed_sha256 !== "string") return "observed_sha256 is neither absent, null, nor a string";
+  if (l.observed_status !== void 0 && !["present", "missing", "unreadable"].includes(l.observed_status)) {
+    return `observed_status is ${JSON.stringify(l.observed_status)}, not one of 'present' | 'missing' | 'unreadable'`;
+  }
+  return null;
+}
+function readLock(sterlingDir) {
+  const read = readStoreFileBounded(join2(sterlingDir, LOCK_FILE), LOCK_MAX_BYTES);
+  if (read.unreadable) return read.code === "ENOENT" ? { absent: true } : { malformed: read.unreadable };
+  const raw = read.text;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    return { malformed: `is not valid JSON (${e && e.message || e})`, raw };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { malformed: "is not a JSON object", raw };
+  const reason = invalidReason(parsed);
+  if (reason) return { malformed: reason, raw };
+  return { lock: parsed, raw };
+}
+function writeAtomicExclusive(dir, name, text) {
+  mkdirSync(dir, { recursive: true });
+  const tmp = join2(dir, `.tmp-${name}-${randomUUID()}`);
+  writeFileSync(tmp, text, { flag: "wx", mode: 384 });
+  renameSync(tmp, join2(dir, name));
+}
+function writeLock(sterlingDir, lock) {
+  writeAtomicExclusive(sterlingDir, LOCK_FILE, JSON.stringify(lock, null, 2) + "\n");
+}
+function writeMarker(sterlingDir, name, body) {
+  writeAtomicExclusive(join2(sterlingDir, "transient"), name, JSON.stringify(body, null, 2) + "\n");
 }
 
-// scripts/hooks/h19-bash-delivery.mjs
-var input = readStdin();
-var command = input.tool_input?.command;
-if (!command) allow();
-if (input.agent_id) allow();
-var store = openStore(input.cwd);
-if (!store) allow();
-try {
-  const gPath = guardPath(input.cwd, input.agent_id);
-  const guard = readGuard(gPath);
-  const entries = [];
-  const delivered = [];
-  for (const candidate of extractCommandPathCandidates(command)) {
-    if (entries.length >= BASH_POINTER_PATH_CAP) break;
-    const rel = repoRel(candidate, input.cwd);
-    if (!rel) continue;
-    if (rel === ".git" || rel.startsWith(".git/")) continue;
-    if (rel.startsWith(".sterling/")) continue;
-    if (guard.pointer_files.includes(rel)) continue;
-    let abs;
-    try {
-      abs = join4(input.cwd, rel);
-      if (!existsSync4(abs) || !statSync3(abs).isFile()) continue;
-    } catch {
-      continue;
-    }
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
-    const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-    if (!owners.length && !hazards.length) continue;
-    entries.push({ rel, owners, hazards });
-    delivered.push(rel);
-  }
-  if (!entries.length) allow();
-  const gapOwners = [];
-  const seenGapOwnerIds = /* @__PURE__ */ new Set();
-  for (const e of entries) {
-    for (const o of e.owners) {
-      if (!Array.isArray(o.known_gaps) || !o.known_gaps.length) continue;
-      if (seenGapOwnerIds.has(o.id)) continue;
-      seenGapOwnerIds.add(o.id);
-      if (isGapDelivered(guard, o)) continue;
-      gapOwners.push(o);
-    }
-  }
-  const gapsByOwner = budgetKnownGaps(gapOwners);
-  const block = bashPointerBlock(entries, { gapsByOwner });
-  enqueuePending(pendingPath(input.cwd), {
-    kind: "bash_pointers",
-    rel: delivered.join(" "),
-    payload: joinPointerBlock(block),
-    recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines }),
-    agent_id: "conductor"
+// scripts/hooks/h31-plan-lock.mjs
+function unresolved(sterlingDir, reason, rawPath) {
+  writeMarker(sterlingDir, "plan-lock-unresolved.json", {
+    reason: sanitizeForContext(reason, REASON_MAX),
+    planFilePath: sanitizeForContext(rawPath ?? "", PATH_MAX) || null,
+    at: (/* @__PURE__ */ new Date()).toISOString()
   });
-  guard.pointer_files.push(...delivered);
-  const deliveredGapOwners = gapOwners.filter((o) => (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
-  if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
-  writeGuard(gPath, guard);
+}
+try {
+  const input = readStdin();
+  const cwd = input?.cwd;
+  if (!cwd) allow();
+  if (!isSterlingProject(cwd)) allow();
+  const sterlingDir = sterlingDirOf(cwd);
+  if (input.hook_event_name !== "PostToolUse") allow();
+  if (input.tool_name !== "ExitPlanMode") allow();
+  const toolInput = input.tool_input;
+  const planText = typeof toolInput?.plan === "string" ? toolInput.plan : null;
+  const rawPath = typeof toolInput?.planFilePath === "string" ? toolInput.planFilePath : "";
+  if (!rawPath) {
+    unresolved(sterlingDir, "the ExitPlanMode approval carried no planFilePath, so the approved plan could not be bound to a file \u2014 any prior lock is preserved unchanged", rawPath);
+    allow();
+  }
+  if (!isAbsolutePlanPath(rawPath)) {
+    unresolved(sterlingDir, "the ExitPlanMode planFilePath was RELATIVE, not absolute, so it could not be bound (a relative plan path has no unambiguous meaning outside the session that produced it) \u2014 any prior lock is preserved unchanged", rawPath);
+    allow();
+  }
+  if (planText === null) {
+    unresolved(sterlingDir, "the ExitPlanMode approval carried no plan text, so the approved content could not be hashed \u2014 any prior lock is preserved unchanged", rawPath);
+    allow();
+  }
+  const hashed = hashPlanFile(rawPath);
+  if (hashed.unreadable) {
+    unresolved(sterlingDir, `the plan file at the approved planFilePath ${hashed.unreadable} \u2014 any prior lock is preserved unchanged`, rawPath);
+    allow();
+  }
+  const priorRead = readLock(sterlingDir);
+  const previous = priorRead.lock ?? null;
+  const git = (args) => {
+    try {
+      const r = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
+      return r.status === 0 ? (r.stdout ?? "").trim() || null : null;
+    } catch {
+      return null;
+    }
+  };
+  const approvedSha = sha256Of(Buffer.from(planText, "utf8"));
+  const lock = {
+    schema_version: 1,
+    plan_path: rawPath,
+    title: extractTitle(planText, basename(rawPath)),
+    approved_at: (/* @__PURE__ */ new Date()).toISOString(),
+    // TWO HASHES, TWO QUESTIONS. approved_sha256 hashes the APPROVED TEXT (what
+    // the user said yes to); file_sha256_at_approval hashes the FILE BYTES at
+    // that moment, and is the ONLY baseline a later live-status check may
+    // compare against — comparing the file against approved_sha256 would make a
+    // text/file mismatch read as permanently MODIFIED.
+    approved_sha256: approvedSha,
+    file_sha256_at_approval: hashed.sha256,
+    text_file_mismatch: approvedSha !== hashed.sha256,
+    approved_session_id: typeof input.session_id === "string" ? input.session_id : null,
+    approved_branch: git(["rev-parse", "--abbrev-ref", "HEAD"]),
+    approved_head: git(["rev-parse", "HEAD"]),
+    source: "exit_plan_mode"
+  };
+  try {
+    writeLock(sterlingDir, lock);
+  } catch (e) {
+    unresolved(
+      sterlingDir,
+      `the approved plan could not be WRITTEN to .sterling/plan-lock.json (${e && e.message || e}) \u2014 any prior lock is preserved unchanged and does NOT describe this approval`,
+      rawPath
+    );
+    allow();
+  }
+  if (previous) {
+    writeMarker(sterlingDir, "plan-lock-previous.json", {
+      title: sanitizeForContext(previous.title, TITLE_MAX) || "(untitled)",
+      plan_path: sanitizeForContext(previous.plan_path, PATH_MAX) || null,
+      approved_at: sanitizeForContext(previous.approved_at, 64) || null,
+      superseded_at: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  }
   allow();
 } catch (e) {
-  warnNonBlocking(`H19: bash pointer delivery failed: ${e && e.message || e}`);
+  try {
+    process.stderr.write(`H31: plan lock failed: ${e && e.message || e}
+`);
+  } catch {
+  }
+  allow();
 }

@@ -228,6 +228,7 @@ const MANIFEST = {
   'h27-dispatch-signatures.mjs': 'blocking',
   'h29-codex-consult-failure.mjs': 'advisory',
   'h30-bare-id-legibility.mjs': 'advisory',
+  'h31-plan-lock.mjs': 'advisory',
 };
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,18 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, openStore, loadConfig } from './lib/common.mjs';
+// Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
+// h19-dispatch-staging.mjs and scripts/plan-lock.mjs. Aliased on import so the
+// PLAN LOCK section's names read locally while the definitions stay shared.
+import {
+  PATH_MAX as PLAN_LOCK_PATH_MAX,
+  REASON_MAX as PLAN_LOCK_REASON_MAX,
+  TITLE_MAX as PLAN_LOCK_TITLE_MAX,
+  claimMarker as claimPlanLockMarker,
+  computeStatus as computePlanStatus,
+  readLock as readPlanLock,
+  sanitizeForContext as planLockClean,
+} from './lib/plan-lock.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
 import { normalizeLedgerEntry, isAuthenticatedDischarge, isExternalReviewEntry } from './lib/review-ledger-entry.mjs';
@@ -288,7 +300,7 @@ function safeReceiptField(v) {
   // Code-point filter rather than a control-character regex class: it states
   // the ranges as numbers (no escape sequence to get subtly wrong, and no
   // literal control character in the source), and it covers C0 — LF and CR
-  // included, which is the whole point, a newline is what forges a line — plus
+  // included, which is the whole point, a newline is what fabricates a line — plus
   // DEL and the C1 block some terminals still act on.
   const cleaned = [...v]
     .map((ch) => {
@@ -519,16 +531,40 @@ const receiptContext = receiptLines.length
     `  node ${remedyClone ?? '<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>'}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"\n` +
     `A LEGACY v1 receipt (no schema_version) has no entry_id — select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.`
   : '';
+// PLAN LOCK — RUN BEFORE EVERY EARLY RETURN, and this position is the whole
+// point (review F2). The section is the authority over what this session may
+// take on, and it CONSUMES three one-shot markers; running it after the
+// storeless bail below would mean a project with .sterling/config.json but no
+// sterling.db yet never gets the section AND never consumes its markers, so a
+// stale unresolved/released/previous disclosure would sit there forever. Called
+// on every SessionStart source (startup, resume, clear, compact); the parsed
+// lock rides on to the ROTATION RESTORE block. Fail-open like every H1 read.
+let planLockContext = '';
+let planLock = null;
+let planLockMalformed = false;
+try {
+  const section = planLockSection({ cwd: input.cwd, source: input.source });
+  planLockContext = section.context;
+  planLock = section.lock;
+  planLockMalformed = section.malformed === true;
+} catch {
+  // fail-open — a broken plan lock costs its own section, never the rest of H1
+}
+
 const store = openStore(input.cwd);
 if (!store) {
   // The receipt report rides this early exit too: H22's ledger gate is
   // .sterling/config.json (not sterling.db), so a project with a config but no
   // initialized store CAN accumulate receipts — reporting them only on the
   // store-present path below would leave exactly those projects silent.
-  if (dispatchResidueLines.length || receiptContext) {
+  // The PLAN LOCK section rides this early exit too, leading as it does on the
+  // main path: a project can hold an approved plan before its store exists, and
+  // a section computed but never emitted would consume its one-shot markers
+  // silently — disclosing nothing while spending the disclosure.
+  if (planLockContext || dispatchResidueLines.length || receiptContext) {
     process.stdout.write(
       JSON.stringify({
-        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: dispatchResidueLines.join('\n\n') + receiptContext },
+        hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + receiptContext },
       })
     );
   }
@@ -734,6 +770,183 @@ try {
   // fail-open — the currency probe must never break or delay SessionStart beyond its timeouts
 }
 
+// PLAN LOCK (decision `plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry`).
+// ONE SELF-CONTAINED FUNCTION, deliberately: H1 is scheduled for a from-blank
+// registry rebuild, which lifts this unchanged. It takes only {cwd, source} and
+// touches nothing else in this file.
+//
+// WHY IT IS FIRST, AND WHY IT IS NOT A GATE: measured 2026-09-06 — after a
+// /clear the conductor re-entered through the rotation note and the board, never
+// re-read the approved plan, and dispatched three lanes that patched mechanisms
+// the plan had homed in from-blank rebuild slices. The plan is the only surface
+// carrying ORDER and the user's written rulings. This puts it back in front of
+// the conductor at every re-entry; whether the plan is FOLLOWED stays the
+// conductor's judgement, and nothing here denies anything.
+//
+// The lock is parsed ONCE, here, and the parsed snapshot is handed to the
+// ROTATION RESTORE block below, which never re-reads it.
+//
+// Every primitive it uses — the sanitiser, the validated lock read, the bounded
+// status computation, the marker claim — is imported from lib/plan-lock.mjs and
+// shared with H31, H19 and the CLI. The ROTATION RESTORE block renders a plan
+// path too (the note's own captured value) and passes it through the SAME
+// imported sanitiser: two sanitisers on one payload is how one ends up weaker.
+function planLockSection(ctx) {
+  const TITLE_MAX = PLAN_LOCK_TITLE_MAX;
+  const PATH_MAX = PLAN_LOCK_PATH_MAX;
+  const REASON_MAX = PLAN_LOCK_REASON_MAX;
+  const STALE_DAYS = 14;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  // Everything below reaches additionalContext and originates in an approved
+  // plan's own text, so it is control-stripped and bounded at the read too —
+  // H31 bounds at the write, this bounds a lock written by anything else.
+  const clean = planLockClean;
+
+  const sterlingDir = join(ctx.cwd, '.sterling');
+  const transientDir = join(sterlingDir, 'transient');
+  const blocks = [];
+
+  // ONE-SHOT MARKERS, on EVERY source. claimPlanLockMarker RENAMES the file out
+  // of its published name before reading it, so deletion-before-parse holds AND
+  // a marker rewritten mid-consume is not silently swallowed.
+  const MARKERS = [
+    {
+      file: 'plan-lock-unresolved.json',
+      render: (body) =>
+        `PLAN LOCK NOT BOUND (one-shot): an ExitPlanMode approval could not be bound to a plan file — ${clean(body?.reason, REASON_MAX) || 'no reason recorded'}. ` +
+        `Any earlier lock was preserved unchanged. Re-bind by hand with plan-lock.mjs --plan <absolute path> if this objective still has an approved plan.`,
+    },
+    {
+      file: 'plan-lock-released.json',
+      render: (body) =>
+        `PLAN LOCK RELEASED (one-shot): the plan lock was released — ${clean(body?.reason, REASON_MAX) || 'no reason recorded'}. ` +
+        `No plan governs this objective's scope and ordering until a new plan is approved.`,
+    },
+    {
+      file: 'plan-lock-previous.json',
+      render: (body) =>
+        `PLAN LOCK SUPERSEDED (one-shot): the previous plan was "${clean(body?.title, TITLE_MAX) || 'untitled'}" (${clean(body?.plan_path, PATH_MAX) || 'no path recorded'}). ` +
+        `The lock above replaced it — work planned under the old plan is no longer governed by it.`,
+    },
+  ];
+  const markerLines = [];
+  for (const marker of MARKERS) {
+    let raw = null;
+    try {
+      raw = claimPlanLockMarker(join(transientDir, marker.file));
+    } catch {
+      raw = null; // fail-open: a failed claim costs one disclosure, never this hook
+    }
+    if (raw === null) continue;
+    // Three claim outcomes: null (nothing there), a string (its text), or an
+    // {unreadable} sentinel for a marker that was consumed but could not be
+    // read (a FIFO or oversize file planted at its path). The last two both
+    // render the body-less disclosure — the marker is spent either way, and
+    // saying nothing about a consumed marker is the one thing that must not
+    // happen.
+    let body = null;
+    if (typeof raw === 'string') {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        body = null;
+      }
+    }
+    markerLines.push(marker.render(body && typeof body === 'object' ? body : null));
+  }
+
+  // THE LOCK ITSELF, read through the shared VALIDATING reader: a record that
+  // is JSON but not a lock is MALFORMED, never half-trusted. MALFORMED is
+  // reserved for the lock RECORD (never for the plan file, whose four states
+  // are below) and suppresses no other section.
+  let read = { absent: true };
+  try {
+    read = readPlanLock(sterlingDir);
+  } catch (e) {
+    read = { malformed: `could not be read (${(e && e.message) || e})` };
+  }
+  const lock = read.lock ?? null;
+  const malformed = Boolean(read.malformed);
+
+  if (malformed) {
+    blocks.push(
+      `PLAN LOCK MALFORMED: .sterling/plan-lock.json exists but ${clean(read.malformed, REASON_MAX)}, so it is not a usable lock record. ` +
+        `Inspect it with \`plan-lock.mjs --show\`, or clear it with \`plan-lock.mjs --release --reason "<why>"\`. ` +
+        `Nothing else in this session start is affected.`
+    );
+  } else if (lock) {
+    // RENDERED copy: sanitised and bounded. The lock's own plan_path stays raw,
+    // and it is the raw one computeStatus reads from disk.
+    const planPath = clean(lock.plan_path, PATH_MAX);
+    // FOUR STATES for the plan FILE, compared against file_sha256_at_approval —
+    // NEVER approved_sha256, or a lock whose approved text legitimately differed
+    // from the file at approval would read as permanently MODIFIED. A non-regular
+    // file, an oversize one, or one this process cannot read is UNREADABLE.
+    // WHY A PLANTED FIFO CANNOT STALL SESSIONSTART (the mechanism is the OPEN,
+    // not a stat): computePlanStatus opens the recorded path ONCE with
+    // O_RDONLY|O_NOFOLLOW|O_NONBLOCK, so a direct FIFO returns immediately
+    // instead of blocking inside the open, and fstat on that descriptor then
+    // rejects it as non-regular. On Windows neither flag exists — accepted,
+    // because a Win32 named pipe is a \\.\pipe\ object openSync does not reach
+    // through these paths; the fstat classification still applies there.
+    let status = 'MISSING';
+    try {
+      const live = computePlanStatus(lock);
+      status = live.status === 'MODIFIED' ? 'MODIFIED since approval' : live.status;
+    } catch {
+      status = 'UNREADABLE';
+    }
+    let branchNow = 'unknown';
+    try {
+      const r = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: ctx.cwd, encoding: 'utf8', timeout: 5_000 });
+      const current = r.status === 0 ? (r.stdout ?? '').trim() : '';
+      const approved = clean(lock.approved_branch, 120);
+      if (current && approved) branchNow = current === approved ? 'same' : `DIFFERENT (now ${current}, approved on ${approved})`;
+    } catch {
+      branchNow = 'unknown';
+    }
+    const source = lock.source === 'manual' ? 'manual' : 'exit_plan_mode';
+    blocks.push(
+      `PLAN LOCK: ${clean(lock.title, TITLE_MAX) || '(untitled plan)'} — ${planPath || '(no path recorded)'} ` +
+        `(approved ${clean(lock.approved_at, 40).slice(0, 10) || 'unknown date'} on ${clean(lock.approved_branch, 120) || 'no branch recorded'}, ${source}) ` +
+        `· plan file ${status} · branch now ${branchNow}`
+    );
+    // THE AUTHORITY BOUNDARY, with its own justification attached: a ruling
+    // delivered without its reason gets re-litigated at the delivery surface.
+    blocks.push(
+      `THE APPROVED PLAN GOVERNS THIS OBJECTIVE'S SCOPE, ORDERING AND SLICES; STANDING STORE DECISIONS STILL GOVERN MECHANISMS ` +
+        `UNLESS THE PLAN RECORDS A LATER USER RULING; THE BOARD IS INVENTORY; READ THE PLAN BEFORE THE FIRST DISPATCH. ` +
+        `(The plan is the only surface carrying ORDER and the user's written rulings — the board holds inventory, the store holds design.)`
+    );
+    if (source === 'manual') {
+      blocks.push(`This lock was written by hand (plan-lock.mjs --plan) — approval provenance is the operator's word, not an ExitPlanMode approval.`);
+    }
+    if (lock.text_file_mismatch === true) {
+      blocks.push(
+        `At approval the approved text and the file on disk already differed (text_file_mismatch) — the live status above is judged against the FILE's bytes at that moment, which is the only honest baseline.`
+      );
+    }
+    if (status === 'MODIFIED since approval') {
+      blocks.push(
+        `The plan file has changed since it was approved. Approval provenance is never re-stamped: record the change with plan-lock.mjs --observe, or have the user approve a new plan.`
+      );
+    }
+    const ageMs = Date.now() - Date.parse(clean(lock.approved_at, 40));
+    if (Number.isFinite(ageMs) && ageMs > STALE_DAYS * DAY_MS) {
+      blocks.push(
+        `STALE: approved ~${Math.round(ageMs / DAY_MS)} days ago. Staleness is a DISCLOSURE, never a clear — only a later approval or plan-lock.mjs --release clears a lock.`
+      );
+    }
+  }
+
+  blocks.push(...markerLines);
+  // `malformed` rides the snapshot: a lock that EXISTS but cannot be parsed is
+  // not the same fact as no lock at all, and a consumer told only `lock: null`
+  // would report "no plan lock is live" for a lock sitting right there.
+  return { context: blocks.length ? blocks.join('\n') + '\n\n' : '', lock: malformed ? null : lock, malformed };
+}
+
 // ROTATION RESTORE (context-rotation slice 3): a rotation note written by
 // scripts/rotation-note.mjs before a /clear is injected into the FRESH session
 // and CONSUMED by that injection — source=clear ONLY (startup/resume have their
@@ -743,6 +956,26 @@ try {
 // refusals: a moved HEAD or an old note still injects, loudly qualified — the
 // store/board stay the authorities; the note is only the non-reconstructable
 // residue. Fail-open like every H1 read.
+// Per-field render bounds for the note: prose fields carry the substance the
+// note exists for, path/sha-shaped ones can never legitimately be longer than a
+// path. Every one of them is rendered through planLockClean (the shared
+// sanitizer) below — see the note comment in the block.
+const NOTE_PROSE_MAX = 2000;
+// Enumeration bounds for the note's live_dispatches block. Per-element
+// sanitisation bounds each string; these bound the ARRAY, which is the other
+// half of "a note cannot dominate the injection".
+const LIVE_DISPATCH_MAX = 20;
+const LIVE_TERRITORY_MAX = 40;
+const LIVE_TERRITORY_LINE_MAX = PLAN_LOCK_PATH_MAX * 4;
+const NOTE_FIELD_MAX = {
+  objective: NOTE_PROSE_MAX,
+  next_slice: NOTE_PROSE_MAX,
+  risks: NOTE_PROSE_MAX,
+  pointers: NOTE_PROSE_MAX,
+  branch: PLAN_LOCK_PATH_MAX,
+  head_sha: PLAN_LOCK_PATH_MAX,
+  at: PLAN_LOCK_PATH_MAX,
+};
 let rotationContext = '';
 try {
   if (input.source === 'clear') {
@@ -760,7 +993,7 @@ try {
       })();
       const cautions = [];
       if (note.head_sha && head && head !== note.head_sha) {
-        cautions.push(`HEAD has MOVED since the note (${String(note.head_sha).slice(0, 8)} → ${head.slice(0, 8)}) — re-verify repository state before acting on it`);
+        cautions.push(`HEAD has MOVED since the note (${planLockClean(String(note.head_sha), PLAN_LOCK_PATH_MAX).slice(0, 8)} → ${head.slice(0, 8)}) — re-verify repository state before acting on it`);
       }
       // COMMITS-AHEAD DRIFT (N15, docs/feedback/sterling-plugin-*2026-08-24*):
       // the note's commits_ahead is a number the writer computed, not prose —
@@ -775,6 +1008,13 @@ try {
       // presented as though it had been confirmed — and, just as important,
       // never asserted as DRIFT either, since a failed recount is not
       // evidence the number is wrong.
+      // THE NOTE IS AN ON-DISK FILE WRITTEN FROM A PREVIOUS SESSION'S CLI
+      // ARGUMENTS, so every field of it that reaches additionalContext is
+      // control-stripped and bounded by the SAME sanitizer the PLAN LOCK
+      // section uses — prose fields generously (they are the point of the
+      // note), path- and sha-shaped ones at the path bound. Only plan_path was
+      // covered before; a control character in `objective` could fabricate a line.
+      const noteBaseBranch = planLockClean(note.base_branch, PLAN_LOCK_PATH_MAX);
       let commitsAheadUnverified = false;
       if (typeof note.commits_ahead === 'number') {
         if (!note.base_branch) {
@@ -785,7 +1025,7 @@ try {
             const actual = countR.status === 0 ? Number((countR.stdout ?? '').trim()) : null;
             if (Number.isFinite(actual)) {
               if (actual !== note.commits_ahead) {
-                cautions.push(`commits_ahead drift — note says ${note.commits_ahead}, actual is ${actual} (vs ${note.base_branch})`);
+                cautions.push(`commits_ahead drift — note says ${note.commits_ahead}, actual is ${actual} (vs ${noteBaseBranch || 'unknown base'})`);
               }
             } else {
               commitsAheadUnverified = true;
@@ -799,12 +1039,46 @@ try {
       if (Number.isFinite(ageMs) && ageMs > 60 * 60 * 1000) {
         cautions.push(`the note is ~${Math.round(ageMs / 3_600_000)}h old`);
       }
-      const fields = ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
-        .filter((k) => note[k])
-        .map((k) => `- ${k}: ${note[k]}`)
+      // PLAN DRIFT (decision plan-lock-...): note.plan_path is a SNAPSHOT taken
+      // at write time, and a new plan can be approved between the note and the
+      // /clear that consumes it. Disclose the divergence — never silently
+      // substitute either value — using the lock this hook already parsed once.
+      // Both paths reach additionalContext, so both go through the SAME
+      // sanitizer the PLAN LOCK section uses — the note is an on-disk file a
+      // previous session wrote, not a trusted in-memory value.
+      // COMPARE THE RAW STRINGS, DISPLAY THE SANITIZED ONES. Sanitizing before
+      // comparing would make two genuinely different paths compare EQUAL once
+      // their differences are stripped or truncated away — the mismatch this
+      // exists to disclose would then be silently suppressed. Presence is
+      // judged on the raw value too, so a path made entirely of stripped
+      // characters is still a path the note names.
+      const notePlanRaw = typeof note.plan_path === 'string' && note.plan_path ? note.plan_path : null;
+      const livePlanRaw = typeof planLock?.plan_path === 'string' && planLock.plan_path ? planLock.plan_path : null;
+      const notePlan = notePlanRaw ? planLockClean(notePlanRaw, PLAN_LOCK_PATH_MAX) : null;
+      const livePlan = livePlanRaw ? planLockClean(livePlanRaw, PLAN_LOCK_PATH_MAX) : null;
+      // THREE ARMS, and the third is the one a two-arm version gets wrong: a
+      // MALFORMED lock is not an absent one, and saying "no plan lock is live"
+      // for a lock sitting on disk would send the reader looking for the wrong
+      // repair.
+      if (notePlanRaw && planLockMalformed) {
+        cautions.push(`the note names a plan (${notePlan}) but the live plan lock is MALFORMED and could not be compared against it — inspect it with \`plan-lock.mjs --show\``);
+      } else if (notePlanRaw && livePlanRaw && notePlanRaw !== livePlanRaw) {
+        cautions.push(`the note's plan_path DIFFERS from the current plan lock (note: ${notePlan}; lock now: ${livePlan}) — a new plan was approved after the note was written, and the PLAN LOCK section above is the authority`);
+      } else if (notePlanRaw && !livePlanRaw) {
+        cautions.push(`the note names a plan (${notePlan}) but no plan lock is live now — it was released, or .sterling/ was recreated`);
+      }
+      // The plan leads the note's fields: it names the AUTHORITY over the next
+      // slice, where every other field describes the residue.
+      const planField = notePlanRaw ? [`- plan: ${notePlan}`] : [];
+      const fields = planField
+        .concat(
+          ['objective', 'next_slice', 'risks', 'pointers', 'branch', 'head_sha', 'at']
+            .filter((k) => note[k])
+            .map((k) => `- ${k}: ${planLockClean(String(note[k]), NOTE_FIELD_MAX[k])}`)
+        )
         .concat(
           typeof note.commits_ahead === 'number'
-            ? [`- commits_ahead: ${note.commits_ahead} (vs ${note.base_branch ?? 'unknown base'})${commitsAheadUnverified ? ' (unverified — base unavailable)' : ''}`]
+            ? [`- commits_ahead: ${note.commits_ahead} (vs ${noteBaseBranch || 'unknown base'})${commitsAheadUnverified ? ' (unverified — base unavailable)' : ''}`]
             : []
         )
         .join('\n');
@@ -823,13 +1097,33 @@ try {
       const liveDispatches = note.live_dispatches;
       let liveLine = '';
       if (Array.isArray(liveDispatches) && liveDispatches.length) {
+        // BOUNDED RENDER. Per-element sanitisation bounds each STRING but not
+        // the ARRAY, so a note carrying thousands of dispatches (or one
+        // dispatch with thousands of territory entries) could still dominate
+        // the whole injection. The COUNT stays exact and unclipped — it is the
+        // number the conductor acts on; only the enumeration is clipped, and
+        // every clip says how much it dropped rather than trailing off.
         const rendered = liveDispatches
+          .slice(0, LIVE_DISPATCH_MAX)
           .map((d) => {
-            const territory = Array.isArray(d?.territory) && d.territory.length ? d.territory.join(', ') : 'no declared territory';
-            return `- ${d?.agent_type ?? 'agent'} (${d?.agent_id ?? 'unknown id'}) — ${territory}`;
+            // Same treatment as the note's scalar fields above — these strings
+            // come from the same on-disk file and reach the same payload.
+            const entries = Array.isArray(d?.territory) ? d.territory : [];
+            let territory = 'no declared territory';
+            if (entries.length) {
+              const shown = entries.slice(0, LIVE_TERRITORY_MAX).map((t) => planLockClean(String(t), PLAN_LOCK_PATH_MAX));
+              const dropped = entries.length - shown.length;
+              let joined = shown.join(', ');
+              if (joined.length > LIVE_TERRITORY_LINE_MAX) joined = `${joined.slice(0, LIVE_TERRITORY_LINE_MAX)}…`;
+              territory = dropped > 0 ? `${joined}… (+${dropped} more)` : joined;
+            }
+            return `- ${planLockClean(String(d?.agent_type ?? 'agent'), PLAN_LOCK_PATH_MAX) || 'agent'} (${planLockClean(String(d?.agent_id ?? 'unknown id'), PLAN_LOCK_PATH_MAX) || 'unknown id'}) — ${territory}`;
           })
           .join('\n');
-        liveLine = `\n${liveDispatches.length} dispatch(es) were live at rotation — check ListAgents before re-dispatching:\n${rendered}`;
+        const omitted = liveDispatches.length - Math.min(liveDispatches.length, LIVE_DISPATCH_MAX);
+        liveLine =
+          `\n${liveDispatches.length} dispatch(es) were live at rotation — check ListAgents before re-dispatching:\n${rendered}` +
+          (omitted > 0 ? `\n… (+${omitted} more)` : '');
       } else if (liveDispatches === null) {
         liveLine =
           `\nLIVE DISPATCHES: UNKNOWN — the dispatch register existed but could not be read when the note was written, so whether any subagent was still running cannot be stated here: check ListAgents before re-dispatching.`;
@@ -1645,7 +1939,9 @@ const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurre
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
+  // session may take on, so it is read before the conventions, not after them.
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 process.stdout.write(JSON.stringify(output));
 allow();
