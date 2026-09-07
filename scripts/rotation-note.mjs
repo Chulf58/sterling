@@ -9,10 +9,10 @@
 // Lifecycle (P4): single slot at .sterling/transient/rotation-note.json — a rewrite
 // supersedes; H1 CONSUMES it on SessionStart source=clear (single-shot injection).
 // Anchored to git HEAD + branch at write time so the restore can disclose drift.
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname } from 'node:path';
-import { liveDispatchesOrUnknown } from './lib/dispatch-register.mjs';
+import { dirname, join } from 'node:path';
+import { classifyRegister } from './lib/dispatch-register.mjs';
 import { readLock } from './hooks/lib/plan-lock.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
 import { resolveStoreWritePath } from './lib/store-path.mjs';
@@ -122,25 +122,46 @@ const baseBranch = resolveBaseBranch();
 const commitsAheadRaw = baseBranch ? git(['rev-list', '--count', `${baseBranch}..HEAD`]) : null;
 const commitsAhead = commitsAheadRaw !== null && /^\d+$/.test(commitsAheadRaw) ? Number(commitsAheadRaw) : null;
 
-// LIVE DISPATCHES (board efbddf09): a subagent dispatched before the /clear
-// keeps running across it — the register is the only mechanical record of that,
-// and the note is the only thing the fresh session reads. Without it a coder
-// still writing files is invisible and a second one gets dispatched at the same
-// slice (measured 2026-09-04, ~330k subagent tokens wasted). "Live" is the H10
-// TTL, read through the ONE shared helper so this can never drift from what H10
-// and H26 call live; a session-less CLI can only apply the TTL half of H10's
-// (session_id AND TTL) test. Two negatives stay distinct: no register at all is
-// CONFIRMED-ZERO ([]), an unreadable one is UNKNOWN (null) — a silent [] there
-// would be a false all-clear, the exact failure this closes.
-const registerRead = liveDispatchesOrUnknown(cwd);
-const liveDispatches =
-  registerRead.status === 'ok'
-    ? registerRead.entries.map((e) => ({
-        agent_type: e?.agent_type ?? null,
-        agent_id: e?.agent_id ?? null,
-        territory: Array.isArray(e?.files) ? e.files : [],
-      }))
-    : null;
+// LIVE DISPATCHES (board efbddf09; R1 tri-state re-cut): a subagent dispatched
+// before the /clear keeps running across it — the register is the only
+// mechanical record of that, and the note is the only thing the fresh session
+// reads. Without it a coder still writing files is invisible and a second one
+// gets dispatched at the same slice (measured 2026-09-04, ~330k subagent
+// tokens wasted). Liveness is now TRI-STATE (decision review-receipt-rebuild-
+// invariant-three-owner-modules-tri-state-liveness-receipt-bound-
+// supersession): presumed-active entries are LIVE, an out-of-lease entry is
+// UNCERTAIN (carried, never silently dropped, never counted as live),
+// inactive-confirmed (Stop already marked it ended) is ignored entirely. This
+// CLI has NO stdin session_id to join on — it calls the ONE owner classifier
+// with ctx.sessionId: null, the NO-SESSION-JOIN mode (lease half only; an
+// entry is never 'other-session' in this mode), exactly the reading this
+// file has always documented ("H10 fires session_id AND TTL; a session-less
+// CLI can only apply the TTL half"). Two negatives stay distinct: a
+// readable-and-empty register is CONFIRMED-ZERO ([]), an unreadable/absent
+// one is UNKNOWN (null) — a silent [] there would be a false all-clear, the
+// exact failure this closes.
+function readStaleMinutes() {
+  try {
+    const cfg = JSON.parse(readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8'));
+    const v = cfg?.dispatch_register?.stale_minutes;
+    return typeof v === 'number' && v > 0 ? v : 60;
+  } catch {
+    return 60;
+  }
+}
+
+const classified = classifyRegister(cwd, { now: Date.now(), sessionId: null, staleMinutes: readStaleMinutes() });
+let liveDispatches = null;
+let uncertainDispatches = null;
+if (classified.availability === 'ok') {
+  const toEntry = (row) => ({
+    agent_type: row.entry?.agent_type ?? null,
+    agent_id: row.entry?.agent_id ?? null,
+    territory: Array.isArray(row.entry?.files) ? row.entry.files : [],
+  });
+  liveDispatches = classified.entries.filter((r) => r.status === 'presumed-active').map(toEntry);
+  uncertainDispatches = classified.entries.filter((r) => r.status === 'unknown').map((r) => ({ ...toEntry(r), reason: r.reason ?? null }));
+}
 
 // PLAN PATH (decision `plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry`):
 // EXACTLY ONE new field, and no flag — the note copies the live lock's
@@ -174,6 +195,7 @@ const note = {
   base_branch: baseBranch,
   commits_ahead: commitsAhead,
   live_dispatches: liveDispatches,
+  uncertain_dispatches: uncertainDispatches,
   reason,
   at: new Date().toISOString(),
 };
@@ -202,6 +224,9 @@ process.stdout.write(
       : liveDispatches.length
         ? `live_dispatches: ${liveDispatches.length} (${liveDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — still running across the /clear\n`
         : '') +
+    (uncertainDispatches && uncertainDispatches.length
+      ? `uncertain_dispatches: ${uncertainDispatches.length} (${uncertainDispatches.map((d) => `${d.agent_type ?? 'agent'}:${d.agent_id ?? '?'}`).join(', ')}) — lease expired, not confirmed dead; settle with ListAgents\n`
+      : '') +
     (note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +
         `  1. exit and relaunch the Claude Code CLI now\n` +

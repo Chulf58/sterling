@@ -1,57 +1,80 @@
-// H22 REVIEW-RECEIPT LEDGER PROMOTION (part A of decision
-// 12a26ca6-a301-466d-a45c-5e1eeff36694, slug review-receipt-ledger; board
-// 7814acc3-bb22-4cc5-abd7-789d6396743f) — SPEC ONLY, red-first.
+// R1 GROUP B — H22 SubagentStop: promoteAtStop -> a ReceiptV2 appended to the
+// durable ledger at .sterling/review-ledger.json (store root, never wiped).
 //
-// Spec under test (given by the launching agent, verified against the
-// decision record above — not inferred from any implementation):
+// Contract source: decision `review-receipt-rebuild-invariant-three-owner-
+// modules-tri-state-liveness-receipt-bound-supersession` + contract sheet
+// §1.2 / §2.1, amendments A1 (Stop MARKS ended, never deletes), A4 (every
+// round has its own Start and its own receipt; a Stop with no UNENDED register
+// entry produces NO receipt), A5 (one owner-mkdir lock, no age takeover, no
+// force) and A6 (every advisory line carries a [code] token).
 //
-//   At SubagentStop, when the departing register entry's agent_type starts
-//   with the literal prefix 'reviewer-' (roster: reviewer-correctness,
-//   reviewer-security, reviewer-skeptic, reviewer-performance), the entry is
-//   PROMOTED — appended as exactly {agent_type, files, at} (three fields,
-//   NOT the register's agent_id/session_id) to a durable ledger at
-//   .sterling/review-ledger.json (STORE ROOT — deliberately NOT under
-//   .sterling/transient/, so H1's session wipe of the transient tree never
-//   touches it) — and THEN removed from the register exactly as today.
-//   Non-reviewer entries keep the delete-only path: the register entry is
-//   removed, and the ledger file is left completely alone — never created
-//   if it did not already exist, never appended to if it did. Ledger reads
-//   tolerate a malformed/missing ledger (treated as empty, never a crash;
-//   the hook must not exit 2 for this).
+// WHAT SURVIVES HERE, and why: the promotion boundary (who is promoted, what
+// is appended, what is left alone), the accumulate/append-never-clobber
+// contract, the byte-identical guarantees on every refusal path, the ledger
+// lock behaviour, and the observed-evidence field split. Every refusal is
+// pinned by its CODE token and by the bytes on disk, never by a sentence.
 //
-// scripts/hooks/h22-dispatch-register.mjs ALREADY EXISTS (it implements the
-// register append/delete/prune behavior covered by
-// scripts/tests/h22-dispatch-register.test.mjs) but, as of this writing, has
-// NO notion of a review ledger at all — every promotion-shaped assertion
-// below is expected to fail red against today's delete-only SubagentStop
-// path: the ledger file this spec expects is never created/appended, so
-// existsSync(ledgerPath) or its parsed contents come back false/empty where
-// a promoted entry is expected. Confirmed by reading (not modifying)
-// scripts/tests/h22-dispatch-register.test.mjs, whose own header states the
-// register's SubagentStop is "removes the entry ... ; no match is a clean
-// no-op" — no ledger promotion is described there.
+// RETIRED (the rebuild removes the behaviour; named so the review sees what
+// was dropped rather than losing it silently):
+//   RETIRED: 'a malformed (corrupt JSON) pre-existing ledger is tolerated —
+//     treated as empty, promotion still succeeds' — INVERTED by the rebuild:
+//     a corrupt ledger is availability 'corrupt' and H22 does NOT write. The
+//     old pin licensed discarding durable evidence to make room for a receipt.
+//   RETIRED: RESUME-1a / RESUME-1a-EARLIER / RESUME-1a-NO-TIMESTAMP /
+//     RESUME-1b / RESUME-1c / ZERO-READ-ROUND / WRONG-TERRITORY REFRESH /
+//     TERRITORY GUARD (undeclared path) / TERRITORY GUARD (omitted path) /
+//     GATE 3b (SESSION-MISMATCH) / GATE 3b (CONTROL absent-null) —
+//     the whole refresh-in-place mechanism (rebaseline_refused, round-scoped
+//     read sets, refresh-time identity gates) is gone: A4 measured that a
+//     resumed reviewer FIRES SubagentStart again, so round n+1 has its own
+//     register entry and mints its own receipt. Nothing refreshes anything.
+//   RETIRED: RESUME_COUNT (absent -> 1) / (2 -> 3) / (UNUSABLE arms) —
+//     resume_count is GONE from the receipt shape (A4).
+//   RETIRED: RESUME-DISCHARGED / RESUME-LEGACY-V1 — both were fail-closed arms
+//     OF the refresh path; the surviving contract is stronger and is pinned by
+//     R1-B10 (a Stop with no unended register entry never touches ANY existing
+//     entry, whatever its status or schema).
+//   RETIRED: every `assert.deepEqual(readRegister(dir), [])` — A1: the entry is
+//     MARKED ended at Stop, never deleted.
+//   RETIRED: the two-candidate lock-directory planting ('review-ledger.json.lock'
+//     OR 'review-ledger.lock') — the sheet names the dir, so the pin names it too.
+//   RETIRED: 'NEVER written unlocked' / 'REFUSED TO REBASELINE' /
+//     "does not bind the receipt's DECLARED territory" prose matches — refusals
+//     are asserted by [code] token and by the bytes on disk.
 //
-// Harness idiom (spawnSync + JSON stdin + temp project dir) is adapted from
-// scripts/tests/h22-dispatch-register.test.mjs's runHook/h22Input/
-// registerPath/writeRegisterRaw helpers WITHOUT importing or modifying that
-// file (mirrors the standalone-file convention used by
-// scripts/tests/merge-review-receipts-hardening.test.mjs relative to
-// scripts/tests/merge-review-receipts.test.mjs). This file seeds the
-// register directly via writeRegisterRaw rather than re-deriving the
-// transcript-extraction path (that extraction behavior is already covered
-// by scripts/tests/h22-dispatch-register.test.mjs and is out of scope here
-// — this file is scoped to the NEW ledger-promotion behavior only).
+// WHERE THE `attestation_rebaseline_refused` PIN WENT (A13 homes it in this
+// file; it is not here, deliberately). This file's three REFUSED TO REBASELINE
+// assertions (RESUME-1a-EARLIER, RESUME-1a-NO-TIMESTAMP, RESUME-1b) drove the
+// H22 HOOK and belonged to the Stop-side REFRESH rebaseline — the mechanism A4
+// deletes outright, since each round now has its own Start and its own
+// receipt, so there is no prior sha to decline to move. Converting them would
+// have re-frozen a mechanism the rebuild removes.
+// The CODE survives for a DIFFERENT mechanism: A11 defines
+// `attestation_rebaseline_refused` as "commit-reviewed's attestation-inspection
+// refusal, unchanged behaviour" — a spend-side refusal whose live pins are in
+// scripts/tests/attestation-disclosure-wiring.test.mjs (where the pin inventory
+// §3 also located the banner). Its trigger is nowhere stated in the sheet, so
+// authoring a fixture for it here would invent a mechanism rather than pin one.
+// CONDUCTOR: the code's pin belongs with the mechanism, in the commit-reviewed
+// group's territory — A13's homing of it to this file predates this file losing
+// the refresh path.
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { hostname, tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
+
+// A refusal/disclosure is asserted by its code token, never by its sentence.
+const token = (c) => new RegExp('\\[' + c + '\\]');
+// A6: every advisory line H22 emits carries SOME [snake_code] token. Pinned
+// generically where the sheet's closed CODES set does not yet name the code.
+const ANY_CODE = /\[[a-z][a-z0-9_]*\]/;
 
 let SterlingStore;
 before(async () => {
@@ -84,6 +107,7 @@ function runHook(input, cwd) {
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
+const output = (r) => `${r.stdout}\n${r.stderr}`;
 
 function h22Input(dir, over = {}) {
   return {
@@ -109,7 +133,8 @@ function writeRegisterRaw(dir, content) {
   writeFileSync(registerPath(dir), typeof content === 'string' ? content : JSON.stringify(content));
 }
 
-// Store-ROOT ledger — deliberately NOT under .sterling/transient/.
+// Store-ROOT ledger — deliberately NOT under .sterling/transient/, so H1's
+// SessionStart wipe of the transient tree never touches durable evidence.
 function ledgerPath(dir) {
   return join(dir, '.sterling', 'review-ledger.json');
 }
@@ -125,61 +150,86 @@ function readLedger(dir) {
 function writeLedgerRaw(dir, content) {
   writeFileSync(ledgerPath(dir), typeof content === 'string' ? content : JSON.stringify(content));
 }
+const ledgerLockDir = (dir) => join(dir, '.sterling', 'review-ledger.lock');
 
-const registerEntry = (agentId, agentType, files, at = new Date().toISOString()) => ({
+const registerEntry = (agentId, agentType, files, at = new Date().toISOString(), over = {}) => ({
   agent_id: agentId,
   agent_type: agentType,
   session_id: 's1',
   files,
   at,
+  ...over,
 });
+// A1: Stop MARKS the entry ended. A round that has already ended is not a
+// candidate for promotion (A4) — this is the shape a second Stop faces.
+const endedEntry = (agentId, agentType, files, at, endedAt = '2026-08-22T00:05:00.000Z') =>
+  registerEntry(agentId, agentType, files, at, { ended: { at: endedAt, event: 'subagent-stop' } });
+
+// §1.2 ReceiptV2, with A11's section ruling: `disposition` is PRESENT as null
+// on every non-discharged receipt; reservation/consumption are ABSENT unless
+// the status requires them.
+const RECEIPT_REQUIRED = ['content_evidence', 'disposition', 'entry_id', 'finished_at', 'identity', 'kind', 'reviewer', 'schema_version', 'started_at', 'status', 'territory'];
+const RECEIPT_OPTIONAL = ['observed_files', 'observed_reads', 'observed_source', 'observed_truncated', 'reservation', 'consumption'];
+
+function assertReceiptShape(entry) {
+  for (const key of RECEIPT_REQUIRED) {
+    assert.ok(key in entry, `a promoted receipt carries the required v2 key '${key}'`);
+  }
+  const allowed = new Set([...RECEIPT_REQUIRED, ...RECEIPT_OPTIONAL]);
+  const extra = Object.keys(entry).filter((k) => !allowed.has(k));
+  assert.deepEqual(extra, [], 'a promoted receipt carries no key outside the ReceiptV2 shape (resume_count and refresh residue are GONE — A4)');
+  assert.equal(entry.schema_version, 2);
+  assert.equal(entry.kind, 'roster_receipt');
+  assert.equal(entry.status, 'active', 'a freshly promoted receipt is active — reserved/consumed/discharged are lifecycle transitions, never a promotion output');
+  assert.equal(entry.disposition, null, 'A11: disposition is present as null until a discharge fills it');
+  assert.ok(!('reservation' in entry) && !('consumption' in entry), 'A11: the lifecycle sections are ABSENT until a status requires them');
+}
 
 // ===========================================================================
-// (1) A single reviewer-class SubagentStop promotes {agent_type, files, at}
-//     into the ledger and removes the register entry.
+// R1-B01 — the promotion boundary itself: a reviewer-class Stop appends a
+// ReceiptV2 and (A1) MARKS its register entry ended rather than deleting it.
+// SABOTAGE: delete the register entry at Stop instead of setting `ended` —
+// the ended assertions go red while every ledger assertion stays green, which
+// is exactly why the two halves are pinned separately (inactive-confirmed is a
+// real classifier output only if the entry survives).
 // ===========================================================================
 
-test('H22 ledger: SubagentStop for a reviewer-* entry PROMOTES it into .sterling/review-ledger.json as a v2 entry (schema_version/entry_id/kind/status/started_at/finished_at/reviewer/identity/territory/content_evidence/disposition, per decision 57984926) and removes the register entry', () => {
+test('R1-B01: a reviewer-* SubagentStop appends a ReceiptV2 to .sterling/review-ledger.json and MARKS the register entry ended (A1)', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [registerEntry('rev-1', 'reviewer-correctness', ['src/a.mjs', 'src/b.mjs'], '2026-08-22T00:00:00.000Z')]);
 
-    const r = runHook(h22Input(dir, { agent_id: 'rev-1', hook_event_name: 'SubagentStop' }), dir);
-    // EXPECTED FAILURE SHAPE (today): the hook has no ledger-promotion logic,
-    // so it exits 0 exactly as before but ledgerExists(dir) stays false —
-    // this assert.ok fires first.
+    const r = runHook(h22Input(dir, { agent_id: 'rev-1', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(ledgerExists(dir), 'a durable review ledger is created at .sterling/review-ledger.json (store root)');
 
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 1);
     const entry = ledger[0];
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): promotions now write the v2 entry envelope, not the flat six-key shape decision 0408b295 pinned.
-    // The flat concerns this pin originally guarded (agent_type/at/base_sha/branch/files/session_id) now live at
-    // their v2 homes (reviewer.agent_type, started_at, identity.{base_sha,branch,session_id}, territory.files) —
-    // same INTENT (no unexpected extra top-level junk on a promotion), pinned against the ruled contract.
-    assert.deepEqual(
-      Object.keys(entry).sort(),
-      ['content_evidence', 'disposition', 'entry_id', 'finished_at', 'identity', 'kind', 'reviewer', 'schema_version', 'started_at', 'status', 'territory'],
-      'decision 57984926: every new promotion is a v2 entry — exactly these eleven top-level keys, nothing extra'
-    );
+    assertReceiptShape(entry);
     assert.equal(entry.reviewer.agent_type, 'reviewer-correctness');
     assert.deepEqual(entry.territory.files, ['src/a.mjs', 'src/b.mjs']);
     assert.equal(entry.started_at, '2026-08-22T00:00:00.000Z');
+    assert.equal(entry.identity.agent_id, 'rev-1');
 
     const reg = readRegister(dir);
-    assert.deepEqual(reg, [], 'the promoted entry is also removed from the in-flight register, exactly as the pre-existing delete-only path did');
+    assert.equal(reg.length, 1, 'A1: the register entry is NOT deleted at Stop');
+    assert.equal(reg[0].agent_id, 'rev-1');
+    assert.equal(reg[0].ended?.event, 'subagent-stop', 'A1: Stop marks the entry ended with the terminal event that was actually observed');
+    assert.ok(reg[0].ended?.at && !Number.isNaN(Date.parse(reg[0].ended.at)), 'the terminal marker carries a parseable instant');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// (2) Multiple reviewer stops accumulate in the ledger (append, in order).
+// R1-B02 — two reviewer stops accumulate, in order; the second never clobbers
+// the first.
+// SABOTAGE: write the ledger as [receipt] instead of [...existing, receipt] —
+// the length assertion goes red.
 // ===========================================================================
 
-test('H22 ledger: two reviewer-* SubagentStop events accumulate two ledger entries in order', () => {
+test('R1-B02: two reviewer-* SubagentStop events accumulate two receipts in stop order', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [
@@ -187,86 +237,80 @@ test('H22 ledger: two reviewer-* SubagentStop events accumulate two ledger entri
       registerEntry('rev-2', 'reviewer-performance', ['src/b.mjs'], '2026-08-22T00:01:00.000Z'),
     ]);
 
-    let r = runHook(h22Input(dir, { agent_id: 'rev-1', hook_event_name: 'SubagentStop' }), dir);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-1', agent_type: 'reviewer-security' }), dir);
     assert.equal(r.code, 0, r.stderr);
-    r = runHook(h22Input(dir, { agent_id: 'rev-2', hook_event_name: 'SubagentStop' }), dir);
+    r = runHook(h22Input(dir, { agent_id: 'rev-2', agent_type: 'reviewer-performance' }), dir);
     assert.equal(r.code, 0, r.stderr);
 
-    // EXPECTED FAILURE SHAPE (today): readLedger throws (file never created)
-    // or, once a partial fix lands, comes back with fewer than 2 entries.
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 2, 'both reviewer stops accumulate — the second promotion never clobbers the first');
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): agent_type now lives at reviewer.agent_type on a v2-promoted entry.
-    assert.deepEqual(ledger.map((e) => e.reviewer.agent_type), ['reviewer-security', 'reviewer-performance'], 'append order matches stop order');
+    assert.deepEqual(
+      ledger.map((e) => e.reviewer.agent_type),
+      ['reviewer-security', 'reviewer-performance'],
+      'append order matches stop order'
+    );
+    assert.notEqual(ledger[0].entry_id, ledger[1].entry_id, 'two promotions mint two distinct entry_ids');
 
-    assert.deepEqual(readRegister(dir), [], 'both entries removed from the register');
+    const reg = readRegister(dir);
+    assert.deepEqual(
+      reg.map((e) => e.ended?.event).sort(),
+      ['subagent-stop', 'subagent-stop'],
+      'both register entries are marked ended (A1), neither removed'
+    );
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// (3) Non-reviewer entries keep the delete-only path: no ledger is ever
-//     created for them.
+// R1-B03/R1-B04 — the non-reviewer boundary. Promotion is gated on the
+// literal 'reviewer-' prefix, and a non-reviewer Stop must not so much as
+// touch the ledger file.
+// SABOTAGE: promote on `agent_type.startsWith('reviewer')` (no hyphen) — R1-B05
+// goes red alone. SABOTAGE: append on every Stop regardless of class — R1-B03
+// and R1-B04 both go red.
 // ===========================================================================
 
-test('H22 ledger: a non-reviewer SubagentStop (agent_type "coder") is delete-only — no ledger file is created at all', () => {
+test('R1-B03: a non-reviewer SubagentStop ("coder") creates no ledger at all, and still marks its register entry ended', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [registerEntry('c-1', 'coder', ['src/x.mjs'])]);
     assert.equal(ledgerExists(dir), false, 'precondition: no ledger exists yet');
 
-    const r = runHook(h22Input(dir, { agent_id: 'c-1', hook_event_name: 'SubagentStop' }), dir);
+    const r = runHook(h22Input(dir, { agent_id: 'c-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
 
-    // EXPECTED FAILURE SHAPE (today): this assertion already holds today
-    // (the current hook never creates a ledger for anyone) — it is a
-    // regression pin, not a red-today assertion, and must keep holding once
-    // the promotion path ships.
-    assert.equal(ledgerExists(dir), false, 'a non-reviewer promotion must never fabricate a ledger file');
-    assert.deepEqual(readRegister(dir), [], 'the register entry is still removed exactly as today');
+    assert.equal(ledgerExists(dir), false, 'a non-reviewer stop must never fabricate a ledger file');
+    const reg = readRegister(dir);
+    assert.equal(reg.length, 1, 'A1: still present');
+    assert.equal(reg[0].ended?.event, 'subagent-stop');
   } finally {
     cleanup();
   }
 });
 
-test('H22 ledger: a non-reviewer SubagentStop leaves a PRE-EXISTING ledger completely untouched (byte-identical)', () => {
+test('R1-B04: a non-reviewer SubagentStop leaves a PRE-EXISTING ledger byte-identical', () => {
   const { dir, cleanup } = makeProject();
   try {
-    const preExisting = [{ agent_type: 'reviewer-skeptic', files: ['src/prior.mjs'], at: '2026-08-21T00:00:00.000Z' }];
-    writeLedgerRaw(dir, preExisting);
+    writeLedgerRaw(dir, [{ agent_type: 'reviewer-skeptic', files: ['src/prior.mjs'], at: '2026-08-21T00:00:00.000Z' }]);
     const before = readLedgerRaw(dir);
 
     writeRegisterRaw(dir, [registerEntry('c-2', 'coder', ['src/y.mjs'])]);
-    const r = runHook(h22Input(dir, { agent_id: 'c-2', hook_event_name: 'SubagentStop' }), dir);
+    const r = runHook(h22Input(dir, { agent_id: 'c-2', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
 
-    // EXPECTED FAILURE SHAPE: today's hook does not touch the ledger for any
-    // agent_type, so this already holds — a regression pin against an
-    // over-eager implementation that appends/rewrites on EVERY stop
-    // regardless of agent_type.
     assert.equal(readLedgerRaw(dir), before, 'byte-identical — a non-reviewer stop must not rewrite an existing ledger at all');
-    assert.deepEqual(readRegister(dir), [], 'the register entry is still removed');
   } finally {
     cleanup();
   }
 });
 
-// ===========================================================================
-// (4) Prefix boundary: "reviewer" without the trailing hyphen is NOT
-//     promoted — the spec's prefix is the literal string 'reviewer-'.
-// ===========================================================================
-
-test('H22 ledger: agent_type "reviewer" (no trailing hyphen) does NOT match the reviewer-* prefix — delete-only, no ledger created', () => {
+test('R1-B05: agent_type "reviewer" (no trailing hyphen) is not reviewer-class — no ledger created', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [registerEntry('r-bare', 'reviewer', ['src/z.mjs'])]);
-    const r = runHook(h22Input(dir, { agent_id: 'r-bare', hook_event_name: 'SubagentStop' }), dir);
+    const r = runHook(h22Input(dir, { agent_id: 'r-bare', agent_type: 'reviewer' }), dir);
     assert.equal(r.code, 0, r.stderr);
-    // EXPECTED FAILURE SHAPE: only fails red if a naive implementation uses a
-    // loose "includes/startsWith('reviewer')" match instead of the exact
-    // 'reviewer-' prefix; asserted here as a precise boundary pin regardless.
     assert.equal(ledgerExists(dir), false, "'reviewer' alone is not a member of the reviewer-* roster prefix");
   } finally {
     cleanup();
@@ -274,28 +318,27 @@ test('H22 ledger: agent_type "reviewer" (no trailing hyphen) does NOT match the 
 });
 
 // ===========================================================================
-// (5) Ledger append never clobbers what was already there.
+// R1-B06 — appending beside pre-existing entries, including a legacy v1 one:
+// reading a v1 entry NEVER rewrites it (adaptLegacyEntry is a read).
+// SABOTAGE: normalize every entry to v2 while writing the array back — the
+// byte-for-byte assertion on the v1 entry goes red while the new receipt's own
+// shape assertions stay green.
 // ===========================================================================
 
-test('H22 ledger: promoting a new reviewer entry APPENDS to a pre-populated ledger — the prior entry survives untouched', () => {
+test('R1-B06: a promotion APPENDS beside a pre-existing legacy v1 entry, which survives byte-for-byte (never migrated by being read)', () => {
   const { dir, cleanup } = makeProject();
   try {
     const priorEntry = { agent_type: 'reviewer-correctness', files: ['src/prior.mjs'], at: '2026-08-20T00:00:00.000Z' };
     writeLedgerRaw(dir, [priorEntry]);
 
     writeRegisterRaw(dir, [registerEntry('rev-new', 'reviewer-security', ['src/new.mjs'], '2026-08-22T00:00:00.000Z')]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-new', hook_event_name: 'SubagentStop' }), dir);
+    const r = runHook(h22Input(dir, { agent_id: 'rev-new', agent_type: 'reviewer-security' }), dir);
     assert.equal(r.code, 0, r.stderr);
 
-    // EXPECTED FAILURE SHAPE: today's hook has no ledger at all, so
-    // readLedger(dir) either throws (no file) — the promotion path does not
-    // exist yet to have produced one.
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 2, 'append, not overwrite');
-    assert.deepEqual(ledger[0], priorEntry, 'the pre-existing entry is byte-for-byte preserved');
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): ledger[1] is the NEW promotion, so it is v2-shaped (agent_type/files live under
-    // reviewer.agent_type/territory.files) — ledger[0] above is the PRE-EXISTING v1 fixture and stays flat, untouched.
+    assert.deepEqual(ledger[0], priorEntry, 'the pre-existing v1 entry is byte-for-byte preserved');
+    assert.equal(JSON.stringify(ledger[0]), JSON.stringify(priorEntry), 'no key-order drift from an in-place rewrite either');
     assert.equal(ledger[1].reviewer.agent_type, 'reviewer-security');
     assert.deepEqual(ledger[1].territory.files, ['src/new.mjs']);
   } finally {
@@ -304,1055 +347,292 @@ test('H22 ledger: promoting a new reviewer entry APPENDS to a pre-populated ledg
 });
 
 // ===========================================================================
-// (6) Malformed ledger degrades to empty — never a crash, never exit 2.
+// R1-B07 — CORRUPT LEDGER, INVERTED. The retired pin let a corrupt ledger be
+// "treated as empty" and overwritten by the new receipt — i.e. durable review
+// evidence discarded to make room for one. The rebuild refuses: availability
+// 'corrupt' means H22 does NOT write, discloses [ledger_corrupt], and leaves
+// the bytes exactly as they were.
+// CONTROL: R1-B01/R1-B08 (a healthy and an absent ledger both promote) prove
+// this is not "promotion is broken".
+// SABOTAGE: restore `catch { entries = [] }` around the ledger read — the
+// byte-identical assertion goes red (the corrupt bytes are replaced by a
+// one-element array) and the [ledger_corrupt] disclosure never fires.
 // ===========================================================================
 
-test('H22 ledger: a malformed (corrupt JSON) pre-existing ledger is tolerated — treated as empty, promotion still succeeds, hook never exits 2', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeLedgerRaw(dir, '{ this is not valid json at all');
-    writeRegisterRaw(dir, [registerEntry('rev-heal', 'reviewer-performance', ['src/heal.mjs'], '2026-08-22T00:00:00.000Z')]);
+test('R1-B07: a CORRUPT ledger stops the promotion — no write, bytes untouched, [ledger_corrupt] disclosed, exit 0', () => {
+  for (const corruptBytes of ['{ this is not valid json at all', '{"not":"an array"}']) {
+    const { dir, cleanup } = makeProject();
+    try {
+      writeLedgerRaw(dir, corruptBytes);
+      writeRegisterRaw(dir, [registerEntry('rev-corrupt', 'reviewer-performance', ['src/heal.mjs'], '2026-08-22T00:00:00.000Z')]);
 
-    const r = runHook(h22Input(dir, { agent_id: 'rev-heal', hook_event_name: 'SubagentStop' }), dir);
-    // EXPECTED FAILURE SHAPE: today's hook does not read/write the ledger at
-    // all, so this exit-code assertion trivially holds (0) but the
-    // downstream ledger-shape assertions below fail red (no promotion logic
-    // exists to recover from the corruption and append).
-    assert.notEqual(r.code, 2, 'a corrupt ledger must never cause the hook to deny/crash the spawn boundary');
-    assert.equal(r.code, 0, r.stderr);
+      const r = runHook(h22Input(dir, { agent_id: 'rev-corrupt', agent_type: 'reviewer-performance' }), dir);
+      assert.notEqual(r.code, 2, 'a corrupt ledger must never deny the SubagentStop boundary');
+      assert.equal(r.code, 0, r.stderr);
 
-    let ledger;
-    assert.doesNotThrow(() => {
-      ledger = JSON.parse(readLedgerRaw(dir));
-    }, 'the ledger left behind after recovery must itself be valid JSON');
-    assert.ok(Array.isArray(ledger));
-    assert.equal(ledger.length, 1, 'the corrupt prior content is discarded (treated as empty), not salvaged into a longer array');
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): the sole surviving entry is the NEW promotion, v2-shaped.
-    assert.equal(ledger[0].reviewer.agent_type, 'reviewer-performance');
-    assert.deepEqual(ledger[0].territory.files, ['src/heal.mjs']);
-  } finally {
-    cleanup();
+      assert.equal(readLedgerRaw(dir), corruptBytes, `the corrupt ledger is left byte-identical — never truncated, repaired or replaced (${corruptBytes})`);
+      assert.match(output(r), token('ledger_corrupt'), 'the withheld promotion is disclosed by its code');
+    } finally {
+      cleanup();
+    }
   }
 });
 
-test('H22 ledger: a MISSING ledger file is tolerated identically to an empty one on first promotion', () => {
+test('R1-B08: a MISSING ledger is the ordinary first-promotion case — the file is created from nothing', () => {
   const { dir, cleanup } = makeProject();
   try {
     assert.equal(ledgerExists(dir), false);
     writeRegisterRaw(dir, [registerEntry('rev-first', 'reviewer-skeptic', ['src/first.mjs'], '2026-08-22T00:00:00.000Z')]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-first', hook_event_name: 'SubagentStop' }), dir);
+    const r = runHook(h22Input(dir, { agent_id: 'rev-first', agent_type: 'reviewer-skeptic' }), dir);
     assert.equal(r.code, 0, r.stderr);
-    // EXPECTED FAILURE SHAPE: ledgerExists(dir) stays false today — no
-    // promotion logic exists yet to create the file on a missing-ledger first run.
-    assert.ok(ledgerExists(dir), 'a first promotion creates the ledger file from nothing');
+    assert.ok(ledgerExists(dir), 'a first promotion creates the ledger file');
     const ledger = readLedger(dir);
     assert.equal(ledger.length, 1);
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): the first-ever promotion is v2-shaped.
     assert.equal(ledger[0].reviewer.agent_type, 'reviewer-skeptic');
+    assert.doesNotMatch(output(r), token('ledger_corrupt'), 'an ABSENT ledger is not a CORRUPT one — the two availabilities are never conflated');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// (7) An unmatched agent_id at SubagentStop remains a clean no-op for the
-//     ledger too (regression pin against the pre-existing no-op contract).
+// R1-B09 / R1-B10 — A4's fail-closed half: promoteAtStop selects the single
+// UNENDED (session_id, agent_id) register entry. Zero unended entries -> NO
+// receipt, and NOTHING existing is touched.
+//
+// R1-B10 is the pin that replaces the entire retired refresh family: the
+// dangerous sequence it closes is a second Stop with no Start of its own
+// re-binding an old brief onto today's bytes.
+// SABOTAGE: select the register entry by agent_id WITHOUT the unended filter
+// — R1-B10 goes red (a second receipt appears, or the first is mutated) while
+// R1-B11 (which has a genuine second Start) stays green either way. That
+// asymmetry is why the two are pinned as a pair.
 // ===========================================================================
 
-test('H22 ledger: SubagentStop with an unmatched agent_id is a clean no-op — no ledger created, register unchanged', () => {
+test('R1-B09: a Stop whose agent_id has NO register entry at all mints no receipt and leaves the register untouched', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeRegisterRaw(dir, [registerEntry('rev-x', 'reviewer-correctness', ['src/x.mjs'])]);
-    const r = runHook(h22Input(dir, { agent_id: 'nonexistent', hook_event_name: 'SubagentStop' }), dir);
+    writeRegisterRaw(dir, [registerEntry('rev-x', 'reviewer-correctness', ['src/x.mjs'], '2026-08-22T00:00:00.000Z')]);
+    const before = readFileSync(registerPath(dir), 'utf8');
+
+    const r = runHook(h22Input(dir, { agent_id: 'nonexistent', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(ledgerExists(dir), false, 'no match, no promotion');
-    const reg = readRegister(dir);
-    assert.equal(reg.length, 1);
-    assert.equal(reg[0].agent_id, 'rev-x', 'the unmatched stop leaves the real reviewer entry live, still eligible for a later, matching stop');
+
+    assert.equal(ledgerExists(dir), false, 'no unended entry for this agent_id — no receipt');
+    assert.equal(readFileSync(registerPath(dir), 'utf8'), before, "the unmatched Stop leaves the other agent's entry exactly as it was, still unended");
+  } finally {
+    cleanup();
+  }
+});
+
+test('R1-B10 (A4): a second Stop whose only matching register entry is already ENDED produces NO receipt and never touches the existing one', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    // Round 1: a genuine Start/Stop pair mints exactly one receipt.
+    writeRegisterRaw(dir, [registerEntry('rev-round1', 'reviewer-correctness', ['src/r.mjs'], '2026-08-22T00:00:00.000Z')]);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-round1', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ledgerBefore = readLedgerRaw(dir);
+    assert.equal(JSON.parse(ledgerBefore).length, 1, 'fixture guard: round 1 minted exactly one receipt');
+
+    // A second Stop arrives with no new Start behind it: the only entry for
+    // this agent_id is the ended round-1 one.
+    r = runHook(h22Input(dir, { agent_id: 'rev-round1', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    assert.equal(readLedgerRaw(dir), ledgerBefore, 'byte-identical: no second receipt, and the first is not refreshed, re-hashed or re-dated');
+  } finally {
+    cleanup();
+  }
+});
+
+test('R1-B11 (A4): a genuine round 2 — its OWN Start, same agent_id — mints its OWN second receipt; the first is untouched', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeRegisterRaw(dir, [registerEntry('rev-two-rounds', 'reviewer-correctness', ['src/a.mjs'], '2026-08-22T00:00:00.000Z')]);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-two-rounds', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const first = readLedger(dir)[0];
+    const firstSnapshot = JSON.stringify(first);
+
+    // Round 2's Start: the ended round-1 entry stays, a fresh UNENDED entry is
+    // appended for the same agent_id (A4's register rule).
+    writeRegisterRaw(dir, [
+      endedEntry('rev-two-rounds', 'reviewer-correctness', ['src/a.mjs'], '2026-08-22T00:00:00.000Z'),
+      registerEntry('rev-two-rounds', 'reviewer-correctness', ['src/a.mjs'], '2026-08-22T00:10:00.000Z', { round: 2 }),
+    ]);
+    r = runHook(h22Input(dir, { agent_id: 'rev-two-rounds', agent_type: 'reviewer-correctness' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const ledger = readLedger(dir);
+    assert.equal(ledger.length, 2, 'each round has its own receipt — never a refresh in place');
+    const stillFirst = ledger.find((e) => e.entry_id === first.entry_id);
+    assert.ok(stillFirst, "round 1's receipt is still present under its own entry_id");
+    assert.equal(JSON.stringify(stillFirst), firstSnapshot, "round 1's receipt is byte-identical — round 2 never edits it");
+    const second = ledger.find((e) => e.entry_id !== first.entry_id);
+    assert.ok(second, 'round 2 minted a distinct receipt');
+    assertReceiptShape(second);
+    assert.equal(second.started_at, '2026-08-22T00:10:00.000Z', "round 2's receipt carries ROUND 2's Start instant, not round 1's");
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// RESUMED REVIEWER — SubagentStop REFRESH of an existing ledger entry
-// (board c9f92090, slice 2, spec item (c)). SPEC ONLY, red-first — authored
-// from the board record (opened via board_get), not from
-// scripts/hooks/h22-dispatch-register.mjs's internals (H4 read wall honored:
-// that hook was never opened by this file's author).
-//
-// SPEC UNDER TEST (board c9f92090, verbatim clause (c)):
-//   "a second SubagentStop for the same agent_id REFRESHES the existing
-//    ledger entry (finished_at, content_evidence, observed_* as UNION,
-//    resume_count incremented) and never changes entry_id, identity.*,
-//    reviewer.* or declared territory.files; fail-closed arms: discharged
-//    entry -> skipped loudly (unchanged), different branch -> refused with a
-//    warning (unchanged), legacy v1 shape -> skipped loudly, consumed
-//    (deleted) receipt -> a NEW receipt is minted (correct second round)."
-//
-// The register entry for a resumed reviewer's SECOND Stop is deliberately
-// NOT re-seeded in most pins below: the board's own probe note records that
-// the register entry is removed at the FIRST Stop, so a refresh must be
-// found via the LEDGER's own identity.agent_id, never via register
-// presence — RESUME-CONSUMED is the one arm that re-seeds the register, to
-// prove the opposite boundary (neither a register entry nor a matching
-// ledger entry -> a genuinely fresh promotion, not a no-op).
-//
-// SCOPE NOTE (ambiguity flagged, not resolved): observed_files/observed_source
-// (decision review-territory-observed-evidence 9500cce1) are deliberately NOT
-// asserted here. That mechanism reads stdin.agent_transcript_path via a lib
-// this suite does not exercise, and scripts/tests/h22-ledger-v2-entry.test.mjs's
-// OWN reviewer-model-provenance pins already read the DIFFERENT
-// `transcript_path` key at Stop for a DIFFERENT purpose (model observation) —
-// stacking a third transcript-shaped fixture on an already-ambiguous field
-// convention risks a wrong-field pin more than it proves anything new. The
-// board's parenthetical "observed_* as UNION" is reported, not resolved.
-//
-// Harness: registerEntry()/writeRegisterRaw()/runHook()/h22Input()/
-// readRegister()/readLedger()/readLedgerRaw()/writeLedgerRaw() are this
-// file's OWN existing helpers above, reused unmodified. git()/
-// makeGitProject() are NEW, added only for RESUME-BRANCH-MISMATCH, adapted
-// from scripts/tests/h22-receipt-expiry.test.mjs's makeGitProject idiom
-// without importing that file.
+// R1-B12 — CONTROL for every "never touched" assertion above: a Stop for a
+// DIFFERENT agent_id must not touch an unrelated existing receipt.
+// SABOTAGE: key promotion/lookup on agent_type (or on "the most recent entry")
+// instead of on the agent_id — A's receipt is mutated by B's Stop and the
+// byte-identical assertion goes red.
 // ===========================================================================
 
-const GIT_SKIP = (() => {
-  const r = spawnSync('git', ['--version'], { encoding: 'utf8' });
-  return !r.error && r.status === 0 ? false : 'git not available on this host';
-})();
-
-function git(cwd, args) {
-  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
-  assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
-  return (r.stdout ?? '').trim();
-}
-
-function makeGitProject(branchName = 'main') {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-h22-ledger-resume-'));
-  git(dir, ['init', '-b', branchName]);
-  git(dir, ['config', 'user.email', 'test@sterling.local']);
-  git(dir, ['config', 'user.name', 'Sterling Test']);
-  git(dir, ['config', 'commit.gpgsign', 'false']);
-  mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
-  writeFileSync(join(dir, 'README.md'), 'seed\n');
-  git(dir, ['add', '-A']);
-  git(dir, ['commit', '-m', 'seed']);
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-// ===========================================================================
-// RESUME-CONTROL, placed FIRST: a Stop for a DIFFERENT agent_id must never
-// touch an unrelated existing ledger entry. Without this control, a green
-// RESUME-1 below is indistinguishable from "any second reviewer Stop
-// refreshes the most recent/any existing entry", which would silently
-// corrupt an unrelated receipt.
-// SABOTAGE: key the refresh match on agent_type (or on "the most recently
-// promoted entry") instead of on identity.agent_id — entryA would be
-// mutated by entryB's unrelated first-ever Stop, reddening the
-// byte-identical assertion below.
-// ===========================================================================
-
-test('RESUME-CONTROL (placed FIRST): a Stop for a DIFFERENT agent_id never touches an unrelated existing ledger entry — refresh is keyed on identity, not on "any second reviewer Stop"', () => {
+test('R1-B12 (CONTROL): a Stop for a different agent_id never touches an unrelated receipt — identity, never recency', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [registerEntry('rev-ctrl-a', 'reviewer-correctness', ['src/a.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-ctrl-a', hook_event_name: 'SubagentStop' }), dir);
+    let r = runHook(h22Input(dir, { agent_id: 'rev-ctrl-a', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
-    const before = readLedger(dir);
-    assert.equal(before.length, 1);
-    const beforeSnapshot = JSON.stringify(before[0]);
+    const aSnapshot = JSON.stringify(readLedger(dir)[0]);
 
-    // A DIFFERENT agent_id's first-ever promotion must never touch A's entry.
     writeRegisterRaw(dir, [registerEntry('rev-ctrl-b', 'reviewer-security', ['src/b.mjs'], '2026-08-22T00:05:00.000Z')]);
-    r = runHook(h22Input(dir, { agent_id: 'rev-ctrl-b', hook_event_name: 'SubagentStop' }), dir);
+    r = runHook(h22Input(dir, { agent_id: 'rev-ctrl-b', agent_type: 'reviewer-security' }), dir);
     assert.equal(r.code, 0, r.stderr);
 
     const after = readLedger(dir);
-    assert.equal(after.length, 2, 'two distinct entries — not a refresh-in-place of A');
-    const aAfter = after.find((e) => e.reviewer?.agent_type === 'reviewer-correctness');
-    assert.ok(aAfter, 'the original A entry is still present');
-    assert.equal(JSON.stringify(aAfter), beforeSnapshot, "A's entry is byte-identical — a different agent_id's Stop never refreshes it");
-    const bAfter = after.find((e) => e.reviewer?.agent_type === 'reviewer-security');
-    assert.ok(bAfter, 'B is a genuine NEW promotion');
-    assert.ok(!('resume_count' in bAfter), 'a first-ever promotion is never itself a "resume" — resume_count is absent');
+    assert.equal(after.length, 2, 'two distinct receipts');
+    const aAfter = after.find((e) => e.identity?.agent_id === 'rev-ctrl-a');
+    assert.ok(aAfter, "A's receipt is still present");
+    assert.equal(JSON.stringify(aAfter), aSnapshot, "A's receipt is byte-identical");
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// RESUME-1 — RE-CUT (decision 77c5b85a, board c9f92090 clause (b), after the
-// H22 receipt-identity fix round).
-//
-// OLD PREMISE: any second SubagentStop for the same agent_id unconditionally
-// RECOMPUTES content_evidence against the file's current on-disk bytes,
-// regardless of whether the resumed reviewer's own transcript shows it
-// actually re-read the changed path this round. The single assertion this
-// used to pin — `assert.notDeepEqual(entry2.content_evidence,
-// entry1.content_evidence)` after changing the file with NO transcript
-// supplied at all — is satisfiable by a resumed reviewer that never looked
-// at the file again: the receipt would silently vouch for bytes nobody
-// reviewed.
-//
-// NEW PREMISE: a changed sha is accepted into content_evidence ONLY when the
-// path is among this round's OBSERVED READS (Read/Grep/Glob tool uses in the
-// agent transcript at stdin.agent_transcript_path); otherwise the PRIOR sha
-// stands, the refusal accumulates into a top-level `rebaseline_refused`
-// array on the entry ({path, prior_sha, current_sha, round}), and the
-// withholding is disclosed on stderr. A path with no prior sha gets no fresh
-// binding either way (nothing to launder there).
-//
-// CLAIM: the OLD single assertion encoded exactly the laundering the fix
-// closes — recomputing evidence with zero proof anyone looked. The three
-// tests below replace it: (a) proves the honest path still works (real
-// transcript evidence -> real recompute); (b) proves the dishonest path is
-// now refused (no evidence -> prior sha stands, refusal disclosed) — this is
-// the re-cut assertion itself, now asserting the OPPOSITE of what it used to;
-// (c) is the CONTROL, proving (a)/(b) are not simply "always keep the old
-// sha" or "always take the new one" in disguise — an unchanged file must
-// never need a refusal at all, which only holds if the guard actually
-// compares SHAS, not merely "was transcript evidence supplied".
+// R1-B13 — content evidence is bound to the STOPPING entry's own declared
+// territory. A second, unrelated live register entry must never leak a path
+// into this receipt's evidence (the measured cross-attribution defect).
+// SABOTAGE: hash the union of every live register entry's files — the
+// evidence-path assertion goes red with 'src/unrelated.mjs' present.
 // ===========================================================================
 
-// Minimal tool_use-block transcript writer for the resumed agent's OWN
-// transcript (stdin.agent_transcript_path) — mirrors the
-// scripts/tests/h22-observed-territory.test.mjs writeToolBlockTranscript
-// idiom, reproduced standalone here rather than imported.
-function writeAgentTranscript(dir, name, blocks) {
-  const p = join(dir, 't', name);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, blocks.map((l) => JSON.stringify(l)).join('\n') + '\n');
-  return p;
-}
-// timestamp is OPTIONAL and, when supplied, lands as a top-level `timestamp`
-// key on the JSONL line — the round-scoping fixture convention shared with
-// scripts/tests/h22-observed-territory.test.mjs's toolLineAt() (board
-// 181d11e7 / brief item (a)). Calls that omit it keep the exact prior
-// shape (no timestamp key at all), so every PRE-EXISTING call site below is
-// untouched by this change unless explicitly adjusted.
-const readBlock = (absPath, timestamp) => {
-  const block = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: absPath } }] } };
-  if (timestamp !== undefined) block.timestamp = timestamp;
-  return block;
-};
-const editBlock = (absPath, timestamp) => {
-  const block = { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: absPath } }] } };
-  if (timestamp !== undefined) block.timestamp = timestamp;
-  return block;
-};
-function isoOffset(iso, ms) {
-  return new Date(Date.parse(iso) + ms).toISOString();
-}
-
-// SABOTAGE: recompute content_evidence unconditionally on every resume
-// regardless of transcript evidence (the OLD behavior) — RESUME-1b below
-// goes red (blobs would show the NEW sha, not the prior one; no
-// rebaseline_refused record; no REFUSED TO REBASELINE disclosure).
-//
-// ADJUSTED (board 181d11e7 / brief item (a) — round-scoping): the Read
-// block now carries an explicit timestamp placed STRICTLY AFTER entry1's
-// own finished_at, so this arm proves the round-scoped case specifically
-// (a read that genuinely belongs to THIS round), not merely "a Read exists
-// somewhere in the whole transcript" — which is exactly the un-scoped
-// behavior RESUME-1a-EARLIER below shows must NOT rebaseline.
-// SABOTAGE (round-scoping specific): drop the timestamp filter and accept
-// ANY Read anywhere in the transcript as "this round" evidence — this arm
-// stays green even under that bug (a Read is present), but its sibling
-// RESUME-1a-EARLIER (Read timestamped BEFORE finished_at) goes red instead,
-// which is why the two are pinned as a pair.
-test('RESUME-1a (rebaseline-on-evidence): a resumed reviewer whose OWN transcript shows a Read of the changed path AFTER the prior finished_at gets a genuinely RECOMPUTED sha — no rebaseline_refused', () => {
+test('R1-B13: content_evidence covers exactly the stopping entry\'s declared territory — a co-live register entry never leaks a path in', () => {
   const { dir, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v1 content\n');
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'a\n');
+    writeFileSync(join(dir, 'src', 'b.mjs'), 'b\n');
+    writeFileSync(join(dir, 'src', 'unrelated.mjs'), 'zz\n');
 
-    writeRegisterRaw(dir, [registerEntry('rev-resume-a', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-a', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    assert.ok(entry1.entry_id, 'the first promotion is v2-shaped with an entry_id');
-
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
-    const readAt = isoOffset(entry1.finished_at, 60_000); // strictly AFTER entry1.finished_at -> this round
-    const agentTranscript = writeAgentTranscript(dir, 'agent-a.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'), readAt)]);
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-resume-a', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const entry2 = readLedger(dir)[0];
-    assert.equal(entry2.entry_id, entry1.entry_id, 'entry_id is STABLE across a resume refresh');
-    assert.deepEqual(entry2.identity, entry1.identity, 'identity.* never changes on refresh');
-    assert.deepEqual(entry2.reviewer, entry1.reviewer, 'reviewer.* never changes on refresh');
-    assert.deepEqual(entry2.territory.files, entry1.territory.files, 'declared territory.files never changes on refresh');
-    assert.ok(Date.parse(entry2.finished_at) >= Date.parse(entry1.finished_at), 'finished_at moves forward');
-    assert.equal(entry2.resume_count ?? 0, (entry1.resume_count ?? 0) + 1, 'resume_count increments by exactly one');
-
-    assert.notDeepEqual(entry2.content_evidence, entry1.content_evidence, "WITH real, round-scoped Read evidence, content_evidence IS recomputed against the file's current bytes");
-    assert.ok(!('rebaseline_refused' in entry2) || entry2.rebaseline_refused.length === 0, 'a genuinely observed, round-scoped rebaseline never accumulates a refusal record for the same path');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// RESUME-1a-EARLIER (board 181d11e7 / brief item (a), pin 2 — sibling arm):
-// the same Read exists in the transcript, but its timestamp is BEFORE the
-// prior finished_at — it belongs to an EARLIER round, not this one, so it
-// must NOT be accepted as this-round evidence: the prior sha stands, the
-// refusal is recorded and disclosed, exactly as RESUME-1b's "no evidence at
-// all" case.
-// SABOTAGE: accept any Read anywhere in the transcript regardless of its
-// timestamp relative to finished_at (i.e. the pre-fix, un-scoped behavior)
-// — this test goes red (content_evidence would show the NEW sha, no
-// rebaseline_refused record, no disclosure) while RESUME-1a above (a
-// genuinely AFTER-timestamped Read) stays green either way, proving the two
-// arms are each other's counter-sabotage on the round-scoping boundary.
-// ===========================================================================
-
-test('RESUME-1a-EARLIER (round-scoping): a Read of the changed path timestamped BEFORE the prior finished_at belongs to an earlier round — rebaseline refused, prior sha stands', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v1 content\n');
-
-    writeRegisterRaw(dir, [registerEntry('rev-resume-earlier', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-earlier', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    const priorSha = entry1.content_evidence.blobs['src/resume.mjs'];
-    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/resume.mjs');
-
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
-    const earlierReadAt = isoOffset(entry1.finished_at, -60_000); // strictly BEFORE entry1.finished_at -> an earlier round
-    const agentTranscript = writeAgentTranscript(dir, 'agent-earlier.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'), earlierReadAt)]);
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-resume-earlier', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const entry2 = readLedger(dir)[0];
-    assert.equal(entry2.entry_id, entry1.entry_id);
-    assert.equal(entry2.content_evidence.blobs['src/resume.mjs'], priorSha, 'a Read timestamped before finished_at is NOT this-round evidence — the prior sha stands');
-    assert.ok(Array.isArray(entry2.rebaseline_refused) && entry2.rebaseline_refused.length === 1, 'the refusal is recorded exactly once');
-    assert.equal(entry2.rebaseline_refused[0].path, 'src/resume.mjs');
-    assert.match(`${r.stdout}\n${r.stderr}`, /REFUSED TO REBASELINE/, 'the withholding is disclosed by name');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// RESUME-1a-NO-TIMESTAMP (board 181d11e7 / brief item (a), pin 3): a
-// transcript entry with NO `timestamp` at all cannot be placed in any
-// round — fail-closed, read the same as "not this round" (matching every
-// other gate's positive-evidence-only direction), never as "assume it
-// counts".
-// SABOTAGE: treat a missing timestamp as satisfying the round-scope check
-// (e.g. `!ts || ts > sinceIso` instead of `ts && ts > sinceIso`) — this
-// test alone catches it; RESUME-1a (fully timestamped, AFTER) and
-// RESUME-1a-EARLIER (fully timestamped, BEFORE) are both unaffected by this
-// specific bug either way.
-// ===========================================================================
-
-test('RESUME-1a-NO-TIMESTAMP (round-scoping, fail-closed): a Read with NO timestamp at all is never treated as this-round evidence — rebaseline refused', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v1 content\n');
-
-    writeRegisterRaw(dir, [registerEntry('rev-resume-notime', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-notime', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    const priorSha = entry1.content_evidence.blobs['src/resume.mjs'];
-    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/resume.mjs');
-
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
-    // Deliberately NO timestamp on this block at all (readBlock's timestamp
-    // arg omitted) — an entry whose time cannot be established.
-    const agentTranscript = writeAgentTranscript(dir, 'agent-notime.jsonl', [readBlock(join(dir, 'src', 'resume.mjs'))]);
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-resume-notime', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const entry2 = readLedger(dir)[0];
-    assert.equal(entry2.content_evidence.blobs['src/resume.mjs'], priorSha, 'an untimestamped Read is never this-round evidence — the prior sha stands');
-    assert.ok(Array.isArray(entry2.rebaseline_refused) && entry2.rebaseline_refused.length === 1, 'the refusal is recorded exactly once');
-    assert.match(`${r.stdout}\n${r.stderr}`, /REFUSED TO REBASELINE/, 'the withholding is disclosed by name');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// ZERO-READ-ROUND (board 181d11e7 / brief item (b)): a follow-up Stop whose
-// round-scoped read set is genuinely EMPTY (a "thanks, done" Stop with
-// nothing read) must never renew the receipt's freshness. Today's bug:
-// finished_at advances whenever declared territory is non-empty, regardless
-// of whether anything was read this round — a laundering route by which a
-// zero-read round makes a stale receipt look fresh again.
-//
-// RE-CUT (independent review finding): the original cut of this pin left
-// the declared file BYTE-IDENTICAL across both rounds, so a wholesale
-// content_evidence recompute produced a deep-equal result anyway and passed
-// vacuously — only the finished_at half was ever load-bearing. This cut
-// genuinely MUTATES the declared file between round 1 and the zero-read
-// resume, and proves the mutation is real (via an independent
-// side-channel sha derivation, not a reimplementation of the hashing
-// algorithm) before relying on it. This closes a genuine coverage gap:
-// RESUME-1b already covers "no transcript at all + a mutated file", but no
-// prior pin covered "a real, readable transcript observing literally
-// nothing + a mutated file" together with the finished_at claim.
-//
-// TWO INDEPENDENT SABOTAGES, EACH WITH ITS OWN CATCHING ASSERTION:
-//   (A) keep advancing finished_at whenever declared territory.files is
-//       non-empty (today's behavior, ignoring the round-scoped read set
-//       entirely) -> caught by the `entry2.finished_at === entry1.finished_at`
-//       assertion.
-//   (B) wipe/recompute content_evidence on every resume regardless of
-//       round-scoped evidence -> now genuinely caught by
-//       `entry2.content_evidence.blobs['src/quiet.mjs'] === priorSha` (and
-//       the `notEqual` against shaOfV2, and the full deepEqual) because the
-//       file's bytes truly changed: a wholesale recompute would pick up the
-//       NEW sha, which the sha-difference guard has already proven differs
-//       from priorSha.
-// A fix landing only one half must still fail this pin.
-// ===========================================================================
-
-test('ZERO-READ-ROUND (board 181d11e7 item (b)): a resumed Stop with an EMPTY round-scoped read set leaves finished_at AND content_evidence completely unchanged — even when the declared file genuinely changed on disk', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    const v1 = 'v1 content, before any mutation\n';
-    const v2 = 'v2 content, mutated after round 1 — a genuine byte change\n';
-    writeFileSync(join(dir, 'src', 'quiet.mjs'), v1);
-
-    writeRegisterRaw(dir, [registerEntry('rev-zero-read', 'reviewer-correctness', ['src/quiet.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-zero-read', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    const priorSha = entry1.content_evidence.blobs['src/quiet.mjs'];
-    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/quiet.mjs');
-
-    // SHA-DIFFERENCE GUARD: derive the sha the mutated (v2) bytes WOULD hash
-    // to via a throwaway side-channel promotion of the identical content
-    // under a different path — using the hook's own hashing rather than
-    // guessing/reimplementing its algorithm, and without presupposing
-    // whether a zero-read resume takes the same code path as a per-path
-    // rebaseline refusal. A no-op "mutation" would leave shaOfV2 ===
-    // priorSha and this guard fails loudly, instead of silently making the
-    // pin vacuous a second time.
-    writeFileSync(join(dir, 'src', 'sidecheck.mjs'), v2);
-    writeRegisterRaw(dir, [registerEntry('rev-sidecheck', 'reviewer-correctness', ['src/sidecheck.mjs'], '2026-08-22T00:00:05.000Z')]);
-    r = runHook(h22Input(dir, { agent_id: 'rev-sidecheck', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const sidecheckEntry = readLedger(dir).find((e) => e.territory?.files?.includes('src/sidecheck.mjs'));
-    const shaOfV2 = sidecheckEntry?.content_evidence?.blobs?.['src/sidecheck.mjs'];
-    assert.ok(shaOfV2, 'fixture guard: the side-channel promotion recorded a real sha for the v2 content');
-    assert.notEqual(shaOfV2, priorSha, 'fixture guard: v2 content genuinely hashes differently from v1 — the mutation below is a real byte change, not a no-op');
-
-    // Now genuinely mutate the DECLARED file to that same v2 content, then
-    // run a zero-read resumed Stop against it: a genuinely readable
-    // departing transcript containing NO tool_use blocks at all —
-    // "observed and found nothing" (round-scoped read set is the empty
-    // set), not "could not observe".
-    writeFileSync(join(dir, 'src', 'quiet.mjs'), v2);
-    const agentTranscript = writeAgentTranscript(dir, 'agent-zero-read.jsonl', [
-      { type: 'assistant', timestamp: isoOffset(entry1.finished_at, 60_000), message: { content: [{ type: 'text', text: 'thanks, done' }] } },
+    writeRegisterRaw(dir, [
+      registerEntry('rev-terr', 'reviewer-correctness', ['src/a.mjs', 'src/b.mjs'], '2026-08-22T00:00:00.000Z'),
+      registerEntry('agent-other', 'coder', ['src/unrelated.mjs'], '2026-08-22T00:00:00.000Z'),
     ]);
 
-    r = runHook(h22Input(dir, { agent_id: 'rev-zero-read', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
+    const r = runHook(h22Input(dir, { agent_id: 'rev-terr', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
 
-    const entry2 = readLedger(dir).find((e) => e.entry_id === entry1.entry_id);
-    assert.ok(entry2, 'the same receipt (by entry_id) is still present, refreshed in place');
-    assert.equal(entry2.finished_at, entry1.finished_at, 'a zero-read round never renews finished_at — the receipt does not get to look fresh again for free (SABOTAGE A)');
-    assert.equal(entry2.content_evidence.blobs['src/quiet.mjs'], priorSha, 'the blob for the now-mutated-but-unread path still holds the OLD (round-1) sha — never the new, unread bytes (SABOTAGE B)');
-    assert.notEqual(entry2.content_evidence.blobs['src/quiet.mjs'], shaOfV2, 'and specifically not the sha the new bytes would hash to (SABOTAGE B)');
-    assert.deepEqual(entry2.content_evidence, entry1.content_evidence, 'content_evidence as a whole stays byte-for-byte the round-1 evidence — a zero-read round must never pick up new bytes for any declared path (SABOTAGE B)');
+    const entry = readLedger(dir)[0];
+    assert.deepEqual([...entry.territory.files].sort(), ['src/a.mjs', 'src/b.mjs']);
+    const evidencePaths = [...Object.keys(entry.content_evidence.blobs ?? {}), ...(entry.content_evidence.absent_paths ?? [])].sort();
+    assert.deepEqual(evidencePaths, ['src/a.mjs', 'src/b.mjs'], "evidence is hashed against THIS receipt's declared territory only");
+    assert.ok(!('src/unrelated.mjs' in (entry.content_evidence.blobs ?? {})), "the co-live coder entry's file never appears in this receipt's evidence");
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// OBSERVED-READS vs OBSERVED-FILES (board 181d11e7, brief item 5): the new
-// observed_reads field is READS ONLY; the pre-existing observed_files keeps
-// its EXACT current meaning (reads UNION writes). A write-only path must
-// appear in observed_files but never in observed_reads — pinned in one test
-// so the two fields cannot silently drift into meaning the same thing.
-// SABOTAGE: alias observed_reads to observed_files (or populate it from the
-// same reads+writes union) — the write-only path would then leak into
-// observed_reads, reddening both the deepEqual and the !includes assertion
-// below, while observed_files (unaffected either way) stays green.
+// R1-B14 — observed_reads is READS ONLY; observed_files keeps the
+// reads-UNION-writes meaning. Supersession coverage consumes observed_reads,
+// so a write-only path leaking in would let an unread file count as reviewed.
+// SABOTAGE: populate observed_reads from the reads+writes union (or alias it
+// to observed_files) — both assertions below go red while observed_files stays
+// green.
 // ===========================================================================
 
-test('OBSERVED-READS vs OBSERVED-FILES (board 181d11e7 item 5): observed_reads excludes a write-only path while observed_files still includes it', () => {
+test('R1-B14: observed_reads excludes a write-only path while observed_files still includes it', () => {
   const { dir, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'read-only.mjs'), 'r\n');
     writeFileSync(join(dir, 'src', 'write-only.mjs'), 'w\n');
 
-    writeRegisterRaw(dir, [registerEntry('rev-reads-vs-files', 'reviewer-correctness', ['src/read-only.mjs', 'src/write-only.mjs'], '2026-08-22T00:00:00.000Z')]);
-    const agentTranscript = writeAgentTranscript(dir, 'agent-reads-vs-files.jsonl', [
-      readBlock(join(dir, 'src', 'read-only.mjs')),
-      editBlock(join(dir, 'src', 'write-only.mjs')),
-    ]);
+    writeRegisterRaw(dir, [registerEntry('rev-reads', 'reviewer-correctness', ['src/read-only.mjs', 'src/write-only.mjs'], '2026-08-22T00:00:00.000Z')]);
 
-    const r = runHook(h22Input(dir, { agent_id: 'rev-reads-vs-files', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: agentTranscript }), dir);
+    const agentTranscript = join(dir, 't', 'agent-reads.jsonl');
+    mkdirSync(dirname(agentTranscript), { recursive: true });
+    writeFileSync(
+      agentTranscript,
+      [
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, 'src', 'read-only.mjs') } }] } }),
+        JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: join(dir, 'src', 'write-only.mjs') } }] } }),
+      ].join('\n') + '\n'
+    );
+
+    const r = runHook(h22Input(dir, { agent_id: 'rev-reads', agent_type: 'reviewer-correctness', agent_transcript_path: agentTranscript }), dir);
     assert.equal(r.code, 0, r.stderr);
 
     const entry = readLedger(dir)[0];
-    assert.deepEqual(
-      [...entry.observed_files].sort(),
-      ['src/read-only.mjs', 'src/write-only.mjs'],
-      'observed_files keeps its EXACT current meaning — the reads-UNION-writes set, unchanged by this addition'
-    );
-    assert.deepEqual(entry.observed_reads, ['src/read-only.mjs'], 'observed_reads is READS ONLY — the write-only path is excluded');
-    assert.ok(!entry.observed_reads.includes('src/write-only.mjs'), 'the write-only path never leaks into observed_reads, whatever observed_files contains');
-  } finally {
-    cleanup();
-  }
-});
-
-// SABOTAGE: ignore transcript evidence and refuse to rebaseline unless the
-// content happens to be byte-identical (i.e. flip the guard to "always keep
-// the prior sha") — RESUME-1a above goes red instead (no recompute despite
-// real evidence), proving these two tests are each other's counter-sabotage.
-test('RESUME-1b (rebaseline-refused, THE RE-CUT): a resumed reviewer with NO transcript evidence of re-reading the changed path keeps the PRIOR sha — refusal disclosed, never silently laundering unread bytes', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v1 content\n');
-
-    writeRegisterRaw(dir, [registerEntry('rev-resume-b', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-b', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    const priorSha = entry1.content_evidence.blobs['src/resume.mjs'];
-    assert.ok(priorSha, 'fixture guard: round 1 recorded a real sha for src/resume.mjs');
-
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'v2 content, changed after the first review round\n');
-
-    // Deliberately NO agent_transcript_path at all — the resumed reviewer's
-    // own transcript offers zero evidence it looked at the changed path
-    // again this round.
-    r = runHook(h22Input(dir, { agent_id: 'rev-resume-b', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const entry2 = readLedger(dir)[0];
-    assert.equal(entry2.entry_id, entry1.entry_id);
-    assert.deepEqual(entry2.identity, entry1.identity);
-    assert.deepEqual(entry2.reviewer, entry1.reviewer);
-    assert.deepEqual(entry2.territory.files, entry1.territory.files);
-    assert.equal(entry2.resume_count ?? 0, (entry1.resume_count ?? 0) + 1, 'resume_count still increments even on a refused rebaseline');
-
-    assert.equal(entry2.content_evidence.blobs['src/resume.mjs'], priorSha, 'THE RE-CUT: without observed-read evidence, the PRIOR sha stands — never the new, unread bytes');
-    assert.ok(Array.isArray(entry2.rebaseline_refused), 'a top-level rebaseline_refused array accumulates the refusal');
-    const currentSha = entry2.rebaseline_refused[0]?.current_sha;
-    assert.notEqual(currentSha, priorSha, 'fixture guard: the file really did change on disk (the refused sha is a genuinely different value)');
-    assert.deepEqual(
-      entry2.rebaseline_refused,
-      [{ path: 'src/resume.mjs', prior_sha: priorSha, current_sha: currentSha, round: 1 }],
-      'the refusal record names the path, the sha it kept, the sha it refused, and which resume round'
-    );
-    assert.match(`${r.stdout}\n${r.stderr}`, /REFUSED TO REBASELINE/, 'the withholding is disclosed by name');
-  } finally {
-    cleanup();
-  }
-});
-
-// SABOTAGE: make the "no evidence" branch unconditional (refuse to rebaseline
-// even when the file never changed, or fabricate a rebaseline_refused entry
-// regardless of whether the sha actually moved) — this control goes red
-// either way (a spurious refusal record, or a spurious REFUSED TO REBASELINE
-// disclosure with nothing to refuse).
-test('RESUME-1c (control): an UNCHANGED file with no transcript evidence never needs a rebaseline refusal — proves the guard compares SHAS, not merely "was transcript evidence supplied"', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'resume.mjs'), 'unchanged content\n');
-
-    writeRegisterRaw(dir, [registerEntry('rev-resume-c', 'reviewer-correctness', ['src/resume.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-resume-c', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-
-    // File is left byte-identical; still no agent_transcript_path.
-    r = runHook(h22Input(dir, { agent_id: 'rev-resume-c', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const entry2 = readLedger(dir)[0];
-    assert.deepEqual(entry2.content_evidence, entry1.content_evidence, 'an unchanged file recomputes to the identical sha either way');
-    assert.ok(!('rebaseline_refused' in entry2) || entry2.rebaseline_refused.length === 0, 'nothing to refuse when the bytes never moved');
-    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /REFUSED TO REBASELINE/, 'no spurious refusal disclosure when nothing changed');
+    assert.deepEqual([...entry.observed_files].sort(), ['src/read-only.mjs', 'src/write-only.mjs'], 'observed_files keeps the reads-UNION-writes meaning');
+    assert.deepEqual(entry.observed_reads, ['src/read-only.mjs'], 'observed_reads is READS ONLY');
+    assert.ok(!entry.observed_reads.includes('src/write-only.mjs'), 'the write-only path never leaks into observed_reads');
+    assert.equal(entry.observed_source, 'subagent-transcript');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// RESUME-DISCHARGED (fail-closed arm 1).
-// SABOTAGE: ignore status/disposition entirely and refresh any ledger entry
-// matching identity.agent_id regardless of lifecycle state — finished_at and
-// content_evidence would move, reddening the byte-identical assertion below.
+// R1-B15 — A5: the ledger lock is coordination, and a held lock is a REFUSAL,
+// never an unlocked write and never a steal. The lock directory is the one the
+// sheet names (.sterling/review-ledger.lock).
+// SABOTAGE: on lock contention fall through to writing unlocked ("write
+// anyway, disclose") — the byte-identical assertion goes red. SABOTAGE:
+// restore an age-based takeover — the lock-still-present assertion goes red.
 // ===========================================================================
 
-test('RESUME-DISCHARGED (fail-closed): a Stop for an agent_id whose ledger entry is already status:"discharged" with an AUTHENTICATED disposition is skipped loudly — never refreshed', () => {
+test('R1-B15 (A5): while the ledger lock is held, the Stop writes nothing — ledger byte-identical, lock never stolen, [ledger_lock_held] disclosed', () => {
   const { dir, cleanup } = makeProject();
   try {
-    const discharged = {
-      schema_version: 2,
-      entry_id: 'e1000000-0000-4000-8000-0000000000d1',
-      kind: 'roster_receipt',
-      status: 'discharged',
-      started_at: '2026-08-22T00:00:00.000Z',
-      finished_at: '2026-08-22T00:01:00.000Z',
-      reviewer: { agent_type: 'reviewer-correctness', model: null, model_family: 'unknown', model_source: 'unknown' },
-      identity: { session_id: 's1', branch: 'main', base_sha: 'a'.repeat(40), agent_id: 'rev-discharged' },
-      territory: { files: ['src/gone.mjs'], source: 'free-prose-fallback', attribution: 'block' },
-      content_evidence: { status: 'unavailable', blobs: {}, absent_paths: ['src/gone.mjs'], truncated_of: null, failure_reason: null },
-      disposition: { reason: 'foreign session at discharge time', at: '2026-08-22T00:02:00.000Z', head_sha: 'b'.repeat(40), classifier_version: 1, class: 'foreign-session', facts: {} },
-    };
-    writeLedgerRaw(dir, [discharged]);
+    writeLedgerRaw(dir, []);
     const before = readLedgerRaw(dir);
 
-    const r = runHook(h22Input(dir, { agent_id: 'rev-discharged', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(readLedgerRaw(dir), before, 'a DISCHARGED entry is never refreshed — byte-identical, including finished_at and status');
-    assert.match(`${r.stdout}\n${r.stderr}`, /discharged/i, 'the skip is disclosed loudly, naming the discharged state, not silent');
+    const lockDir = ledgerLockDir(dir);
+    mkdirSync(lockDir, { recursive: true });
+    // Alive on this host and deliberately old: age alone must never authorise
+    // a takeover (A5 — no age takeover, no --force-lock).
+    writeFileSync(join(lockDir, 'owner.json'), JSON.stringify({ pid: process.pid, host: hostname(), at: '2025-08-22T00:00:00.000Z', nonce: 'held' }));
+
+    writeRegisterRaw(dir, [registerEntry('rev-locked', 'reviewer-correctness', ['src/locked.mjs'], '2026-08-22T00:00:00.000Z')]);
+    const r = runHook(h22Input(dir, { agent_id: 'rev-locked', agent_type: 'reviewer-correctness' }), dir);
+
+    assert.equal(r.code, 0, `a held ledger lock is disclosed, never a denial — stderr: ${r.stderr}`);
+    assert.equal(readLedgerRaw(dir), before, 'the ledger is byte-identical — the promotion was withheld, never written unlocked');
+    assert.match(output(r), token('ledger_lock_held'), 'the withheld promotion is disclosed by its code');
+    assert.ok(existsSync(lockDir), 'the foreign lock is left untouched, never stolen');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// RESUME-BRANCH-MISMATCH (fail-closed arm 2).
-// SABOTAGE: omit the branch check from the refresh path — the entry would be
-// refreshed regardless of which branch the hook's cwd is on, reddening the
-// byte-identical assertion below.
+// R1-B16 — A6: every advisory line H22 emits carries a [snake_code] token, so
+// no consumer ever has to scrape a sentence.
+// SABOTAGE: emit the disclosure through a bare string instead of render() —
+// this goes red while R1-B07's own code assertion may still pass if the code
+// happens to be interpolated by hand somewhere else, which is why the generic
+// shape is pinned as well as the specific codes.
 // ===========================================================================
 
-test(
-  "RESUME-BRANCH-MISMATCH (fail-closed): a Stop whose CURRENT branch differs from the ledger entry's identity.branch refuses the refresh with a warning — entry unchanged",
-  { skip: GIT_SKIP },
-  () => {
-    const { dir, cleanup } = makeGitProject('main');
-    try {
-      const entry = {
-        schema_version: 2,
-        entry_id: 'e2000000-0000-4000-8000-0000000000b1',
-        kind: 'roster_receipt',
-        status: 'active',
-        started_at: '2026-08-22T00:00:00.000Z',
-        finished_at: '2026-08-22T00:01:00.000Z',
-        reviewer: { agent_type: 'reviewer-correctness', model: null, model_family: 'unknown', model_source: 'unknown' },
-        identity: { session_id: 's1', branch: 'sterling/some-other-branch', base_sha: 'c'.repeat(40), agent_id: 'rev-branchmismatch' },
-        territory: { files: ['README.md'], source: 'free-prose-fallback', attribution: 'block' },
-        content_evidence: { status: 'complete', blobs: { 'README.md': git(dir, ['hash-object', 'README.md']) }, absent_paths: [], truncated_of: null, failure_reason: null },
-        disposition: null,
-      };
-      writeLedgerRaw(dir, [entry]);
-      const before = readLedgerRaw(dir);
-
-      const r = runHook(h22Input(dir, { agent_id: 'rev-branchmismatch', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-      assert.equal(r.code, 0, r.stderr);
-      assert.equal(readLedgerRaw(dir), before, "a branch-mismatched entry is never refreshed — the hook's cwd is on 'main', the entry's identity.branch is 'sterling/some-other-branch'");
-      assert.match(`${r.stdout}\n${r.stderr}`, /branch/i, 'the refusal names the branch mismatch, not a silent skip');
-    } finally {
-      cleanup();
-    }
-  }
-);
-
-// ===========================================================================
-// RESUME-LEGACY-V1 (fail-closed arm 3): a v1 (flat) ledger entry has no
-// identity.agent_id at all to match against — structurally impossible to
-// refresh, so it must be left alone rather than crash or be coerced.
-// SABOTAGE: fall back to matching on agent_type+at (or any other v1-readable
-// pair) against a v1 entry when agent_id is absent — the v1 entry would gain
-// finished_at/resume_count, reddening the byte-identical assertion below.
-// ===========================================================================
-
-test('RESUME-LEGACY-V1 (fail-closed): a pre-existing v1 (flat) ledger entry has no identity.agent_id to match against — a Stop sharing its agent_type is skipped loudly as a non-match, never mutated', () => {
+test('R1-B16 (A6): a disclosing Stop emits an advisory carrying a [snake_code] token', () => {
   const { dir, cleanup } = makeProject();
   try {
-    const v1Entry = { agent_type: 'reviewer-correctness', files: ['src/legacy.mjs'], at: '2026-08-20T00:00:00.000Z', session_id: 's1', branch: 'main', base_sha: 'd'.repeat(40) };
-    writeLedgerRaw(dir, [v1Entry]);
-    const before = readLedgerRaw(dir);
-
-    const r = runHook(h22Input(dir, { agent_id: 'rev-legacy-resume', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
+    writeLedgerRaw(dir, '{ not json');
+    writeRegisterRaw(dir, [registerEntry('rev-a6', 'reviewer-correctness', ['src/a6.mjs'], '2026-08-22T00:00:00.000Z')]);
+    const r = runHook(h22Input(dir, { agent_id: 'rev-a6', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.equal(readLedgerRaw(dir), before, 'a v1 entry (no identity.agent_id field to match by construction) is never mutated by the refresh path');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// RESUME-CONSUMED (correct second round): with the ledger holding ZERO
-// entries for this agent (as if already consumed by commit-reviewed) but a
-// genuinely fresh register entry present (a real re-dispatch), the Stop
-// mints a brand-new receipt rather than treating the absence as a no-op.
-// SABOTAGE: treat "no matching ledger entry found" as itself a reason to
-// skip promotion (conflating "nothing to refresh" with "nothing to do") —
-// ledgerExists(dir) would stay false, reddening the length assertion below.
-// ===========================================================================
-
-test('RESUME-CONSUMED (correct second round): the ledger holds ZERO entries for this agent (already consumed) but a fresh register entry exists (a genuine re-dispatch) — Stop mints a brand-new receipt, not a no-op', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry('rev-second-round', 'reviewer-correctness', ['src/second.mjs'], '2026-08-23T00:00:00.000Z')]);
-
-    const r = runHook(h22Input(dir, { agent_id: 'rev-second-round', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const ledger = readLedger(dir);
-    assert.equal(ledger.length, 1, 'a genuinely fresh register entry with no prior ledger record mints exactly one NEW receipt');
-    const entry = ledger[0];
-    assert.ok(entry.entry_id, 'the new receipt is v2-shaped with its own entry_id');
-    assert.ok(!('resume_count' in entry), 'a fresh mint (nothing to resume from) never carries resume_count');
-    assert.equal(entry.reviewer?.agent_type, 'reviewer-correctness');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// WRONG-TERRITORY REFRESH (board c9f92090, THE LIVE DEFECT — measured live: a
-// follow-up message fires a fresh SubagentStart whose register entry is
-// re-attributed to the newest message, so a receipt for five paths got a
-// concurrent coder's two paths hashed onto it). The fix: the territory
-// hashed at refresh is ALWAYS the receipt's OWN territory.files, never a
-// register entry's files, whatever the register happens to hold at the
-// moment of the resumed Stop.
-// SABOTAGE: source the refresh's file set from the LIVE register entry
-// matching this agent_id (or its most recent live entry) instead of
-// entry.territory.files — content_evidence would include 'zz-other.mjs'
-// and/or drop 'a.mjs'/'b.mjs', reddening the assertions below.
-// ===========================================================================
-
-test("WRONG-TERRITORY REFRESH: a resumed reviewer whose register is re-seeded with a DIFFERENT (wrong) file set is refreshed against its OWN declared territory, never the register's", () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'a.mjs'), 'a\n');
-    writeFileSync(join(dir, 'src', 'b.mjs'), 'b\n');
-    writeFileSync(join(dir, 'src', 'zz-other.mjs'), 'zz\n');
-
-    writeRegisterRaw(dir, [registerEntry('rev-wrongterr', 'reviewer-correctness', ['src/a.mjs', 'src/b.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-wrongterr', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    assert.deepEqual([...entry1.territory.files].sort(), ['src/a.mjs', 'src/b.mjs'], 'fixture guard: round 1 declared a.mjs+b.mjs');
-
-    // The measured live defect: the register is re-seeded for the SAME
-    // agent_id with a WRONG file set (a follow-up message's fresh Start
-    // mis-attributed), PLUS a second live entry for a completely different
-    // agent — neither must ever leak into this refresh.
-    writeRegisterRaw(dir, [
-      registerEntry('rev-wrongterr', 'reviewer-correctness', ['src/zz-other.mjs'], '2026-08-22T00:05:00.000Z'),
-      registerEntry('agent-other', 'coder', ['src/unrelated.mjs'], '2026-08-22T00:05:00.000Z'),
-    ]);
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-wrongterr', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const entry2 = readLedger(dir).find((e) => e.entry_id === entry1.entry_id);
-    assert.ok(entry2, 'the same receipt (by entry_id) is still present — refreshed in place');
-    assert.deepEqual(entry2.territory.files, entry1.territory.files, 'declared territory.files is NEVER overwritten by a re-seeded register entry');
-
-    const evidencePaths = [...Object.keys(entry2.content_evidence.blobs ?? {}), ...(entry2.content_evidence.absent_paths ?? [])].sort();
-    assert.deepEqual(
-      evidencePaths,
-      ['src/a.mjs', 'src/b.mjs'],
-      "content_evidence is hashed against the RECEIPT's own territory — never the register's zz-other.mjs, and never leaking in the unrelated agent's files either"
-    );
-    assert.ok(!('src/zz-other.mjs' in (entry2.content_evidence.blobs ?? {})), 'zz-other.mjs (the WRONG register-sourced file) never appears in content_evidence');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// TERRITORY GUARD (board c9f92090) — defense-in-depth alongside WRONG-
-// TERRITORY REFRESH above: if a receipt's OWN evidence ever names a path
-// outside its declared territory, or is missing a declared path with no
-// failure_reason recorded, the refresh refuses outright rather than
-// touching the entry.
-//
-// AMBIGUITY DISCLOSED, RESOLVED BY A STATED READING: the spec does not name
-// the exact trigger mechanism for "the evidence names an undeclared path".
-// Under the WRONG-TERRITORY REFRESH fix above, a CORRECT refresh can never
-// itself PRODUCE such evidence externally (it is bound strictly to
-// entry.territory.files) — so this is read here as a SELF-CONSISTENCY check
-// applied to the EXISTING entry before any refresh is attempted: a
-// pre-existing v2 entry whose OWN content_evidence already violates its OWN
-// declared territory (e.g. from a prior corrupted round, or hand-tampering)
-// must be refused, never "fixed up" or silently extended further. Both arms
-// below hand-craft exactly that malformed pre-existing state directly into
-// the ledger file. Reported, not silently resolved beyond this stated
-// reading.
-// SABOTAGE (both arms): skip this self-consistency check and refresh the
-// malformed entry anyway — the byte-identical assertions go red.
-// ===========================================================================
-
-test('TERRITORY GUARD (undeclared path): a pre-existing entry whose content_evidence names a path OUTSIDE its declared territory.files is refused, never refreshed', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const malformed = {
-      schema_version: 2,
-      entry_id: 'e3000000-0000-4000-8000-0000000000g1',
-      kind: 'roster_receipt',
-      status: 'active',
-      started_at: '2026-08-22T00:00:00.000Z',
-      finished_at: '2026-08-22T00:01:00.000Z',
-      reviewer: { agent_type: 'reviewer-correctness', model: null, model_family: 'unknown', model_source: 'unknown' },
-      identity: { session_id: 's1', branch: null, base_sha: null, agent_id: 'rev-guard-undeclared' },
-      territory: { files: ['src/a.mjs'], source: 'free-prose-fallback', attribution: 'block' },
-      content_evidence: { status: 'complete', blobs: { 'src/a.mjs': 'a'.repeat(40), 'src/zz-extra.mjs': 'b'.repeat(40) }, absent_paths: [], truncated_of: null, failure_reason: null },
-      disposition: null,
-    };
-    writeLedgerRaw(dir, [malformed]);
-    const before = readLedgerRaw(dir);
-
-    const r = runHook(h22Input(dir, { agent_id: 'rev-guard-undeclared', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(
-      readLedgerRaw(dir),
-      before,
-      "an entry whose evidence names an undeclared path ('src/zz-extra.mjs' is outside territory.files ['src/a.mjs']) is never refreshed — byte-identical"
-    );
-    assert.match(`${r.stdout}\n${r.stderr}`, /does not bind the receipt's DECLARED territory/, 'the refusal names the binding violation');
-  } finally {
-    cleanup();
-  }
-});
-
-test('TERRITORY GUARD (omitted path, no failure_reason): a pre-existing entry whose content_evidence is missing a declared path with no failure_reason recorded is refused, never refreshed', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const malformed = {
-      schema_version: 2,
-      entry_id: 'e3000000-0000-4000-8000-0000000000g2',
-      kind: 'roster_receipt',
-      status: 'active',
-      started_at: '2026-08-22T00:00:00.000Z',
-      finished_at: '2026-08-22T00:01:00.000Z',
-      reviewer: { agent_type: 'reviewer-correctness', model: null, model_family: 'unknown', model_source: 'unknown' },
-      identity: { session_id: 's1', branch: null, base_sha: null, agent_id: 'rev-guard-omitted' },
-      territory: { files: ['src/a.mjs', 'src/b.mjs'], source: 'free-prose-fallback', attribution: 'block' },
-      content_evidence: { status: 'complete', blobs: { 'src/a.mjs': 'a'.repeat(40) }, absent_paths: [], truncated_of: null, failure_reason: null },
-      disposition: null,
-    };
-    writeLedgerRaw(dir, [malformed]);
-    const before = readLedgerRaw(dir);
-
-    const r = runHook(h22Input(dir, { agent_id: 'rev-guard-omitted', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.equal(
-      readLedgerRaw(dir),
-      before,
-      "an entry declaring ['src/a.mjs','src/b.mjs'] but whose evidence covers only 'src/a.mjs', with no failure_reason accounting for 'src/b.mjs', is never refreshed — byte-identical"
-    );
-    assert.match(`${r.stdout}\n${r.stderr}`, /does not bind the receipt's DECLARED territory/, 'the refusal names the binding violation');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// GATE 3b — SESSION IDENTITY (board c9f92090): a resume refresh compares
-// identity.session_id against the Stop's OWN session_id, POSITIVE-EVIDENCE-
-// ONLY — a genuine, confirmed mismatch (both sides present and different)
-// refuses; an absent/null value on EITHER side is not evidence of anything
-// and the refresh still proceeds.
-// SABOTAGE (mismatch test): drop the session_id comparison from the refresh
-// path entirely — the byte-identical assertion goes red.
-// SABOTAGE (control test): flip the guard to fail-closed on ANY absence
-// (treat missing/null as a mismatch) — the refresh would wrongly refuse,
-// reddening the "still increments" assertions below.
-// ===========================================================================
-
-test("GATE 3b (SESSION-MISMATCH): a resumed Stop whose session_id genuinely differs from the ledger entry's identity.session_id refuses the refresh — byte-identical, disclosed", () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry('rev-sess-mismatch', 'reviewer-correctness', ['src/sess.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-sess-mismatch', session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1 = readLedger(dir)[0];
-    assert.equal(entry1.identity.session_id, 's1', 'fixture guard: round 1 recorded session_id s1');
-    const before = readLedgerRaw(dir);
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-sess-mismatch', agent_type: 'reviewer-correctness', session_id: 's2', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    assert.equal(readLedgerRaw(dir), before, 'a genuinely different session_id refuses the refresh — byte-identical');
-    assert.match(`${r.stdout}\n${r.stderr}`, /session/i, 'the refusal names the session mismatch');
-  } finally {
-    cleanup();
-  }
-});
-
-test('GATE 3b (CONTROL, absent/null): a NULL identity.session_id, or a Stop with NO session_id at all, is not evidence of a mismatch — the refresh still proceeds', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    // Half A: the LEDGER side is null.
-    writeRegisterRaw(dir, [registerEntry('rev-sess-null-a', 'reviewer-correctness', ['src/sessA.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-sess-null-a', session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    let ledger = readLedger(dir);
-    ledger[0].identity.session_id = null;
-    writeLedgerRaw(dir, ledger);
-    const entry1a = readLedger(dir)[0];
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-sess-null-a', agent_type: 'reviewer-correctness', session_id: 's9-anything', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry2a = readLedger(dir).find((e) => e.entry_id === entry1a.entry_id);
-    assert.equal(entry2a.resume_count ?? 0, (entry1a.resume_count ?? 0) + 1, 'a null identity.session_id never blocks the refresh — resume_count still increments');
-
-    // Half B: the STOP side is absent entirely (no session_id key on stdin).
-    writeRegisterRaw(dir, [registerEntry('rev-sess-null-b', 'reviewer-correctness', ['src/sessB.mjs'], '2026-08-22T00:00:00.000Z')]);
-    r = runHook(h22Input(dir, { agent_id: 'rev-sess-null-b', session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry1b = readLedger(dir).find((e) => e.identity?.agent_id === 'rev-sess-null-b');
-    assert.ok(entry1b, 'fixture guard: round 1 promoted the second scenario');
-
-    const input2b = h22Input(dir, { agent_id: 'rev-sess-null-b', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' });
-    delete input2b.session_id;
-    r = runHook(input2b, dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry2b = readLedger(dir).find((e) => e.entry_id === entry1b.entry_id);
-    assert.equal(entry2b.resume_count ?? 0, (entry1b.resume_count ?? 0) + 1, 'a completely absent stdin.session_id never blocks the refresh either — resume_count still increments');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// RESUME_COUNT ARMS (board c9f92090): resume_count increments only from a
-// genuinely usable (non-negative integer) prior value; an absent prior
-// value silently becomes 1; a present but UNUSABLE prior value (a string, a
-// negative number, a non-integer) resets to 1 with a loud disclosure rather
-// than propagating garbage arithmetic (e.g. "3"+1 via string concatenation,
-// or -1+1 silently reading as a fresh mint).
-// SABOTAGE: do plain `(resume_count ?? 0) + 1` arithmetic with no usability
-// check at all — the UNUSABLE-value assertions below go red (the result is
-// NaN, a concatenated string, or 0 for the -1 case) and the UNUSABLE stderr
-// disclosure never fires.
-// ===========================================================================
-
-test('RESUME_COUNT (absent -> 1, silently): a fresh promotion has no resume_count; its first resume sets it to exactly 1 with no UNUSABLE disclosure', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry('rev-rc-absent', 'reviewer-correctness', ['src/rc.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-rc-absent', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.ok(!('resume_count' in readLedger(dir)[0]), 'fixture guard: a fresh promotion carries no resume_count');
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-rc-absent', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry = readLedger(dir)[0];
-    assert.equal(entry.resume_count, 1, 'absent -> 1');
-    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /UNUSABLE resume_count/i, 'an absent prior value is the ordinary case, never disclosed as unusable');
-  } finally {
-    cleanup();
-  }
-});
-
-test('RESUME_COUNT (2 -> 3, silently): a genuinely usable non-negative-integer resume_count increments by exactly one with no disclosure', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry('rev-rc-two', 'reviewer-correctness', ['src/rc2.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-rc-two', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ledger = readLedger(dir);
-    ledger[0].resume_count = 2;
-    writeLedgerRaw(dir, ledger);
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-rc-two', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry = readLedger(dir)[0];
-    assert.equal(entry.resume_count, 3, '2 -> 3');
-    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, /UNUSABLE resume_count/i, 'a genuinely usable prior value is never disclosed as unusable');
-  } finally {
-    cleanup();
-  }
-});
-
-test('RESUME_COUNT (UNUSABLE arms): a present but unusable prior resume_count ("3" string, -1, 1.5) resets to exactly 1, disclosed by name', () => {
-  for (const unusable of ['3', -1, 1.5]) {
-    const { dir, cleanup } = makeProject();
-    try {
-      writeRegisterRaw(dir, [registerEntry('rev-rc-bad', 'reviewer-correctness', ['src/rcbad.mjs'], '2026-08-22T00:00:00.000Z')]);
-      let r = runHook(h22Input(dir, { agent_id: 'rev-rc-bad', hook_event_name: 'SubagentStop' }), dir);
-      assert.equal(r.code, 0, r.stderr);
-      const ledger = readLedger(dir);
-      ledger[0].resume_count = unusable;
-      writeLedgerRaw(dir, ledger);
-
-      r = runHook(h22Input(dir, { agent_id: 'rev-rc-bad', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-      assert.equal(r.code, 0, r.stderr);
-      const entry = readLedger(dir)[0];
-      assert.equal(entry.resume_count, 1, `unusable prior resume_count (${JSON.stringify(unusable)}) resets to exactly 1, never propagated arithmetic`);
-      assert.match(`${r.stdout}\n${r.stderr}`, /UNUSABLE resume_count/i, `the reset is disclosed by name for prior value ${JSON.stringify(unusable)}`);
-    } finally {
-      cleanup();
-    }
-  }
-});
-
-// ===========================================================================
-// GATE 4 — LEDGER LOCK TIMEOUT (board c9f92090: "withLedgerLock timeout
-// proceeds UNLOCKED today ... the refresh path must SKIP loudly, never take
-// the unlocked route, because a whole-array rewrite can clobber a concurrent
-// consume"). The ledger lock is shared with scripts/review-ledger.mjs
-// discharge (article review-ledger-cli: "shares the ledger lock
-// convention"), which uses a directory-based lock carrying an owner token
-// (scripts/tests/review-ledger-discharge-hardening.test.mjs, pin P7) —
-// reused here, without importing, since neither CLI's internals were opened
-// (H4). Two candidate lock directory names are planted (the lock's exact
-// filename is not verifiable from outside — same disclosed substitution as
-// that P7 pin) so whichever the real implementation uses, this test
-// contends with it.
-// SABOTAGE: on ledger-lock contention, fall through to the ORIGINAL
-// promotion path's pre-existing "write anyway, disclose" unlocked fallback
-// instead of skipping the refresh outright — the byte-identical assertion
-// goes red.
-// ===========================================================================
-
-test('GATE 4: while the review-ledger lock is held externally, a resumed Stop SKIPS the refresh entirely — ledger byte-identical, never written unlocked', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry('rev-gate4', 'reviewer-correctness', ['src/gate4.mjs'], '2026-08-22T00:00:00.000Z')]);
-    let r = runHook(h22Input(dir, { agent_id: 'rev-gate4', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const before = readLedgerRaw(dir);
-
-    const now = new Date();
-    const LOCK_NAMES = ['review-ledger.json.lock', 'review-ledger.lock'];
-    const planted = LOCK_NAMES.map((name) => {
-      const lockDir = join(dir, '.sterling', name);
-      mkdirSync(lockDir, { recursive: true });
-      const tokenPath = join(lockDir, 'owner.json');
-      writeFileSync(tokenPath, JSON.stringify({ pid: 999_999, host: 'another-machine', at: now.toISOString() }));
-      utimesSync(tokenPath, now, now);
-      utimesSync(lockDir, now, now);
-      return { lockDir, tokenPath };
-    });
-
-    r = runHook(h22Input(dir, { agent_id: 'rev-gate4', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop' }), dir);
-
-    assert.equal(r.code, 0, `a ledger lock timeout is disclosed, never denies the spawn — stderr: ${r.stderr}`);
-    assert.equal(readLedgerRaw(dir), before, 'the ledger is byte-identical — the refresh was skipped, never written unlocked');
-    assert.match(`${r.stdout}\n${r.stderr}`, /NEVER written unlocked/, 'the skip is disclosed by the exact contract wording');
-
-    for (const p of planted) {
-      assert.ok(existsSync(p.lockDir), 'the foreign lock is left untouched, never stolen');
-    }
+    assert.match(output(r), ANY_CODE, 'the advisory is rendered through the shared errors module, code first');
   } finally {
     cleanup();
   }

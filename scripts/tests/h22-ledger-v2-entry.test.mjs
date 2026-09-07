@@ -1,4 +1,17 @@
-// H22 REVIEW-LEDGER ENTRY v2 — WRITE SIDE (campaign slice S2b-1).
+// H22 REVIEW-LEDGER ENTRY v2 — WRITE SIDE.
+//
+// R1 PIN RE-CUT (contract sheet §1.2 + amendments A3/A8): the v2 envelope is
+// KEPT as this file already pins it. What this re-cut adds is the honest
+// naming of the byte evidence: content_evidence.basis is
+// 'stop-time-worktree-snapshot' — the bytes that EXISTED at Stop, never "the
+// bytes the reviewer read" — with index_blobs recorded only where the index
+// differed from the worktree at Stop (A8: spend matches the WORKTREE blob;
+// index_blobs is diagnostic).
+//   RETIRED: nothing in this file. Its subject (the promoted entry's shape,
+//   model provenance, absence sentinels, v1 non-migration) is unchanged by the
+//   rebuild; the A3 compatibility read of a MISSING basis is pinned at the
+//   parser instead, in scripts/tests/review-ledger-entry-owner.test.mjs
+//   (R1-B23), because it is a read-side contract, not a write-side one.
 //
 // Governing decision: knowledge_get 57984926-3bdc-4824-908e-b6ab2546be52
 // (slug review-ledger-v2-lifecycle-refuse-flip-and-external-review-design).
@@ -350,6 +363,13 @@ test('V2-1: a reviewer-* SubagentStop promotion writes a full v2 entry (schema_v
     assert.equal(entry.content_evidence?.status, 'complete', 'both declared files exist on disk — content evidence is complete');
     assert.deepEqual(entry.content_evidence?.absent_paths, [], 'nothing absent — the sentinel array is present but empty');
     assert.notEqual(entry.content_evidence?.blobs, undefined, 'some blob evidence was recorded for the present files');
+    // R1 re-cut (sheet §1.2): the evidence NAMES what it is. A receipt that
+    // claimed to hold "the bytes the reviewer read" would be asserting
+    // something no Stop-time hash can support.
+    // SABOTAGE: omit `basis` from the freshly-written entry (relying on A3's
+    // read-side default to fill it in) — this assertion goes red while every
+    // other V2-1 assertion stays green.
+    assert.equal(entry.content_evidence?.basis, 'stop-time-worktree-snapshot', 'a freshly promoted receipt NAMES its evidence basis explicitly');
 
     assert.equal(entry.disposition, null);
 
@@ -763,6 +783,65 @@ test('V2-6: a pre-existing v1 ledger entry is structurally untouched after a new
     const v2After = findEntryByFile(ledger, 'src/new.mjs');
     assert.ok(v2After, 'the newly-promoted entry is present');
     assert.equal(v2After.schema_version, 2, 'the newly-promoted entry is v2, independent of the v1 entry sitting beside it');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// R1-B17 (NEW, sheet §1.2 + A8) — WHAT THE BLOBS ACTUALLY ARE. `blobs` is the
+// git hash-object of the WORKTREE at Stop for every declared path; a
+// `stop_index_blob` is recorded ONLY where `git ls-files -s` disagreed with
+// the worktree at that moment. Spend compares the index against `blobs`
+// (A8) — `index_blobs` is diagnostic, which is exactly why recording it
+// everywhere (or recording the INDEX blob as `blobs`) must be visible.
+//
+// The control path is inside the same fixture and must pass for the OPPOSITE
+// reason: a file whose index and worktree agree gets NO index_blobs entry, so
+// a green "index_blobs recorded" cannot mean "index_blobs is always written".
+//
+// SABOTAGE: hash the INDEX (`git ls-files -s` / `git rev-parse :path`) into
+// `blobs` instead of the worktree — the worktree-equality assertion goes red
+// with the staged (older) sha, and the spend rule silently starts vouching for
+// bytes that were never on disk at Stop.
+// SABOTAGE: always write index_blobs for every declared path — the control
+// half goes red while the divergent half stays green.
+// ===========================================================================
+
+test('R1-B17: content_evidence.blobs is the WORKTREE blob at Stop; index_blobs appears only where the index disagreed', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject('sterling/blob-basis');
+  try {
+    // (a) CONTROL half: index and worktree agree.
+    touchFile(dir, 'src/agreed.mjs', '// agreed\n');
+    // (b) DIVERGENT half: staged bytes, then a further worktree-only edit.
+    touchFile(dir, 'src/diverged.mjs', '// staged version\n');
+    git(dir, ['add', 'src/agreed.mjs', 'src/diverged.mjs']);
+    touchFile(dir, 'src/diverged.mjs', '// worktree version, edited after staging\n');
+
+    const agreedIndex = git(dir, ['rev-parse', ':src/agreed.mjs']);
+    const agreedWorktree = git(dir, ['hash-object', 'src/agreed.mjs']);
+    assert.equal(agreedIndex, agreedWorktree, 'fixture guard: the control file genuinely agrees');
+    const divergedIndex = git(dir, ['rev-parse', ':src/diverged.mjs']);
+    const divergedWorktree = git(dir, ['hash-object', 'src/diverged.mjs']);
+    assert.notEqual(divergedIndex, divergedWorktree, 'fixture guard: the divergent file genuinely diverges');
+
+    writeRegisterRaw(dir, [
+      registerEntry({ agent_id: 'rev-blob-basis', agent_type: 'reviewer-correctness', files: ['src/agreed.mjs', 'src/diverged.mjs'], at: '2026-09-07T00:00:00.000Z' }),
+    ]);
+    writeChildTranscript(dir, 'child-blob-basis.jsonl');
+
+    const r = runHook(h22Input(dir, { agent_id: 'rev-blob-basis', agent_type: 'reviewer-correctness', transcript_path: join(dir, 't', 'child-blob-basis.jsonl') }), dir);
+    assert.equal(r.code, 0, r.stderr);
+
+    const entry = readLedger(dir)[0];
+    assert.equal(entry.content_evidence.basis, 'stop-time-worktree-snapshot');
+    assert.equal(entry.content_evidence.blobs['src/agreed.mjs'], agreedWorktree, 'CONTROL: the agreeing file records its (identical) worktree blob');
+    assert.equal(entry.content_evidence.blobs['src/diverged.mjs'], divergedWorktree, 'the DIVERGENT file records the WORKTREE blob, never the staged one');
+    assert.notEqual(entry.content_evidence.blobs['src/diverged.mjs'], divergedIndex, 'and specifically not the index blob');
+
+    const indexBlobs = entry.content_evidence.index_blobs ?? {};
+    assert.equal(indexBlobs['src/diverged.mjs'], divergedIndex, 'the disagreement is recorded diagnostically as the index blob');
+    assert.ok(!('src/agreed.mjs' in indexBlobs), 'a path whose index matched the worktree records no index_blobs entry at all');
   } finally {
     cleanup();
   }

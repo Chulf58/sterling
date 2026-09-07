@@ -1,7 +1,24 @@
-// H22 TERRITORY-EVIDENCE UPGRADE — SPEC ONLY, red-first.
+// H22 TERRITORY-EVIDENCE — observed tool paths as CORROBORATION.
 // Governing decision: knowledge_get 9500cce1-f54b-450b-ae63-dd78ee53dbab
 // (slug review-territory-observed-evidence) — confirmed LIVE as of the
 // amendment below (it did not exist at this file's first draft).
+//
+// R1 PIN RE-CUT: this file is KEPT WHOLE. The contract sheet carries
+// observed_files / observed_reads / observed_source / observed_truncated
+// forward unchanged (§1.2, "as today"), including the null-vs-empty tri-state
+// this file IS the test base for, and it does not rebuild
+// scripts/hooks/lib/observed-territory.mjs. The round-scoped
+// observedToolPathsSince pins (PART 4) are likewise KEPT: the refresh path
+// they were first written for is retired by A4, but round-scoping becomes MORE
+// load-bearing under it, not less — round n+1 has its own receipt derived from
+// the SAME child transcript, so a round-2 receipt that counted round 1's reads
+// as its own would be exactly the false corroboration this file guards.
+//   RETIRED: nothing in this file.
+//   A11 NAMES THE CODE: PART 2's missing-declaration warning is
+//   `territory_declaration_missing` (H22 Start advisory), now a CODES member,
+//   so the positive arms assert that exact token. The negative arms keep the
+//   content discriminator alone, because "no warning fired" cannot be
+//   distinguished from "some other coded advisory fired" by a token alone.
 //
 // SPEC CORRECTION (post-first-draft amendment, verified against
 // research_finding 20b44518-39d0-4dd4-81b7-59a403ad09e1, a byte-exact live
@@ -254,6 +271,15 @@ const registerEntry = (over = {}) => ({
 // (P2-malformed-marker) pass even with no real absence warning present).
 const ABSENCE_INDICATOR_RE = /\b(no|missing|without)\b[^\n]{0,80}REVIEW-TERRITORY|REVIEW-TERRITORY[^\n]{0,80}\b(no|missing|without)\b/is;
 
+// A6 + A11: this advisory is rendered through the shared errors module and
+// carries exactly the code A11 names for it.
+// SABOTAGE: emit this warning as a bare console.error string, or render it
+// with `territory_declaration_malformed` (the sibling code for a line that IS
+// present but unparseable) — the token assertion goes red while the content
+// discriminator stays green, which is the confusion the two codes exist to
+// keep apart: nothing declared vs something declared badly.
+const token = (c) => new RegExp('\\[' + c + '\\]');
+
 function assertNoDeclarationWarning(stderr) {
   assert.match(stderr, /REVIEW-TERRITORY/, 'stderr names REVIEW-TERRITORY');
   assert.match(
@@ -261,6 +287,7 @@ function assertNoDeclarationWarning(stderr) {
     ABSENCE_INDICATOR_RE,
     'stderr carries a standalone absence indicator ("no"/"missing"/"without") near the REVIEW-TERRITORY marker'
   );
+  assert.match(stderr, token('territory_declaration_missing'), 'A11: the missing-declaration advisory carries its own code — not the malformed-declaration one');
 }
 function assertNoWarningAtAll(stderr) {
   assert.doesNotMatch(stderr, ABSENCE_INDICATOR_RE, 'no absence-declaration warning fires');

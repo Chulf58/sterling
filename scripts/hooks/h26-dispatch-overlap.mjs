@@ -16,14 +16,15 @@
 // recovery to do here), normalizes them repo-relative POSIX and drops the
 // same governed-exclusion prefixes H22 drops (.git/, .sterling/, sterling/,
 // git/) so an excluded path never enters the candidate set on either side of
-// the comparison. It then reads H22's register (.sterling/transient/
-// dispatch-register.json) via the shared TTL reader (scripts/lib/
-// dispatch-register.mjs liveDispatches — config dispatch_register.stale_minutes,
-// default 60; corrupt/missing register degrades to []), additionally
-// restricted to entries from THIS session (liveDispatches has no session
-// context; only the hook does). When any live same-session entry's declared
-// `files` exactly matches (repo-relative string equality) a candidate from
-// the outgoing prompt, it emits a warn-only advisory naming the overlapping
+// the comparison. It then classifies H22's register (scripts/lib/
+// dispatch-register.mjs classifyRegister — the ONE owner classifier,
+// TRI-STATE: presumed-active/unknown/inactive-confirmed; config
+// dispatch_register.stale_minutes, default 60; corrupt/missing register
+// degrades per A11, never a silent all-clear). presumed-active AND unknown
+// entries both warn (an expired lease is not a death certificate);
+// inactive-confirmed is skipped. When any warnable entry's declared `files`
+// exactly matches (repo-relative string equality) a candidate from the
+// outgoing prompt, it emits a warn-only advisory naming the overlapping
 // path(s), each overlapping dispatch as `agent_type:agent_id`, and the remedy
 // (keep lanes file-disjoint: await the in-flight agent, or re-scope this
 // dispatch's territory). A malformed register entry (missing `files` or
@@ -42,10 +43,11 @@
 // surfaced as a caveated warning that would cry wolf on every batch.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
+import { readStdin, allow, exitAfterWrite, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
-import { liveDispatches } from '../lib/dispatch-register.mjs';
+import { classifyRegister, formatDispatchRef } from '../lib/dispatch-register.mjs';
+import { disclosure, render } from '../lib/review-errors.mjs';
 import { hasUnsuppressedMatch, escapeRe, isReadOnlyDispatchType } from './lib/dispatch-advisory.mjs';
 import { claimedResources } from './lib/dispatch-residue.mjs';
 
@@ -192,23 +194,40 @@ try {
   warnNonBlocking(`H26: failed to parse stdin: ${(e && e.message) || e}`);
 }
 
+// R0: the payload and the exit are ONE state machine (exitAfterWrite) — a
+// bare process.stdout.write() followed by a separate exit call can truncate
+// on a reader that has not yet drained (measured, decision
+// hook-stdout-exit-after-write-callback-bound-exit-deny-stays-synchronous).
 function emit(additionalContext) {
   recordAdvisoryFire(input.cwd, 'h26', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-  process.stdout.write(
+  exitAfterWrite(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext },
-    })
+    }),
+    0
   );
 }
 
 try {
   const prompt = input.tool_input?.prompt;
 
-  // Session-scoped live register, shared by the resource check below and the
-  // file-overlap check further down (same liveness/TTL semantics either way).
-  // liveDispatches reads only the register/config JSON files — no store
-  // dependency — so this is safe to compute even outside a Sterling project.
-  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
+  // TRI-STATE consumer policy (contract sheet §1.1, A11): classifyRegister is
+  // the ONE owner classifier — reads only the register/config JSON files, so
+  // this is safe to compute even outside a Sterling project. presumed-active
+  // AND unknown both warn (an expired lease is not a death certificate);
+  // inactive-confirmed is skipped; an unreadable register is disclosed once,
+  // never a silent all-clear.
+  const staleMinutes = (() => {
+    try {
+      const v = loadConfig(input.cwd)?.dispatch_register?.stale_minutes;
+      return typeof v === 'number' && v > 0 ? v : 60;
+    } catch {
+      return 60;
+    }
+  })();
+  const classified = classifyRegister(input.cwd, { now: Date.now(), sessionId: input.session_id, staleMinutes });
+  const rows = classified.availability === 'ok' ? classified.entries.filter((row) => row.status !== 'inactive-confirmed') : [];
+  const live = rows.map((row) => row.entry);
 
   // SPEC B — EXCLUSIVE NON-FILE RESOURCE CLAIM. This runs BEFORE both (a) the
   // sterling.db project-marker gate just below and (b) the read-only-
@@ -250,7 +269,10 @@ try {
   // entries, no overlap).
   function finish(fileAdvisory) {
     const parts = [fileAdvisory, resourceAdvisory].filter(Boolean);
-    if (parts.length) emit(parts.join('\n\n'));
+    if (parts.length) {
+      emit(parts.join('\n\n')); // owns the exit itself (exitAfterWrite)
+      return;
+    }
     allow();
   }
 
@@ -329,11 +351,28 @@ try {
 
   const candidateSet = new Set(files);
 
-  if (!live.length) finish();
+  // An unreadable register is never a silent all-clear (A11): disclosed once,
+  // regardless of how many entries it might have held. A genuinely ABSENT
+  // register stays silent — H26 acts on overlaps, it never renders a
+  // statement about the in-flight set, so silence here is not a claim.
+  if (classified.availability === 'corrupt') {
+    finish(
+      render(
+        disclosure(
+          'register_unavailable',
+          { availability: classified.availability },
+          `dispatch register unavailable (${classified.availability}) — no overlap can be judged`
+        )
+      )
+    );
+  }
+
+  if (!rows.length) finish();
 
   const overlaps = [];
   const overlapPaths = new Set();
-  for (const e of live) {
+  for (const row of rows) {
+    const e = row.entry;
     // A malformed entry (no `files` array, no agent_id — the entry key) is
     // skipped outright: it can never contribute an overlap, and it must never
     // surface as a bogus 'undefined:undefined' dispatch identity. agent_type
@@ -430,23 +469,52 @@ try {
       : [];
     const matched = [...new Set([...matchedExact, ...matchedPrefix])];
     if (matched.length) {
-      overlaps.push({ agentType: e.agent_type ?? 'agent', agentId: e.agent_id, files: matched });
+      overlaps.push({ row, agentType: e.agent_type ?? 'agent', agentId: e.agent_id, files: matched });
       matched.forEach((f) => overlapPaths.add(f));
     }
   }
   if (!overlaps.length) finish();
 
+  // TRI-STATE WORDING (A11): the ref (formatDispatchRef) carries the status
+  // and the measured age itself, so the advisory NEVER asserts liveness it
+  // cannot observe — it names what the register RECORDS. An unknown-status
+  // holder gets an additional caveat naming the killed-dispatch case.
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(', ');
-  const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(', ')})`).join('; ');
-  finish(
-    `H26 DISPATCH OVERLAP ADVISORY — this dispatch's brief names file(s) that overlap a LIVE in-flight ` +
-      `dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is ` +
-      `warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) — the prompt extraction only approximates write territory, and this hook ` +
-      `compares only dispatches already present in the live register when this PreToolUse fires. It may repeat ` +
-      `on further dispatches while the holding dispatch stays live, for the same reason. Remedy: ` +
-      `keep lanes file-disjoint — await the in-flight agent, or re-scope this dispatch's territory so it does ` +
-      `not overlap.`
-  );
+  // formatDispatchRef reads agent_type verbatim (H22 writes `agent_type ?? null`
+  // by design); the null-fallback label is applied here, on a shallow clone,
+  // so the shared owner formatter never has to know about H26's label
+  // convention.
+  const entryList = overlaps
+    .map((o) => `${formatDispatchRef({ ...o.row, entry: { ...o.row.entry, agent_type: o.agentType } })} (${o.files.join(', ')})`)
+    .join('; ');
+  const hasUnknown = overlaps.some((o) => o.row.status === 'unknown');
+  const overlapLines = [
+    render(
+      disclosure(
+        'dispatch_overlap',
+        {},
+        `H26 DISPATCH OVERLAP ADVISORY — this dispatch's brief names file(s) that overlap dispatch(es) ` +
+          `already present in the live register when this PreToolUse fires: ${pathList}. Dispatch(es): ${entryList}. ` +
+          `This is warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) — the prompt extraction ` +
+          `only approximates write territory. It may repeat on further dispatches while the holding dispatch stays ` +
+          `live, for the same reason. Remedy: keep lanes file-disjoint — await the in-flight agent, or re-scope ` +
+          `this dispatch's territory so it does not overlap.`
+      )
+    ),
+  ];
+  if (hasUnknown) {
+    overlapLines.push(
+      render(
+        disclosure(
+          'dispatch_status_unknown',
+          {},
+          `status unknown for one or more of the dispatch(es) above — RECORDED IN THE REGISTER, not observed ` +
+            `running; a KILLED or interrupted dispatch leaves this entry, so the overlap above cannot be confirmed live.`
+        )
+      )
+    );
+  }
+  finish(overlapLines.join('\n'));
 } catch (e) {
   // Advisory only, never a gate: loud but non-blocking (P5 without AC7 harm).
   warnNonBlocking(`H26: dispatch-overlap advisory failed: ${(e && e.message) || e}`);

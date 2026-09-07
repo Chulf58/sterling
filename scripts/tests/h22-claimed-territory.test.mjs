@@ -1,6 +1,16 @@
 // H22 CLAIMED-TERRITORY (write-side negation guard) — board c56862a9,
 // research_finding 289cd172 v2 (h26-registers-do-not-touch-paths-as-held-territory).
 //
+// R1 PIN RE-CUT: KEPT WHOLE. The rebuild keeps `files` (territory EXAMINED)
+// and `claimed_files` (territory CLAIMED) as separate RegisterEntry fields
+// (contract sheet §1.1) and keeps H26's claimed-first / files-fallback read.
+// The only change is Section 5's ledger lookup: a promoted receipt's declared
+// territory lives at `territory.files` (§1.2) and the dual-shape tolerance is
+// no longer needed — the v1 flat shape is never PRODUCED, only read through
+// the legacy adapter.
+//   RETIRED: the `ledger[0].territory?.files ?? ledger[0].files` dual-shape
+//   read — a promotion writes one shape, and tolerating two hid which.
+//
 // SPEC UNDER TEST (given by the launching agent):
 //   H22 SubagentStart keeps writing `files` = EVERY path candidate the matched
 //   block(s) mention (territory EXAMINED — review receipts, residue probes and
@@ -363,13 +373,10 @@ test('H22 claimed-territory RECEIPT SAFETY: a reviewer brief naming its subject 
 
     const ledger = JSON.parse(readFileSync(join(dir, '.sterling', 'review-ledger.json'), 'utf8'));
     assert.equal(ledger.length, 1, 'exactly one receipt was promoted');
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): a v2-promoted entry carries files at territory.files; dual-shape read preserves this test's
-    // substance (the promoted receipt must still NAME the reviewed territory) for either shape.
-    const promotedFiles = ledger[0].territory?.files ?? ledger[0].files;
+    // A promotion writes ONE shape (§1.2): territory.files.
     assert.ok(
-      promotedFiles.includes('src/auth.mjs'),
-      `the promoted receipt must NAME the reviewed territory — an empty files[] is the strongest unverifiable-territory signal at commit-reviewed.mjs:428-436; got: ${JSON.stringify(ledger[0])}`
+      ledger[0].territory.files.includes('src/auth.mjs'),
+      `the promoted receipt must NAME the reviewed territory — an empty declared set is the strongest unverifiable-territory signal at spend time; got: ${JSON.stringify(ledger[0])}`
     );
   } finally {
     cleanup();

@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync5, mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync as writeFileSync2, renameSync as renameSync2, rmdirSync, rmSync as rmSync2, statSync as statSync4 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync4, statSync as statSync4, mkdirSync as mkdirSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 import { spawnSync as spawnSync2 } from "node:child_process";
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { join as join3 } from "node:path";
+import { randomUUID } from "node:crypto";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5475,9 +5475,6 @@ function lastDispatchBlocks(transcriptPath, skip = 0) {
   return [];
 }
 
-// scripts/hooks/lib/dispatch-residue.mjs
-import { spawnSync } from "node:child_process";
-
 // scripts/hooks/lib/dispatch-advisory.mjs
 var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
 var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
@@ -5585,8 +5582,12 @@ function extractGlobPrefixCandidates(text) {
   const found = String(text ?? "").match(GLOB_PREFIX_RE) ?? [];
   return [...new Set(found.map((m) => m.slice(0, -2)))];
 }
+function isReviewerClass(type) {
+  return !!type && type.startsWith("reviewer-");
+}
 
 // scripts/hooks/lib/dispatch-residue.mjs
+import { spawnSync } from "node:child_process";
 function probeDirtyPaths(projectDir, files) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
@@ -5639,178 +5640,595 @@ function claimedResources(promptText, configuredNames) {
   return claimed;
 }
 
-// scripts/hooks/lib/dispatch-register-lock.mjs
-import { mkdirSync, rmSync, renameSync, statSync as statSync2, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
-import { randomUUID } from "node:crypto";
-var DEFAULT_RETRY_MS = 1e3;
-var DEFAULT_STALE_MS = 1e4;
-var POLL_MS = 20;
-var OWNER_FILE = "owner";
-function registerLockDir(projectRoot2) {
-  return join2(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync4, statSync as statSync2 } from "node:fs";
+import { hostname } from "node:os";
+import { join as join2, basename, dirname as dirname2 } from "node:path";
+import { randomBytes } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
 }
-function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+function refusal(code, facts = {}, message = code) {
+  assertCode(code);
+  const err = new Error(message);
+  err.kind = "refusal";
+  err.code = code;
+  err.facts = facts;
+  return err;
 }
-function readOwnerNonce(lockDir) {
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join2(root, ".sterling", "transient", "dispatch-register.json");
+}
+function registerLockDir(root) {
+  return join2(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function ledgerLockDir(root) {
+  return join2(root, ".sterling", "review-ledger.lock");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync4(p)) return { availability: "absent", arr: [] };
+  let raw;
   try {
-    return readFileSync2(join2(lockDir, OWNER_FILE), "utf8");
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function writeRawArrayAtomic(root, arr) {
+  const dir = join2(root, ".sterling", "transient");
+  mkdirSync(dir, { recursive: true });
+  const p = registerPath(root);
+  const tmp = `${p}.tmp-${randomBytes(4).toString("hex")}`;
+  writeFileSync(tmp, JSON.stringify(arr));
+  renameSync(tmp, p);
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var LOCK_CODE_BY_BASENAME = {
+  "dispatch-register.lock": "register_lock_held",
+  "review-ledger.lock": "ledger_lock_held"
+};
+function lockCodeFor(lockDir) {
+  return LOCK_CODE_BY_BASENAME[basename(lockDir)] ?? "register_lock_held";
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readOwner(lockDir) {
+  try {
+    return JSON.parse(readFileSync2(join2(lockDir, "owner.json"), "utf8"));
   } catch {
     return null;
   }
 }
-function tombAndRemove(lockDir) {
-  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID()}`;
-  renameSync(lockDir, tomb);
+function looksDeadOwner(o) {
+  return !!o && o.host === hostname() && !isPidAlive(o.pid);
+}
+function statIno(p) {
   try {
-    rmSync(tomb, { recursive: true, force: true });
+    return statSync2(p).ino;
   } catch {
+    return null;
   }
 }
-function makeLock(lockDir, nonce) {
-  return {
-    nonce,
-    release() {
-      try {
-        if (readOwnerNonce(lockDir) !== nonce) return;
-        tombAndRemove(lockDir);
-      } catch {
-      }
-    }
-  };
+function sleepAsync(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
-async function acquireLock(lockDir, opts = {}) {
-  const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
-  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
-  const nonce = randomUUID();
-  const deadline = Date.now() + retryMs;
-  const ownerPath = join2(lockDir, OWNER_FILE);
+async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 1e3;
+  const start = Date.now();
   for (; ; ) {
-    mkdirSync(lockDir, { recursive: true });
     try {
-      writeFileSync(ownerPath, nonce, { flag: "wx" });
-      return makeLock(lockDir, nonce);
+      mkdirSync(dirname2(lockDir), { recursive: true });
+      mkdirSync(lockDir);
+      break;
     } catch (e) {
-      if (e.code === "ENOENT") continue;
-      if (e.code !== "EEXIST") throw e;
-    }
-    let ageMs = null;
-    try {
-      ageMs = Date.now() - statSync2(ownerPath).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (ageMs >= staleMs) {
-      try {
-        tombAndRemove(lockDir);
-      } catch {
+      if (e?.code !== "EEXIST") throw e;
+      const owner = readOwner(lockDir);
+      if (looksDeadOwner(owner)) {
+        const examinedIno = statIno(lockDir);
+        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
+        let renamed = false;
+        try {
+          renameSync(lockDir, tombstone);
+          renamed = true;
+        } catch {
+        }
+        if (renamed) {
+          const tombstoneOwner = readOwner(tombstone);
+          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
+          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+            try {
+              rmSync(tombstone, { recursive: true, force: true });
+            } catch {
+            }
+          } else {
+            try {
+              renameSync(tombstone, lockDir);
+            } catch (restoreErr) {
+              if (restoreErr?.code === "EEXIST") {
+                process.stderr.write(
+                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
+`
+                );
+                throw refusal(
+                  lockCodeFor(lockDir),
+                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
+                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
+                );
+              }
+            }
+          }
+        }
       }
-      continue;
+      if (Date.now() - start >= timeoutMs) {
+        throw refusal(
+          lockCodeFor(lockDir),
+          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
+          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+        );
+      }
+      await sleepAsync(retryMs);
     }
-    if (Date.now() >= deadline) return null;
-    await sleep(POLL_MS);
   }
+  writeFileSync(
+    join2(lockDir, "owner.json"),
+    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
+  );
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function withRegisterLock(root, fn, opts = {}) {
+  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
+}
+function withLedgerLock(root, fn, opts = {}) {
+  return withOwnerMkdirLock(ledgerLockDir(root), fn, opts);
+}
+function registerStart(root, entry) {
+  return withRegisterLock(root, () => {
+    const { availability, arr } = readRawArray(root);
+    if (availability === "corrupt") {
+      throw refusal("register_unavailable", { path: registerPath(root), reason: "corrupt" });
+    }
+    const list = availability === "ok" ? arr : [];
+    const hasUnendedDup = list.some((e) => e && e.agent_id === entry.agent_id && e.session_id === entry.session_id && !e.ended);
+    if (hasUnendedDup) {
+      throw refusal("register_agent_id_duplicate", { agent_id: entry.agent_id, session_id: entry.session_id });
+    }
+    const priorRounds = list.filter((e) => e && e.agent_id === entry.agent_id && e.session_id === entry.session_id);
+    const round = priorRounds.length > 0 ? Math.max(...priorRounds.map((e) => typeof e.round === "number" ? e.round : 1)) + 1 : 1;
+    const toWrite = { ...entry, round };
+    list.push(toWrite);
+    writeRawArrayAtomic(root, list);
+    return toWrite;
+  });
+}
+function registerEnd(root, agentId, event, { sessionId } = {}) {
+  return withRegisterLock(root, () => {
+    const { availability, arr } = readRawArray(root);
+    if (availability === "corrupt") {
+      throw refusal("register_unavailable", { path: registerPath(root), reason: "corrupt" });
+    }
+    if (availability !== "ok") return { found: false };
+    const idx = arr.findIndex((e) => e && e.agent_id === agentId && !e.ended && (sessionId === void 0 || e.session_id === sessionId));
+    if (idx === -1) return { found: false };
+    const updated = { ...arr[idx], ended: { at: (/* @__PURE__ */ new Date()).toISOString(), event } };
+    arr[idx] = updated;
+    writeRawArrayAtomic(root, arr);
+    const parsed = parseRegisterEntry(updated);
+    return { found: true, entry: parsed.ok ? parsed.entry : updated };
+  });
 }
 
 // scripts/hooks/lib/review-ledger-entry.mjs
+import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, renameSync as renameSync2 } from "node:fs";
+import { join as join3, extname } from "node:path";
+import { createHash, randomBytes as randomBytes2 } from "node:crypto";
 function isEvidenceObject(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
-function normalizeLedgerEntry(entry) {
-  if (!entry || typeof entry !== "object" || entry.schema_version !== 2) {
-    return entry;
-  }
-  const v2Deficient = typeof entry.entry_id !== "string" || entry.entry_id === "" || typeof entry.started_at !== "string" || entry.started_at === "" || !entry.identity || typeof entry.identity !== "object" || Array.isArray(entry.identity);
-  const reviewer = entry.reviewer && typeof entry.reviewer === "object" ? entry.reviewer : {};
-  const identity = entry.identity && typeof entry.identity === "object" ? entry.identity : {};
-  const territory = entry.territory && typeof entry.territory === "object" ? entry.territory : {};
-  const contentEvidence = isEvidenceObject(entry.content_evidence) ? entry.content_evidence : null;
-  const truncatedFlag = contentEvidence && typeof contentEvidence.truncated === "boolean" ? contentEvidence.truncated : contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0;
-  const truncatedOf = contentEvidence && Number.isInteger(contentEvidence.truncated_of) && contentEvidence.truncated_of > 0 ? contentEvidence.truncated_of : null;
-  const blobs = contentEvidence ? contentEvidence.blobs : entry.content_evidence;
-  return {
-    // THE SCHEMA VERSION IS SURFACED, and it is the ONE discriminator a reader
-    // may use to tell the two shapes apart (roster review LOW-2, board 7dd3200a).
-    // Reaching this line means `entry.schema_version === 2` — the gate at the top
-    // of this function — so this key is written BY THE ADAPTER and is never the
-    // writer's copy of it. That distinction is the whole finding: `v2_deficient`
-    // reads as a v2-only marker, but on the LEGACY branch this function returns
-    // the raw entry UNTOUCHED, so a hand-written v1 entry carrying its own
-    // `v2_deficient` key had that key survive into the "normalized" view and could
-    // steer a reader down the v2 path. Nothing a v1 entry can carry reaches this
-    // object, so `schema_version === 2` is exactly as trustworthy as the gate it
-    // mirrors — and isLegacyEntry() below asks the question in one place for both
-    // raw and normalized entries.
-    schema_version: 2,
-    // S2b-2 — the v2 entry's own identity, surfaced so a reader can NAME the
-    // entry it refuses or waives (decision 57984926 §2). undefined for v1.
-    entry_id: entry.entry_id,
-    // S2b-4 — THE KIND GATE (decision 57984926 §4). A v2 ledger is now
-    // MULTI-KIND: 'roster_receipt' entries are spendable review receipts, and
-    // 'external_review' entries are the conductor's attestation that an
-    // outside-model consult happened (minted only by scripts/review-ledger.mjs
-    // record-external). §4 requires external entries to be "never spendable,
-    // never stamped, never counted by roster eligibility (kind gate +
-    // agent-type regex, belt and braces)", so the KIND must be visible through
-    // the one adapter every reader uses — otherwise each surface would need its
-    // own `entry.kind` branch, which is the second hand-rolled switch this
-    // adapter exists to prevent (finding HIGH-3). Passed through RAW and
-    // undefaulted, same posture as `status`: an external entry carries no
-    // reviewer object, no identity and no started_at, so WITHOUT this key it
-    // normalizes to the shape of a structurally-deficient roster receipt and
-    // gets reported as a malformed REVIEW receipt rather than as what it is.
-    // undefined for v1 (early return above) and for a v2 entry promoted before
-    // the field existed — both of which are roster receipts by construction.
-    kind: entry.kind,
-    // S2b-3 — the v2 LIFECYCLE STATUS, raw and undefaulted (see the STATUS note
-    // in the header). undefined for v1; 'discharged' is the only value that
-    // makes an entry unspendable.
-    status: entry.status,
-    // S2b-3 FIX ROUND — the DISPOSITION, raw and unvalidated. A discharge is
-    // only AUTHENTICATED by the pair {status:'discharged', disposition:<object>}
-    // (see isAuthenticatedDischarge below), and until this was surfaced no
-    // reader could see the second half of that pair: `status` alone is a single
-    // string any hand-written or truncated ledger can carry, which made a
-    // one-field forgery enough to make real reviewer evidence invisible to every
-    // spending surface. Passed through UNCHANGED for the same reason `status` is:
-    // the shape-transparency layer reports what is there, the READER decides what
-    // it means. undefined for v1 (which returns early and has no lifecycle).
-    disposition: entry.disposition,
-    agent_type: reviewer.agent_type,
-    files: territory.files,
-    files_source: territory.source,
-    attribution: territory.attribution,
-    at: entry.started_at,
-    session_id: identity.session_id,
-    branch: identity.branch,
-    base_sha: identity.base_sha,
-    // HIGH-2/HIGH-3 — the register's own dispatch identity, undefined for a
-    // v1 entry (which never recorded it) or a legacy v2 entry promoted before
-    // this field existed.
-    agent_id: identity.agent_id,
-    reviewed_state: {
-      completed_at: typeof entry.finished_at === "string" ? entry.finished_at : void 0,
-      blobs,
-      ...truncatedFlag ? { truncated: true, truncated_of: truncatedOf } : {}
-    },
-    // F2 — v2-ONLY marker (a v1 entry returns early above and never reaches
-    // this object, so a reader that only ever sees this key set can rely on
-    // its presence to mean "this came through the v2 branch").
-    content_evidence_status: typeof contentEvidence?.status === "string" ? contentEvidence.status : void 0,
-    // MED-2 — v2-ONLY marker: true when this v2-claiming object is missing
-    // entry_id/started_at/identity. A v1 entry never sets this key at all
-    // (undefined, not false), matching content_evidence_status's v2-only
-    // presence convention.
-    v2_deficient: v2Deficient
-  };
+function normalizeReceiptPath(p) {
+  const s = String(p).replace(/\\/g, "/").replace(/^\.\//, "");
+  if (/^[A-Za-z]:/.test(s)) return null;
+  if (s.startsWith("/")) return null;
+  if (s.split("/").includes("..")) return null;
+  return s;
 }
 function isUsableBlobSha(v) {
   return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
 }
+function parseDisposition(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (typeof raw.class !== "string" || raw.class === "") return { ok: false };
+  if (typeof raw.reason !== "string" || raw.reason === "") return { ok: false };
+  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
+  if (typeof raw.head_sha !== "string" || raw.head_sha === "") return { ok: false };
+  if (typeof raw.classifier_version !== "number") return { ok: false };
+  const facts = isEvidenceObject(raw.facts) ? raw.facts : {};
+  return {
+    ok: true,
+    value: { class: raw.class, reason: raw.reason, at: raw.at, head_sha: raw.head_sha, classifier_version: raw.classifier_version, facts }
+  };
+}
+function parseReservation(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
+  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
+  if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
+  if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
+  return { ok: true, value: { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation } };
+}
+function parseConsumption(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
+  if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
+  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
+  return { ok: true, value: { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce } };
+}
+function parseContentEvidence(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false };
+  if (raw.status !== "complete" && raw.status !== "partial" && raw.status !== "unavailable") return { ok: false };
+  const basis = typeof raw.basis === "string" && raw.basis ? raw.basis : "stop-time-worktree-snapshot";
+  let blobs;
+  if (raw.blobs === void 0) {
+    blobs = {};
+  } else if (isEvidenceObject(raw.blobs)) {
+    blobs = { ...raw.blobs };
+  } else {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.blobs" } };
+  }
+  let absentPaths;
+  if (raw.absent_paths === void 0) {
+    absentPaths = [];
+  } else if (Array.isArray(raw.absent_paths)) {
+    absentPaths = raw.absent_paths.filter((p) => typeof p === "string");
+  } else {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.absent_paths" } };
+  }
+  const value = { basis, status: raw.status, blobs, absent_paths: absentPaths };
+  if (raw.index_blobs !== void 0) {
+    if (!isEvidenceObject(raw.index_blobs)) {
+      return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.index_blobs" } };
+    }
+    value.index_blobs = { ...raw.index_blobs };
+  }
+  if (raw.truncated === true) value.truncated = true;
+  if (Number.isInteger(raw.truncated_of)) value.truncated_of = raw.truncated_of;
+  if (typeof raw.failure_reason === "string" && raw.failure_reason) value.failure_reason = raw.failure_reason;
+  return { ok: true, value };
+}
+function parseObservedEvidence(raw) {
+  const value = {};
+  if (Array.isArray(raw?.observed_files)) value.observed_files = raw.observed_files.filter((p) => typeof p === "string");
+  if (Array.isArray(raw?.observed_reads)) value.observed_reads = raw.observed_reads.filter((p) => typeof p === "string");
+  if (typeof raw?.observed_source === "string" && raw.observed_source) value.observed_source = raw.observed_source;
+  if (raw?.observed_truncated === true) value.observed_truncated = true;
+  return { ok: true, value };
+}
+var RECEIPT_STATUSES = /* @__PURE__ */ new Set(["active", "reserved", "consumed", "discharged"]);
+var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var AGENT_TYPE_PATTERN = /^[A-Za-z0-9_-]+$/;
+var TERRITORY_SOURCES = /* @__PURE__ */ new Set(["review-territory", "free-prose-fallback", "unattributable"]);
+function parseReceipt(raw) {
+  if (!isEvidenceObject(raw)) return { ok: false, code: "ledger_entry_malformed" };
+  if (raw.schema_version !== 2) return { ok: false, code: "ledger_entry_malformed" };
+  if (raw.kind !== void 0 && raw.kind !== "roster_receipt") return { ok: false, code: "ledger_entry_malformed" };
+  if (typeof raw.entry_id !== "string" || !UUID_PATTERN.test(raw.entry_id)) return { ok: false, code: "ledger_entry_malformed" };
+  if (!RECEIPT_STATUSES.has(raw.status)) return { ok: false, code: "ledger_entry_malformed" };
+  if (typeof raw.started_at !== "string" || !raw.started_at) return { ok: false, code: "ledger_entry_malformed" };
+  if (typeof raw.finished_at !== "string" || !raw.finished_at) return { ok: false, code: "ledger_entry_malformed" };
+  if (!isEvidenceObject(raw.reviewer)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer" } };
+  if (typeof raw.reviewer.agent_type !== "string" || !AGENT_TYPE_PATTERN.test(raw.reviewer.agent_type)) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer.agent_type" } };
+  }
+  if (!isEvidenceObject(raw.identity)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity" } };
+  if (typeof raw.identity.agent_id !== "string" || !raw.identity.agent_id) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity.agent_id" } };
+  }
+  if (!isEvidenceObject(raw.territory) || !Array.isArray(raw.territory.files)) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory" } };
+  }
+  if (!TERRITORY_SOURCES.has(raw.territory.source)) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
+  }
+  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "union") {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
+  }
+  const contentParsed = parseContentEvidence(raw.content_evidence);
+  if (!contentParsed.ok) {
+    return { ok: false, code: "ledger_entry_malformed", facts: contentParsed.facts ?? { field: "content_evidence" } };
+  }
+  let reservation;
+  let consumption;
+  let disposition = null;
+  if (raw.status === "reserved") {
+    const r = parseReservation(raw.reservation);
+    if (!r.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
+    reservation = r.value;
+  } else if (raw.reservation !== void 0) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
+  }
+  if (raw.status === "consumed") {
+    const c = parseConsumption(raw.consumption);
+    if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
+    consumption = c.value;
+  } else if (raw.consumption !== void 0) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
+  }
+  if (raw.status === "discharged") {
+    const d = parseDisposition(raw.disposition);
+    if (!d.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
+    disposition = d.value;
+  } else if (raw.disposition !== void 0 && raw.disposition !== null) {
+    return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
+  }
+  const identity = {
+    session_id: typeof raw.identity.session_id === "string" ? raw.identity.session_id : null,
+    branch: typeof raw.identity.branch === "string" ? raw.identity.branch : null,
+    base_sha: typeof raw.identity.base_sha === "string" ? raw.identity.base_sha : null,
+    agent_id: raw.identity.agent_id
+  };
+  const observed = parseObservedEvidence(raw).value;
+  const receipt = {
+    schema_version: 2,
+    entry_id: raw.entry_id,
+    kind: "roster_receipt",
+    status: raw.status,
+    started_at: raw.started_at,
+    finished_at: raw.finished_at,
+    reviewer: {
+      agent_type: raw.reviewer.agent_type,
+      model: raw.reviewer.model ?? null,
+      model_family: raw.reviewer.model_family ?? null,
+      model_source: raw.reviewer.model_source ?? null
+    },
+    identity,
+    territory: {
+      files: raw.territory.files.filter((f) => typeof f === "string"),
+      source: raw.territory.source,
+      attribution: raw.territory.attribution
+    },
+    content_evidence: contentParsed.value,
+    disposition,
+    ...observed
+  };
+  if (reservation) receipt.reservation = reservation;
+  if (consumption) receipt.consumption = consumption;
+  return { ok: true, receipt };
+}
+function legacyFingerprint(raw) {
+  const files = Array.isArray(raw?.files) ? raw.files.filter((f) => typeof f === "string").map(normalizeReceiptPath).sort() : [];
+  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? raw.reviewed_state.blobs : {};
+  const blobs = Object.entries(blobsObj).map(([p, s]) => [normalizeReceiptPath(p), s]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  let canonical;
+  try {
+    canonical = JSON.stringify([raw?.agent_type ?? null, raw?.at ?? null, files, blobs]);
+    if (typeof canonical !== "string") canonical = "<unserializable>";
+  } catch {
+    canonical = "<unserializable>";
+  }
+  return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
+}
+function legacyReceiptHandle(raw) {
+  return `receipt-${legacyFingerprint(raw)}`;
+}
+function adaptLegacyEntry(raw) {
+  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? { ...raw.reviewed_state.blobs } : {};
+  return {
+    kind: "legacy",
+    handle: legacyReceiptHandle(raw),
+    agent_type: typeof raw?.agent_type === "string" ? raw.agent_type : null,
+    files: Array.isArray(raw?.files) ? raw.files.slice() : [],
+    at: typeof raw?.at === "string" ? raw.at : null,
+    session_id: typeof raw?.session_id === "string" ? raw.session_id : null,
+    branch: typeof raw?.branch === "string" ? raw.branch : null,
+    base_sha: typeof raw?.base_sha === "string" ? raw.base_sha : null,
+    blobs: blobsObj,
+    status: raw?.status === "discharged" ? "discharged" : "active"
+  };
+}
+function looksLikeLegacyV1(raw) {
+  return typeof raw?.agent_type === "string" && raw.agent_type !== "" && Array.isArray(raw?.files) && typeof raw?.at === "string" && raw.at !== "";
+}
+function classifyLedgerEntry(raw) {
+  if (!isEvidenceObject(raw)) {
+    return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (raw.schema_version === 2) {
+    if (raw.kind === "external_review") {
+      if (typeof raw.entry_id !== "string" || !raw.entry_id || typeof raw.thread_id !== "string" || !Array.isArray(raw.files)) {
+        return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "external_review" } };
+      }
+      return { kind: "external_review", entry: raw };
+    }
+    const parsed = parseReceipt(raw);
+    if (!parsed.ok) return { kind: "malformed", code: "ledger_entry_malformed", facts: parsed.facts ?? { reason: "receipt" } };
+    return { kind: "receipt", receipt: parsed.receipt };
+  }
+  if (looksLikeLegacyV1(raw)) {
+    return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
+  }
+  return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
+}
+function ledgerPath(root) {
+  return join3(root, ".sterling", "review-ledger.json");
+}
+function readLedger(root) {
+  const p = ledgerPath(root);
+  if (!existsSync5(p)) return { availability: "absent", entries: [], rawEntries: [], raw: "" };
+  let raw;
+  try {
+    raw = readFileSync3(p, "utf8");
+  } catch {
+    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
+  return {
+    availability: "ok",
+    entries: parsed.map((e, index) => ({ ...classifyLedgerEntry(e), index })),
+    rawEntries: parsed,
+    raw
+  };
+}
+function writeLedger(root, entries) {
+  const dir = join3(root, ".sterling");
+  mkdirSync2(dir, { recursive: true });
+  const p = ledgerPath(root);
+  const tmp = `${p}.tmp-${randomBytes2(4).toString("hex")}`;
+  writeFileSync2(tmp, JSON.stringify(entries));
+  renameSync2(tmp, p);
+}
 
 // scripts/hooks/lib/observed-territory.mjs
-import { existsSync as existsSync4, statSync as statSync3 } from "node:fs";
+import { existsSync as existsSync6, statSync as statSync3 } from "node:fs";
 var WRITE_TOOLS_FILE_PATH = /* @__PURE__ */ new Set(["Edit", "Write"]);
 var TAIL_BYTES2 = 1024 * 1024;
 function hasFileExtension(p) {
@@ -5820,7 +6238,7 @@ function hasFileExtension(p) {
 }
 function observedToolPaths(transcriptPath, cwd) {
   if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  if (!existsSync4(transcriptPath)) return null;
+  if (!existsSync6(transcriptPath)) return null;
   let tail;
   try {
     tail = readTail(transcriptPath);
@@ -5853,70 +6271,6 @@ function observedToolPaths(transcriptPath, cwd) {
       continue;
     }
     if (entry?.type !== "assistant") continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || block.type !== "tool_use") continue;
-      const name = block.name;
-      const input2 = block.input;
-      if (WRITE_TOOLS_FILE_PATH.has(name)) {
-        add(writes, input2?.file_path);
-      } else if (name === "NotebookEdit") {
-        add(writes, input2?.notebook_path);
-      } else if (name === "Read") {
-        add(reads, input2?.file_path);
-      } else if (name === "Grep") {
-        const p = input2?.path;
-        if (typeof p === "string" && p !== "" && hasFileExtension(p)) add(reads, p);
-      } else if (name === "Glob") {
-        add(reads, input2?.path);
-      }
-    }
-  }
-  const result = { reads: [...reads], writes: [...writes] };
-  if (truncated) result.truncated = true;
-  return result;
-}
-function observedToolPathsSince(transcriptPath, cwd, sinceIso) {
-  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  if (!existsSync4(transcriptPath)) return null;
-  if (typeof sinceIso !== "string" || sinceIso === "") return null;
-  const sinceMs = Date.parse(sinceIso);
-  if (!Number.isFinite(sinceMs)) return null;
-  let tail;
-  try {
-    tail = readTail(transcriptPath);
-  } catch {
-    return null;
-  }
-  if (tail === null || tail === "") return null;
-  let truncated = false;
-  try {
-    truncated = statSync3(transcriptPath).size > TAIL_BYTES2;
-  } catch {
-  }
-  const reads = /* @__PURE__ */ new Set();
-  const writes = /* @__PURE__ */ new Set();
-  const add = (set, rawPath) => {
-    if (typeof rawPath !== "string" || rawPath === "") return;
-    const rel = repoRel(rawPath, cwd);
-    if (!rel) return;
-    const lower = rel.toLowerCase();
-    if (lower === ".git" || lower.startsWith(".git/") || lower === ".sterling" || lower.startsWith(".sterling/")) return;
-    set.add(rel);
-  };
-  for (const line of tail.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (entry?.type !== "assistant") continue;
-    const stamp = typeof entry.timestamp === "string" ? Date.parse(entry.timestamp) : Number.NaN;
-    if (!Number.isFinite(stamp) || stamp <= sinceMs) continue;
     const content = entry.message?.content;
     if (!Array.isArray(content)) continue;
     for (const block of content) {
@@ -5943,12 +6297,6 @@ function observedToolPathsSince(transcriptPath, cwd, sinceIso) {
 }
 
 // scripts/hooks/h22-dispatch-register.mjs
-var REGISTER_RETRY_MS = 1e3;
-var REGISTER_STALE_MS = 1e4;
-async function acquireRegisterLock(cwd) {
-  mkdirSync2(join3(cwd, ".sterling", "transient"), { recursive: true });
-  return acquireLock(registerLockDir(cwd), { retryMs: REGISTER_RETRY_MS, staleMs: REGISTER_STALE_MS });
-}
 function loadExclusiveResourceNames(cwd) {
   try {
     const names = loadConfig(cwd)?.exclusive_resources;
@@ -5956,6 +6304,18 @@ function loadExclusiveResourceNames(cwd) {
   } catch {
     return [];
   }
+}
+function configuredReviewerModel(cwd) {
+  try {
+    const model = loadConfig(cwd)?.models?.reviewers?.model;
+    return typeof model === "string" && model !== "" ? model : null;
+  } catch {
+    return null;
+  }
+}
+function normIdentity(v) {
+  if (typeof v === "string") return v.trim() === "" ? null : v.trim();
+  return null;
 }
 function gitReceiptIdentity(cwd) {
   const git = (args) => {
@@ -5966,24 +6326,58 @@ function gitReceiptIdentity(cwd) {
       return null;
     }
   };
-  return {
-    branch: git(["symbolic-ref", "--quiet", "--short", "HEAD"]),
-    base_sha: git(["rev-parse", "HEAD"])
-  };
+  return { branch: git(["symbolic-ref", "--quiet", "--short", "HEAD"]), base_sha: git(["rev-parse", "HEAD"]) };
+}
+function familyFromModel(model) {
+  if (typeof model !== "string" || model === "") return "unknown";
+  if (/^claude-/.test(model)) return "anthropic";
+  if (/^gpt-/.test(model) || /^codex/.test(model)) return "openai";
+  return "unknown";
+}
+function observedModelFromTranscript(transcriptPath) {
+  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
+  let tail;
+  try {
+    tail = readFromStart(transcriptPath, 1024 * 1024);
+  } catch {
+    return null;
+  }
+  if (tail === null) return null;
+  const lines = tail.text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let parsed;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (parsed.type !== "assistant") continue;
+    const model = parsed.message?.model;
+    if (typeof model === "string" && model !== "") return model;
+  }
+  return null;
+}
+function resolveReviewerModel(departing, transcriptPath, agentTranscriptPath) {
+  const preferred = typeof agentTranscriptPath === "string" && agentTranscriptPath !== "" ? agentTranscriptPath : transcriptPath;
+  const observed = observedModelFromTranscript(preferred);
+  if (observed) return { model: observed, model_source: "observed" };
+  const configured = typeof departing?.configured_model === "string" && departing.configured_model !== "" ? departing.configured_model : null;
+  if (configured) return { model: configured, model_source: "configured" };
+  return { model: null, model_source: "unknown" };
 }
 var REVIEWED_BLOBS_CAP = 64;
 function buildContentEvidence(cwd, files) {
   const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : [];
-  if (uniqueFiles.length === 0) {
-    return { status: "complete", blobs: {}, absent_paths: [] };
-  }
+  if (uniqueFiles.length === 0) return { basis: "stop-time-worktree-snapshot", status: "complete", blobs: {}, absent_paths: [] };
   const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
   const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
   const present = [];
   const absent = [];
   for (const p of paths) {
     try {
-      if (statSync4(join3(cwd, p)).isFile()) present.push(p);
+      if (statSync4(`${cwd}/${p}`).isFile()) present.push(p);
       else absent.push(p);
     } catch {
       absent.push(p);
@@ -6012,9 +6406,32 @@ function buildContentEvidence(cwd, files) {
       failureReason = "git hash-object threw";
     }
   }
+  let indexBlobs;
+  if (Object.keys(blobs).length > 0) {
+    try {
+      const r = spawnSync2("git", ["ls-files", "-s", "--", ...Object.keys(blobs)], { cwd, encoding: "utf8", timeout: 1e4 });
+      if (r && !r.error && r.status === 0) {
+        for (const line of (r.stdout ?? "").split("\n")) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
+          const tab = trimmed.indexOf("	");
+          if (tab === -1) continue;
+          const meta = trimmed.slice(0, tab).split(/\s+/);
+          const path = trimmed.slice(tab + 1);
+          const sha = meta[1];
+          if (isUsableIndexSha(sha) && blobs[path] && blobs[path] !== sha) {
+            if (!indexBlobs) indexBlobs = {};
+            indexBlobs[path] = sha;
+          }
+        }
+      }
+    } catch {
+    }
+  }
   const noEvidenceCount = absent.length + presentUnhashed.length;
   const status = noEvidenceCount === 0 ? "complete" : noEvidenceCount === paths.length ? "unavailable" : "partial";
-  const result = { status, blobs, absent_paths: absent };
+  const result = { basis: "stop-time-worktree-snapshot", status, blobs, absent_paths: absent };
+  if (indexBlobs) result.index_blobs = indexBlobs;
   if (truncated) {
     result.truncated = true;
     result.truncated_of = uniqueFiles.length;
@@ -6022,72 +6439,8 @@ function buildContentEvidence(cwd, files) {
   if (failureReason) result.failure_reason = failureReason;
   return result;
 }
-function territoryBindingFault(evidence, declaredFiles) {
-  const declared = Array.isArray(declaredFiles) ? [...new Set(declaredFiles.filter((f) => typeof f === "string" && f !== ""))] : [];
-  const expected = declared.slice(0, REVIEWED_BLOBS_CAP);
-  const ev = isEvidenceObject(evidence) ? evidence : {};
-  const named = [
-    ...isEvidenceObject(ev.blobs) ? Object.keys(ev.blobs) : [],
-    ...Array.isArray(ev.absent_paths) ? ev.absent_paths.filter((p) => typeof p === "string" && p !== "") : []
-  ];
-  const expectedSet = new Set(expected);
-  const namedSet = new Set(named);
-  const foreign = [...new Set(named.filter((p) => !expectedSet.has(p)))];
-  const missing = ev.failure_reason ? [] : expected.filter((p) => !namedSet.has(p));
-  return { expected, foreign, missing, faulty: foreign.length > 0 || missing.length > 0 };
-}
-function observedModelFromTranscript(transcriptPath) {
-  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  let tail;
-  try {
-    tail = readTail(transcriptPath);
-  } catch {
-    return null;
-  }
-  if (tail === null) return null;
-  const lines = tail.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (parsed.type !== "assistant") continue;
-    const model = parsed.message?.model;
-    if (typeof model === "string" && model !== "") return model;
-  }
-  return null;
-}
-function configuredReviewerModel(cwd) {
-  try {
-    const model = loadConfig(cwd)?.models?.reviewers?.model;
-    return typeof model === "string" && model !== "" ? model : null;
-  } catch {
-    return null;
-  }
-}
-function familyFromModel(model) {
-  if (typeof model !== "string" || model === "") return "unknown";
-  if (/^claude-/.test(model)) return "anthropic";
-  if (/^gpt-/.test(model) || /^codex/.test(model)) return "openai";
-  return "unknown";
-}
-function resolveReviewerModel(departing, transcriptPath, agentTranscriptPath) {
-  const preferredTranscriptPath = typeof agentTranscriptPath === "string" && agentTranscriptPath !== "" ? agentTranscriptPath : transcriptPath;
-  const observed = observedModelFromTranscript(preferredTranscriptPath);
-  if (observed) return { model: observed, model_source: "observed" };
-  const configured = typeof departing?.configured_model === "string" && departing.configured_model !== "" ? departing.configured_model : null;
-  if (configured) return { model: configured, model_source: "configured" };
-  return { model: null, model_source: "unknown" };
-}
-function normIdentity(v) {
-  if (typeof v === "string") return v.trim() === "" ? null : v.trim();
-  if (typeof v === "number" && Number.isFinite(v)) return String(v);
-  if (typeof v === "boolean") return String(v);
-  return null;
+function isUsableIndexSha(v) {
+  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
 }
 var MAX_WALK_BACK = 20;
 var SAFE_ATTRIBUTION_CASE = "current-message-unique";
@@ -6102,21 +6455,13 @@ function attributeBlocks(transcriptPath, agentType) {
   }
   let matched = lastBlocks.filter((b) => typeof b.subagent_type === "string" && b.subagent_type === agentType);
   if (matched.length === 1) {
-    return {
-      blocks: matched,
-      attribution: "block",
-      positional: { safe: true, case: SAFE_ATTRIBUTION_CASE, detail: `exactly one '${agentType}' block in the current dispatching message` }
-    };
+    return { blocks: matched, attribution: "block", positional: { safe: true, case: SAFE_ATTRIBUTION_CASE, detail: `exactly one '${agentType}' block in the current dispatching message` } };
   }
   if (matched.length > 1) {
     return {
       blocks: matched,
       attribution: "union",
-      positional: {
-        safe: false,
-        case: "same-type-siblings",
-        detail: `${matched.length} same-type ('${agentType}') blocks sit in the current dispatching message and no stdin field says WHICH one this spawn is`
-      }
+      positional: { safe: false, case: "same-type-siblings", detail: `${matched.length} same-type ('${agentType}') blocks sit in the current dispatching message and no stdin field says WHICH one this spawn is` }
     };
   }
   for (let skip = 1; skip <= MAX_WALK_BACK; skip++) {
@@ -6127,33 +6472,21 @@ function attributeBlocks(transcriptPath, agentType) {
       return {
         blocks: matched,
         attribution: "block",
-        positional: {
-          safe: false,
-          case: "walk-back",
-          detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched one ${skip} dispatching message(s) earlier, which is the measured off-by-one shape (decision c91b351d)`
-        }
+        positional: { safe: false, case: "walk-back", detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched one ${skip} dispatching message(s) earlier` }
       };
     }
     if (matched.length > 1) {
       return {
         blocks: matched,
         attribution: "union",
-        positional: {
-          safe: false,
-          case: "walk-back",
-          detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched ${matched.length} same-type blocks ${skip} dispatching message(s) earlier`
-        }
+        positional: { safe: false, case: "walk-back", detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched ${matched.length} same-type blocks ${skip} dispatching message(s) earlier` }
       };
     }
   }
   return {
     blocks: lastBlocks,
     attribution: "union",
-    positional: {
-      safe: false,
-      case: "terminal-union",
-      detail: `no '${agentType}' block was found in the current dispatching message or anywhere in the bounded backward walk, so territory fell back to the union of the last message's blocks`
-    }
+    positional: { safe: false, case: "terminal-union", detail: `no '${agentType}' block was found in the current dispatching message or anywhere in the bounded backward walk, so territory fell back to the union of the last message's blocks` }
   };
 }
 function candidatesFromBlocks(blocks) {
@@ -6167,14 +6500,30 @@ function normalizeRegisterPaths(cands, cwd) {
 function resolveTerritory(blocks) {
   const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
   const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
-  const declaredWins = declared.length > 0;
-  const warnings = parsed.filter((p) => p.decl.present && !p.decl.valid).map(
-    (p) => declaredWins ? `H22: malformed REVIEW-TERRITORY declaration ignored \u2014 a sibling block's valid declaration is authoritative for this dispatch, so this block's prose (including this line) is DROPPED entirely, not free-prose-extracted: ${p.decl.raw}` : `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose extraction across all attributed blocks: ${p.decl.raw}`
-  );
-  if (declaredWins) {
-    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: "review-territory", warnings };
+  const malformed = parsed.filter((p) => p.decl.present && !p.decl.valid);
+  const anyPresent = parsed.some((p) => p.decl.present);
+  if (declared.length > 0) {
+    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: "review-territory", malformed, anyPresent };
   }
-  return { candidates: candidatesFromBlocks(blocks), files_source: "free-prose-fallback", warnings };
+  return { candidates: candidatesFromBlocks(blocks), files_source: "free-prose-fallback", malformed, anyPresent };
+}
+function claimedFromBlocks(blocks) {
+  return [
+    ...new Set(
+      blocks.flatMap(
+        (b) => extractPathCandidates(b.prompt).filter((raw) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false }))
+      )
+    )
+  ];
+}
+function globPrefixesFromBlocks(blocks) {
+  return [
+    ...new Set(
+      blocks.flatMap(
+        (b) => extractGlobPrefixCandidates(b.prompt).filter((prefix) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false }))
+      )
+    )
+  ];
 }
 var CHILD_SCAN_BYTES = 64 * 1024 * 1024;
 var PARENT_SCAN_BYTES = 64 * 1024 * 1024;
@@ -6183,11 +6532,7 @@ function childBriefFromTranscript(childPath) {
   if (read === null) return { ok: false, reason: "child-transcript-missing", detail: `no file at '${childPath}'` };
   const nl = read.text.indexOf("\n");
   if (nl === -1 && !read.complete) {
-    return {
-      ok: false,
-      reason: "child-first-record-truncated",
-      detail: `the child transcript's first line exceeds the ${CHILD_SCAN_BYTES}-byte read window, so the delivered brief could not be read whole`
-    };
+    return { ok: false, reason: "child-first-record-truncated", detail: `the child transcript's first line exceeds the ${CHILD_SCAN_BYTES}-byte read window` };
   }
   const firstLine = (nl === -1 ? read.text : read.text.slice(0, nl)).trim();
   if (firstLine === "") return { ok: false, reason: "child-transcript-empty", detail: `'${childPath}' has no first record` };
@@ -6198,11 +6543,11 @@ function childBriefFromTranscript(childPath) {
     return { ok: false, reason: "child-first-record-unparseable", detail: "the first line of the child transcript is not JSON" };
   }
   if (!record || record.type !== "user") {
-    return { ok: false, reason: "child-first-record-not-user", detail: `first record type is ${JSON.stringify(record?.type)}, not 'user' (the resumed/split-session shape the decision refuses)` };
+    return { ok: false, reason: "child-first-record-not-user", detail: `first record type is ${JSON.stringify(record?.type)}, not 'user'` };
   }
   const content = record.message?.content;
   if (typeof content !== "string") {
-    return { ok: false, reason: "child-first-record-content-not-string", detail: `first record message.content is ${typeof content}, not the delivered brief string` };
+    return { ok: false, reason: "child-first-record-content-not-string", detail: `first record message.content is ${typeof content}` };
   }
   let userStringRecords = 0;
   let unparseableLines = 0;
@@ -6222,13 +6567,13 @@ function childBriefFromTranscript(childPath) {
 }
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) {
-    return { ok: false, reason: "sidecar-path-underivable", detail: `agent_transcript_path '${childPath}' does not end in .jsonl, so the sidecar path cannot be derived` };
+    return { ok: false, reason: "sidecar-path-underivable", detail: `agent_transcript_path '${childPath}' does not end in .jsonl` };
   }
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync5(sidecarPath)) return { ok: false, reason: "sidecar-missing", detail: `no file at '${sidecarPath}'` };
+  if (!existsSync7(sidecarPath)) return { ok: false, reason: "sidecar-missing", detail: `no file at '${sidecarPath}'` };
   let meta;
   try {
-    meta = JSON.parse(readFileSync3(sidecarPath, "utf8"));
+    meta = JSON.parse(readFileSync4(sidecarPath, "utf8"));
   } catch {
     return { ok: false, reason: "sidecar-unparseable", detail: `'${sidecarPath}' is not readable JSON` };
   }
@@ -6239,13 +6584,13 @@ function sidecarForChildTranscript(childPath) {
     return { ok: false, reason: "sidecar-tool-use-id-missing", detail: `sidecar toolUseId is ${JSON.stringify(meta.toolUseId)}` };
   }
   if (meta.spawnDepth !== 1) {
-    return { ok: false, reason: "sidecar-spawn-depth", detail: `sidecar spawnDepth is ${JSON.stringify(meta.spawnDepth)}, not 1 (nested agents are refused for reviewer receipts)` };
+    return { ok: false, reason: "sidecar-spawn-depth", detail: `sidecar spawnDepth is ${JSON.stringify(meta.spawnDepth)}, not 1` };
   }
   return { ok: true, meta, sidecarPath };
 }
 function findParentToolUseBlock(parentPath, toolUseId) {
   if (typeof parentPath !== "string" || parentPath === "") {
-    return { ok: false, reason: "parent-transcript-path-absent", detail: "stdin carried no transcript_path to locate the spawning block in" };
+    return { ok: false, reason: "parent-transcript-path-absent", detail: "stdin carried no transcript_path" };
   }
   const read = readFromStart(parentPath, PARENT_SCAN_BYTES);
   if (read === null) return { ok: false, reason: "parent-transcript-missing", detail: `no file at '${parentPath}'` };
@@ -6264,590 +6609,250 @@ function findParentToolUseBlock(parentPath, toolUseId) {
     if (block) return { ok: true, block };
   }
   if (!read.complete) {
-    return {
-      ok: false,
-      reason: "parent-scan-truncated",
-      detail: `the parent transcript exceeds the ${PARENT_SCAN_BYTES}-byte scan window, so '${toolUseId}' being unfound proves nothing`
-    };
+    return { ok: false, reason: "parent-scan-truncated", detail: `the parent transcript exceeds the ${PARENT_SCAN_BYTES}-byte scan window` };
   }
   return { ok: false, reason: "tool-use-id-absent-from-parent", detail: `no tool_use block with id '${toolUseId}' anywhere in the parent transcript` };
 }
 function bindReviewerTerritoryAtStop(input2) {
   const childPath = input2.agent_transcript_path;
-  if (typeof childPath !== "string" || childPath === "") {
-    return { bound: false, reason: "agent-transcript-path-absent", detail: "stdin carried no agent_transcript_path, so there is no delivered brief to bind against" };
-  }
   const brief = childBriefFromTranscript(childPath);
   if (!brief.ok) return { bound: false, reason: brief.reason, detail: brief.detail };
   if (typeof input2.agent_id !== "string" || input2.agent_id === "" || typeof brief.agentId !== "string" || brief.agentId !== input2.agent_id) {
     return {
       bound: false,
       reason: "child-transcript-agent-mismatch",
-      detail: `the child transcript's first record carries agentId ${JSON.stringify(brief.agentId)}, which is not the stopping agent's stdin agent_id ${JSON.stringify(input2.agent_id)}, so '${childPath}' is not provably this agent's transcript`
-    };
-  }
-  if (brief.userStringRecords > 1) {
-    return {
-      bound: false,
-      reason: "not-first-stop-no-existing-receipt",
-      detail: `the child transcript carries ${brief.userStringRecords} string-content user records, so this is continuation round ${brief.userStringRecords}, not the first Stop \u2014 yet no receipt exists for this dispatch to refresh. Territory is bound at the FIRST Stop only; what happened to the earlier receipt (spent by a commit, or lost) is not knowable from here`
-    };
-  }
-  if (!brief.complete || brief.unparseableLines > 0) {
-    return {
-      bound: false,
-      reason: "child-scan-truncated",
-      detail: brief.complete ? `the child transcript holds ${brief.unparseableLines} unreadable line(s) \u2014 a record cut off mid-write \u2014 so 'exactly one round' cannot be concluded: an unreadable record could itself be the continuation this check exists to catch` : `the child transcript exceeds the ${CHILD_SCAN_BYTES}-byte scan window, so 'exactly one round' cannot be concluded \u2014 an unread tail could hold further continuation records`
+      detail: `the child transcript's first record carries agentId ${JSON.stringify(brief.agentId)}, which is not the stopping agent's stdin agent_id ${JSON.stringify(input2.agent_id)}`
     };
   }
   const sidecar = sidecarForChildTranscript(childPath);
   if (!sidecar.ok) return { bound: false, reason: sidecar.reason, detail: sidecar.detail };
   if (sidecar.meta.agentType !== input2.agent_type) {
-    return {
-      bound: false,
-      reason: "agent-type-mismatch",
-      detail: `sidecar agentType ${JSON.stringify(sidecar.meta.agentType)} does not equal stdin agent_type ${JSON.stringify(input2.agent_type)}`
-    };
+    return { bound: false, reason: "agent-type-mismatch", detail: `sidecar agentType ${JSON.stringify(sidecar.meta.agentType)} does not equal stdin agent_type ${JSON.stringify(input2.agent_type)}` };
   }
   const located = findParentToolUseBlock(input2.transcript_path, sidecar.meta.toolUseId);
   if (!located.ok) return { bound: false, reason: located.reason, detail: located.detail };
   if (located.block.input?.prompt !== brief.brief) {
-    return {
-      bound: false,
-      reason: "prompt-mismatch",
-      detail: `the parent block '${sidecar.meta.toolUseId}' prompt is not byte-identical to the child's first record, so the sidecar and the delivered brief do not describe one dispatch`
-    };
+    return { bound: false, reason: "prompt-mismatch", detail: `the parent block '${sidecar.meta.toolUseId}' prompt is not byte-identical to the child's first record` };
   }
-  const { candidates, files_source, warnings } = resolveTerritory([{ subagent_type: sidecar.meta.agentType, prompt: brief.brief }]);
-  return {
-    bound: true,
-    files: normalizeRegisterPaths(candidates, input2.cwd),
-    files_source,
-    warnings,
-    tool_use_id: sidecar.meta.toolUseId
-  };
+  const { candidates, files_source, malformed } = resolveTerritory([{ subagent_type: sidecar.meta.agentType, prompt: brief.brief }]);
+  return { bound: true, files: normalizeRegisterPaths(candidates, input2.cwd), files_source, malformed };
 }
-function claimedFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap(
-        (b) => extractPathCandidates(b.prompt).filter(
-          (raw) => (
-            // The SAME call the read side makes (h26-dispatch-overlap.mjs): one
-            // shared detector, never a second divergent heuristic — that
-            // divergence WAS the defect. checkSubjectVerb:false because
-            // "implement the feature in <path>" is a legitimate territory
-            // declaration for a FILE candidate (that guard is for H25's tool
-            // mentions). Matched against the RAW extracted substring, which
-            // PATH_CANDIDATE_RE guarantees appears literally in the prompt.
-            hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false })
+function promoteAtStop(departing, input2) {
+  const lines = [];
+  let territoryFiles = Array.isArray(departing.files) ? departing.files : [];
+  let territorySource = departing.files_source ?? "free-prose-fallback";
+  if (typeof input2.agent_transcript_path !== "string" || input2.agent_transcript_path === "") {
+    territorySource = "unattributable";
+  } else {
+    const bind = bindReviewerTerritoryAtStop(input2);
+    if (bind.bound) {
+      territoryFiles = bind.files;
+      territorySource = bind.files_source;
+    } else {
+      territorySource = "unattributable";
+      lines.push(
+        render(
+          disclosure(
+            "receipt_unattributable",
+            { reason: bind.reason },
+            `H22: reviewer-class Stop for '${input2.agent_id}' bound closed to unattributable (${bind.reason}): ${bind.detail}`
           )
         )
-      )
-    )
-  ];
-}
-function globPrefixesFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap(
-        (b) => extractGlobPrefixCandidates(b.prompt).filter(
-          (prefix) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false })
-        )
-      )
-    )
-  ];
-}
-function withLedgerLock(sterlingDir, run) {
-  const lockPath = join3(sterlingDir, "review-ledger.lock");
-  let acquired = false;
-  for (let i = 0; i < 200 && !acquired; i++) {
-    try {
-      mkdirSync2(lockPath);
-      acquired = true;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        if (Date.now() - statSync4(lockPath).mtimeMs > 1e4) {
-          rmSync2(lockPath, { recursive: true, force: true });
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      );
     }
   }
-  if (!acquired) {
-    process.stderr.write("H22: review-ledger lock timed out \u2014 proceeding UNLOCKED (degraded-loud); a concurrent writer may lose this update\n");
-    return run(false);
+  const contentEvidence = buildContentEvidence(input2.cwd, territoryFiles);
+  const observed = observedToolPaths(input2.agent_transcript_path, input2.cwd);
+  const { branch, base_sha } = gitReceiptIdentity(input2.cwd);
+  const { model, model_source } = resolveReviewerModel(departing, input2.transcript_path, input2.agent_transcript_path);
+  const AGENT_TYPE_PATTERN2 = /^[A-Za-z0-9_-]+$/;
+  const reviewerAgentType = departing.agent_type ?? input2.agent_type ?? null;
+  if (typeof reviewerAgentType !== "string" || !AGENT_TYPE_PATTERN2.test(reviewerAgentType)) {
+    return {
+      receipt: null,
+      lines: [
+        ...lines,
+        render(
+          disclosure(
+            "ledger_entry_malformed",
+            { field: "reviewer.agent_type", agent_id: input2.agent_id },
+            `H22: refused to promote a receipt for '${input2.agent_id}' \u2014 reviewer.agent_type is ${JSON.stringify(reviewerAgentType)}, not a trailer-safe token; the entry would parse as ledger_entry_malformed on the very next read`
+          )
+        )
+      ]
+    };
   }
-  try {
-    return run(true);
-  } finally {
-    rmdirSync(lockPath);
+  const receipt = {
+    schema_version: 2,
+    entry_id: randomUUID(),
+    kind: "roster_receipt",
+    status: "active",
+    started_at: typeof departing.at === "string" ? departing.at : (/* @__PURE__ */ new Date()).toISOString(),
+    finished_at: (/* @__PURE__ */ new Date()).toISOString(),
+    reviewer: { agent_type: reviewerAgentType, model, model_family: familyFromModel(model), model_source },
+    identity: { session_id: normIdentity(input2.session_id), branch, base_sha, agent_id: input2.agent_id },
+    // A legacy register entry with NO attribution key promotes to a receipt
+    // with NO attribution key either — the field is copied, never fabricated
+    // (scripts/tests/h22-review-territory.test.mjs T6a/T6b CONTROL pair).
+    territory: {
+      files: territoryFiles,
+      source: territorySource,
+      ...typeof departing.attribution === "string" ? { attribution: departing.attribution } : {}
+    },
+    content_evidence: contentEvidence,
+    disposition: null
+  };
+  if (observed) {
+    receipt.observed_files = [.../* @__PURE__ */ new Set([...observed.reads ?? [], ...observed.writes ?? []])];
+    receipt.observed_reads = observed.reads ?? [];
+    receipt.observed_source = "subagent-transcript";
+    if (observed.truncated) receipt.observed_truncated = true;
   }
+  return { receipt, lines };
 }
 var input = readStdin();
 try {
-  let readEntriesRaw = function() {
-    try {
-      if (existsSync5(registerPath)) {
-        const raw = JSON.parse(readFileSync3(registerPath, "utf8"));
-        if (Array.isArray(raw)) return raw;
-      }
-    } catch {
-    }
-    return [];
-  };
-  if (!existsSync5(join3(input.cwd, ".sterling", "config.json"))) allow();
+  if (!existsSync7(`${input.cwd}/.sterling/config.json`)) allow();
+  mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
-  const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
+  const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
   if (event !== "SubagentStart" && event !== "SubagentStop") {
     warnNonBlocking(`H22: unexpected hook_event_name '${event}' \u2014 no entry was added or removed; the register cannot track dispatches until this event name is handled`);
   }
   if (!input.agent_id) {
     warnNonBlocking(`H22: ${event} carried no agent_id (entries are keyed by agent_id) \u2014 ${consequence}`);
   }
-  const registerPath = join3(input.cwd, ".sterling", "transient", "dispatch-register.json");
-  const pruneForeign = (raw) => raw.filter((e) => e && e.session_id === input.session_id);
+  const lines = [];
   if (event === "SubagentStart") {
     const { blocks: matchedBlocks, attribution, positional } = attributeBlocks(input.transcript_path, input.agent_type);
-    const { candidates, files_source: declaredFilesSource, warnings: territoryWarnings } = resolveTerritory(matchedBlocks);
-    let filesSource = declaredFilesSource;
-    for (const w of territoryWarnings) process.stderr.write(w + "\n");
-    const reviewerClassStart = typeof input.agent_type === "string" && input.agent_type.startsWith("reviewer-");
-    if (reviewerClassStart && declaredFilesSource !== "review-territory") {
-      process.stderr.write(
-        `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s) \u2014 territory falls back to free-prose extraction, which measurably over-captures context-mentioned files (board f60ff6d8). Every code-touching reviewer dispatch should carry an explicit REVIEW-TERRITORY: [...] line in its prompt.
-`
-      );
+    const territory = resolveTerritory(matchedBlocks);
+    let filesSource = territory.files_source;
+    const reviewerStart = typeof input.agent_type === "string" && isReviewerClass(input.agent_type);
+    for (const m of territory.malformed) {
+      lines.push(render(disclosure("territory_declaration_malformed", { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));
     }
-    if (reviewerClassStart && !positional.safe) {
-      filesSource = "unattributable";
-      process.stderr.write(
-        `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to a dispatch block by position [${positional.case}]: ${positional.detail}. SubagentStart carries no tool_use_id (research_finding ffa6219c), so the attributed territory may belong to a DIFFERENT dispatch. Its receipt records territory.source 'unattributable': scripts/commit-reviewed.mjs will NEVER stamp or consume it, and it stays in the ledger for a human to judge. observed_files (read from this agent's OWN transcript at Stop) remains the receipt's only trustworthy territory.
-`
-      );
-    }
-    const claimedCandidates = claimedFromBlocks(matchedBlocks);
-    const globPrefixCandidates = globPrefixesFromBlocks(matchedBlocks);
-    const toRegisterPaths = (cands) => normalizeRegisterPaths(cands, input.cwd);
-    const files = toRegisterPaths(candidates);
-    const claimedFiles = toRegisterPaths(claimedCandidates);
-    const claimedGlobPrefixes = toRegisterPaths(globPrefixCandidates);
-    const configuredResources = loadExclusiveResourceNames(input.cwd);
-    const claimed = attribution === "block" && configuredResources.length ? claimedResources(matchedBlocks.map((b) => b.prompt).join("\n"), configuredResources) : [];
-    const newEntryBase = {
-      agent_id: input.agent_id,
-      agent_type: input.agent_type ?? null,
-      session_id: input.session_id,
-      files,
-      // Provenance of `files` above (decision 8f137474): 'review-territory'
-      // when at least one attributed block carried a well-formed
-      // REVIEW-TERRITORY declaration, 'free-prose-fallback' otherwise —
-      // copied unchanged into the promoted review-ledger receipt at Stop.
-      files_source: filesSource,
-      // Always present, even empty — its ABSENCE is the legacy-entry signal
-      // H26 falls back on (see claimedFromBlocks above).
-      claimed_files: claimedFiles,
-      // Same always-present-even-empty posture, same reason: an absent field
-      // means a pre-migration entry (H26 treats it as "no prefix claims",
-      // not "unknown" — safe, since the pre-existing exact-match comparison
-      // on claimed_files/files is completely unaffected either way).
-      claimed_glob_prefixes: claimedGlobPrefixes,
-      at: (/* @__PURE__ */ new Date()).toISOString(),
-      attribution
-    };
-    if (claimed.length) newEntryBase.exclusive_resources = claimed;
-    if (typeof input.agent_type === "string" && input.agent_type.startsWith("reviewer-")) {
-      newEntryBase.configured_model = configuredReviewerModel(input.cwd);
-    }
-    const registerLock = await acquireRegisterLock(input.cwd);
-    if (!registerLock) {
-      process.stderr.write(
-        `H22: register lock timed out \u2014 SKIPPING SubagentStart append for '${input.agent_id}' (never writing the register unlocked), including any "you do not hold <resource>" exclusive-resource notice this spawn would have received \u2014 ${consequence}
-`
-      );
-    } else {
-      try {
-        const entries = pruneForeign(readEntriesRaw());
-        const notices = [];
-        for (const name of configuredResources) {
-          const holder = entries.find((e) => Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
-          if (holder) {
-            notices.push(`You do not hold '${name}' \u2014 it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
-          }
-        }
-        if (notices.length) {
-          process.stdout.write(
-            JSON.stringify({ hookSpecificOutput: { hookEventName: "SubagentStart", additionalContext: notices.join("\n") } })
-          );
-        }
-        entries.push(newEntryBase);
-        const transient = join3(input.cwd, ".sterling", "transient");
-        mkdirSync2(transient, { recursive: true });
-        const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
-        writeFileSync2(tmpPath, JSON.stringify(entries));
-        renameSync2(tmpPath, registerPath);
-      } finally {
-        registerLock.release();
-      }
-    }
-    allow();
-  } else {
-    const finishedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const departing = pruneForeign(readEntriesRaw()).find((e) => e.agent_id === input.agent_id);
-    if (departing && !departing.residue_reported_at) {
-      const lastMsg = input.last_assistant_message;
-      const noFinalMessage = typeof lastMsg !== "string" || lastMsg === "";
-      if (noFinalMessage) {
-        const probe = probeDirtyPaths(input.cwd, departing.files);
-        if (probe.dirty.length > 0) {
-          process.stdout.write(formatResidueLine(departing, probe.dirty, { verified: probe.verified, reason: probe.reason }) + "\n");
-        }
-      }
-    }
-    const sterlingRoot = join3(input.cwd, ".sterling");
-    const readLedgerArray = () => {
-      try {
-        const p = join3(sterlingRoot, "review-ledger.json");
-        if (existsSync5(p)) {
-          const raw = JSON.parse(readFileSync3(p, "utf8"));
-          if (Array.isArray(raw)) return raw;
-        }
-      } catch {
-      }
-      return [];
-    };
-    const matchesThisDispatch = (e) => {
-      const normalized = normalizeLedgerEntry(e);
-      if (!normalized) return false;
-      if (typeof normalized.agent_id === "string" && typeof input.agent_id === "string") {
-        return normalized.agent_id === input.agent_id;
-      }
-      return !!departing && normalized.agent_type === departing.agent_type && normalized.at === departing.at;
-    };
-    const departingIsReviewer = !!departing && typeof departing.agent_type === "string" && departing.agent_type.startsWith("reviewer-");
-    const existingReceiptRaw = readLedgerArray().find(matchesThisDispatch);
-    const existingReceipt = existingReceiptRaw ? normalizeLedgerEntry(existingReceiptRaw) : null;
-    const resumeCandidate = departing ? null : existingReceipt;
-    const resumeIsReviewer = !!resumeCandidate && typeof resumeCandidate.agent_type === "string" && resumeCandidate.agent_type.startsWith("reviewer-");
-    if (departingIsReviewer || resumeIsReviewer) {
-      const stopAgentType = departingIsReviewer ? departing.agent_type : resumeCandidate.agent_type;
-      const stopBinding = departingIsReviewer && !existingReceipt ? bindReviewerTerritoryAtStop(input) : null;
-      if (stopBinding) {
-        for (const w of stopBinding.warnings ?? []) process.stderr.write(w + "\n");
-        if (stopBinding.bound) {
-          process.stderr.write(
-            `H22: reviewer territory BOUND AT STOP for '${input.agent_id}' (agent_type '${stopAgentType}') from the brief this agent actually received \u2014 child transcript first record, corroborated by sidecar toolUseId '${stopBinding.tool_use_id}' and a byte-identical parent prompt. Receipt territory records ${stopBinding.files.length} file(s) with source '${stopBinding.files_source}'; the SubagentStart register attribution (files_source '${departing.files_source}') was provisional and is NOT what this receipt attests.
-`
-          );
-        } else {
-          process.stderr.write(
-            `H22: UNATTRIBUTABLE TERRITORY AT STOP \u2014 reviewer '${input.agent_id}' (agent_type '${stopAgentType}') could not be bound to its dispatch block [${stopBinding.reason}]: ${stopBinding.detail}. The Start-side attribution is a positional GUESS (SubagentStart carries no tool_use_id, research_finding ffa6219c, and the parent's spawning record is sometimes not yet on disk when it fires \u2014 decision edbaa38d), so it is recorded as territory.source 'unattributable': scripts/commit-reviewed.mjs will NEVER stamp or consume this receipt, and it stays in the ledger for a human to judge. observed_files (read from this agent's OWN transcript) remains its only trustworthy territory.
-`
-          );
-        }
-      }
-      const boundTerritory = stopBinding && stopBinding.bound ? stopBinding : null;
-      const mintFiles = boundTerritory ? boundTerritory.files : departing?.files;
-      const mintFilesSource = boundTerritory ? boundTerritory.files_source : "unattributable";
-      const stopTerritoryFiles = existingReceipt ? existingReceipt.files : mintFiles;
-      const sterlingDir = join3(input.cwd, ".sterling");
-      const identity = gitReceiptIdentity(input.cwd);
-      const evidenceByTerritory = /* @__PURE__ */ new Map();
-      const territoryKey = (files) => (Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : []).sort().join("\n");
-      const evidenceFor = (files) => {
-        const key = territoryKey(files);
-        if (!evidenceByTerritory.has(key)) evidenceByTerritory.set(key, buildContentEvidence(input.cwd, files));
-        return evidenceByTerritory.get(key);
-      };
-      const contentEvidence = evidenceFor(stopTerritoryFiles);
-      const resolvedModel = resolveReviewerModel(departing, input.transcript_path, input.agent_transcript_path);
-      const observed = observedToolPaths(input.agent_transcript_path, input.cwd);
-      if (observed === null) {
-        const shape = typeof input.agent_transcript_path === "string" && input.agent_transcript_path !== "" ? `present but unobservable ('${input.agent_transcript_path}')` : "absent from stdin";
-        process.stderr.write(
-          `H22: no observed evidence for reviewer '${input.agent_id}' (agent_type '${stopAgentType}') \u2014 agent transcript unobservable (agent_transcript_path is ${shape}); this receipt promotes without observed_files/observed_source.
-`
+    if (reviewerStart) {
+      if (territory.files_source !== "review-territory") {
+        lines.push(
+          render(disclosure("territory_declaration_missing", {}, `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s)`))
         );
       }
-      withLedgerLock(sterlingDir, (lockAcquired) => {
-        const ledgerPath = join3(sterlingDir, "review-ledger.json");
-        let ledger = [];
-        try {
-          if (existsSync5(ledgerPath)) {
-            const raw = JSON.parse(readFileSync3(ledgerPath, "utf8"));
-            if (Array.isArray(raw)) ledger = raw;
-          }
-        } catch {
-          ledger = [];
-        }
-        const existingIndex = ledger.findIndex(matchesThisDispatch);
-        if (existingIndex !== -1) {
-          const raw = ledger[existingIndex];
-          const existing = normalizeLedgerEntry(raw);
-          const label = `agent_id '${input.agent_id}' (agent_type '${stopAgentType}')`;
-          if (!existing || existing.schema_version !== 2) {
-            process.stderr.write(
-              `H22: a review receipt for ${label} is already present in .sterling/review-ledger.json and is a LEGACY (pre-v2) entry \u2014 skipping duplicate promotion; a legacy receipt is never refreshed in place and never migrated (pin V2-6)
-`
-            );
-            return;
-          }
-          if (existing.status === "discharged") {
-            process.stderr.write(
-              `H22: NOT REFRESHING a DISCHARGED review receipt for ${label} \u2014 it was explicitly ruled unspendable and is preserved as it stands (decision 57984926 \xA73). This Stop's finish time and content evidence are NOT recorded; dispatch a fresh reviewer if this work needs a live receipt.
-`
-            );
-            return;
-          }
-          const receiptBranch = normIdentity(existing.branch);
-          const hereBranch = normIdentity(identity.branch);
-          if (receiptBranch !== null && hereBranch !== null && receiptBranch !== hereBranch) {
-            process.stderr.write(
-              `H22: REFUSING to refresh the review receipt for ${label} \u2014 it was earned on branch '${receiptBranch}' and this Stop fired on '${hereBranch}'. A receipt's evidence is bound to the branch that earned it (decision 0408b295), so it is left byte-identical: nothing about this Stop is recorded on it.
-`
-            );
-            return;
-          }
-          const receiptSession = normIdentity(existing.session_id);
-          const hereSession = normIdentity(input.session_id);
-          if (receiptSession !== null && hereSession !== null && receiptSession !== hereSession) {
-            process.stderr.write(
-              `H22: REFUSING to refresh the review receipt for ${label} \u2014 it was earned in session '${receiptSession}' and this Stop fired in session '${hereSession}'. A receipt's evidence is bound to the session that earned it (decision 0408b295), so it is left byte-identical: nothing about this Stop is recorded on it. Dispatch a fresh reviewer if this round of work needs its own receipt.
-`
-            );
-            return;
-          }
-          const bindingRefusal = (subject, fault) => `H22: REFUSING to refresh the review receipt for ${label} \u2014 ${subject} does not bind the receipt's DECLARED territory` + (fault.foreign.length > 0 ? `; it names ${fault.foreign.length} path(s) the receipt never declared: ${fault.foreign.join(", ")}` : "") + (fault.missing.length > 0 ? `; it silently omits ${fault.missing.length} declared path(s) with no failure_reason to account for them: ${fault.missing.join(", ")}` : "") + `. Declared territory (${fault.expected.length} path(s)): ${fault.expected.join(", ") || "<none>"}. The receipt is left EXACTLY as it stands: evidence that describes another territory would make it claim coverage of bytes nobody hashed, and the reviewed-bytes gate would then refuse the commit for every declared path. This receipt is not repairable by a further refresh \u2014 DISCHARGE it (scripts/review-ledger.mjs discharge) or dispatch a FRESH review of this territory.
-`;
-          const carriedFault = territoryBindingFault(raw.content_evidence, existing.files);
-          if (carriedFault.faulty) {
-            process.stderr.write(bindingRefusal("the content evidence it already carries", carriedFault));
-            return;
-          }
-          if (!lockAcquired) {
-            process.stderr.write(
-              `H22: SKIPPING the review-receipt refresh for ${label} \u2014 the review-ledger lock timed out and a refresh is NEVER written unlocked (an unlocked whole-array rewrite can clobber a concurrent consume). The receipt keeps its previous finished_at, content evidence and observed files; this Stop's evidence is lost, which is bounded, rather than risking the receipt itself.
-`
-            );
-            return;
-          }
-          const refreshEvidence = evidenceFor(existing.files);
-          const builtFault = territoryBindingFault(refreshEvidence, existing.files);
-          if (builtFault.faulty) {
-            process.stderr.write(bindingRefusal("the content evidence built for this Stop", builtFault));
-            return;
-          }
-          const priorResume = raw.resume_count;
-          const priorResumeUsable = Number.isInteger(priorResume) && priorResume >= 0;
-          if (priorResume !== void 0 && !priorResumeUsable) {
-            process.stderr.write(
-              `H22: the review receipt for ${label} carries an UNUSABLE resume_count (${JSON.stringify(priorResume)}) \u2014 this hook only ever writes a non-negative integer, so that value was not written by a refresh. It is RESET to 1 for this round rather than incremented from a value that means nothing; how many rounds preceded this one is unrecoverable from the receipt.
-`
-            );
-          }
-          const nextResumeCount = priorResumeUsable ? priorResume + 1 : 1;
-          const priorEvidence = isEvidenceObject(raw.content_evidence) ? raw.content_evidence : null;
-          const priorBlobs = priorEvidence && isEvidenceObject(priorEvidence.blobs) ? priorEvidence.blobs : null;
-          const priorFinishedAt = typeof raw.finished_at === "string" ? raw.finished_at : null;
-          const observedThisRound = observedToolPathsSince(input.agent_transcript_path, input.cwd, priorFinishedAt);
-          const observedReadsThisRound = new Set(observedThisRound ? observedThisRound.reads : []);
-          const rebaselineRefused = [];
-          const droppedUnbound = [];
-          const nextEvidence = { ...refreshEvidence };
-          if (isEvidenceObject(nextEvidence.blobs)) {
-            const mergedBlobs = { ...nextEvidence.blobs };
-            for (const [p, freshSha] of Object.entries(nextEvidence.blobs)) {
-              const prior = priorBlobs ? priorBlobs[p] : void 0;
-              const priorUsable = isUsableBlobSha(prior);
-              if (priorUsable && isUsableBlobSha(freshSha) && prior.toLowerCase() === freshSha.toLowerCase()) continue;
-              if (observedReadsThisRound.has(p)) continue;
-              rebaselineRefused.push({ path: p, prior_sha: priorUsable ? prior : null, current_sha: freshSha, round: nextResumeCount });
-              if (priorUsable) mergedBlobs[p] = prior;
-              else {
-                delete mergedBlobs[p];
-                droppedUnbound.push(p);
-              }
-            }
-            nextEvidence.blobs = mergedBlobs;
-          }
-          if (droppedUnbound.length > 0) {
-            const note = `refused to rebaseline ${droppedUnbound.length} declared path(s) recording no prior sha, so they are deliberately left UNBOUND rather than bound to bytes this reviewer is not known to have read: ${droppedUnbound.join(", ")}`;
-            nextEvidence.failure_reason = nextEvidence.failure_reason ? `${nextEvidence.failure_reason}; ${note}` : note;
-            const boundCount = isEvidenceObject(nextEvidence.blobs) ? Object.keys(nextEvidence.blobs).length : 0;
-            nextEvidence.status = boundCount === builtFault.expected.length ? "complete" : boundCount === 0 ? "unavailable" : "partial";
-          }
-          const territoryReadThisRound = builtFault.expected.filter((p) => observedReadsThisRound.has(p));
-          const zeroReadRound = territoryReadThisRound.length === 0;
-          if (builtFault.expected.length === 0) {
-            process.stderr.write(
-              `H22: NOT advancing finished_at on the review receipt for ${label} \u2014 its declared territory is EMPTY, so this refresh verified nothing about any file and there is no review-end instant to record. Renewing the timestamp would keep a zero-evidence receipt permanently inside commit-reviewed's staleness horizon while attesting nothing. The content evidence is left exactly as it stands for the same reason; what IS recorded is the attempted resume (resume_count now ${nextResumeCount}, observed files unioned).
-`
-            );
-          } else if (zeroReadRound) {
-            process.stderr.write(
-              `H22: NOT advancing finished_at and NOT replacing the content evidence on the review receipt for ${label} \u2014 NOTHING in this round's observed reads (transcript entries stamped after the receipt's previous finish time ${priorFinishedAt ?? "<none recorded>"}) shows this reviewer read any of its ${builtFault.expected.length} DECLARED path(s), so this Stop reviewed nothing in territory \u2014 reads OUTSIDE the declared territory are not evidence of a review round and never renew this receipt. The receipt keeps the evidence and the review-end instant it earned; only the attempted resume is recorded (resume_count now ${nextResumeCount}, observed files unioned). Re-dispatch a reviewer if this round of work needs a receipt.
-`
-            );
-          } else {
-            raw.finished_at = finishedAt;
-          }
-          if (!zeroReadRound) raw.content_evidence = nextEvidence;
-          if (observed) {
-            const priorObserved = Array.isArray(raw.observed_files) ? raw.observed_files.filter((f) => typeof f === "string" && f !== "") : [];
-            raw.observed_files = [.../* @__PURE__ */ new Set([...priorObserved, ...observed.reads, ...observed.writes])];
-            const priorReads = Array.isArray(raw.observed_reads) ? raw.observed_reads.filter((f) => typeof f === "string" && f !== "") : [];
-            raw.observed_reads = [.../* @__PURE__ */ new Set([...priorReads, ...observed.reads])];
-            raw.observed_source = "subagent-transcript";
-            if (observed.truncated) raw.observed_truncated = true;
-          }
-          raw.resume_count = nextResumeCount;
-          if (rebaselineRefused.length > 0) {
-            const priorRefused = Array.isArray(raw.rebaseline_refused) ? raw.rebaseline_refused : [];
-            raw.rebaseline_refused = [...priorRefused, ...rebaselineRefused];
-            process.stderr.write(
-              `H22: REFUSED TO REBASELINE ${rebaselineRefused.length} path(s) on the review receipt for ${label} \u2014 their bytes moved since the recorded evidence and NOTHING in this round's observed reads shows this reviewer looked at them, so the receipt keeps the sha it actually reviewed: ${rebaselineRefused.map((r) => `${r.path} (recorded ${r.prior_sha ? r.prior_sha.slice(0, 12) : "nothing"}, on disk ${String(r.current_sha).slice(0, 12)})`).join(", ")}. The reviewed-bytes gate will refuse a commit carrying those bytes \u2014 re-dispatch a reviewer over them rather than waiving, unless the change is genuinely outside what was reviewed.
-`
-            );
-          }
-          const refreshedWhat = zeroReadRound ? "finished_at and content evidence PRESERVED (nothing was read this round), observed files updated" : "finished_at, content evidence and observed files updated";
-          process.stderr.write(
-            `H22: REFRESHED the existing review receipt for ${label} in .sterling/review-ledger.json instead of promoting a duplicate \u2014 ${refreshedWhat} (observed files UNIONED with the earlier round's), resume_count now ${raw.resume_count}. entry_id, identity, reviewer model provenance and declared territory are unchanged.
-`
-          );
-        } else if (!departingIsReviewer) {
-          process.stderr.write(
-            `H22: the review receipt for agent_id '${input.agent_id}' (agent_type '${stopAgentType}') is no longer in .sterling/review-ledger.json \u2014 it was consumed (stamped onto a commit) between this Stop's lookup and its ledger write, and there is no register entry left to promote from. Nothing is written: a spent receipt is never re-minted. Dispatch a reviewer if this round of work needs its own receipt.
-`
-          );
-          return;
-        } else {
-          if (departingIsReviewer && !stopBinding) {
-            process.stderr.write(
-              `H22: UNATTRIBUTABLE TERRITORY AT STOP \u2014 reviewer '${input.agent_id}' (agent_type '${stopAgentType}') is being minted fresh because its existing receipt was consumed (stamped onto a commit) while this ledger lock was being acquired, so no Stop-time territory binding was performed for it (decision edbaa38d binds only on a fresh mint). Its territory records the SubagentStart guess with source 'unattributable': scripts/commit-reviewed.mjs will never stamp or consume it.
-`
-            );
-          }
-          ledger.push({
-            schema_version: 2,
-            entry_id: randomUUID2(),
-            kind: "roster_receipt",
-            status: "active",
-            started_at: departing.at,
-            finished_at: finishedAt,
-            reviewer: {
-              agent_type: departing.agent_type,
-              model: resolvedModel.model,
-              model_family: familyFromModel(resolvedModel.model),
-              model_source: resolvedModel.model_source
-            },
-            identity: {
-              session_id: normIdentity(departing.session_id) ?? normIdentity(input.session_id),
-              branch: identity.branch,
-              base_sha: identity.base_sha,
-              // DISPATCH IDENTITY (finding HIGH-2) — the register's own unique
-              // key for this dispatch, stamped so a later duplicate-promotion
-              // attempt for the SAME dispatch can be recognized by identity
-              // rather than by the coincidence of sharing agent_type+at with
-              // an unrelated dispatch. Not part of decision 57984926's original
-              // named identity fields (session_id/branch/base_sha), but no pin
-              // asserts an exact key set on this nested object.
-              agent_id: departing.agent_id
-            },
-            territory: {
-              // BOUND AT STOP, NOT COPIED FROM THE REGISTER (decision edbaa38d)
-              // — see bindReviewerTerritoryAtStop and the mintFiles/
-              // mintFilesSource computation above. The register entry's
-              // Start-time attribution is PROVISIONAL for a reviewer, so what
-              // this receipt attests is the territory declared in the brief this
-              // agent provably received; every shape that could not be bound is
-              // 'unattributable' and unspendable, never a copied guess.
-              files: mintFiles,
-              source: mintFilesSource,
-              // Decision 8f137474's attribution label is UNCHANGED and still
-              // copied verbatim from the register entry: it names which
-              // Start-side positional case fired ('block'/'union') and is read
-              // by nothing that judges spendability — territory.source carries
-              // that verdict. Rewriting it here would silently restate the
-              // Stop binding in a field whose existing meaning is the Start one.
-              attribution: departing.attribution
-            },
-            // OBSERVED-EVIDENCE UPGRADE, PART (2) (decision
-            // review-territory-observed-evidence, 9500cce1) — TOP-LEVEL
-            // fields (not nested under `territory`, unlike the declared
-            // files/source above): the decision names "the ledger entry
-            // additionally carries observed_files", corroboration
-            // deliberately siblings-not-nests the declared territory it
-            // corroborates. Spread-conditional so a null `observed` (the
-            // transcript could not be observed at all) omits BOTH keys
-            // entirely, never writing an empty placeholder that would read
-            // as "observed and found nothing". `observed_truncated:true`
-            // (review MEDIUM) is a THIRD top-level sibling, present only when
-            // the lib's own `truncated` flag says the 1MB tail window did not
-            // cover the whole departing transcript — absent (never `false`)
-            // otherwise, same absent-unless-true convention as observed_files.
-            // OBSERVED_READS — THE READS-ONLY HALF, its OWN field beside
-            // observed_files (board 181d11e7 / 4b59e6ff). observed_files above
-            // is reads UNION WRITES and stays byte-identical for the consumers
-            // that already read it; it cannot answer "what did this reviewer
-            // READ", because a path the agent WROTE is a path whose bytes it
-            // authored. scripts/review-ledger.mjs's 'superseded' discharge class
-            // requires exactly this split and refuses to fall back to
-            // observed_files for that reason. Same absent-when-unobserved
-            // posture as its siblings, and covered by the SAME
-            // `observed_truncated: true` marker (one transcript, one tail
-            // window, one truncation fact — review-ledger.mjs already refuses a
-            // superseded discharge on that exact key, so it is never spelled a
-            // second way here).
-            ...observed ? {
-              observed_files: [.../* @__PURE__ */ new Set([...observed.reads, ...observed.writes])],
-              observed_reads: [...new Set(observed.reads)],
-              observed_source: "subagent-transcript",
-              ...observed.truncated ? { observed_truncated: true } : {}
-            } : {},
-            // BUILT FOR THE TERRITORY THIS ENTRY RECORDS (`mintFiles`, the
-            // Stop-bound territory a few lines above — no longer
-            // `departing.files`, which is the provisional Start-time guess),
-            // not for whatever territory the outside-the-lock
-            // precompute happened to use: this branch is reachable when the
-            // receipt found at decision time was consumed while the lock was
-            // being acquired, and the precompute would then describe THAT
-            // receipt's territory rather than this fresh mint's. A cache HIT in
-            // every ordinary mint (the precompute used exactly these files).
-            content_evidence: evidenceFor(mintFiles),
-            disposition: null
-          });
-        }
-        const ledgerTmpPath = join3(sterlingDir, `review-ledger.json.tmp-${process.pid}`);
-        writeFileSync2(ledgerTmpPath, JSON.stringify(ledger));
-        renameSync2(ledgerTmpPath, ledgerPath);
-      });
+      if (!positional.safe) {
+        filesSource = "unattributable";
+        lines.push(
+          render(
+            disclosure(
+              "receipt_unattributable",
+              { case: positional.case },
+              `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to a dispatch block by position [${positional.case}]: ${positional.detail}`
+            )
+          )
+        );
+      }
     }
-    const registerLock = await acquireRegisterLock(input.cwd);
-    if (!registerLock) {
-      process.stderr.write(
-        `H22: register lock timed out \u2014 SKIPPING SubagentStop removal for '${input.agent_id}' (never writing the register unlocked) \u2014 ${consequence}
-`
+    const files = normalizeRegisterPaths(territory.candidates, input.cwd);
+    const claimedFiles = normalizeRegisterPaths(claimedFromBlocks(matchedBlocks), input.cwd);
+    const claimedGlobPrefixes = normalizeRegisterPaths(globPrefixesFromBlocks(matchedBlocks), input.cwd);
+    const configuredResourceNames = loadExclusiveResourceNames(input.cwd);
+    const claimed = attribution === "block" && configuredResourceNames.length ? claimedResources(matchedBlocks.map((b) => b.prompt).join("\n"), configuredResourceNames) : [];
+    if (configuredResourceNames.length) {
+      const existing = readRegister(input.cwd);
+      if (existing.availability === "ok") {
+        for (const name of configuredResourceNames) {
+          const holder = existing.entries.find((e) => !e.ended && Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
+          if (holder) lines.push(`You do not hold '${name}' \u2014 it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
+        }
+      }
+    }
+    const entry = {
+      agent_id: input.agent_id,
+      agent_type: typeof input.agent_type === "string" ? input.agent_type : null,
+      session_id: input.session_id,
+      files,
+      files_source: filesSource,
+      claimed_files: claimedFiles,
+      claimed_glob_prefixes: claimedGlobPrefixes,
+      attribution,
+      at: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    if (claimed.length) entry.exclusive_resources = claimed;
+    if (reviewerStart) entry.configured_model = configuredReviewerModel(input.cwd);
+    if (readRegister(input.cwd).availability === "corrupt") {
+      lines.push(
+        render(
+          disclosure(
+            "register_unavailable",
+            { path: registerPath(input.cwd), reason: "corrupt" },
+            `H22: dispatch register unavailable (corrupt) at ${registerPath(input.cwd)} \u2014 this Start writes nothing; resetting it would destroy the corruption signal every availability pin depends on and silently discard any unended round the file held`
+          )
+        )
       );
     } else {
       try {
-        let entries = pruneForeign(readEntriesRaw());
-        entries = entries.filter((e) => e.agent_id !== input.agent_id);
-        const transient = join3(input.cwd, ".sterling", "transient");
-        mkdirSync2(transient, { recursive: true });
-        const tmpPath = join3(transient, `dispatch-register.json.tmp-${process.pid}`);
-        writeFileSync2(tmpPath, JSON.stringify(entries));
-        renameSync2(tmpPath, registerPath);
-      } finally {
-        registerLock.release();
+        await registerStart(input.cwd, entry);
+      } catch (e) {
+        if (e?.code === "register_agent_id_duplicate" || e?.code === "register_lock_held") {
+          lines.push(render(e));
+        } else {
+          throw e;
+        }
+      }
+    }
+  } else if (event === "SubagentStop") {
+    let departing;
+    try {
+      const ended = await registerEnd(input.cwd, input.agent_id, "subagent-stop", { sessionId: input.session_id });
+      departing = ended.found ? ended.entry : void 0;
+    } catch (e) {
+      if (e?.code === "register_lock_held") {
+        lines.push(
+          render(
+            disclosure(
+              "register_lock_held",
+              e.facts ?? {},
+              `H22: could not mark this round ended \u2014 the register lock is held at ${e.facts?.lock_dir ?? "(unknown)"}: coordination, not evidence \u2014 remove by hand only once no writer runs. This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
+            )
+          )
+        );
+        departing = void 0;
+      } else {
+        throw e;
+      }
+    }
+    if (departing) {
+      const lastMsg = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
+      if (lastMsg === "") {
+        const probe = probeDirtyPaths(input.cwd, departing.files);
+        const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+        if (!(probe.verified && dirty.length === 0)) {
+          lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason }))));
+        }
+      }
+    }
+    if (departing && typeof departing.agent_type === "string" && isReviewerClass(departing.agent_type)) {
+      const { receipt, lines: promotionLines } = promoteAtStop(departing, input);
+      lines.push(...promotionLines);
+      if (receipt) {
+        try {
+          await withLedgerLock(input.cwd, () => {
+            const ledgerState = readLedger(input.cwd);
+            if (ledgerState.availability === "corrupt") {
+              lines.push(render(disclosure("ledger_corrupt", {}, "H22: a corrupt review ledger stops this promotion \u2014 no write, bytes left untouched")));
+              return;
+            }
+            const rawArr = ledgerState.rawEntries;
+            rawArr.push(receipt);
+            writeLedger(input.cwd, rawArr);
+          });
+        } catch (e) {
+          if (e?.code === "ledger_lock_held") lines.push(render(e));
+          else throw e;
+        }
       }
     }
   }
+  if (lines.length) process.stderr.write(lines.join("\n") + "\n");
   allow();
 } catch (e) {
-  const consequence = input.hook_event_name === "SubagentStop" ? `the entry for '${input.agent_id}' STAYS LIVE and OVER-DEFERS H10's file duties for the files it claims, until H10's staleness TTL expires or H1 deletes the register at the next session start \u2014 and if this was a reviewer-class dispatch, its receipt may never have reached the durable review ledger, so a later scripts/commit-reviewed.mjs invocation may wrongly refuse for lack of review evidence` : `this dispatch is absent from the register, so H10 will NOT defer the duties for the files it owns (under-defer: a duty fires that could have waited)`;
-  warnNonBlocking(`H22: dispatch register update failed: ${e && e.message || e} \u2014 ${consequence}`);
+  warnNonBlocking(`H22: internal failure (${e && e.message || e}) \u2014 this fire tracked nothing; the register/ledger are left exactly as they were`);
 }

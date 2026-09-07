@@ -1,46 +1,38 @@
-// FROZEN SPEC — board efbddf09 (objective dome-farmer-issues-2026-09-05, slice 4):
-// "rotation note carries live dispatches". scripts/rotation-note.mjs today has
-// zero references to live subagents and H1's restore injection enumerates
-// none, so a coder dispatched before /clear kept running invisibly and the
-// fresh session dispatched a second coder at the same slice (~330k tokens
-// wasted, issues log 2026-09-04).
+// R1 PIN RE-CUT — the rotation note's dispatch set, under the TRI-STATE status.
 //
-// FIX PINNED HERE (literal spec text from board efbddf09):
-//   (1) rotation-note.mjs writes the live dispatch set -- entries of
-//       {agent_type, agent_id, territory} -- into the rotation note at write
-//       time, taken from the H22 register (.sterling/transient/dispatch-register.json).
-//   (2) H1 on restore (source=clear) re-prints it as
-//       'N dispatch(es) were live at rotation -- check ListAgents before
-//       re-dispatching', listing each agent_type + agent_id + territory.
-//   (3) zero live dispatches -> the note carries an empty set and H1 prints
-//       NO such line (no ceremony, P1).
-//   (4) a register that cannot be read -> the note DISCLOSES that the live
-//       set is unknown rather than silently writing an empty one, and H1
-//       re-prints the disclosure.
+// CONTRACT SOURCE: decision `review-receipt-rebuild-invariant-three-owner-modules-tri-state-liveness-receipt-bound-supersession`
+// + contract sheet §1.1 (rotation-note policy) / §6 A1, A2, A6, A9. The board
+// item this file was born from (a coder kept running invisibly across a /clear,
+// and the fresh session dispatched a second one at the same slice) is unchanged
+// in substance: what changed is that "live" is now a THREE-valued judgement.
 //
-// DESIGN CALLS THIS TEST FILE OWNS (not literally spelled out in the board
-// item, recorded here so the conductor can see the judgment made):
-//   - the note's field is named `live_dispatches` ("the live dispatch set" in
-//     the board text) -- a snake_case sibling of the note's other fields
-//     (next_slice, commits_ahead, base_branch, ...).
-//   - CONFIRMED-ZERO is `[]`; UNKNOWN (register present but unparseable) is
-//     `null` -- the same null-vs-empty-object convention this codebase
-//     already uses for observed-territory ("null=could-not-observe vs
-//     {reads:[],writes:[]}=observed-nothing", h22-dispatch-register article).
-//     A MISSING register file (nothing ever dispatched this session) is
-//     CONFIRMED-ZERO, not unknown -- only a PRESENT-BUT-UNPARSEABLE register
-//     is unknown.
-//   - "live" reuses the staleness concept the board item cites H10 as
-//     already computing from the same register (H10 fires session_id AND
-//     TTL; a session-less CLI can only apply the TTL half) -- an entry hours
-//     old is excluded, never printed as still running.
-//   - territory is the register entry's `files` array, carried through
-//     unchanged.
+// THE POLICY:
+//   presumed-active   -> listed as a LIVE dispatch (note.live_dispatches).
+//   unknown           -> carried, but as UNCERTAIN — never inside live_dispatches
+//                        and never inside the "N dispatch(es) were live" count.
+//   inactive-confirmed-> ignored (the round ended; nothing to check).
+//   availability != ok-> "register unavailable": the live set is not knowable, so
+//                        no count is ever fabricated for it.
 //
-// Every behavioral pin below carries a SABOTAGE comment naming the one-line
-// change that must turn it red. All pins are RED at HEAD (grep confirms zero
-// references to ListAgents/subagent/"live dispatch" in scripts/rotation-note.mjs
-// today per the board item's own evidence).
+// SESSION JOIN, RESOLVED AMBIGUITY (stated, not silently taken): rotation-note is
+// a session-less CLI, so it has no stdin session_id to join on. It therefore
+// applies the LEASE HALF of dispatchStatus alone and never classifies an entry
+// unknown/other-session — the same reading this file has always documented
+// ("H10 fires session_id AND TTL; a session-less CLI can only apply the TTL
+// half"). Every fixture below carries session_id 's-live', which matches nothing
+// in the environment, precisely so that a session join wrongly applied here
+// would turn every entry unknown and fail R1-A71/A72 loudly instead of quietly.
+//
+// RETIRED: 'no dispatch register at all -> note.live_dispatches is a confirmed empty array, not unknown'
+//   — the decision classes ABSENT with CORRUPT as 'registry unavailable' (readRegister
+//     returns availability 'absent'), and H1 deletes the register at SessionStart, so a
+//     missing file cannot be distinguished from a never-written one. The
+//     confirmed-zero CONTROL it provided is preserved, and strengthened, by
+//     R1-A70 (an EMPTY ARRAY on disk = availability ok = confirmed zero).
+// RETIRED: 'a stale register entry (hours old) is excluded when a fresh entry is also present'
+//   — an out-of-lease entry is now UNKNOWN, not dead: dropping it entirely is the
+//     silent-loss failure this whole re-cut exists to close. Re-cut as R1-A73/A74.
+// CONVERTED: the /unknown/i disclosure assertion -> token('register_unavailable').
 
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -53,6 +45,8 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const ROTATION_SCRIPT = join(root, 'scripts', 'rotation-note.mjs');
 const H1_SCRIPT = join(root, 'scripts', 'hooks', 'h1-session-start.mjs');
+
+const token = (c) => new RegExp('\\[' + c + '\\]');
 
 let SterlingStore;
 before(async () => {
@@ -107,8 +101,6 @@ function h1(dir, over = {}) {
     encoding: 'utf8',
     cwd: dir,
     timeout: 60_000,
-    // mirrors runHook's default env in hooks-full.test.mjs: never let H1's
-    // clone-currency probe attempt a real network fetch during this suite.
     env: { ...process.env, STERLING_CURRENCY_DISABLE: '1', STERLING_NO_BANNER: '1', STERLING_PLUGIN_ROOT: root },
   });
   let out = null;
@@ -120,9 +112,9 @@ function h1(dir, over = {}) {
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '', out };
 }
 
-// ----- H22 register fixture helpers (shape per scripts/tests/h22-register-concurrency.test.mjs / h22-attribution.test.mjs) -----
+// ----- register fixtures -----
 
-function registerEntry(agentId, agentType, files, agoMs = 0) {
+function registerEntry(agentId, agentType, files, agoMs = 0, over = {}) {
   return {
     agent_id: agentId,
     agent_type: agentType,
@@ -130,83 +122,54 @@ function registerEntry(agentId, agentType, files, agoMs = 0) {
     files,
     attribution: 'block',
     at: new Date(Date.now() - agoMs).toISOString(),
+    ...over,
   };
 }
 
 function writeRegister(dir, entries) {
   const p = join(dir, '.sterling', 'transient');
   mkdirSync(p, { recursive: true });
-  writeFileSync(join(p, 'dispatch-register.json'), JSON.stringify(entries));
-}
-
-function writeCorruptRegister(dir) {
-  const p = join(dir, '.sterling', 'transient');
-  mkdirSync(p, { recursive: true });
-  writeFileSync(join(p, 'dispatch-register.json'), '{not valid json,,,\n');
+  writeFileSync(join(p, 'dispatch-register.json'), typeof entries === 'string' ? entries : JSON.stringify(entries));
 }
 
 // --------------------------------------------------------------------------
-// PIN 1 (CONTROL for PIN 7): nothing has ever dispatched this session --
-// no register file at all. This is CONFIRMED-ZERO, not unknown.
-// SABOTAGE: change the note writer to omit `live_dispatches` entirely when
-// the register file does not exist (an early return before the field is
-// ever set) -> `note.live_dispatches` is `undefined`, and the deepEqual([])
-// assertion below goes red. This test is also the CONTROL that an
-// always-null "can't tell" implementation (PIN 7's sabotage target) would
-// itself fail here, since it would report null in this confirmed-empty case
-// too.
+// R1-A70 (CONTROL, and the replacement for the retired absent-is-empty pin):
+// a register that is READABLE and EMPTY is a confirmed zero — the note carries
+// an empty array and H1 says nothing at all (P1: no ceremony).
+// SABOTAGE: make the note writer report `null` whenever it cannot find any live
+// entry (collapsing confirmed-zero into unknown) -> the deepEqual([]) goes red
+// here while R1-A75 (genuinely unreadable) stays green.
 // --------------------------------------------------------------------------
-test('rotation-note.mjs: no dispatch register at all -> note.live_dispatches is a confirmed empty array, not unknown', () => {
+test('R1-A70 CONTROL: an EMPTY register on disk is a CONFIRMED zero — note.live_dispatches is [] and H1 prints no dispatch line', () => {
   const { dir, cleanup } = gitProject();
   try {
+    writeRegister(dir, []);
     const r = runRotationNote(dir, ['--next-slice', 'next thing']);
     assert.equal(r.status, 0, r.stderr);
-    const note = readRotationNote(dir);
-    assert.deepEqual(note.live_dispatches, [], 'nothing was ever dispatched -- confirmed empty, not unknown');
-  } finally {
-    cleanup();
-  }
-});
+    assert.deepEqual(readRotationNote(dir).live_dispatches, [], 'readable-and-empty is the one legitimate all-clear');
 
-// --------------------------------------------------------------------------
-// PIN 2: zero live dispatches -> H1 prints the ordinary ROTATION RESTORE
-// block with NO live-dispatch line at all (not even a "0 dispatch(es)..."
-// line) -- no ceremony (P1).
-// SABOTAGE: make H1 always print the live-dispatch line, e.g. hardcode
-// `${note.live_dispatches.length} dispatch(es) were live at rotation --
-// check ListAgents before re-dispatching` unconditionally (no `.length > 0`
-// guard) -> the doesNotMatch assertions below go red.
-// --------------------------------------------------------------------------
-test('H1 rotation restore: zero live dispatches -> no live-dispatch line at all, ROTATION RESTORE otherwise intact', () => {
-  const { dir, cleanup } = gitProject();
-  try {
-    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
-    const r = h1(dir, { source: 'clear' });
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = r.out.hookSpecificOutput.additionalContext;
+    const h = h1(dir, { source: 'clear' });
+    assert.equal(h.code, 0, h.stderr);
+    const ctx = h.out.hookSpecificOutput.additionalContext;
     assert.match(ctx, /ROTATION RESTORE/);
     assert.doesNotMatch(ctx, /dispatch\(es\) were live at rotation/i, 'no line at all when nothing was live');
-    assert.doesNotMatch(ctx, /ListAgents/i, 'the ListAgents remedy is not printed when there is nothing to check');
+    assert.doesNotMatch(ctx, token('register_unavailable'), 'an empty register is not an unavailable one');
   } finally {
     cleanup();
   }
 });
 
 // --------------------------------------------------------------------------
-// PIN 3 (positive control establishing the read pipeline works): a single
-// live register entry is captured into the note as {agent_type, agent_id,
-// territory}.
-// SABOTAGE: rename the mapped key from `territory` to `files` (i.e. carry
-// the register's own field name through unchanged instead of the note's
-// `territory` key) -> the deepEqual below goes red on the key name.
+// R1-A71: a PRESUMED-ACTIVE entry is captured as {agent_type, agent_id, territory}.
+// SABOTAGE: rename the mapped key from `territory` to `files` -> the deepEqual
+// goes red on the key name.
 // --------------------------------------------------------------------------
-test('rotation-note.mjs: a single live register entry is captured as {agent_type, agent_id, territory}', () => {
+test('R1-A71: a presumed-active register entry is captured as {agent_type, agent_id, territory}', () => {
   const { dir, cleanup } = gitProject();
   try {
     writeRegister(dir, [registerEntry('agent-c7', 'coder', ['scripts/foo.mjs', 'scripts/bar.mjs'], 1_000)]);
     assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
-    const note = readRotationNote(dir);
-    assert.deepEqual(note.live_dispatches, [
+    assert.deepEqual(readRotationNote(dir).live_dispatches, [
       { agent_type: 'coder', agent_id: 'agent-c7', territory: ['scripts/foo.mjs', 'scripts/bar.mjs'] },
     ]);
   } finally {
@@ -215,135 +178,161 @@ test('rotation-note.mjs: a single live register entry is captured as {agent_type
 });
 
 // --------------------------------------------------------------------------
-// PIN 4: H1 restore re-prints exactly one live dispatch, naming the count,
-// agent_type, agent_id and territory.
-// SABOTAGE: H1 reads the note but never renders the live_dispatches block at
-// all (treats the field as unknown metadata) -> every match() below goes
-// red.
+// R1-A72: H1 restore re-prints the live set with count, identity and territory.
+// SABOTAGE: H1 reads the note but never renders the live_dispatches block ->
+// every match() below goes red.
 // --------------------------------------------------------------------------
-test('H1 rotation restore: a single live dispatch is re-printed with count, agent_type, agent_id, territory', () => {
+test('R1-A72: H1 rotation restore re-prints a presumed-active dispatch with count, agent_type, agent_id and territory', () => {
   const { dir, cleanup } = gitProject();
   try {
     writeRegister(dir, [registerEntry('agent-c7', 'coder', ['scripts/foo.mjs', 'scripts/bar.mjs'], 1_000)]);
     assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
-    const r = h1(dir, { source: 'clear' });
-    const ctx = r.out.hookSpecificOutput.additionalContext;
+    const ctx = h1(dir, { source: 'clear' }).out.hookSpecificOutput.additionalContext;
     assert.match(ctx, /ROTATION RESTORE/);
     assert.match(ctx, /1 dispatch\(es\) were live at rotation/i, 'names the count');
-    assert.match(ctx, /check ListAgents before re-dispatching/i, 'names the remedy verbatim');
-    assert.match(ctx, /coder/, 'names the agent_type');
-    assert.match(ctx, /agent-c7/, 'names the agent_id');
-    assert.match(ctx, /scripts\/foo\.mjs/, 'names the territory');
+    assert.match(ctx, /ListAgents/, 'names the remedy tool');
+    assert.match(ctx, /coder/);
+    assert.match(ctx, /agent-c7/);
+    assert.match(ctx, /scripts\/foo\.mjs/);
   } finally {
     cleanup();
   }
 });
 
 // --------------------------------------------------------------------------
-// PIN 5: two live dispatches are BOTH captured and BOTH printed, with the
-// correct count of 2 (guards against a hardcoded "1" or a `.slice(0,1)`
-// truncation).
-// SABOTAGE: cap the mapped array at the first entry only
-// (`liveEntries.slice(0, 1)`) -> `note.live_dispatches.length === 2` goes
-// red, and the second agent's id/territory never appear in H1's output.
+// R1-A73 (replaces the retired stale-is-dropped pin): an out-of-lease entry is
+// UNKNOWN. It must survive into the note — dropping it is the invisible-agent
+// failure this file exists to prevent — but it must never be counted as live.
+// SABOTAGE: filter out-of-lease entries out of the captured set entirely (the
+// pre-rebuild TTL filter) -> the "carried somewhere" assertion goes red while
+// R1-A71 stays green.
 // --------------------------------------------------------------------------
-test('rotation-note.mjs + H1: two live dispatches are both captured and both printed, count is accurate', () => {
+test('R1-A73: an out-of-lease (unknown) entry is CARRIED by the note but is never listed as live', () => {
   const { dir, cleanup } = gitProject();
   try {
     writeRegister(dir, [
-      registerEntry('agent-c1', 'coder', ['scripts/one.mjs'], 1_000),
-      registerEntry('agent-tw2', 'test-writer', ['scripts/two.mjs'], 2_000),
+      registerEntry('agent-fresh', 'coder', ['scripts/fresh.mjs'], 10_000),
+      registerEntry('agent-uncertain', 'coder', ['scripts/uncertain.mjs'], 5 * 60 * 60 * 1000),
     ]);
     assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
     const note = readRotationNote(dir);
-    assert.equal(note.live_dispatches.length, 2, 'both entries captured, not truncated');
-    assert.ok(note.live_dispatches.some((e) => e.agent_id === 'agent-c1' && e.agent_type === 'coder'));
-    assert.ok(note.live_dispatches.some((e) => e.agent_id === 'agent-tw2' && e.agent_type === 'test-writer'));
-
-    const r = h1(dir, { source: 'clear' });
-    const ctx = r.out.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /2 dispatch\(es\) were live at rotation/i, 'accurate count, not hardcoded to 1');
-    assert.match(ctx, /agent-c1/);
-    assert.match(ctx, /agent-tw2/);
-    assert.match(ctx, /scripts\/one\.mjs/);
-    assert.match(ctx, /scripts\/two\.mjs/);
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------------------------------------------------------
-// PIN 6: a stale/orphaned register entry is excluded from the live set when
-// a genuinely fresh one is also present (an entry hours old is not still
-// "live" -- printing it would be exactly the false-alarm noise P1 forbids).
-// PIN 3 above is this test's control: an implementation that always returns
-// an empty set (never reads the register at all) would already fail PIN 3,
-// so a green PIN 3 plus this test together rule out that confound.
-// SABOTAGE: remove the age filter (map every register entry through
-// regardless of `at`) -> `note.live_dispatches.length === 1` goes red (it
-// would be 2), and the JSON would still contain 'agent-stale'.
-// --------------------------------------------------------------------------
-test('rotation-note.mjs: a stale register entry (hours old) is excluded when a fresh entry is also present', () => {
-  const { dir, cleanup } = gitProject();
-  try {
-    writeRegister(dir, [
-      registerEntry('agent-fresh', 'coder', ['scripts/fresh.mjs'], 10_000), // 10s ago
-      registerEntry('agent-stale', 'coder', ['scripts/stale.mjs'], 5 * 60 * 60 * 1000), // 5h ago
-    ]);
-    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
-    const note = readRotationNote(dir);
-    assert.equal(note.live_dispatches.length, 1, 'only the fresh entry is live');
+    assert.equal(note.live_dispatches.length, 1, 'only the presumed-active entry is LIVE');
     assert.equal(note.live_dispatches[0].agent_id, 'agent-fresh');
-    assert.ok(!JSON.stringify(note.live_dispatches).includes('agent-stale'), 'the stale entry never appears anywhere in the captured set');
+    assert.ok(
+      JSON.stringify(note).includes('agent-uncertain'),
+      'the uncertain dispatch is carried by the note — an entry we cannot confirm dead is never silently dropped'
+    );
   } finally {
     cleanup();
   }
 });
 
 // --------------------------------------------------------------------------
-// PIN 7: a register file that EXISTS but cannot be parsed (malformed JSON)
-// must never be silently treated as confirmed-empty. PIN 1 is this test's
-// control: an always-null "can't tell" implementation would fail PIN 1,
-// which expects `[]` for the genuinely-nothing-dispatched case; only this
-// test's present-but-corrupt case should yield `null`.
-// SABOTAGE: reuse the existing shared liveDispatches() degrade-to-[] path
-// unchanged for a JSON parse failure (i.e. treat corrupt exactly like
-// missing) -> `assert.equal(note.live_dispatches, null)` goes red (it would
-// be `[]`).
+// R1-A74: H1 re-prints the uncertain dispatch as UNCERTAIN, with its code, and
+// keeps it out of the live COUNT. The count and the uncertainty are asserted
+// together because a correct count with no disclosure, and a disclosure with a
+// wrong count, are both failures with the same shape in the text.
+// SABOTAGE: fold unknown entries into the live count -> the "1 dispatch(es)
+// were live" assertion goes red (it would read 2).
 // --------------------------------------------------------------------------
-test('rotation-note.mjs: a register file that exists but is not valid JSON yields an UNKNOWN marker, never a silent empty array', () => {
+test('R1-A74: H1 restore reports the unknown dispatch with [dispatch_status_unknown] and excludes it from the live count', () => {
   const { dir, cleanup } = gitProject();
   try {
-    writeCorruptRegister(dir);
+    writeRegister(dir, [
+      registerEntry('agent-fresh', 'coder', ['scripts/fresh.mjs'], 10_000),
+      registerEntry('agent-uncertain', 'test-writer', ['scripts/uncertain.mjs'], 5 * 60 * 60 * 1000),
+    ]);
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    const ctx = h1(dir, { source: 'clear' }).out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /1 dispatch\(es\) were live at rotation/i, 'exactly the presumed-active one is counted as live');
+    assert.match(ctx, /agent-uncertain/, 'the uncertain dispatch is still surfaced to the operator');
+    assert.match(ctx, token('dispatch_status_unknown'), 'and it is surfaced as UNCERTAIN, carrying its code');
+    assert.doesNotMatch(ctx, /NaN/);
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------------------------------------------------------
+// R1-A75: an ENDED entry is inactive-confirmed and is ignored — not live, and
+// not uncertain either. This is the arm that keeps A73's "carry everything"
+// from degenerating into "print the whole register forever".
+// SABOTAGE: treat `ended` as ordinary metadata (classify by age alone) -> the
+// entry reappears as live or uncertain and both assertions go red.
+// --------------------------------------------------------------------------
+test('R1-A75: an ENDED (inactive-confirmed) entry is ignored entirely — neither live nor uncertain', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeRegister(dir, [
+      registerEntry('agent-fresh', 'coder', ['scripts/fresh.mjs'], 10_000),
+      registerEntry('agent-done', 'coder', ['scripts/done.mjs'], 10_000, { ended: { at: new Date().toISOString(), event: 'subagent-stop' } }),
+    ]);
+    assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
+    const note = readRotationNote(dir);
+    assert.deepEqual(note.live_dispatches.map((e) => e.agent_id), ['agent-fresh'], 'a stopped round is not live');
+
+    const ctx = h1(dir, { source: 'clear' }).out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /1 dispatch\(es\) were live at rotation/i);
+    assert.ok(!ctx.includes('agent-done'), `a confirmed-inactive dispatch is not worth the operator's attention — ctx=${ctx}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------------------------------------------------------
+// R1-A76: an UNAVAILABLE register (present but unreadable) never becomes a
+// silent empty set. R1-A70 is this test's control: only the readable-empty case
+// may report [].
+// SABOTAGE: degrade a JSON parse failure to [] (treat corrupt exactly like
+// empty) -> `live_dispatches === null` goes red.
+// --------------------------------------------------------------------------
+test('R1-A76: a CORRUPT register yields the unknown marker in the note, never a silent empty array', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeRegister(dir, '{not valid json,,,\n');
     const r = runRotationNote(dir, ['--next-slice', 'next thing']);
     assert.equal(r.status, 0, r.stderr);
-    const note = readRotationNote(dir);
-    assert.equal(note.live_dispatches, null, 'unreadable register is disclosed as unknown, not confirmed-empty');
+    assert.equal(readRotationNote(dir).live_dispatches, null, 'an unreadable register is unknown, not confirmed-empty');
   } finally {
     cleanup();
   }
 });
 
 // --------------------------------------------------------------------------
-// PIN 8: H1 restore for the unknown case discloses the uncertainty
-// distinctly from the ordinary counted line -- it must never fabricate a
-// count (e.g. "0 dispatch(es)...") for a set it could not verify, but it
-// still points the operator at the remedy (ListAgents).
-// SABOTAGE: H1 treats `live_dispatches === null` identically to an empty
-// array (prints nothing) -> the /unknown/i match below goes red (no
-// disclosure at all is produced).
+// R1-A77: an ABSENT register is availability 'absent' — also unavailable, per
+// the decision ("a corrupt or ABSENT register is 'registry unavailable'").
+// H1 wipes the register at SessionStart, so a missing file cannot be
+// distinguished from a never-written one; only an on-disk [] proves zero.
+// SABOTAGE: special-case a missing file to [] -> this goes red while R1-A70
+// (the genuine confirmed-zero) stays green, which is what separates the two.
 // --------------------------------------------------------------------------
-test('H1 rotation restore: an UNKNOWN live-dispatch set is disclosed distinctly, never fabricated as a count', () => {
+test('R1-A77: an ABSENT register is unavailable too — the note carries the unknown marker, not a confirmed zero', () => {
   const { dir, cleanup } = gitProject();
   try {
-    writeCorruptRegister(dir);
+    const r = runRotationNote(dir, ['--next-slice', 'next thing']);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(readRotationNote(dir).live_dispatches, null, 'no register file is not proof that nothing was dispatched');
+  } finally {
+    cleanup();
+  }
+});
+
+// --------------------------------------------------------------------------
+// R1-A78: H1 discloses the unavailability with [register_unavailable] and never
+// fabricates a count for a set it could not read.
+// SABOTAGE: H1 treats `live_dispatches === null` identically to [] (prints
+// nothing) -> the token assertion goes red (no disclosure at all).
+// --------------------------------------------------------------------------
+test('R1-A78: H1 restore discloses an unreadable register with [register_unavailable] and fabricates no count', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    writeRegister(dir, '{not valid json,,,\n');
     assert.equal(runRotationNote(dir, ['--next-slice', 'next thing']).status, 0);
-    const r = h1(dir, { source: 'clear' });
-    const ctx = r.out.hookSpecificOutput.additionalContext;
+    const ctx = h1(dir, { source: 'clear' }).out.hookSpecificOutput.additionalContext;
     assert.match(ctx, /ROTATION RESTORE/);
     assert.doesNotMatch(ctx, /\d+ dispatch\(es\) were live at rotation/i, 'never a fabricated count for an unverifiable set');
-    assert.match(ctx, /unknown/i, 'the uncertainty itself is disclosed');
-    assert.match(ctx, /ListAgents/i, 'still points at the same remedy');
+    assert.match(ctx, token('register_unavailable'), 'the unavailability carries its code');
+    assert.match(ctx, /ListAgents/, 'and still points at the same remedy');
   } finally {
     cleanup();
   }

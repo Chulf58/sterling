@@ -5430,37 +5430,193 @@ function parseReviewTerritory(text) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { readFileSync as readFileSync3, existsSync as existsSync3 } from "node:fs";
-import { join as join3 } from "node:path";
-function liveDispatchesOrUnknown(root) {
-  const path = join3(root, ".sterling", "transient", "dispatch-register.json");
-  if (!existsSync3(path)) return { status: "ok", entries: [] };
-  let entries;
-  try {
-    entries = JSON.parse(readFileSync3(path, "utf8"));
-  } catch {
-    return { status: "unknown", entries: [] };
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync3, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync } from "node:fs";
+import { join as join3, basename, dirname as dirname2 } from "node:path";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
   }
-  if (!Array.isArray(entries)) return { status: "unknown", entries: [] };
-  return { status: "ok", entries: filterLive(root, entries) };
 }
-function liveDispatches(root) {
-  return liveDispatchesOrUnknown(root).entries;
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
 }
-function filterLive(root, entries) {
-  let staleMinutes = 60;
-  try {
-    const cfg = JSON.parse(readFileSync3(join3(root, ".sterling", "config.json"), "utf8"));
-    if (Number.isInteger(cfg?.dispatch_register?.stale_minutes) && cfg.dispatch_register.stale_minutes > 0) {
-      staleMinutes = cfg.dispatch_register.stale_minutes;
-    }
-  } catch {
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.json");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
   }
-  const now = Date.now();
-  return entries.filter((e) => {
-    const age = now - Date.parse(e?.at ?? "");
-    return Number.isFinite(age) && age >= 0 && age < staleMinutes * 6e4;
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync3(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
   });
+  return { availability: "ok", entries: rows };
+}
+function formatAge(ageMs) {
+  if (ageMs === null || ageMs === void 0 || Number.isNaN(ageMs)) return "age unreadable";
+  const mins = Math.floor(ageMs / 6e4);
+  if (mins < 1) return "<1m";
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h${m}m`;
+}
+function formatDispatchRef(row) {
+  const { entry, status, ageMs } = row;
+  return `${entry.agent_type}:${entry.agent_id} (registered ${formatAge(ageMs)}; ${status})`;
 }
 
 // scripts/hooks/lib/dispatch-advisory.mjs
@@ -5638,20 +5794,34 @@ try {
 }
 function emit(additionalContext) {
   recordAdvisoryFire(input.cwd, "h26", input.session_id);
-  process.stdout.write(
+  exitAfterWrite(
     JSON.stringify({
       hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext }
-    })
+    }),
+    0
   );
 }
 try {
   let finish = function(fileAdvisory) {
     const parts = [fileAdvisory, resourceAdvisory].filter(Boolean);
-    if (parts.length) emit(parts.join("\n\n"));
+    if (parts.length) {
+      emit(parts.join("\n\n"));
+      return;
+    }
     allow();
   };
   const prompt = input.tool_input?.prompt;
-  const live = liveDispatches(input.cwd).filter((e) => e && e.session_id === input.session_id);
+  const staleMinutes = (() => {
+    try {
+      const v = loadConfig(input.cwd)?.dispatch_register?.stale_minutes;
+      return typeof v === "number" && v > 0 ? v : 60;
+    } catch {
+      return 60;
+    }
+  })();
+  const classified = classifyRegister(input.cwd, { now: Date.now(), sessionId: input.session_id, staleMinutes });
+  const rows = classified.availability === "ok" ? classified.entries.filter((row) => row.status !== "inactive-confirmed") : [];
+  const live = rows.map((row) => row.entry);
   const cfg = loadConfig(input.cwd);
   const configuredNames = Array.isArray(cfg?.exclusive_resources) ? cfg.exclusive_resources.filter((n) => typeof n === "string" && n.trim()) : [];
   let resourceAdvisory = "";
@@ -5688,10 +5858,22 @@ try {
   }
   if (!files.length) finish();
   const candidateSet = new Set(files);
-  if (!live.length) finish();
+  if (classified.availability === "corrupt") {
+    finish(
+      render(
+        disclosure(
+          "register_unavailable",
+          { availability: classified.availability },
+          `dispatch register unavailable (${classified.availability}) \u2014 no overlap can be judged`
+        )
+      )
+    );
+  }
+  if (!rows.length) finish();
   const overlaps = [];
   const overlapPaths = /* @__PURE__ */ new Set();
-  for (const e of live) {
+  for (const row of rows) {
+    const e = row.entry;
     if (!e || !Array.isArray(e.files) || !e.agent_id) continue;
     if (isReadOnlyDispatchType(e.agent_type)) continue;
     if (e.attribution !== "block") continue;
@@ -5702,16 +5884,35 @@ try {
     const matchedPrefix = entryPrefixes.length ? files.filter((f) => entryPrefixes.some((p) => f === p || f.startsWith(`${p}/`))) : [];
     const matched = [.../* @__PURE__ */ new Set([...matchedExact, ...matchedPrefix])];
     if (matched.length) {
-      overlaps.push({ agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
+      overlaps.push({ row, agentType: e.agent_type ?? "agent", agentId: e.agent_id, files: matched });
       matched.forEach((f) => overlapPaths.add(f));
     }
   }
   if (!overlaps.length) finish();
   const pathList = [...overlapPaths].map((p) => `'${p}'`).join(", ");
-  const entryList = overlaps.map((o) => `${o.agentType}:${o.agentId} (${o.files.join(", ")})`).join("; ");
-  finish(
-    `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap a LIVE in-flight dispatch's declared territory: ${pathList}. Overlapping live dispatch(es): ${entryList}. This is warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) \u2014 the prompt extraction only approximates write territory, and this hook compares only dispatches already present in the live register when this PreToolUse fires. It may repeat on further dispatches while the holding dispatch stays live, for the same reason. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
-  );
+  const entryList = overlaps.map((o) => `${formatDispatchRef({ ...o.row, entry: { ...o.row.entry, agent_type: o.agentType } })} (${o.files.join(", ")})`).join("; ");
+  const hasUnknown = overlaps.some((o) => o.row.status === "unknown");
+  const overlapLines = [
+    render(
+      disclosure(
+        "dispatch_overlap",
+        {},
+        `H26 DISPATCH OVERLAP ADVISORY \u2014 this dispatch's brief names file(s) that overlap dispatch(es) already present in the live register when this PreToolUse fires: ${pathList}. Dispatch(es): ${entryList}. This is warn-only, never a block (decision 6de73875-75b5-4182-8c1c-ca4841c993fa) \u2014 the prompt extraction only approximates write territory. It may repeat on further dispatches while the holding dispatch stays live, for the same reason. Remedy: keep lanes file-disjoint \u2014 await the in-flight agent, or re-scope this dispatch's territory so it does not overlap.`
+      )
+    )
+  ];
+  if (hasUnknown) {
+    overlapLines.push(
+      render(
+        disclosure(
+          "dispatch_status_unknown",
+          {},
+          `status unknown for one or more of the dispatch(es) above \u2014 RECORDED IN THE REGISTER, not observed running; a KILLED or interrupted dispatch leaves this entry, so the overlap above cannot be confirmed live.`
+        )
+      )
+    );
+  }
+  finish(overlapLines.join("\n"));
 } catch (e) {
   warnNonBlocking(`H26: dispatch-overlap advisory failed: ${e && e.message || e}`);
 }

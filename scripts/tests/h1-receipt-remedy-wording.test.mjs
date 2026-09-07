@@ -51,9 +51,30 @@
 // v2 reporting path would leave the v1 receipts — the ones actually stuck in
 // consumers today — still printing the denied remedy.
 //
-// MUTATION DISCIPLINE (decision 23afbc83): every pin carries a SABOTAGE comment
-// naming the one-line change that must turn it RED. None is executed here —
-// this file's author holds no Bash by design, and no mutation result is claimed.
+// MUTATION DISCIPLINE: every pin carries a SABOTAGE comment naming the one-line
+// change that must turn it RED. None is executed here — this file's author holds
+// no Bash by design, and no mutation result is claimed.
+//
+// R1 PIN RE-CUT. The CLI string `review-ledger.mjs discharge --entry-id … --digest
+// … --class` is a PINNED CONSUMER CONTRACT and its sentence assertions are KEPT
+// verbatim (RW-1/RW-2/RW-3/RW-4/RW-5 and the three controls, all unchanged) —
+// this is the one place the no-sentence-assertions rule does not apply, because
+// what is being pinned IS the text an operator copies. Two pins are ADDED for the
+// rebuilt reading surface, where H1 obtains its receipt list through
+// classifyLedgerEntry rather than by re-parsing the ledger itself:
+//   R1-C81 — a v1 entry is listed as LEGACY, with the handle it must be
+//            discharged by (an entry_id remedy is unusable for a v1 entry);
+//   R1-C82 — a RESERVED entry is disclosed with the `reconcile` remedy, not the
+//            discharge one (discharge REFUSES a reserved entry, so offering it
+//            sends the operator at a guaranteed refusal);
+//   RW-6   — an entry the shape owner REFUSES is disclosed as one
+//            [ledger_entry_malformed] line naming the entry_id and the offending
+//            field, and offering neither remedy.
+// The v2Receipt() fixture was also corrected to the shape owner's accepted shape
+// (identity.agent_id required; truncated_of omitted rather than null; basis
+// stated) — see the note at the fixture.
+// RETIRED: nothing in this file. Its subject — which remedy H1 prints — is
+// unchanged by the rebuild, and the differential extractor stays as it is.
 // ---------------------------------------------------------------------------
 
 import { test, before } from 'node:test';
@@ -64,6 +85,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, sep } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { legacyReceiptHandle } from '../hooks/lib/review-ledger-entry.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -167,7 +189,22 @@ const legacyReceipt = () => ({
   base_sha: 'd'.repeat(40),
 });
 
-// v2 envelope entry, per decision 57984926 (1).
+// v2 envelope entry — the shape the OWNER MODULE accepts, per contract sheet
+// §1.2 (ReceiptV2). Two corrections after the shape owner tightened:
+//   * identity.agent_id is REQUIRED (non-empty string) and was absent here, so
+//     this fixture parsed as MALFORMED and every arm below was reporting on an
+//     entry H1 could not read — a fixture defect that would have read as seven
+//     implementation failures;
+//   * content_evidence.truncated_of is OPTIONAL and typed `number` in §1.2, so a
+//     literal null is not the shape the parser is specified to accept; the field
+//     is OMITTED rather than nulled, and `basis` is stated explicitly (a missing
+//     basis is read as this same value by A3's compatibility path, which is not
+//     the path an ordinary fixture should exercise).
+// PROVENANCE OF THE SHAPE: contract sheet §1.2, not the parser source — this
+// file's author holds no read on scripts/hooks/lib/review-ledger-entry.mjs (H4).
+// If the parser and the sheet disagree about truncated_of or failure_reason, the
+// SHEET is wrong and this literal is the one line to change; RW-C1 goes red first
+// and names the fixture rather than the hook.
 const v2Receipt = () => ({
   schema_version: 2,
   entry_id: randomUUID(),
@@ -176,9 +213,9 @@ const v2Receipt = () => ({
   started_at: isoAgo(30 * 3_600_000),
   finished_at: isoAgo(29 * 3_600_000),
   reviewer: { agent_type: 'reviewer-correctness', model: null, model_family: 'unknown', model_source: 'unknown' },
-  identity: { session_id: FOREIGN_SESSION, branch: 'sterling/some-other-slice', base_sha: 'e'.repeat(40) },
+  identity: { session_id: FOREIGN_SESSION, branch: 'sterling/some-other-slice', base_sha: 'e'.repeat(40), agent_id: `a${'0'.repeat(16)}` },
   territory: { files: ['src/a.mjs'], source: 'review-territory', attribution: 'block' },
-  content_evidence: { status: 'unavailable', blobs: {}, absent_paths: [], truncated_of: null, failure_reason: 'fixture' },
+  content_evidence: { basis: 'stop-time-worktree-snapshot', status: 'unavailable', blobs: {}, absent_paths: [], failure_reason: 'fixture' },
   disposition: null,
 });
 
@@ -584,3 +621,119 @@ test('RW-5 (board fb7c43fb F-B, expect RED today): pointed at a DIFFERENT marker
 // `<clone>` placeholder if RW-4's fix never landed either) while every other RW
 // pin in this file stays green — RW-4 in particular, whose seam happens to equal
 // the real repo and so cannot tell the two implementations apart.
+
+// =============================================================================
+// R1-C81 / R1-C82 — THE REMEDY MUST FIT THE ENTRY IT IS PRINTED BESIDE.
+//
+// H1 obtains its receipt list through classifyLedgerEntry, so it knows which of
+// {receipt, external_review, legacy, malformed} each entry is and what lifecycle
+// state it is in. A remedy that does not fit the entry is worse than none: the
+// operator runs it, is refused, and learns that the sanctioned route does not
+// work — which is exactly how a workaround gets manufactured.
+// =============================================================================
+
+// SABOTAGE: print the --entry-id remedy for every reported entry -> the handle
+// assertion goes red. A v1 entry HAS no entry_id; the discharge verb refuses
+// --entry-id against one by design and redirects to the handle, so printing the
+// entry_id form here sends the operator at a guaranteed refusal. The handle is
+// DERIVED, never stored, so H1's report is one of the only two places it can be
+// read at all.
+// WHICH GUARD CARRIES THE VERDICT: the handle substring — the /legacy/i marker
+// alone would be satisfied by prose that names the shape without giving the
+// operator the value they must paste.
+test('R1-C81 (expect RED today): a v1 entry is reported as LEGACY and the block carries the exact receipt-<32hex> handle to discharge it by', () => {
+  const entry = legacyReceipt();
+  const { block } = receiptReport(() => entry);
+  assert.notEqual(block.trim(), '', 'precondition (RW-C1): the block must be non-empty for this pin to mean anything');
+  assert.match(block, /legacy/i, `the entry is NAMED as a legacy one — its lifecycle differs from a v2 receipt's in every respect that matters here. block=${flat(block)}`);
+  assert.ok(
+    block.includes(legacyReceiptHandle(entry)),
+    `and the block carries the HANDLE the operator must paste — a v1 entry has no entry_id, so the --entry-id remedy cannot address it and the handle exists nowhere else on disk. block=${flat(block)}`
+  );
+});
+
+// SABOTAGE: report a reserved entry with the discharge remedy -> the reconcile
+// assertion goes red. Discharge REFUSES a reserved entry ([entry_not_active]), so
+// the discharge remedy is not merely unhelpful there, it cannot work: the entry
+// is mid-spend and the only sanctioned move is `review-ledger.mjs reconcile`,
+// which either finalizes it against its commit or releases it.
+// SECOND SABOTAGE: stop reporting reserved entries at all -> the non-empty-block
+// precondition goes red, and a crashed spend becomes invisible at exactly the
+// session start where a human could act on it.
+// =============================================================================
+// RW-6 — AN ENTRY THE OWNER REFUSES IS STILL DISCLOSED.
+//
+// H1's receipt list comes from classifyLedgerEntry, which answers `malformed` for
+// an entry that parses as neither receipt, external_review nor legacy. The
+// tempting handling is to filter those out: they are unspendable, so there is
+// nothing to DO about them. That is exactly why they must be shown. An entry
+// nobody can parse is an entry nobody can discharge either, so silence leaves it
+// in the ledger forever, invisible, while H1 reports "no surviving receipts" —
+// and the ledger is agent-writable, so a single malformed key is then also the
+// cheapest way to hide a receipt from the one surface that reports them.
+// =============================================================================
+
+// SABOTAGE (the one this pin exists for): filter classifyLedgerEntry's
+// `malformed` verdict out of the reported list -> the block goes empty and the
+// non-vacuity assertion fires first, naming the drop.
+// SABOTAGE (the identification half): print a bare "1 malformed entry" count ->
+// the entry_id and facts.field assertions go red. A count is not actionable: the
+// operator has to know WHICH entry and WHICH field to open the file at.
+// SABOTAGE (the false-remedy half): reuse the ordinary receipt line so the
+// malformed entry gets the discharge (or reconcile) remedy -> the no-remedy
+// assertion goes red. Discharge addresses an entry through a parsed selector and
+// verifies a class against parsed facts; offered here it sends the operator at a
+// guaranteed refusal, which is the same defect RW-1 exists for in its other
+// spelling.
+// WHICH GUARD CARRIES THE VERDICT: the line-scoped assertions. Asserting against
+// the whole block would let a discharge remedy printed for a DIFFERENT entry
+// satisfy or break this pin by accident — so the line carrying the code is
+// isolated first, and every claim is made about that line.
+test('RW-6 (expect RED today): a v2 entry the shape owner REFUSES is DISCLOSED as one [ledger_entry_malformed] line naming the entry_id and the offending field — and that line offers NO discharge or reconcile remedy', () => {
+  const malformed = (() => {
+    const e = v2Receipt();
+    delete e.identity.agent_id; // required non-empty string — the entry no longer parses
+    return e;
+  })();
+  const { block } = receiptReport(() => malformed);
+
+  assert.notEqual(
+    block.trim(),
+    '',
+    'an unparseable entry is REPORTED — it is unspendable AND undischargeable, so dropping it silently leaves it in the ledger forever while H1 says nothing survives'
+  );
+
+  const lines = block.split(/\r?\n/).filter((l) => /\[ledger_entry_malformed\]/.test(l));
+  assert.equal(lines.length, 1, `exactly ONE line carries the code — got ${lines.length}: ${flat(block)}`);
+  const line = lines[0];
+
+  assert.ok(
+    line.includes(malformed.entry_id),
+    `the line names the entry_id, which is a string here even though the entry as a whole does not parse — without it the operator cannot find the entry in the file. line=${flat(line)}`
+  );
+  assert.match(
+    line,
+    /agent_id/,
+    `and names the offending field (facts.field), so the operator knows what is wrong rather than only that something is. line=${flat(line)}`
+  );
+  assert.doesNotMatch(
+    line,
+    /discharge|reconcile/i,
+    `and offers NEITHER remedy: both address an entry through parsed facts this entry does not have, so printing one sends the operator at a guaranteed refusal. The correct instruction is to inspect the entry. line=${flat(line)}`
+  );
+});
+
+test('R1-C82 (expect RED today): a RESERVED entry is disclosed with the `reconcile` remedy, never the discharge one', () => {
+  const reservedReceipt = () => ({
+    ...v2Receipt(),
+    status: 'reserved',
+    reservation: { nonce: 'op-4242', at: isoAgo(3_600_000), index_blobs: { 'src/a.mjs': 'a'.repeat(40) }, operation: 'commit-reviewed' },
+  });
+  const { block } = receiptReport(reservedReceipt);
+  assert.notEqual(block.trim(), '', 'precondition: a reserved entry is REPORTED — a crashed spend that says nothing at session start is the state nobody recovers from');
+  assert.match(
+    block,
+    /review-ledger\.mjs\s+reconcile/,
+    `the remedy for a reserved entry is the reconcile verb, printed so it can be copied — discharge refuses a reserved entry outright, so offering it here sends the operator at a guaranteed refusal. block=${flat(block)}`
+  );
+});

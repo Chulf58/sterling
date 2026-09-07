@@ -30,9 +30,10 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs';
-import { join } from 'node:path';
-import { readStdin, deny, allow, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
-import { acquireLock, registerLockDir } from './lib/dispatch-register-lock.mjs';
+import { join, basename } from 'node:path';
+import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
+import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
+import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
@@ -55,42 +56,43 @@ import { matchesGlob, parseConfig } from '@sterling/schemas';
  * an orphan) stays true.
  */
 async function computeDeadDispatchResidue(cwd, sessionId) {
-  const registerPath = join(cwd, '.sterling', 'transient', 'dispatch-register.json');
-  let raw = [];
-  try {
-    if (existsSync(registerPath)) {
-      const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
-      if (Array.isArray(parsed)) raw = parsed;
-    }
-  } catch {
-    raw = [];
-  }
-  if (!raw.length) return [];
+  const registerPath = ownerRegisterPath(cwd);
+  const nowIso = new Date().toISOString();
+  // ONE READER: parseRegisterEntry (scripts/lib/dispatch-register.mjs) now
+  // spreads every unvalidated field through unchanged (residue_reported_at
+  // included), so the print-once guard below reads it off the PARSED entry
+  // instead of a second raw JSON read — readRegister is the same authority
+  // the duty-deferral tri-state above already uses.
+  const { availability, entries: registerEntries } = readRegister(cwd);
+  if (availability !== 'ok' || !registerEntries.length) return [];
   let staleMinutes = 60; // schema default (decision ec9eacaa) when config cannot be read
   try {
     staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
   } catch {
     // fall back to the schema default rather than skipping the residue check
   }
-  const nowIso = new Date().toISOString();
   const nowMs = Date.parse(nowIso);
   const lines = [];
   const stampIds = new Set();
-  for (const entry of raw) {
+  for (const entry of registerEntries) {
     if (!entry || entry.session_id !== sessionId) continue;
+    // A1: Stop MARKS `ended` rather than deleting — an ended entry's Stop DID
+    // fire, so it is inactive-confirmed, never "stopped by timeout" residue,
+    // however stale its `at` reads.
+    if (entry.ended) continue;
     if (!isOrphan(entry, staleMinutes, nowMs)) continue;
     if (entry.residue_reported_at) continue; // print-once
     const probe = probeDirtyPaths(cwd, entry.files);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue; // clean — nothing to report
-    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    lines.push(render(disclosure('dispatch_residue', {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
     stampIds.add(entry.agent_id);
   }
   if (stampIds.size) {
     // FRESH-READ MERGE UNDER THE COOPERATING REGISTER LOCK (decision
     // register-writers-cooperating-lock, 1e0ba0d0) — H10 is a register writer
     // like H22's Start/Stop/prune and H1's session-boundary delete, so it
-    // takes the SAME mkdir-mutex lock (scripts/hooks/lib/dispatch-register-lock.mjs)
+    // takes the SAME mkdir-mutex lock (scripts/lib/dispatch-register.mjs withRegisterLock, R1)
     // rather than a second divergent cross-hook lock. TIMEOUT POSTURE: SKIP
     // THE STAMP, LOUD, never an unlocked write — an unlocked whole-array
     // rewrite here could erase a concurrent H22 SubagentStart/Stop's
@@ -102,26 +104,23 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
     // simply left unstamped, never resurrected by writing back a stale copy
     // of it — and a torn concurrent read degrading to [] here costs only
     // this stamp, never the live register (we write back the FRESH read, not
-    // our own stale `raw`).
-    const lockDir = registerLockDir(cwd);
+    // our own stale snapshot).
+    //
+    // ONE READER for this fresh re-read too (readRegister, not a second raw
+    // JSON.parse): parseRegisterEntry's full-spread parse means a VALID entry
+    // round-trips byte-identical through it, so this changes nothing for the
+    // ordinary case. DISCLOSED TRADE: an entry so malformed it fails to parse
+    // at all (missing agent_id/session_id/files/at — never produced by
+    // registerStart itself, only by external corruption) is dropped from this
+    // rewrite rather than preserved verbatim, the same bounded cost the
+    // comment above already accepts for a concurrently-removed entry.
     try {
       mkdirSync(join(cwd, '.sterling', 'transient'), { recursive: true });
-      const lock = await acquireLock(lockDir, { retryMs: 1000, staleMs: 10_000 });
-      if (!lock) {
-        process.stderr.write(
-          'H10: register lock timed out — SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop\n'
-        );
-      } else {
-        try {
-          let fresh = [];
-          try {
-            if (existsSync(registerPath)) {
-              const parsed = JSON.parse(readFileSync(registerPath, 'utf8'));
-              if (Array.isArray(parsed)) fresh = parsed;
-            }
-          } catch {
-            fresh = []; // a torn/corrupt read degrades to empty — nothing to stamp, never a re-add
-          }
+      await withRegisterLock(
+        cwd,
+        () => {
+          const freshRead = readRegister(cwd);
+          const fresh = freshRead.availability === 'ok' ? freshRead.entries : [];
           for (const entry of fresh) {
             if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
               entry.residue_reported_at = nowIso;
@@ -129,15 +128,19 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
           }
           const transient = join(cwd, '.sterling', 'transient');
           mkdirSync(transient, { recursive: true });
-          const tmpPath = join(transient, `dispatch-register.json.tmp-${process.pid}`);
+          const tmpPath = join(transient, `${basename(registerPath)}.tmp-${process.pid}`);
           writeFileSync(tmpPath, JSON.stringify(fresh));
           renameSync(tmpPath, registerPath);
-        } finally {
-          lock.release();
-        }
+        },
+        { retryMs: 1000, timeoutMs: 10_000 }
+      );
+    } catch (e) {
+      if (e?.code === 'register_lock_held') {
+        process.stderr.write(
+          `${render(e)} — SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop\n`
+        );
       }
-    } catch {
-      // best-effort — a failed stamp costs only print-once across Stops, never this report
+      // any other failure is best-effort — a failed stamp costs only print-once across Stops, never this report
     }
   }
   return lines;
@@ -160,6 +163,24 @@ if (!store) {
 const touchesPath = join(input.cwd, '.sterling', 'transient', 'touches.json');
 const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');
 const nagMarker = join(input.cwd, '.sterling', 'transient', 'capture-nagged.json');
+
+// R0 CONTROL-FLOW SENTINEL: this script's body is bare top-level code (no
+// wrapping main()), so a real `return` is illegal at every one of
+// releaseWithPressure()'s seven call sites below. allow()/deny() still exit
+// synchronously (process.exit() never returns to the caller), so they need
+// nothing extra; but the non-empty-payload branch of exitAfterWrite settles
+// its process.exit() ASYNCHRONOUSLY, in the write's own callback — so a bare
+// `return` there only exits releaseWithPressure() itself, and the top-level
+// `if` block that called it falls through to whatever duty logic follows,
+// which can reach a LATER deny()/write while the first one is still in
+// flight (measured: truncates the correct payload, wrong exit code). Throwing
+// a TAGGED error from inside the guarded region instead unwinds all the way
+// to the founding catch below, which recognizes the tag and does nothing
+// further — the in-flight write's own callback owns the exit, exactly as R0
+// requires. No module-scope sentinel (check-failclosed-boundary review): a
+// plain top-level statement outside the guarded try is itself a fail-closed
+// finding, so the tag lives on the thrown Error, created only at the throw
+// site inside the try.
 
 try {
   if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers
@@ -486,7 +507,20 @@ try {
       // Disclosures never CAUSE a block — they only ride one that is already due.
       if (parts.length) deny([...disclosureParts, ...parts].join('\n\n'));
     }
-    if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join('\n\n') }));
+    // R0: the payload and the exit are ONE state machine — a bare
+    // process.stdout.write() followed by a separate allow() can exit before
+    // the pipe drains (decision hook-stdout-exit-after-write-callback-bound-
+    // exit-deny-stays-synchronous).
+    if (disclosureParts.length) {
+      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join('\n\n') }), 0);
+      // This write's exit is async, so a bare `return` here would let the
+      // top-level caller fall through into later duty code. Throw a TAGGED
+      // error to unwind past every enclosing top-level `if` to the founding
+      // catch, which recognizes the tag and treats it as a normal, already-
+      // handled completion — no module-scope sentinel (see the note above the
+      // guarded try).
+      throw Object.assign(new Error('h10-release-in-flight'), { h10ReleaseInFlight: true });
+    }
     allow();
   };
 
@@ -627,36 +661,28 @@ try {
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter((p) =>
     existsSync(join(input.cwd, p))
   );
-  let dispatchEntries = [];
-  try {
-    const registerPath = join(input.cwd, '.sterling', 'transient', 'dispatch-register.json');
-    if (existsSync(registerPath)) {
-      const raw = JSON.parse(readFileSync(registerPath, 'utf8'));
-      if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
-    }
-  } catch {
-    dispatchEntries = [];
-  }
   // ONE source of truth for the threshold: the zod default (60) lives in
   // config.dispatch_register, so a missing field is a real defect that fails
   // loud into the catch below rather than silently reverting policy to a second
   // literal maintained here.
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
-  // An unparseable `at` counts as STALE, never live: deferral suppresses a duty,
-  // so it is only ever granted on a fact we can actually read.
-  const ageMs = (e) => {
-    const t = Date.parse(e.at ?? '');
-    return Number.isNaN(t) ? Infinity : nowMs - t;
-  };
-  // A NEGATIVE age (clock skew, or an `at` stamped in the future) is stale, not
-  // live — otherwise the TTL never expires for that entry and it defers forever.
-  const isLive = (e) => {
-    const a = ageMs(e);
-    return a >= 0 && a < staleMinutes * 60_000;
-  };
-  const liveDispatches = dispatchEntries.filter(isLive);
-  const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+
+  // TRI-STATE CONSUMER POLICY (contract sheet §1.1; R1 rebuild). classifyRegister
+  // is the ONE owner classifier: presumed-active | unknown | inactive-confirmed.
+  // presumed-active EXCLUDES its declared files from this duty; unknown NEVER
+  // excludes (an expired lease is not a licence to defer) and is disclosed
+  // per-entry with [dispatch_status_unknown]; inactive-confirmed is IGNORED
+  // entirely (the round is over, nothing to settle, P1: no ceremony). A
+  // corrupt register excludes nothing and is disclosed once with
+  // [register_unavailable]; an ABSENT register stays silent — H10 never
+  // enumerates a register that plainly does not exist.
+  const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
+  // Flat presumed-active entry list — consumed further down by the
+  // capture_pending "does the declared target name a live dispatch"
+  // heuristic (namesLiveTarget/pendingTargetLive), a SEPARATE question from
+  // the file-deferral join above (who owns THIS touched path).
+  const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern b3972717) while
@@ -666,13 +692,19 @@ try {
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? '').replace(WORKTREE_PREFIX_RE, '');
   const deferredOwners = new Map(); // repo-relative path -> Set(owning agent_id)
-  for (const e of liveDispatches) {
-    for (const f of Array.isArray(e.files) ? e.files : []) {
-      // Keyed through joinKey on BOTH sides: dispatch prose can itself name a
-      // worktree-prefixed path, which H22 stores verbatim (review LOW, 2026-08-21).
-      const k = joinKey(f);
-      if (!deferredOwners.has(k)) deferredOwners.set(k, new Set());
-      deferredOwners.get(k).add(e.agent_id);
+  const unknownRows = [];
+  if (classified.availability === 'ok') {
+    for (const row of classified.entries) {
+      if (row.status === 'presumed-active') {
+        for (const f of Array.isArray(row.entry.files) ? row.entry.files : []) {
+          const k = joinKey(f);
+          if (!deferredOwners.has(k)) deferredOwners.set(k, new Set());
+          deferredOwners.get(k).add(row.entry.agent_id);
+        }
+      } else if (row.status === 'unknown') {
+        unknownRows.push(row);
+      }
+      // inactive-confirmed: ignored entirely — no exclusion, no disclosure.
     }
   }
   const isDeferred = (p) => deferredOwners.has(joinKey(p));
@@ -719,15 +751,36 @@ try {
         `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
     );
   }
-  // Only a stale entry that WOULD HAVE DEFERRED something is worth saying: one
-  // owning a file nobody touched changes no outcome, and disclosing it would
-  // repeat byte-identically on every Stop for the rest of the session — the
-  // board cac61a95 noise shape (P1).
+  // UNKNOWN — disclosed WITHOUT excluding. Only named when it actually bites
+  // something this Stop touched: an unknown owner of an untouched file changes
+  // no outcome and would repeat byte-identically every Stop (board cac61a95
+  // noise shape, P1).
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
-  if (staleBiting.length) {
+  const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  for (const row of bitingUnknown) {
     disclosureParts.push(
-      `• stale dispatch: ${staleBiting.length} entry/entries [${staleBiting.map((e) => e.agent_id).join(', ')}] stale (>${staleMinutes}m) → defers nothing; H1 sweeps at next session start`
+      render(
+        disclosure(
+          'dispatch_status_unknown',
+          { agent_id: row.entry.agent_id, reason: row.reason },
+          `ownership uncertain (dispatch ${formatDispatchRef(row)}) — settle with TaskStop or an explicit abandonment`
+        )
+      )
+    );
+  }
+  // A11: 'absent' is anomalous only after H1 has run (which now writes `[]`
+  // instead of deleting) and today's un-rebuilt fixtures still exercise a
+  // genuinely-missing file — silence is the byte-identical posture; only
+  // 'corrupt' is worth a line (an all-clear would be a false claim).
+  if (classified.availability === 'corrupt') {
+    disclosureParts.push(
+      render(
+        disclosure(
+          'register_unavailable',
+          { availability: classified.availability },
+          `dispatch register unavailable (${classified.availability}) — nothing excluded, no holder can be judged`
+        )
+      )
     );
   }
 
@@ -2060,6 +2113,12 @@ try {
   clearRegisters();
   releaseWithPressure();
 } catch (e) {
+  if (e?.h10ReleaseInFlight === true) {
+    // Normal completion: releaseWithPressure() already handed a non-empty
+    // payload to exitAfterWrite and threw to unwind past the duty code that
+    // would otherwise run behind it. That write's own callback owns the
+    // process exit (R0) — there is nothing left to do here.
+  } else {
   // A throw here (config parse, store read) would otherwise skip every session-end
   // duty silently on a non-blocking exit-1. Degrade LOUD instead (AC4): record a
   // check_skipped trail best-effort, then warn. deny()/allow() exit the process,
@@ -2070,5 +2129,6 @@ try {
     // store itself is the casualty — the warn below is the remaining loud signal
   }
   warnNonBlocking(`H10: session-end duties skipped — ${(e && e.message) || e} (check_skipped h10-stop-duties; fix & re-run)`);
+  }
 }
 // no close: every path above exits the process, which releases the handle (board f81b1987)

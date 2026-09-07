@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID4 } from "node:crypto";
+import { randomUUID as randomUUID3 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync as rmSync3, existsSync as existsSync4, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
-import { join as join5 } from "node:path";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
+import { join as join5, basename as basename3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -7778,82 +7778,320 @@ function openStore(cwd) {
   return existsSync2(p) ? new SterlingStore(p) : null;
 }
 
-// scripts/hooks/lib/dispatch-register-lock.mjs
-import { mkdirSync as mkdirSync2, rmSync, renameSync, statSync as statSync2, writeFileSync, readFileSync as readFileSync2 } from "node:fs";
-import { join as join3 } from "node:path";
-import { randomUUID as randomUUID2 } from "node:crypto";
-var DEFAULT_RETRY_MS = 1e3;
-var DEFAULT_STALE_MS = 1e4;
-var POLL_MS = 20;
-var OWNER_FILE = "owner";
-function registerLockDir(projectRoot2) {
-  return join3(projectRoot2, ".sterling", "transient", "dispatch-register.lock");
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2 } from "node:fs";
+import { hostname } from "node:os";
+import { join as join3, basename as basename2, dirname as dirname3 } from "node:path";
+import { randomBytes } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
 }
-function sleep(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+function refusal(code, facts = {}, message = code) {
+  assertCode(code);
+  const err = new Error(message);
+  err.kind = "refusal";
+  err.code = code;
+  err.facts = facts;
+  return err;
 }
-function readOwnerNonce(lockDir) {
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.json");
+}
+function registerLockDir(root) {
+  return join3(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  let raw;
   try {
-    return readFileSync2(join3(lockDir, OWNER_FILE), "utf8");
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var LOCK_CODE_BY_BASENAME = {
+  "dispatch-register.lock": "register_lock_held",
+  "review-ledger.lock": "ledger_lock_held"
+};
+function lockCodeFor(lockDir) {
+  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readOwner(lockDir) {
+  try {
+    return JSON.parse(readFileSync2(join3(lockDir, "owner.json"), "utf8"));
   } catch {
     return null;
   }
 }
-function tombAndRemove(lockDir) {
-  const tomb = `${lockDir}.tomb-${process.pid}-${randomUUID2()}`;
-  renameSync(lockDir, tomb);
+function looksDeadOwner(o) {
+  return !!o && o.host === hostname() && !isPidAlive(o.pid);
+}
+function statIno(p) {
   try {
-    rmSync(tomb, { recursive: true, force: true });
+    return statSync2(p).ino;
   } catch {
+    return null;
   }
 }
-function makeLock(lockDir, nonce) {
-  return {
-    nonce,
-    release() {
-      try {
-        if (readOwnerNonce(lockDir) !== nonce) return;
-        tombAndRemove(lockDir);
-      } catch {
-      }
-    }
-  };
+function sleepAsync(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
 }
-async function acquireLock(lockDir, opts = {}) {
-  const retryMs = Number.isFinite(opts.retryMs) ? opts.retryMs : DEFAULT_RETRY_MS;
-  const staleMs = Number.isFinite(opts.staleMs) ? opts.staleMs : DEFAULT_STALE_MS;
-  const nonce = randomUUID2();
-  const deadline = Date.now() + retryMs;
-  const ownerPath = join3(lockDir, OWNER_FILE);
+async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 1e3;
+  const start = Date.now();
   for (; ; ) {
-    mkdirSync2(lockDir, { recursive: true });
     try {
-      writeFileSync(ownerPath, nonce, { flag: "wx" });
-      return makeLock(lockDir, nonce);
+      mkdirSync2(dirname3(lockDir), { recursive: true });
+      mkdirSync2(lockDir);
+      break;
     } catch (e) {
-      if (e.code === "ENOENT") continue;
-      if (e.code !== "EEXIST") throw e;
-    }
-    let ageMs = null;
-    try {
-      ageMs = Date.now() - statSync2(ownerPath).mtimeMs;
-    } catch {
-      continue;
-    }
-    if (ageMs >= staleMs) {
-      try {
-        tombAndRemove(lockDir);
-      } catch {
+      if (e?.code !== "EEXIST") throw e;
+      const owner = readOwner(lockDir);
+      if (looksDeadOwner(owner)) {
+        const examinedIno = statIno(lockDir);
+        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
+        let renamed = false;
+        try {
+          renameSync(lockDir, tombstone);
+          renamed = true;
+        } catch {
+        }
+        if (renamed) {
+          const tombstoneOwner = readOwner(tombstone);
+          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
+          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+            try {
+              rmSync(tombstone, { recursive: true, force: true });
+            } catch {
+            }
+          } else {
+            try {
+              renameSync(tombstone, lockDir);
+            } catch (restoreErr) {
+              if (restoreErr?.code === "EEXIST") {
+                process.stderr.write(
+                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
+`
+                );
+                throw refusal(
+                  lockCodeFor(lockDir),
+                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
+                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
+                );
+              }
+            }
+          }
+        }
       }
-      continue;
+      if (Date.now() - start >= timeoutMs) {
+        throw refusal(
+          lockCodeFor(lockDir),
+          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
+          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+        );
+      }
+      await sleepAsync(retryMs);
     }
-    if (Date.now() >= deadline) return null;
-    await sleep(POLL_MS);
   }
+  writeFileSync(
+    join3(lockDir, "owner.json"),
+    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
+  );
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
+    } catch {
+    }
+  }
+}
+function withRegisterLock(root, fn, opts = {}) {
+  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
+}
+function statusReason(entry, ctx) {
+  if (!entry) return "clock-unreadable";
+  const t = Date.parse(entry.at);
+  if (Number.isNaN(t)) return "clock-unreadable";
+  if (ctx.sessionId !== null && entry.session_id !== ctx.sessionId) return "other-session";
+  const age = ctx.now - t;
+  const lease = ctx.staleMinutes * 6e4;
+  if (age >= 0 && age < lease) return null;
+  return "lease-expired";
+}
+function dispatchStatus(entry, ctx) {
+  if (entry?.ended) return "inactive-confirmed";
+  return statusReason(entry, ctx) === null ? "presumed-active" : "unknown";
+}
+function classifyRegister(root, ctx) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return { availability, entries: [] };
+  const rows = entries.map((entry) => {
+    const status = dispatchStatus(entry, ctx);
+    const reason = statusReason(entry, ctx);
+    const t = Date.parse(entry.at);
+    const ageMs = Number.isNaN(t) ? null : ctx.now - t;
+    return { entry, status, reason, ageMs };
+  });
+  return { availability: "ok", entries: rows };
+}
+function formatAge(ageMs) {
+  if (ageMs === null || ageMs === void 0 || Number.isNaN(ageMs)) return "age unreadable";
+  const mins = Math.floor(ageMs / 6e4);
+  if (mins < 1) return "<1m";
+  if (mins < 60) return `${mins}m`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return `${h}h${m}m`;
+}
+function formatDispatchRef(row) {
+  const { entry, status, ageMs } = row;
+  return `${entry.agent_type}:${entry.agent_id} (registered ${formatAge(ageMs)}; ${status})`;
 }
 
 // scripts/hooks/lib/settlement.mjs
-import { createHash, randomUUID as randomUUID3 } from "node:crypto";
+import { createHash, randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
@@ -7950,7 +8188,7 @@ function loadGeneratedProjections(root) {
 }
 function buildReconcileItem(article, fileKeys, now) {
   return {
-    id: randomUUID3(),
+    id: randomUUID2(),
     type: "todo",
     created_at: now,
     updated_at: now,
@@ -8010,10 +8248,10 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync3, statSync as statSync4, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync3(path)) return null;
+  if (!existsSync4(path)) return null;
   const fd = openSync(path, "r");
   try {
     const size = fstatSync(fd).size;
@@ -8150,56 +8388,37 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 
 // scripts/hooks/h10-direct-capture.mjs
 async function computeDeadDispatchResidue(cwd, sessionId) {
-  const registerPath = join5(cwd, ".sterling", "transient", "dispatch-register.json");
-  let raw = [];
-  try {
-    if (existsSync4(registerPath)) {
-      const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
-      if (Array.isArray(parsed)) raw = parsed;
-    }
-  } catch {
-    raw = [];
-  }
-  if (!raw.length) return [];
+  const registerPath2 = registerPath(cwd);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const { availability, entries: registerEntries } = readRegister(cwd);
+  if (availability !== "ok" || !registerEntries.length) return [];
   let staleMinutes = 60;
   try {
     staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
   } catch {
   }
-  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
   const nowMs = Date.parse(nowIso);
   const lines = [];
   const stampIds = /* @__PURE__ */ new Set();
-  for (const entry of raw) {
+  for (const entry of registerEntries) {
     if (!entry || entry.session_id !== sessionId) continue;
+    if (entry.ended) continue;
     if (!isOrphan(entry, staleMinutes, nowMs)) continue;
     if (entry.residue_reported_at) continue;
     const probe = probeDirtyPaths(cwd, entry.files);
     const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
     if (probe.verified && dirty.length === 0) continue;
-    lines.push(formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }));
+    lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(entry, dirty, { verified: probe.verified, reason: probe.reason }))));
     stampIds.add(entry.agent_id);
   }
   if (stampIds.size) {
-    const lockDir = registerLockDir(cwd);
     try {
       mkdirSync4(join5(cwd, ".sterling", "transient"), { recursive: true });
-      const lock = await acquireLock(lockDir, { retryMs: 1e3, staleMs: 1e4 });
-      if (!lock) {
-        process.stderr.write(
-          "H10: register lock timed out \u2014 SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop\n"
-        );
-      } else {
-        try {
-          let fresh = [];
-          try {
-            if (existsSync4(registerPath)) {
-              const parsed = JSON.parse(readFileSync4(registerPath, "utf8"));
-              if (Array.isArray(parsed)) fresh = parsed;
-            }
-          } catch {
-            fresh = [];
-          }
+      await withRegisterLock(
+        cwd,
+        () => {
+          const freshRead = readRegister(cwd);
+          const fresh = freshRead.availability === "ok" ? freshRead.entries : [];
           for (const entry of fresh) {
             if (entry && stampIds.has(entry.agent_id) && !entry.residue_reported_at) {
               entry.residue_reported_at = nowIso;
@@ -8207,14 +8426,19 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
           }
           const transient = join5(cwd, ".sterling", "transient");
           mkdirSync4(transient, { recursive: true });
-          const tmpPath = join5(transient, `dispatch-register.json.tmp-${process.pid}`);
+          const tmpPath = join5(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
           writeFileSync2(tmpPath, JSON.stringify(fresh));
-          renameSync2(tmpPath, registerPath);
-        } finally {
-          lock.release();
-        }
+          renameSync2(tmpPath, registerPath2);
+        },
+        { retryMs: 1e3, timeoutMs: 1e4 }
+      );
+    } catch (e) {
+      if (e?.code === "register_lock_held") {
+        process.stderr.write(
+          `${render(e)} \u2014 SKIPPING residue_reported_at stamp (never writing the register unlocked); the residue line may print again on a later Stop
+`
+        );
       }
-    } catch {
     }
   }
   return lines;
@@ -8355,7 +8579,7 @@ try {
       if (delegationSpent()) return null;
       const dw = config.delegation_watch;
       const tPath = input.transcript_path ?? "";
-      if (!tPath || !existsSync4(tPath)) {
+      if (!tPath || !existsSync5(tPath)) {
         store.recordCheckSkipped("delegation-watch", "transcript_missing", void 0, now);
         return null;
       }
@@ -8445,7 +8669,10 @@ try {
       }
       if (parts.length) deny([...disclosureParts, ...parts].join("\n\n"));
     }
-    if (disclosureParts.length) process.stdout.write(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }));
+    if (disclosureParts.length) {
+      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }), 0);
+      throw Object.assign(new Error("h10-release-in-flight"), { h10ReleaseInFlight: true });
+    }
     allow();
   };
   const touchesClaimPath = `${touchesPath}.claim`;
@@ -8454,7 +8681,7 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync4(touchesClaimPath)) {
+      if (existsSync5(touchesClaimPath)) {
         try {
           orphanedTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
         } catch {
@@ -8484,7 +8711,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync4(touchesClaimPath) && !existsSync4(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
+        if (existsSync5(touchesClaimPath) && !existsSync5(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -8492,7 +8719,7 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync4(eventsPath)) {
+    if (existsSync5(eventsPath)) {
       const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
@@ -8500,38 +8727,27 @@ try {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync4(join5(input.cwd, p))
+    (p) => existsSync5(join5(input.cwd, p))
   );
-  let dispatchEntries = [];
-  try {
-    const registerPath = join5(input.cwd, ".sterling", "transient", "dispatch-register.json");
-    if (existsSync4(registerPath)) {
-      const raw = JSON.parse(readFileSync4(registerPath, "utf8"));
-      if (Array.isArray(raw)) dispatchEntries = raw.filter((e) => e && e.session_id === input.session_id);
-    }
-  } catch {
-    dispatchEntries = [];
-  }
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
-  const ageMs = (e) => {
-    const t = Date.parse(e.at ?? "");
-    return Number.isNaN(t) ? Infinity : nowMs - t;
-  };
-  const isLive = (e) => {
-    const a = ageMs(e);
-    return a >= 0 && a < staleMinutes * 6e4;
-  };
-  const liveDispatches = dispatchEntries.filter(isLive);
-  const staleDispatches = dispatchEntries.filter((e) => !isLive(e));
+  const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
+  const liveDispatches = classified.availability === "ok" ? classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) : [];
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const deferredOwners = /* @__PURE__ */ new Map();
-  for (const e of liveDispatches) {
-    for (const f of Array.isArray(e.files) ? e.files : []) {
-      const k = joinKey(f);
-      if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
-      deferredOwners.get(k).add(e.agent_id);
+  const unknownRows = [];
+  if (classified.availability === "ok") {
+    for (const row of classified.entries) {
+      if (row.status === "presumed-active") {
+        for (const f of Array.isArray(row.entry.files) ? row.entry.files : []) {
+          const k = joinKey(f);
+          if (!deferredOwners.has(k)) deferredOwners.set(k, /* @__PURE__ */ new Set());
+          deferredOwners.get(k).add(row.entry.agent_id);
+        }
+      } else if (row.status === "unknown") {
+        unknownRows.push(row);
+      }
     }
   }
   const isDeferred = (p) => deferredOwners.has(joinKey(p));
@@ -8549,10 +8765,27 @@ try {
     );
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const staleBiting = staleDispatches.filter((e) => (Array.isArray(e.files) ? e.files : []).some((f) => touchedKeys.has(f)));
-  if (staleBiting.length) {
+  const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  for (const row of bitingUnknown) {
     disclosureParts.push(
-      `\u2022 stale dispatch: ${staleBiting.length} entry/entries [${staleBiting.map((e) => e.agent_id).join(", ")}] stale (>${staleMinutes}m) \u2192 defers nothing; H1 sweeps at next session start`
+      render(
+        disclosure(
+          "dispatch_status_unknown",
+          { agent_id: row.entry.agent_id, reason: row.reason },
+          `ownership uncertain (dispatch ${formatDispatchRef(row)}) \u2014 settle with TaskStop or an explicit abandonment`
+        )
+      )
+    );
+  }
+  if (classified.availability === "corrupt") {
+    disclosureParts.push(
+      render(
+        disclosure(
+          "register_unavailable",
+          { availability: classified.availability },
+          `dispatch register unavailable (${classified.availability}) \u2014 nothing excluded, no holder can be judged`
+        )
+      )
     );
   }
   const clearRegisters = () => {
@@ -8627,7 +8860,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync4(join5(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync5(join5(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -8711,7 +8944,7 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync4(join5(input.cwd, p))));
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync5(join5(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);
@@ -8815,7 +9048,7 @@ try {
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    if (!existsSync4(nagMarker)) {
+    if (!existsSync5(nagMarker)) {
       writeFileSync2(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
       releaseTouchesClaim();
       releaseWithPressure();
@@ -8827,7 +9060,7 @@ try {
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8857,7 +9090,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 duties before this session ends \u2014 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync4(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync5(nagMarker)) {
     writeFileSync2(nagMarker, JSON.stringify({ at: now }));
     const parts = [...disclosureParts];
     const noCaptureCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "no-capture.mjs")}"` : "node scripts/no-capture.mjs";
@@ -8909,7 +9142,7 @@ ${parts.join("\n\n")}`);
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8929,7 +9162,7 @@ ${parts.join("\n\n")}`);
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync4(join5(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => !existsSync5(join5(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);
@@ -8938,7 +9171,7 @@ ${parts.join("\n\n")}`);
     }
     if (demandKeys.length) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8958,7 +9191,7 @@ ${parts.join("\n\n")}`);
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8979,7 +9212,7 @@ ${parts.join("\n\n")}`);
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8999,9 +9232,12 @@ ${parts.join("\n\n")}`);
   clearRegisters();
   releaseWithPressure();
 } catch (e) {
-  try {
-    store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
-  } catch {
+  if (e?.h10ReleaseInFlight === true) {
+  } else {
+    try {
+      store.recordCheckSkipped("h10-stop-duties", String(e && e.message || e), void 0, (/* @__PURE__ */ new Date()).toISOString());
+    } catch {
+    }
+    warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (check_skipped h10-stop-duties; fix & re-run)`);
   }
-  warnNonBlocking(`H10: session-end duties skipped \u2014 ${e && e.message || e} (check_skipped h10-stop-duties; fix & re-run)`);
 }

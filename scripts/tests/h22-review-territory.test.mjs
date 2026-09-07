@@ -1,6 +1,21 @@
-// H22 STRUCTURED REVIEW TERRITORY — SPEC ONLY, red-first.
+// H22 STRUCTURED REVIEW TERRITORY — the declared-territory parser.
 // Governing decision: knowledge_get 8f137474-3ba0-4040-bb7d-28e4e608060c
 // (slug review-territory-structured-receipt-files, board 0770ca72).
+//
+// R1 PIN RE-CUT: this file's contracts are KEPT WHOLE — the rebuild keeps
+// lib/dispatch-prompt.mjs as the declaration parser and keeps every outcome
+// pinned here (marker wins over prose, explicit [] is a declaration, malformed
+// falls back loudly, no existence filtering, path-shape validation, the
+// reviewer-class Stop-bind fail-closed). The only change is A6: the loud
+// warning is now RENDERED through the shared errors module, so every arm below
+// additionally requires a [snake_code] token on the emitted line.
+//   A11 NAMES THE CODE: a declaration that is PRESENT but unparseable /
+//   non-POSIX / non-array is `territory_declaration_malformed` (facts.line),
+//   distinct from `territory_declaration_missing` (no line at all, pinned in
+//   scripts/tests/h22-observed-territory.test.mjs). Both arms below assert the
+//   exact token alongside the required FACT — the rejected declaration's own
+//   text, echoed verbatim.
+//   RETIRED: nothing in this file.
 //
 // Spec under test (pinned from the decision record + the launching agent's
 // contract, NOT inferred from scripts/hooks/h22-dispatch-register.mjs — that
@@ -325,6 +340,15 @@ test('(T2) marker with an explicit empty array is a valid declaration: files: []
 // caught by casual inspection.
 // ===========================================================================
 
+// A6 + A11: the advisory is rendered through the shared errors module and
+// carries the code A11 names for a PRESENT-but-unusable declaration.
+// SABOTAGE: render this with `territory_declaration_missing` instead — both
+// arms below go red, and the distinction between "nothing declared" and "a
+// declaration this dispatch could not use" (which the operator must fix) is
+// lost at the only surface that reports it.
+const token = (c) => new RegExp('\\[' + c + '\\]');
+const MALFORMED_CODE = token('territory_declaration_malformed');
+
 function assertMalformedFallback(dir, agentId, prompt, decoyPath) {
   const r = runHook(h22Input(dir, { agent_id: agentId }), dir);
   assert.equal(r.code, 0, r.stderr, 'H22 never denies a spawn, even on a malformed declaration');
@@ -332,6 +356,7 @@ function assertMalformedFallback(dir, agentId, prompt, decoyPath) {
   assert.ok(entry.files.includes(decoyPath), 'fallback recovers the free-prose path when the declaration is unusable (expected to already hold today)');
   assert.equal(entry.files_source, 'free-prose-fallback', 'a malformed declaration is never silently treated as a valid review-territory declaration');
   assert.match(r.stderr, /REVIEW-TERRITORY/, 'the malformed declaration is named loudly on stderr, not silently swallowed');
+  assert.match(r.stderr, MALFORMED_CODE, 'A11: a present-but-unusable declaration carries territory_declaration_malformed');
   return r;
 }
 
@@ -761,6 +786,7 @@ function assertPathShapeRejected(dir, agentId, badPath) {
   assert.ok(entry.files.includes('scripts/decoy-analysis.mjs'), 'fallback recovers the free-prose path when the declared path shape is invalid');
   assert.equal(entry.files_source, 'free-prose-fallback', 'a path-shape-invalid declaration is never treated as authoritative review-territory');
   assert.match(r.stderr, /REVIEW-TERRITORY/, 'the rejected declaration is named loudly on stderr, not silently accepted');
+  assert.match(r.stderr, MALFORMED_CODE, 'A11: a present-but-unusable declaration carries territory_declaration_malformed');
   return r;
 }
 

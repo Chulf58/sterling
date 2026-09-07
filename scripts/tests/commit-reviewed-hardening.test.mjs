@@ -1,58 +1,22 @@
-// COMMIT-REVIEWED CLI — HARDENING PINS (decision review-receipt-ledger, id
-// 12a26ca6-a301-466d-a45c-5e1eeff36694; board 7814acc3-bb22-4cc5-abd7-789d6396743f)
+// COMMIT-REVIEWED — HARDENING: concurrent ledger writes, entry validation, trailer
+// multiplicity, the project guard, and the verification target (R1 pin re-cut, group D).
 //
-// SUPPLEMENTAL to scripts/tests/commit-reviewed.test.mjs (base spec — read in
-// full, NOT modified) and scripts/tests/h22-review-ledger.test.mjs (promotion
-// spec — read in full, NOT modified). Both were read for harness conventions
-// only; nothing here imports either file, and neither is duplicated — this
-// file's five properties are the ones the base spec does not cover:
+// AUTHORITY: contract sheet §1.2 (`readLedger`/`writeLedger` under `withLedgerLock`;
+// `classifyLedgerEntry` → `{kind:'malformed', code:'ledger_entry_malformed'}`), §3.2 steps
+// 3-5. Every property here is exercised through REAL git hooks in the fixture repo, which is
+// the only way to observe "while git commit runs" without reading the implementation.
 //
-//   1. CONSUME-SNAPSHOT — an entry appended to the ledger file DURING the
-//      `git commit` invocation (by a pre-commit hook) survives consumption:
-//      the CLI must only remove the entries it actually read and stamped
-//      into trailers, re-diffed against the ledger's POST-commit on-disk
-//      state — never a blind overwrite (e.g. "write back my in-memory
-//      snapshot minus the stamped ones" would silently erase the hook's
-//      concurrent append; "write []" would erase it even harder).
-//   2. CONSUME-ONLY-AFTER-SUCCESS — if `git commit` itself fails (e.g. a
-//      pre-commit hook exits non-zero), the ledger must be byte-preserved:
-//      no consumption happens for a commit that never landed. This may
-//      already hold under the base (unhardened) implementation if it simply
-//      never reaches its consumption step on a failed spawnSync — pinned
-//      here regardless, as a regression pin, with that noted per-test.
-//   3. VALIDATION — a ledger entry whose agent_type is not a safe, single-
-//      line string (embedded newline enabling trailer/commit-message
-//      injection; non-string values like null or an object) must be
-//      SKIPPED, not stamped and not silently coerced via string
-//      interpolation — while a valid entry alongside it still gets its
-//      trailer and gets consumed. A ledger of ONLY invalid entries must
-//      refuse exactly like the base spec's zero-entries case.
-//   4. DUPLICATES — two ledger entries sharing the same agent_type produce
-//      TWO separate `Reviewed-By-Agent` trailer lines (one per entry) — the
-//      CLI must never de-duplicate by value, since each entry is a distinct
-//      piece of review evidence even when the reviewer role recurs.
-//   5. CWD GUARD — invoked from a directory that is not a Sterling project
-//      at all (no .sterling/ present), the CLI must refuse with a message
-//      DISTINCT from the base spec's zero-ledger-entries guidance (which
-//      talks about dispatching a reviewer / the merge gate — advice that
-//      presupposes a Sterling-governed repo and is actively misleading for
-//      "this isn't a Sterling project"). This test pins the MISMATCH, not
-//      any specific replacement wording, per the launching agent's brief.
-//
-// Written BLIND to scripts/commit-reviewed.mjs's internals — a fixer is
-// hardening it in a parallel lane right now; this file specifies the target
-// behavior from the decision record and the launching agent's brief only, and
-// does not read that script (H4 read wall; also true by design here). The
-// `git()`/`stageChange()`/`ledgerPath()`/`readTrailerValues()` idioms below
-// are adapted from scripts/tests/commit-reviewed.test.mjs's own helpers,
-// reproduced standalone (not imported) so this file runs independently, per
-// the same convention scripts/tests/merge-review-receipts-hardening.test.mjs
-// uses relative to its own base spec.
-//
-// Every property here is exercised via a REAL git pre-commit hook installed
-// in the fixture repo's .git/hooks/ — a deterministic way to observe/control
-// exactly what happens "while git commit runs" without reading the CLI's
-// internals.
+// RETIRED: CONSUME-ONLY-AFTER-SUCCESS — re-cut as the reserve/release pin
+//   commit-reviewed-two-phase-spend.test.mjs R1-D104, which additionally proves the entry was
+//   reserved before the release (this file's version could not tell "released" from
+//   "never reserved").
+// RETIRED: N2 TRAILER SURVIVES — it is the happy path, pinned as commit-reviewed.test.mjs
+//   R1-D08; a second copy added no distinct failure.
+// RETIRED: N2 TRAILER DESTROYED with its `COMMIT SUCCEEDED` / `UNMERGEABLE` prose assertions
+//   — re-cut as commit-reviewed-two-phase-spend.test.mjs R1-D109, asserted by outcome
+//   (not consumed, not reported successful) rather than by wording.
+// RETIRED: every v1 (flat agent_type/files/at) fixture — v1 entries are never spendable; the
+//   validation family is re-cut onto reviewer.agent_type inside a v2 receipt.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -70,14 +34,20 @@ const GIT_SKIP = (() => {
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
 
+const token = (c) => new RegExp('\\[' + c + '\\]');
+const SESSION = 'this-session';
+const ENV_SESSION = { STERLING_SESSION_ID: SESSION };
+const flat = (s) => String(s ?? '').replace(/\r?\n/g, ' | ');
+const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
+
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
   assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
   return (r.stdout ?? '').trim();
 }
 
-function makeRepo() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-commit-reviewed-hardening-'));
+function makeRepo({ sterling = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-commit-reviewed-harden-'));
   git(dir, ['init', '-b', 'main']);
   git(dir, ['config', 'user.email', 'test@sterling.local']);
   git(dir, ['config', 'user.name', 'Sterling Test']);
@@ -87,434 +57,301 @@ function makeRepo() {
   writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
   git(dir, ['add', '-A']);
   git(dir, ['commit', '-m', 'base']);
-  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  if (sterling) mkdirSync(join(dir, '.sterling'), { recursive: true });
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-// Same as makeRepo(), but deliberately never creates .sterling/ at all — a
-// directory that is not a Sterling project, for the CWD GUARD pin.
-function makeRepoNoSterling() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-commit-reviewed-hardening-nosterling-'));
-  git(dir, ['init', '-b', 'main']);
-  git(dir, ['config', 'user.email', 'test@sterling.local']);
-  git(dir, ['config', 'user.name', 'Sterling Test']);
-  git(dir, ['config', 'commit.gpgsign', 'false']);
-  mkdirSync(join(dir, 'src'), { recursive: true });
-  writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
-  git(dir, ['add', '-A']);
-  git(dir, ['commit', '-m', 'base']);
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
+const ledgerPath = (dir) => join(dir, '.sterling', 'review-ledger.json');
+const writeLedger = (dir, entries) => writeFileSync(ledgerPath(dir), JSON.stringify(entries));
+const readLedger = (dir) => (existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null);
+const readLedgerRaw = (dir) => (existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null);
+const entryById = (dir, id) => (readLedger(dir) ?? []).find((e) => e.entry_id === id);
 
-function ledgerPath(dir) {
-  return join(dir, '.sterling', 'review-ledger.json');
-}
-function writeLedger(dir, entries) {
-  writeFileSync(ledgerPath(dir), JSON.stringify(entries));
-}
-function readLedgerRaw(dir) {
-  return readFileSync(ledgerPath(dir), 'utf8');
-}
-function readLedger(dir) {
-  return existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null;
-}
-
-function stageChange(dir, relPath = 'src/feature.mjs', content = 'export const f = 1;\n') {
+function stageChange(dir, relPath, content = 'export const f = 1;\n') {
   const abs = join(dir, relPath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
   git(dir, ['add', '-A']);
 }
-
-function runCommitReviewed(dir, args = []) {
-  const r = spawnSync(process.execPath, [CLI_PATH, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
+function indexBlob(dir, relPath) {
+  const out = git(dir, ['ls-files', '-s', '--', relPath]);
+  const m = out.match(/^\d+ ([0-9a-f]{40}) \d+\t/);
+  assert.ok(m, `fixture guard: ${relPath} must be staged in the index — got ${out}`);
+  return m[1];
+}
+function runCommitReviewed(dir, args = [], env = ENV_SESSION) {
+  const r = spawnSync(process.execPath, [CLI_PATH, ...args], {
+    cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
+  });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
-
-// The EXACT read scripts/direct-merge.mjs's receipt-gate uses — the
-// '%(trailers:key=Reviewed-By-Agent,valueonly,unfold)' format string (per
-// the base spec) — cited by format, never by line number, so this comment
-// cannot rot the way a line-number citation did (N2 roster review).
-function readTrailerValues(dir, sha = 'HEAD') {
-  const out = git(dir, ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha]);
+function trailerValues(dir, key, sha = 'HEAD') {
+  const out = git(dir, ['log', '-1', `--format=%(trailers:key=${key},valueonly,unfold)`, sha]);
   return out.split('\n').filter((l) => l.trim() !== '');
 }
+const reviewedByTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Reviewed-By-Agent', sha);
+const receiptTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Review-Receipt', sha);
+const commitMessage = (dir, sha = 'HEAD') => git(dir, ['log', '-1', '--format=%B', sha]);
 
-// Installs a REAL, executable pre-commit hook in the fixture repo. `script`
-// is the complete file content including its own shebang line.
-function installPreCommitHook(dir, script) {
-  const hookPath = join(dir, '.git', 'hooks', 'pre-commit');
-  writeFileSync(hookPath, script, { mode: 0o755 });
-  chmodSync(hookPath, 0o755);
+function installHook(dir, name, script) {
+  const p = join(dir, '.git', 'hooks', name);
+  writeFileSync(p, script, { mode: 0o755 });
+  chmodSync(p, 0o755);
 }
 
-// A pre-commit hook that appends a fresh, valid ledger entry (agent_type
-// 'reviewer-security') to .sterling/review-ledger.json and exits 0 — used to
-// simulate a concurrent reviewer landing its promotion while `git commit` is
-// mid-flight for property (1).
-const HOOK_APPEND_VALID_ENTRY = `#!/usr/bin/env node
+function v2({ entry_id, agent_type, files, blobs = {}, base_sha, at = isoAgo(60_000) }) {
+  return {
+    schema_version: 2, entry_id, kind: 'roster_receipt', status: 'active',
+    started_at: at, finished_at: at,
+    reviewer: { agent_type, model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
+    identity: { session_id: SESSION, branch: 'main', base_sha, agent_id: 'agent-fixture' },
+    territory: { files, source: 'review-territory', attribution: 'block' },
+    content_evidence: {
+      basis: 'stop-time-worktree-snapshot', status: 'complete', blobs,
+      absent_paths: [], truncated_of: null, failure_reason: null,
+    },
+    disposition: null,
+  };
+}
+
+// A pre-commit hook that APPENDS a fresh entry to the ledger while `git commit` is mid-flight
+// — i.e. between this run's reserve and its finalize.
+const HOOK_APPEND_ENTRY = `#!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
 const p = path.join(process.cwd(), '.sterling', 'review-ledger.json');
 let entries = [];
 try { entries = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { entries = []; }
-entries.push({ agent_type: 'reviewer-security', files: ['src/hookadded.mjs'], at: '2026-08-22T00:02:00.000Z' });
+entries.push({
+  schema_version: 2, entry_id: 'aaaaaaaa-0000-4000-8000-000000000999', kind: 'roster_receipt', status: 'active',
+  started_at: '2026-09-07T00:00:00.000Z', finished_at: '2026-09-07T00:00:00.000Z',
+  reviewer: { agent_type: 'reviewer-security', model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
+  identity: { session_id: 'this-session', branch: 'main', base_sha: null, agent_id: 'agent-hook' },
+  territory: { files: ['src/hookadded.mjs'], source: 'review-territory', attribution: 'block' },
+  content_evidence: { basis: 'stop-time-worktree-snapshot', status: 'complete', blobs: {}, absent_paths: [], truncated_of: null, failure_reason: null },
+  disposition: null
+});
 fs.writeFileSync(p, JSON.stringify(entries));
 `;
 
-// A pre-commit hook that always fails the commit — used to simulate `git
-// commit` itself failing (e.g. a lint/format hook rejecting the change) for
-// property (2).
-const HOOK_ALWAYS_FAIL = `#!/bin/sh
-exit 1
-`;
-
-// ---------------------------------------------------------------------------
-// (1) CONSUME-SNAPSHOT
-// ---------------------------------------------------------------------------
-
-test('commit-reviewed.mjs (hardening) CONSUME-SNAPSHOT: a ledger entry appended by a pre-commit hook WHILE git commit runs survives consumption', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    installPreCommitHook(dir, HOOK_APPEND_VALID_ENTRY);
-    stageChange(dir);
-    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
-
-    // EXPECTED FAILURE SHAPE: today's (or a naively-hardened) implementation
-    // most likely reads the ledger once, decides the trailer set, spawns
-    // `git commit`, and on success writes back its OWN in-memory snapshot
-    // (e.g. `[]`, or "everything minus what I stamped" computed against the
-    // stale pre-commit copy) rather than re-reading the current on-disk
-    // ledger and removing only the stamped entries from it. That clobbers
-    // the hook's concurrent append. The `ledgerAfter.length === 1` /
-    // `agent_type === 'reviewer-security'` assertions below are the ones
-    // expected to fail red — most likely the file comes back empty (`[]`)
-    // or still containing the ORIGINAL pre-existing entry instead of the
-    // hook-appended one.
-    const r = runCommitReviewed(dir, ['-m', 'feature reviewed, hook appends mid-commit']);
-    assert.equal(r.code, 0, `commit must succeed — the pre-commit hook itself exits 0 — stdout=${r.stdout} stderr=${r.stderr}`);
-
-    const trailers = readTrailerValues(dir);
-    assert.deepEqual(trailers, ['reviewer-correctness'], 'the trailer set reflects only the PRE-EXISTING entry the CLI read before spawning git commit — the hook-appended entry was not yet on disk when trailers were decided');
-
-    const ledgerAfter = readLedger(dir);
-    assert.equal(ledgerAfter.length, 1, 'exactly one entry remains: the one the hook appended mid-commit — it must never be silently erased by consumption');
-    assert.equal(ledgerAfter[0].agent_type, 'reviewer-security');
-    assert.deepEqual(ledgerAfter[0].files, ['src/hookadded.mjs']);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (2) CONSUME-ONLY-AFTER-SUCCESS
-// ---------------------------------------------------------------------------
-
-test('commit-reviewed.mjs (hardening) CONSUME-ONLY-AFTER-SUCCESS: if git commit itself fails, the ledger is byte-preserved (not consumed)', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    installPreCommitHook(dir, HOOK_ALWAYS_FAIL);
-    stageChange(dir);
-    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
-    const before = readLedgerRaw(dir);
-    const beforeHead = git(dir, ['rev-parse', 'HEAD']);
-
-    // EXPECTED FAILURE SHAPE: this property may ALREADY hold under an
-    // unhardened implementation, if it simply never reaches its consumption
-    // step when the git-commit spawn returns non-zero (a straight-line
-    // "spawn, then on success consume" shape naturally satisfies this without
-    // any dedicated hardening). Pinned here regardless as a REGRESSION pin —
-    // if it is red today, the failing line is most likely `assert.equal
-    // (readLedgerRaw(dir), before, ...)`, i.e. the ledger got consumed (or
-    // partially rewritten) even though the underlying commit never landed.
-    const r = runCommitReviewed(dir, ['-m', 'this commit must fail']);
-    assert.notEqual(r.code, 0, `a failing git commit must propagate as a nonzero exit — stdout=${r.stdout} stderr=${r.stderr}`);
-
-    const afterHead = git(dir, ['rev-parse', 'HEAD']);
-    assert.equal(afterHead, beforeHead, 'no commit was created when the pre-commit hook rejected it');
-
-    assert.equal(readLedgerRaw(dir), before, 'the ledger is byte-preserved — consumption never happens for a commit that did not land');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (3) VALIDATION
-// ---------------------------------------------------------------------------
-
-test('commit-reviewed.mjs (hardening) VALIDATION: unsafe/non-string agent_type entries are skipped (not stamped, not consumed) while a valid entry alongside them still works', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    const invalidNewline = { agent_type: 'reviewer-good\nCo-authored-by: attacker', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' };
-    const invalidNull = { agent_type: null, files: ['src/feature.mjs'], at: '2026-08-22T00:01:00.000Z' };
-    const invalidObject = { agent_type: { nested: true }, files: ['src/feature.mjs'], at: '2026-08-22T00:02:00.000Z' };
-    const valid = { agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:03:00.000Z' };
-    writeLedger(dir, [invalidNewline, invalidNull, invalidObject, valid]);
-
-    // EXPECTED FAILURE SHAPE: an unhardened implementation most likely builds
-    // each trailer via plain string interpolation of `entry.agent_type` with
-    // no type/shape check, so it (a) stamps 4 trailers instead of 1 — a
-    // literal `\n` inside the interpolated value splits the commit message
-    // into an extra line that git's own trailer parser may or may not
-    // attribute back to `Reviewed-By-Agent`, and `null`/the object stringify
-    // to `"null"` / `"[object Object]"` and get stamped as if valid — and (b)
-    // never mentions "skip" on stderr, since no validation branch exists to
-    // report it. `assert.deepEqual(trailers, ['reviewer-correctness'])` and
-    // the `/skip/i` stderr match are expected to fail red first.
-    const r = runCommitReviewed(dir, ['-m', 'mixed valid/invalid ledger entries']);
-    assert.equal(r.code, 0, `a ledger with at least one valid entry must still succeed — stdout=${r.stdout} stderr=${r.stderr}`);
-
-    const trailers = readTrailerValues(dir);
-    assert.deepEqual(trailers, ['reviewer-correctness'], 'exactly one trailer is stamped — the sole safe, valid entry; the unsafe/non-string entries are excluded entirely');
-
-    assert.match(r.stderr, /skip/i, 'stderr mentions skipping the invalid entries');
-
-    const ledgerAfter = readLedger(dir);
-    assert.equal(ledgerAfter.length, 3, 'the three invalid entries remain in the ledger, un-consumed');
-    assert.ok(ledgerAfter.some((e) => e.agent_type === null), 'the null-agent_type entry survives untouched');
-    assert.ok(ledgerAfter.some((e) => e.agent_type !== null && typeof e.agent_type === 'object'), 'the object-agent_type entry survives untouched');
-    assert.ok(
-      ledgerAfter.some((e) => typeof e.agent_type === 'string' && e.agent_type.includes('\n')),
-      'the newline-carrying agent_type entry survives untouched'
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-test('commit-reviewed.mjs (hardening) VALIDATION: a ledger with ONLY invalid entries refuses exactly like the zero-entries case', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-good\nCo-authored-by: attacker', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' },
-      { agent_type: null, files: ['src/feature.mjs'], at: '2026-08-22T00:01:00.000Z' },
-      { agent_type: { nested: true }, files: ['src/feature.mjs'], at: '2026-08-22T00:02:00.000Z' },
-    ]);
-    const beforeHead = git(dir, ['rev-parse', 'HEAD']);
-
-    // EXPECTED FAILURE SHAPE: an unhardened implementation, absent any
-    // validation step, sees 3 (raw) entries and takes the happy path,
-    // stamping 3 garbage trailers and succeeding (r.code === 0) — the
-    // `assert.equal(r.code, 1, ...)` line is expected to fail red first.
-    const r = runCommitReviewed(dir, ['-m', 'attempt with only invalid entries']);
-    assert.equal(r.code, 1, `a ledger with zero VALID entries must refuse exactly like zero entries — stdout=${r.stdout} stderr=${r.stderr}`);
-    assert.match(r.stderr, /dispatch.*review|reviewer/i, 'refusal guidance matches the base zero-entries contract');
-    assert.match(r.stderr, /merge gate|commit bare/i, 'refusal guidance matches the base zero-entries contract');
-
-    const afterHead = git(dir, ['rev-parse', 'HEAD']);
-    assert.equal(afterHead, beforeHead, 'no commit was made against an all-invalid ledger');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (4) DUPLICATES
-// ---------------------------------------------------------------------------
-
-test('commit-reviewed.mjs (hardening) DUPLICATES: two ledger entries sharing the same agent_type stamp TWO trailer lines — no dedupe', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' },
-      { agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:01:00.000Z' },
-    ]);
-
-    // EXPECTED FAILURE SHAPE: an implementation that de-dupes trailers by
-    // value (e.g. building a Set of agent_types before stamping) produces
-    // exactly ONE trailer line instead of two — `assert.equal(trailers.length,
-    // 2, ...)` is the line expected to fail red.
-    const r = runCommitReviewed(dir, ['-m', 'two reviews from the same reviewer role']);
-    assert.equal(r.code, 0, `two valid (duplicate agent_type) entries must still succeed — stdout=${r.stdout} stderr=${r.stderr}`);
-
-    const trailers = readTrailerValues(dir);
-    assert.equal(trailers.length, 2, 'one trailer line PER ledger entry — duplicates are never collapsed');
-    assert.deepEqual(trailers, ['reviewer-correctness', 'reviewer-correctness']);
-
-    const ledgerAfter = readLedger(dir);
-    assert.deepEqual(ledgerAfter, [], 'both duplicate entries are consumed');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (5) CWD GUARD
-// ---------------------------------------------------------------------------
-
-test('commit-reviewed.mjs (hardening) CWD GUARD: invoked where .sterling/ does not exist at all, refuses with a message DISTINCT from the zero-entry-ledger guidance', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepoNoSterling();
-  try {
-    assert.equal(existsSync(join(dir, '.sterling')), false, 'fixture guard: this is genuinely not a Sterling project directory');
-    stageChange(dir);
-    const beforeHead = git(dir, ['rev-parse', 'HEAD']);
-
-    // EXPECTED FAILURE SHAPE: an implementation that treats "ledger file
-    // missing" (because .sterling/ itself is missing) identically to "ledger
-    // present but empty" reuses the exact zero-entries guidance verbatim
-    // ("dispatch a reviewer ... or commit bare and answer at the merge
-    // gate") — advice that presupposes a Sterling-governed repo and is
-    // actively wrong here. The `assert.doesNotMatch(r.stderr, /merge gate|
-    // commit bare/i, ...)` line is expected to fail red (i.e. that phrase IS
-    // present) against such an implementation.
-    const r = runCommitReviewed(dir, ['-m', 'attempt outside any Sterling project']);
-    assert.equal(r.code, 1, `no .sterling/ at all must refuse — stdout=${r.stdout} stderr=${r.stderr}`);
-    assert.ok(r.stderr.trim().length > 0, 'the refusal names a reason on stderr');
-    assert.doesNotMatch(
-      r.stderr,
-      /merge gate|commit bare/i,
-      'the missing-.sterling guard must be a DISTINCT message from the zero-ledger-entries guidance, not a reused copy of the "commit bare / merge gate" advice'
-    );
-
-    const afterHead = git(dir, ['rev-parse', 'HEAD']);
-    assert.equal(afterHead, beforeHead, 'no commit was made outside a Sterling project');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (6) TRAILER SURVIVAL (N2, docs/feedback/sterling-plugin-*2026-08-24*):
-// scripts/commit-reviewed.mjs must never hand back success while the trailer
-// it just stamped is unreadable — or does not match what was stamped — via
-// the exact format direct-merge.mjs's receipt-gate read uses — that shape
-// merges as a normal commit, then silently refuses at the gate with no clue
-// why. The required shape is a blank line separating subject from trailers,
-// then a FINAL PARAGRAPH consisting entirely of trailer-shaped lines — the
-// destroyer is any non-trailer line inside that paragraph, or content
-// appended after it, NOT the required separating blank line itself.
-// ---------------------------------------------------------------------------
-
-// A prepare-commit-msg hook that mixes a plain, non-trailer-shaped line into
-// the trailer paragraph — simulating the 'git commit --amend -F <file>'
-// destroyer class from a single git-commit invocation: git's trailer parser
-// requires EVERY line of the final paragraph to look like a trailer, so one
-// ordinary line stitched into that paragraph makes the WHOLE paragraph
-// unparseable as trailers even though 'Reviewed-By-Agent: ...' text is still
-// sitting right there in the raw commit message.
-const HOOK_BREAK_TRAILER_PARAGRAPH = `#!/usr/bin/env node
-const fs = require('fs');
-const file = process.argv[2];
-let msg = fs.readFileSync(file, 'utf8');
-msg = msg.replace(/\\n\\n(Reviewed-By-Agent:[^]*)$/, '\\n\\nnot a trailer line\\n$1');
-fs.writeFileSync(file, msg);
-`;
-
-function installPrepareCommitMsgHook(dir, script) {
-  const hookPath = join(dir, '.git', 'hooks', 'prepare-commit-msg');
-  writeFileSync(hookPath, script, { mode: 0o755 });
-  chmodSync(hookPath, 0o755);
-}
-
-test('commit-reviewed.mjs (N2) TRAILER SURVIVES: a normal commit stamps a trailer readable via the exact direct-merge.mjs receipt-gate format', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir);
-    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
-
-    const r = runCommitReviewed(dir, ['-m', 'feature reviewed']);
-    assert.equal(r.code, 0, `commit must succeed — stdout=${r.stdout} stderr=${r.stderr}`);
-
-    const trailers = readTrailerValues(dir);
-    assert.deepEqual(trailers, ['reviewer-correctness'], 'the trailer stamped by commit-reviewed.mjs is readable via the exact direct-merge.mjs receipt-gate format string');
-
-    assert.deepEqual(readLedger(dir), [], 'the consumed entry is removed once the trailer verified');
-  } finally {
-    cleanup();
-  }
-});
-
-test('commit-reviewed.mjs (N2) TRAILER DESTROYED: when the trailer does not survive the commit, the CLI fails LOUDLY instead of reporting success', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    installPrepareCommitMsgHook(dir, HOOK_BREAK_TRAILER_PARAGRAPH);
-    stageChange(dir);
-    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
-    const ledgerBefore = readLedgerRaw(dir);
-
-    // EXPECTED FAILURE SHAPE (red before the fix): an implementation that
-    // never re-reads the trailer after `git commit` reports {committed:
-    // true, ...} with exit 0 and consumes the ledger, even though the
-    // commit that just landed is unmergeable — direct-merge.mjs would
-    // refuse it later with no link back to this step. The `assert.notEqual
-    // (r.code, 0, ...)` line below is the one expected to fail red.
-    const r = runCommitReviewed(dir, ['-m', 'feature reviewed but the trailer gets mangled']);
-    assert.notEqual(r.code, 0, `a destroyed trailer must fail loudly, not report success — stdout=${r.stdout} stderr=${r.stderr}`);
-    assert.match(r.stderr, /COMMIT SUCCEEDED/i, 'the failure names that the commit already exists');
-    assert.match(r.stderr, /UNMERGEABLE/i, 'the failure names that the commit is unmergeable as-is');
-
-    // The commit itself really did land (git commit exited 0) — this is not
-    // a normal refusal, it is a distinct post-commit failure mode.
-    const headMsg = git(dir, ['log', '-1', '--format=%s']);
-    assert.equal(headMsg, 'feature reviewed but the trailer gets mangled');
-
-    // The trailer really is unreadable via the exact direct-merge format —
-    // this is a fixture-correctness guard, not the behavior under test.
-    assert.deepEqual(readTrailerValues(dir), [], 'fixture guard: the prepare-commit-msg hook actually broke the trailer paragraph');
-
-    // The ledger entry must survive un-consumed so a retry (e.g. a
-    // corrected amend) can still stamp it.
-    assert.equal(readLedgerRaw(dir), ledgerBefore, 'the review-ledger entry is NOT consumed when the trailer verification fails');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (7) VERIFICATION-TARGET-IS-THE-CREATED-SHA (Codex P1-A): the post-commit
-// trailer verification must be pinned to the SHA the invocation's own `git
-// commit` actually created, never a subsequent read of the moving `HEAD`
-// alias — a `post-commit` hook that itself lands another commit (moving
-// HEAD) before `git commit` returns is enough to point a bare-HEAD
-// verification at the WRONG commit entirely.
-// ---------------------------------------------------------------------------
-
-// A post-commit hook that immediately lands a second, untrailered commit —
-// simulating any concurrent process (a reviewer's own workflow, another
-// tool) that moves HEAD in this working tree between this invocation's
-// commit and a later bare-HEAD read.
-const HOOK_MOVE_HEAD_AFTER_COMMIT = `#!/usr/bin/env node
+// A post-commit hook that lands a SECOND, untrailered commit — any concurrent process moving
+// HEAD between this run's commit and its own later reads.
+const HOOK_MOVE_HEAD = `#!/usr/bin/env node
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 fs.writeFileSync('post-commit-hook-file.mjs', '// landed by the post-commit hook\\n');
 execFileSync('git', ['add', '-A']);
-execFileSync('git', ['commit', '-m', 'unrelated commit landed by a concurrent process']);
+execFileSync('git', ['commit', '--no-verify', '-m', 'unrelated commit landed by a concurrent process']);
 `;
 
-test('commit-reviewed.mjs (Codex P1-A) VERIFICATION-TARGET-IS-THE-CREATED-SHA: a post-commit hook moving HEAD does not fool the trailer verification', { skip: GIT_SKIP }, () => {
+// ===========================================================================
+
+// EXPECTED: RED today — today's finalize writes back an in-memory snapshot minus the stamped
+// entries, so the hook's concurrent append is erased; the survivor assertions fire.
+// SABOTAGE: finalize by writing the pre-commit snapshot (or `[]`) instead of re-reading the
+// ledger under the lock and transitioning ONLY the reserved entry_ids -> the hook's entry
+// vanishes -> red. That erasure destroys a real reviewer's evidence with no trace at all,
+// which is why the re-read is part of the finalize contract rather than an optimisation.
+test('R1-D82 (CONSUME-SNAPSHOT): an entry appended to the ledger by a pre-commit hook WHILE git commit runs survives finalize — only the reserved entry_ids are transitioned', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    installPreCommitHook(dir, '#!/bin/sh\nexit 0\n'); // no-op — post-commit is what matters here
-    const hookPath = join(dir, '.git', 'hooks', 'post-commit');
-    writeFileSync(hookPath, HOOK_MOVE_HEAD_AFTER_COMMIT, { mode: 0o755 });
-    chmodSync(hookPath, 0o755);
+    installHook(dir, 'pre-commit', HOOK_APPEND_ENTRY);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '82000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base })]);
 
-    stageChange(dir);
-    writeLedger(dir, [{ agent_type: 'reviewer-correctness', files: ['src/feature.mjs'], at: '2026-08-22T00:00:00.000Z' }]);
+    const r = runCommitReviewed(dir, ['-m', 'D82 hook appends mid-commit']);
+    assert.equal(r.code, 0, `the hook exits 0, so the commit must land — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(receiptTrailers(dir), [id], 'the trailer set reflects only what was reserved before the hook ran');
 
-    // EXPECTED FAILURE SHAPE (red against a bare `git rev-parse HEAD`
-    // capture, or against a verification that never pins a sha at all): by
-    // the time the CLI reads HEAD, the post-commit hook has already landed
-    // a SECOND, untrailered commit on top — a bare-HEAD verification reads
-    // THAT commit's (missing) trailer, reporting a false TRAILER-DESTROYED
-    // failure for a commit that actually carries the trailer correctly.
-    // The `assert.equal(r.code, 0, ...)` line is the one expected to fail
-    // red against that shape.
-    const r = runCommitReviewed(dir, ['-m', 'feature reviewed, hook lands a second commit after']);
-    assert.equal(r.code, 0, `verification must target the sha THIS invocation created, not whatever HEAD moved to afterward — stdout=${r.stdout} stderr=${r.stderr}`);
+    const after = readLedger(dir);
+    assert.equal(after.length, 2, `both entries are present after the run — got ${JSON.stringify(after.map((e) => e.entry_id))}`);
+    assert.equal(entryById(dir, id).status, 'consumed', 'the reserved entry is finalized');
+    const hookEntry = after.find((e) => e.reviewer?.agent_type === 'reviewer-security');
+    assert.ok(hookEntry, 'the concurrently-appended entry is NOT erased');
+    assert.equal(hookEntry.status, 'active', 'and is untouched — it was never reserved by this run');
+  } finally { cleanup(); }
+});
+
+// EXPECTED: RED today — today an unsafe agent_type is interpolated straight into the trailer
+// block with no shape check, so 4 trailers land instead of 1 and no code is emitted.
+// SABOTAGE: build the trailer by plain interpolation of `reviewer.agent_type` -> a literal
+// newline splits the commit message, `null` stringifies to "null" and an object to
+// "[object Object]", all three stamp as if valid -> the trailer deepEqual and the
+// no-forged-line assertion red together.
+// SECOND SABOTAGE: drop malformed entries silently -> only the [ledger_entry_malformed]
+// assertion reds, which is the half pinning that evidence is never discarded in silence.
+test('R1-D83 (VALIDATION): receipts whose reviewer.agent_type is unsafe (embedded newline), null, or an object are [ledger_entry_malformed] — skipped, disclosed, left in the ledger, while a valid receipt beside them spends', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    const good = '83000000-0000-4000-8000-000000000004';
+    const bad = ['83000000-0000-4000-8000-000000000001', '83000000-0000-4000-8000-000000000002', '83000000-0000-4000-8000-000000000003'];
+    writeLedger(dir, [
+      v2({ entry_id: bad[0], agent_type: 'reviewer-good\nCo-authored-by: attacker', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: bad[1], agent_type: null, files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: bad[2], agent_type: { nested: true }, files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: good, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+    ]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D83 mixed valid/invalid entries']);
+    assert.equal(r.code, 0, `a ledger with one valid receipt still spends — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness'], 'exactly one trailer — the sole safe entry');
+    assert.deepEqual(receiptTrailers(dir), [good], 'and exactly one Review-Receipt binding');
+    assert.doesNotMatch(commitMessage(dir), /Co-authored-by: attacker/, 'no forged line reaches the durable commit message');
+    assert.match(`${r.stdout}\n${r.stderr}`, token('ledger_entry_malformed'), `the skipped entries are DISCLOSED — stderr=${flat(r.stderr)}`);
+    for (const id of bad) assert.ok(entryById(dir, id), `${id} survives in the ledger un-consumed`);
+  } finally { cleanup(); }
+});
+
+// EXPECTED: RED today — today all three garbage entries are stamped and the run exits 0.
+// SABOTAGE: fall back to "spend whatever parses well enough" when nothing is selectable ->
+// exit 0 with garbage trailers -> red. A ledger of only malformed entries is a ledger with
+// zero evidence, and it must refuse exactly like an empty one.
+test('R1-D84 (VALIDATION): a ledger of ONLY malformed entries refuses [no_spendable_receipt] — nothing is stamped, HEAD is unmoved, the ledger is byte-identical', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    writeLedger(dir, [
+      v2({ entry_id: '84000000-0000-4000-8000-000000000001', agent_type: 'reviewer-good\nCo-authored-by: attacker', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: '84000000-0000-4000-8000-000000000002', agent_type: null, files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+    ]);
+    const before = readLedgerRaw(dir);
+
+    const r = runCommitReviewed(dir, ['-m', 'D84 only invalid entries']);
+    assert.equal(r.code, 1, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.match(`${r.stdout}\n${r.stderr}`, token('no_spendable_receipt'), `stderr=${flat(r.stderr)}`);
+    assert.equal(git(dir, ['rev-parse', 'HEAD']), base, 'no commit');
+    assert.equal(readLedgerRaw(dir), before, 'ledger byte-identical');
+  } finally { cleanup(); }
+});
+
+// EXPECTED: RED today only on the two Review-Receipt trailers and the consumed statuses; the
+// roster-trailer half already holds.
+// SABOTAGE: de-duplicate trailers by value (build a Set of agent_types before stamping) ->
+// one roster trailer instead of two -> red. Each receipt is a distinct piece of review
+// evidence even when the reviewer ROLE recurs, and the Review-Receipt trailers are what keep
+// the two distinguishable at the merge gate.
+test('R1-D85 (DUPLICATES): two receipts sharing one agent_type stamp TWO Reviewed-By-Agent lines and TWO distinct Review-Receipt lines — no dedupe by value', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    const id1 = '85000000-0000-4000-8000-000000000001';
+    const id2 = '85000000-0000-4000-8000-000000000002';
+    writeLedger(dir, [
+      v2({ entry_id: id1, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: id2, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+    ]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D85 two rounds from one reviewer role']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness', 'reviewer-correctness'], 'one roster trailer line PER receipt');
+    assert.deepEqual(receiptTrailers(dir).sort(), [id1, id2].sort(), 'and one Review-Receipt line per receipt, distinct by entry_id');
+    for (const id of [id1, id2]) assert.equal(entryById(dir, id).status, 'consumed', `${id} consumed`);
+  } finally { cleanup(); }
+});
+
+// THE PROJECT GUARD (contract sheet §6 A13: `not_sterling_project` — "no .sterling/ at the
+// project root → refusal BEFORE any git action").
+// EXPECTED: RED today — the code does not exist and today's guard reuses the zero-receipt
+// guidance, which presupposes a Sterling-governed repo.
+// SABOTAGE: treat "ledger file missing" (because .sterling/ itself is missing) identically to
+// "ledger present but empty" -> [no_spendable_receipt] here instead -> both the code and the
+// doesNotMatch assertion red, and the operator is told to dispatch a reviewer in a repo
+// Sterling does not govern.
+// SECOND SABOTAGE: run the guard AFTER the staged-diff read or any other git action -> the
+// code assertion may stay green while the refusal is no longer the first thing that happens;
+// the `--json` object is what pins that it refused rather than proceeded.
+test('R1-D86 (PROJECT GUARD): invoked where .sterling/ does not exist at all, the CLI refuses [not_sterling_project] — never [no_spendable_receipt] — and makes no commit', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo({ sterling: false });
+  try {
+    assert.equal(existsSync(join(dir, '.sterling')), false, 'fixture guard: genuinely not a Sterling project');
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+
+    const r = runCommitReviewed(dir, ['-m', 'D86 outside any Sterling project', '--json']);
+    assert.equal(r.code, 1, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    let out;
+    assert.doesNotThrow(() => { out = JSON.parse(r.stdout); }, `--json must print exactly ONE JSON object even here — stdout=${flat(r.stdout)}`);
+    assert.equal(out.code, 'not_sterling_project', `got ${JSON.stringify(out)}`);
+    assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, token('no_spendable_receipt'),
+      `a missing project is not an empty ledger — stderr=${flat(r.stderr)}`);
+    assert.equal(git(dir, ['rev-parse', 'HEAD']), base, 'no commit');
+  } finally { cleanup(); }
+});
+
+// A DANGLING --target-sha SELECTS A DIFFERENT MODE, which is the worst shape an argument
+// defect can take: today the flag with no value falls through to NEW-COMMIT mode, so an
+// operator who meant to amend an existing commit silently creates a new one instead — and the
+// amend guards (tip-only, clean tree, publication) never run at all.
+// EXPECTED: RED today — the fall-through succeeds (or refuses for an unrelated reason) and
+// there is no [argument_invalid] code.
+// SABOTAGE: parse the flag as `argv[i+1] ?? null` and treat null as "not in amend mode" -> a
+// new commit is created, exit 0 -> the exit-code and HEAD-unmoved assertions red. A flag whose
+// ABSENT VALUE changes the operation must refuse, never default.
+// TWO ARMS, because "no value" has two spellings and a parser can get one right and the other
+// wrong: (a) the flag is the LAST token, so nothing follows it; (b) the next token is ANOTHER
+// FLAG, which a naive `argv[i+1]` parser swallows as the value and then reports as an
+// unresolvable sha — a different, misleading refusal for the same operator mistake.
+test('R1-D88 (ARGUMENT): --target-sha with a MISSING value refuses [argument_invalid] facts.flag "--target-sha" — never falling through to new-commit mode, and never swallowing the next FLAG as its value', { skip: GIT_SKIP }, () => {
+  for (const [label, args] of [
+    ['last-token', ['--json', '--target-sha']],
+    ['next-token-is-a-flag', ['--target-sha', '--json']],
+  ]) {
+    const { dir, cleanup } = makeRepo();
+    try {
+      stageChange(dir, 'src/laneA.mjs');
+      const base = git(dir, ['rev-parse', 'HEAD']);
+      const id = '88000000-0000-4000-8000-000000000001';
+      writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base })]);
+      const before = readLedgerRaw(dir);
+
+      const r = runCommitReviewed(dir, args);
+      assert.equal(r.code, 1, `[${label}] stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+      let out;
+      assert.doesNotThrow(() => { out = JSON.parse(r.stdout); }, `[${label}] --json must still print exactly ONE JSON object — stdout=${flat(r.stdout)}`);
+      assert.equal(out.code, 'argument_invalid', `[${label}] got ${JSON.stringify(out)}`);
+      assert.equal(out.facts?.flag, '--target-sha',
+        `[${label}] facts.flag names the flag whose value is missing — not '--json' swallowed as a sha, and not a target_sha_unresolvable refusal that sends the operator looking for a commit — got ${JSON.stringify(out.facts)}`);
+      assert.equal(git(dir, ['rev-parse', 'HEAD']), base, `[${label}] no commit was created in either mode`);
+      assert.equal(readLedgerRaw(dir), before, `[${label}] ledger byte-identical`);
+    } finally { cleanup(); }
+  }
+});
+
+// EXPECTED: RED today on the consumption.commit_sha assertion — today's consume records no
+// sha at all, so the "which commit did this receipt pay for" question has no answer to be
+// wrong about.
+// SABOTAGE: verify and finalize against a bare `git rev-parse HEAD` read AFTER the commit
+// instead of against the sha this invocation created -> the run either reports a false
+// trailer-destroyed failure or binds the receipt to the hook's unrelated commit -> the exit
+// code or the consumption.commit_sha assertion reds. Both outcomes are silent
+// mis-attribution: the merge gate would then resolve the receipt against a commit no reviewer
+// ever saw.
+test('R1-D87 (VERIFICATION TARGET): a post-commit hook that moves HEAD does not fool verification — the receipt is consumed against the sha THIS invocation created, never against whatever HEAD became', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    installHook(dir, 'post-commit', HOOK_MOVE_HEAD);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '87000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base })]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D87 hook lands a second commit after']);
+    assert.equal(r.code, 0, `verification must target the created sha, not the moving HEAD — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
 
     const headSha = git(dir, ['rev-parse', 'HEAD']);
-    const parentSha = git(dir, ['rev-parse', 'HEAD~1']);
-    assert.equal(git(dir, ['log', '-1', '--format=%s', headSha]), 'unrelated commit landed by a concurrent process', 'fixture guard: HEAD really did move past the reviewed commit');
-    assert.deepEqual(readTrailerValues(dir, parentSha), ['reviewer-correctness'], 'the reviewed commit (now HEAD~1) carries the trailer');
-    assert.deepEqual(readTrailerValues(dir, headSha), [], 'fixture guard: the hook-landed commit on top carries no trailer at all');
-
-    assert.deepEqual(readLedger(dir), [], 'the ledger entry was correctly consumed once the CORRECT (non-HEAD) commit verified');
-  } finally {
-    cleanup();
-  }
+    const createdSha = git(dir, ['rev-parse', 'HEAD~1']);
+    assert.equal(git(dir, ['log', '-1', '--format=%s', headSha]), 'unrelated commit landed by a concurrent process', 'fixture guard: HEAD really moved past the reviewed commit');
+    assert.deepEqual(receiptTrailers(dir, createdSha), [id], 'the reviewed commit carries the binding');
+    assert.deepEqual(receiptTrailers(dir, headSha), [], 'fixture guard: the hook-landed commit carries none');
+    assert.equal(entryById(dir, id).consumption?.commit_sha, createdSha, 'and the consumption names THAT commit, not HEAD');
+  } finally { cleanup(); }
 });

@@ -1,4 +1,35 @@
-// H22/H26 PER-BLOCK ATTRIBUTION — SPEC ONLY, red-first.
+// H22/H26 PER-BLOCK ATTRIBUTION (Start-side) AND REVIEWER TERRITORY BINDING
+// AT SubagentStop (decision edbaa38d).
+//
+// R1 PIN RE-CUT (contract sheet §2.1 + amendments A1/A4/A6): the attribution
+// contracts in this file are KEPT — the rebuild keeps decision edbaa38d's
+// Stop-bind and today's positional rules at Start, including the
+// unattributable partition. What changed:
+//   - A1: SubagentStop MARKS the register entry ended; it does not delete it.
+//     RETIRED: `assert.deepEqual(readRegister(dir), [])` in STOP-BIND
+//     NON-REVIEWER — replaced by the `ended.event === 'subagent-stop'` pin.
+//   - A4 (MEASURED 2026-09-07): resuming a reviewer FIRES SubagentStart again
+//     with the same agent_id, so every round has its OWN Start and its OWN
+//     receipt, and a Stop with no UNENDED register entry mints nothing.
+//     RETIRED: 'PIN B CONTROL (exactly ONE string-content user record binds)',
+//     'PIN B (resumed reviewer, no existing receipt)' and 'PIN B (truncated
+//     child read)' — all three inferred a resumed round from the COUNT of
+//     string-content user records in the child transcript, on the premise that
+//     a resumed round produces a Stop with no Start. A4 measured that premise
+//     false; under it, that count-based refusal would make every legitimately
+//     resumed round's receipt unspendable, defeating the decision's own named
+//     remedy for a broken byte binding ("the remedy is a fresh review round").
+//     The danger those pins guarded — a Stop re-binding an old brief onto
+//     today's bytes with no Start of its own — is now closed by the register
+//     rule and pinned in scripts/tests/h22-review-ledger.test.mjs (R1-B10/B11).
+//     The CONTINUATION pin below is re-cut onto that rule and keeps
+//     edbaa38d item 5 (only the FIRST child record is authoritative) alive.
+//   - A6: every advisory carries a [snake_code] token, so the disclosures are
+//     pinned by CODE, never by the word 'unattributable' in a sentence. The
+//     substantive verdict stays pinned as a FIELD (files_source /
+//     territory.source), which is what actually carries these tests.
+//     RETIRED: every `assert.match(..., /unattributable/i)` prose match.
+//
 // (board 8662956c-ea05-4f2c-8577-84396a119f95 — CROSS-ATTRIBUTION fix)
 //
 // Spec under test (given by the launching agent, NOT inferred from any
@@ -77,6 +108,14 @@ function runHookAt(scriptPath, input, cwd, env = {}) {
 }
 const runH22 = (input, cwd) => runHookAt(H22_PATH, input, cwd);
 const runH26 = (input, cwd) => runHookAt(H26_PATH, input, cwd);
+
+// A6: refusals and disclosures are asserted by their [code] token, never by a
+// sentence. `ANY_CODE` is used where the sheet's closed CODES set does not yet
+// name the code for a Start-side advisory — the contract pinned there is that
+// the line is RENDERED through the shared errors module at all.
+const token = (c) => new RegExp('\\[' + c + '\\]');
+const ANY_CODE = /\[[a-z][a-z0-9_]*\]/;
+const outputOf = (r) => `${r.stdout}\n${r.stderr}`;
 
 // --------------------------------------------------------------------------
 // H22-side fixtures (mirrors scripts/tests/h22-dispatch-register.test.mjs)
@@ -398,7 +437,7 @@ test('H22 attribution REVIEWER-R1: UNSAFE case 1 — more than one same-type rev
     const entry = reg.find((e) => e.agent_id === 'agent-rev-sibling');
     assert.ok(entry, 'entry was appended');
     assert.equal(entry.files_source, 'unattributable', 'two same-type reviewer siblings in one message means SubagentStart (which carries no tool_use_id) cannot tell which physical dispatch this Start belongs to');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'the case is disclosed loudly, never silent');
+    assert.match(outputOf(r), ANY_CODE, 'the case is disclosed through the shared errors module, code first (A6) — never a silent downgrade');
   } finally {
     cleanup();
   }
@@ -424,7 +463,7 @@ test('H22 attribution REVIEWER-R2: UNSAFE case 2 — a SINGLE walk-back match (t
       'unattributable',
       'a reviewer-class walk-back match is unsafe even at exactly ONE match — for a NON-reviewer type this exact shape is attribution:block (see PIN3 above), but a reviewer dispatch cannot be bound to a specific earlier block by position alone'
     );
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), ANY_CODE, 'disclosed through the shared errors module (A6)');
   } finally {
     cleanup();
   }
@@ -448,7 +487,7 @@ test('H22 attribution REVIEWER-R3: UNSAFE case 3 — terminal union (zero review
     const entry = reg.find((e) => e.agent_id === 'agent-rev-terminal');
     assert.ok(entry, 'entry was appended');
     assert.equal(entry.files_source, 'unattributable', 'zero type matches anywhere in the bounded walk falls to the terminal union of the last message\'s blocks, which is unsafe for a reviewer-class dispatch');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), ANY_CODE, 'disclosed through the shared errors module (A6)');
   } finally {
     cleanup();
   }
@@ -803,10 +842,18 @@ test('H22 STOP-BIND BYTE-IDENTICAL BRIEFS: two dispatch blocks with identical pr
 // every SendMessage delivery but toolUseId keeps the original spawn's
 // value") — simulated here too, so this arm cannot be satisfied merely by an
 // implementation that happens to ignore sidecar rewrites.
+// R1 RE-CUT (A1/A4): the second Stop below has NO Start of its own — the
+// first Stop marked the register entry ended — so under the rebuild it mints
+// nothing and touches nothing, and the assertion is strengthened from "the
+// territory did not change" to "the ledger is byte-identical". Round 2 WITH
+// its own Start is the separate arm R1-B18.
 // SABOTAGE: re-parse the child transcript's LAST record (or union every
 // record) on every Stop instead of freezing on the first — reddens the
 // territory.files deepEqual (would include or become
 // ['scripts/should-never-be-used.mjs']).
+// SABOTAGE: promote again on the second Stop without checking for an UNENDED
+// register entry — reddens the byte-identical assertion (a second receipt is
+// appended, or the first is re-dated).
 // ===========================================================================
 
 test('H22 STOP-BIND CONTINUATION: a second SubagentStop never re-derives territory from an appended coordinator-continuation record — only the FIRST record is authoritative', () => {
@@ -827,6 +874,7 @@ test('H22 STOP-BIND CONTINUATION: a second SubagentStop never re-derives territo
     const entry1 = readLedger(dir).find((e) => e.identity?.agent_id === 'agent-cont');
     assert.ok(entry1, 'first Stop promotes the receipt');
     assert.deepEqual(entry1.territory.files, ['scripts/first-round.mjs']);
+    const ledgerAfterFirst = readFileSync(ledgerPath(dir), 'utf8');
 
     const decoy = 'Thanks, one more thing to check.\nREVIEW-TERRITORY: ["scripts/should-never-be-used.mjs"]';
     writeFileSync(childPath, readFileSync(childPath, 'utf8') + JSON.stringify(continuationRecord(decoy)) + '\n');
@@ -837,6 +885,7 @@ test('H22 STOP-BIND CONTINUATION: a second SubagentStop never re-derives territo
       dir
     );
     assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(ledgerPath(dir), 'utf8'), ledgerAfterFirst, 'A4: the second Stop has no unended register entry of its own — the ledger is byte-identical');
     const ledgerAfter = readLedger(dir);
     const entry2 = ledgerAfter.find((e) => e.entry_id === entry1.entry_id) ?? ledgerAfter.find((e) => e.identity?.agent_id === 'agent-cont');
     assert.ok(entry2, 'the same receipt is still present after the second Stop');
@@ -877,7 +926,13 @@ test('H22 STOP-BIND NON-REVIEWER: a non-reviewer agent_type ("coder") is complet
     assert.equal(r.code, 0, r.stderr);
 
     assert.equal(existsSync(ledgerPath(dir)), false, 'a non-reviewer Stop never creates a ledger entry, no matter how complete the Stop-bind artifacts are');
-    assert.deepEqual(readRegister(dir), [], "the register entry is still removed exactly as today's delete-only path");
+    // A1 RE-CUT: Stop MARKS the entry ended; it does not delete it, so
+    // 'inactive-confirmed' is a real classifier output rather than an absence.
+    // SABOTAGE: delete the entry at Stop (today's behaviour) — this goes red.
+    const reg = readRegister(dir);
+    assert.equal(reg.length, 1, 'the register entry survives its Stop');
+    assert.equal(reg[0].agent_id, 'agent-nonrev');
+    assert.equal(reg[0].ended?.event, 'subagent-stop', 'the terminal event that was actually observed is recorded');
   } finally {
     cleanup();
   }
@@ -911,7 +966,7 @@ test('H22 STOP-BIND FAIL-CLOSED (missing child transcript): agent_transcript_pat
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f1');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -937,7 +992,7 @@ test('H22 STOP-BIND FAIL-CLOSED (malformed first record): the child transcript\'
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f2');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -963,7 +1018,7 @@ test('H22 STOP-BIND FAIL-CLOSED (missing sidecar): the child transcript is well-
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f3');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -988,7 +1043,7 @@ test('H22 STOP-BIND FAIL-CLOSED (malformed sidecar): the .meta.json sidecar exis
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f4');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -1019,7 +1074,7 @@ test('H22 STOP-BIND FAIL-CLOSED (toolUseId not in parent): the sidecar\'s toolUs
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f5');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -1046,7 +1101,7 @@ test('H22 STOP-BIND FAIL-CLOSED (prompt mismatch): the sidecar\'s toolUseId reso
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f6');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -1071,7 +1126,7 @@ test('H22 STOP-BIND FAIL-CLOSED (agentType mismatch): the sidecar\'s agentType d
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f7');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -1096,7 +1151,7 @@ test('H22 STOP-BIND FAIL-CLOSED (spawnDepth !== 1): a nested agent (sidecar spaw
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-f8');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -1183,7 +1238,7 @@ test('H22 STOP-BIND PIN A (agentId differs): a child transcript whose first reco
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-pinA-diff');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
@@ -1210,85 +1265,61 @@ test('H22 STOP-BIND PIN A (agentId absent): a child transcript whose first recor
     );
     assert.equal(r.code, 0, r.stderr);
     assertUnattributableStop(dir, 'agent-pinA-absent');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.match(outputOf(r), token('receipt_unattributable'), 'the fail-closed bind is disclosed by its code (A6), never by a sentence');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// PIN B — A RESUMED REVIEWER MUST NOT MINT A FRESH BOUND RECEIPT (the
-// critical pin, per the launching agent). Binding is gated on "no existing
-// receipt", treated as proof this is the FIRST Stop — false once
-// commit-reviewed has already consumed the first receipt. The dangerous
-// sequence: reviewer reviews x.mjs -> Stop mints a receipt -> the receipt is
-// CONSUMED by a commit -> x.mjs CHANGES -> a follow-up message RESUMES the
-// same agent -> the second Stop finds no receipt, treats itself as a first
-// Stop, rebinds x.mjs from the ORIGINAL brief, hashes the CURRENT bytes, and
-// mints a spendable receipt for bytes nobody reviewed.
+// RETIRED HERE — the PIN B family (A4, MEASURED 2026-09-07).
 //
-// MEASURED FACT (per the launching agent): each continuation round appends a
-// STRING-CONTENT user record to the SAME child transcript. A first-Stop
-// transcript has exactly ONE user record whose message.content is a string;
-// a resumed one has more (measured 7 in a transcript resumed 6 times).
+// RETIRED: 'PIN B CONTROL (exactly ONE string-content user record binds)'
+// RETIRED: 'PIN B (resumed reviewer, no existing receipt) -> unattributable'
+// RETIRED: 'PIN B (truncated child read) -> refuse rather than conclude
+//           "first Stop" from the lines that parsed'
 //
-// Pinned on STRUCTURE (the COUNT of string-content user records), never on
-// the English wording of the platform's coordinator envelope, which is not a
-// contract — continuationRecord() uses realistic-looking continuation text,
-// but no assertion in this section matches against its wording.
+// All three inferred "this is a resumed round" from the COUNT of
+// string-content user records in the child transcript, on the premise that a
+// resumed round produces a Stop with NO Start of its own. A4 measured that
+// premise FALSE: resuming with SendMessage fires SubagentStart again with the
+// same agent_id, so round n+1 has its own register entry and legitimately
+// mints its own receipt. Kept as written, this family would make every
+// resumed round's receipt unspendable — defeating the rebuild's own named
+// remedy for a broken byte binding ("the remedy is a fresh review round").
+//
+// The danger the family guarded — a Stop with no Start of its own re-binding
+// an old brief onto today's bytes — is closed by the register rule instead,
+// and is pinned in scripts/tests/h22-review-ledger.test.mjs as R1-B10 (a Stop
+// whose only matching entry is already ENDED mints nothing and touches
+// nothing) with R1-B11 as its counter-arm (a genuine round 2, with its own
+// Start, mints its own second receipt). The truncated-read concern survives
+// as a general fail-closed property of the child read, exercised by the
+// FAIL-CLOSED (malformed first record) arm above.
 // ===========================================================================
 
-// CONTROL (placed FIRST, essential per this role's own multi-cause
-// discipline): the SAME fixture shape with exactly ONE string-content user
-// record binds successfully — without this, a green UNSAFE arm below is
-// indistinguishable from "the fixture is simply broken" or "Stop-bind is now
-// unconditionally disabled", neither of which proves the COUNT is what
-// discriminates.
-// SABOTAGE: treat every Stop as a resumed Stop unconditionally (hardcode the
-// multi-record refusal to always fire) — this CONTROL goes red
-// (territory.source would read 'unattributable' instead of
-// 'review-territory').
-test('H22 STOP-BIND PIN B CONTROL (placed FIRST): a child transcript with exactly ONE string-content user record binds successfully, proving the COUNT — not the fixture shape — is what the unsafe arm below discriminates on', () => {
-  const { dir, cleanup } = makeH22Project();
-  try {
-    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/pinB-ctrl.mjs"]\nThis is the original dispatch.';
-    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinB_ctrl', 'reviewer-correctness', brief)])]);
-    writeRegisterRaw(dir, [registerEntry('agent-pinB-ctrl', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
-
-    const childPath = writeChildTranscript(dir, 'agent-pinB-ctrl.jsonl', [firstUserRecord(brief, 'agent-pinB-ctrl')]);
-    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'single round', toolUseId: 'toolu_pinB_ctrl', spawnDepth: 1, model: 'claude-x' });
-
-    const r = runH22(
-      h22Input(dir, { agent_id: 'agent-pinB-ctrl', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
-      dir
-    );
-    assert.equal(r.code, 0, r.stderr);
-    const entry = readLedger(dir).find((e) => e.identity?.agent_id === 'agent-pinB-ctrl');
-    assert.ok(entry, 'exactly one string-content user record still promotes a ledger entry');
-    assert.equal(entry.territory.source, 'review-territory', 'a genuine first Stop (one string-content user record) binds normally — the control PIN B\'s unsafe arm depends on');
-    assert.deepEqual(entry.territory.files, ['scripts/pinB-ctrl.mjs']);
-  } finally {
-    cleanup();
-  }
-});
-
-// SABOTAGE: gate the rebind purely on "no existing ledger receipt" (today's
-// treatment) without counting string-content user records at all — this test
-// goes red (territory.source would read 'review-territory' instead of
-// 'unattributable', and territory.files would wrongly read
-// ['scripts/pinB-original.mjs'] as if this were a genuine first Stop).
-test('H22 STOP-BIND PIN B (resumed reviewer, no existing receipt): a child transcript with MORE THAN ONE string-content user record and NO existing ledger receipt is unattributable — never re-bound as if this were a fresh first Stop', () => {
+// R1-B18 (REPLACES the retired PIN B resumed arm, A4): a genuine round 2 has
+// its OWN unended register entry, and its receipt binds from the child
+// transcript's FIRST record — the original brief — exactly as round 1 did.
+// This is the case A4 measured live ("territory derived from the original
+// brief"), and the continuation record appended for round 2 must not change
+// what the receipt says it reviewed.
+// SABOTAGE: derive territory from the LAST string-content user record (or the
+// union of them) once more than one exists — this goes red (territory.files
+// would read ['scripts/should-never-be-used.mjs']).
+test('R1-B18 (A4): round 2 — its own unended register entry, a child transcript carrying the appended continuation — still binds territory from the FIRST record', () => {
   const { dir, cleanup } = makeH22Project();
   try {
     const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/pinB-original.mjs"]\nThis is the original dispatch.';
-    const continuation = 'Thanks for the first pass — one more thing before you wrap up, please also double check the error paths.';
+    const continuation = 'Thanks for the first pass.\nREVIEW-TERRITORY: ["scripts/should-never-be-used.mjs"]';
     writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinB_resumed', 'reviewer-correctness', brief)])]);
-    writeRegisterRaw(dir, [registerEntry('agent-pinB-resumed', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
+    // A4's register shape: round 1's entry is ENDED and stays; round 2's Start
+    // appended a fresh UNENDED entry for the same agent_id.
+    writeRegisterRaw(dir, [
+      { ...registerEntry('agent-pinB-resumed', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z'), ended: { at: '2026-09-06T00:05:00.000Z', event: 'subagent-stop' } },
+      { ...registerEntry('agent-pinB-resumed', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:10:00.000Z'), round: 2 },
+    ]);
 
-    // Simulates the post-consumption state directly: the ledger has NO entry
-    // for this agent (as it would not, once commit-reviewed had consumed and
-    // removed the first receipt) while the child transcript already carries
-    // a second, appended string-content user record from the resumed round.
     const childPath = writeChildTranscript(dir, 'agent-pinB-resumed.jsonl', [
       firstUserRecord(brief, 'agent-pinB-resumed'),
       continuationRecord(continuation),
@@ -1300,52 +1331,43 @@ test('H22 STOP-BIND PIN B (resumed reviewer, no existing receipt): a child trans
       dir
     );
     assert.equal(r.code, 0, r.stderr);
-    assertUnattributableStop(dir, 'agent-pinB-resumed');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    const entry = readLedger(dir).find((e) => e.identity?.agent_id === 'agent-pinB-resumed');
+    assert.ok(entry, "round 2's Stop mints its own receipt — it has its own Start (A4)");
+    assert.equal(entry.territory.source, 'review-territory', 'a resumed round binds normally; it is not unattributable merely for being round 2');
+    assert.deepEqual(entry.territory.files, ['scripts/pinB-original.mjs'], 'only the FIRST child record is authoritative (edbaa38d item 5)');
+    assert.ok(!entry.territory.files.includes('scripts/should-never-be-used.mjs'), 'the appended continuation never re-declares territory');
   } finally {
     cleanup();
   }
 });
 
-// INCOMPLETE/TRUNCATED CHILD READ — this check concludes an ABSENCE (no
-// second string-content user record found, therefore first Stop), so it is
-// only valid over a COMPLETE read of the child transcript. Constructed
-// deterministically as a file whose trailing bytes are cut off mid-record
-// (invalid JSON on the last line, no trailing newline) — this reproduces
-// identically on every run without depending on any timing/race, and it is
-// exactly the byte shape a genuinely truncated on-disk write would leave
-// behind for a reader arriving mid-flush.
-// SABOTAGE: on a JSON-parse failure for a trailing line, silently skip that
-// line and conclude from only the lines that DID parse (i.e. "only one real
-// string-content user record found, therefore first Stop") — this test goes
-// red (territory.source would read 'review-territory' instead of
-// 'unattributable', since the hidden partial record is exactly the second
-// round this pin exists to catch).
-test('H22 STOP-BIND PIN B (truncated child read): a child transcript whose last line is invalid/incomplete JSON must refuse rather than conclude "first Stop" from only the lines it could parse', () => {
+// R1-B19 (A4, the surviving half of the retired truncated-read arm): a Stop
+// whose agent_id has NO UNENDED register entry mints NOTHING, whatever the
+// child transcript says. This is the fail-closed rule that replaces the
+// count-based resumed-round inference: a Stop that never had a Start of its
+// own cannot mint evidence, so there is no partial-read conclusion left to
+// draw. Its counter-arm is R1-B18 above (a genuine round 2 DOES mint).
+// SABOTAGE: promote on the presence of a valid child transcript + sidecar
+// without requiring an unended register entry — this goes red (a receipt
+// appears for a round that never started).
+test('R1-B19 (A4): a reviewer Stop whose only register entry is already ENDED mints no receipt at all, however complete its Stop-bind artifacts are', () => {
   const { dir, cleanup } = makeH22Project();
   try {
-    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/pinB-truncated.mjs"]\nThis is the original dispatch.';
-    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_pinB_trunc', 'reviewer-correctness', brief)])]);
-    writeRegisterRaw(dir, [registerEntry('agent-pinB-truncated', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z')]);
+    const brief = 'Please review the assigned scope.\nREVIEW-TERRITORY: ["scripts/no-start.mjs"]';
+    writeParentTranscript(dir, [taskLine([taskBlockId('toolu_nostart', 'reviewer-correctness', brief)])]);
+    writeRegisterRaw(dir, [
+      { ...registerEntry('agent-no-start', 'reviewer-correctness', ['src/irrelevant.mjs'], '2026-09-06T00:00:00.000Z'), ended: { at: '2026-09-06T00:05:00.000Z', event: 'subagent-stop' } },
+    ]);
 
-    const childPath = join(dir, 't', 'agent-pinB-truncated.jsonl');
-    mkdirSync(dirname(childPath), { recursive: true });
-    const line1 = JSON.stringify(firstUserRecord(brief, 'agent-pinB-truncated'));
-    // A second record cut off mid-write: a valid-looking JSON prefix, missing
-    // its closing quote/braces and trailing newline — exactly what a reader
-    // arriving mid-flush would see on disk, constructed here with plain bytes
-    // so it reproduces identically every run.
-    const truncatedSecondLine = '{"parentUuid":"parent-uuid-of-first-record","isSidechain":true,"type":"user","message":{"role":"user","content":"one more thing before you wrap';
-    writeFileSync(childPath, line1 + '\n' + truncatedSecondLine);
-    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'truncated read', toolUseId: 'toolu_pinB_trunc', spawnDepth: 1, model: 'claude-x' });
+    const childPath = writeChildTranscript(dir, 'agent-no-start.jsonl', [firstUserRecord(brief, 'agent-no-start')]);
+    writeSidecar(childPath, { agentType: 'reviewer-correctness', description: 'no start of its own', toolUseId: 'toolu_nostart', spawnDepth: 1, model: 'claude-x' });
 
     const r = runH22(
-      h22Input(dir, { agent_id: 'agent-pinB-truncated', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
+      h22Input(dir, { agent_id: 'agent-no-start', agent_type: 'reviewer-correctness', hook_event_name: 'SubagentStop', agent_transcript_path: childPath }),
       dir
     );
     assert.equal(r.code, 0, r.stderr);
-    assertUnattributableStop(dir, 'agent-pinB-truncated');
-    assert.match(`${r.stdout}\n${r.stderr}`, /unattributable/i, 'disclosed loudly');
+    assert.equal(existsSync(ledgerPath(dir)), false, 'no unended register entry — no receipt, and no ledger file conjured for one');
   } finally {
     cleanup();
   }

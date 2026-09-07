@@ -1,47 +1,47 @@
-// scripts/tests/commit-reviewed-file-scoping.test.mjs
+// COMMIT-REVIEWED — SELECTION BY COVERED-PATH OVERLAP AND COMMIT COVERAGE
+// (R1 pin re-cut, group D).
 //
-// FILE-SCOPED STAMPING (board 51d93c34 requirement 2). Review receipts already
-// record the files[] they reviewed; scripts/commit-reviewed.mjs used to ignore
-// that field when stamping, so EVERY valid receipt landed on whatever happened
-// to be staged and was then consumed. That forced concurrently-reviewed slices
-// to commit as ONE unit (decision
-// reviewed-set-commits-as-one-unit-until-receipts-are-file-scoped, c45b6ee4;
-// measured instance: four same-session same-branch receipts covering THREE
-// slices, all spent on commit cef717d).
+// AUTHORITY: contract sheet §3.2 step 1 — "candidates = receipts with `receiptIsSpendable`
+// ok whose territory overlaps the staged code paths; unattributable NEVER selected
+// (disclosure); coverage: every staged code path must be covered by ≥1 selected receipt else
+// `coverage_incomplete` (the incomplete-coverage refusal that caught a real defect, kept as a
+// code)" — with §6 A9 (`receiptCoveredPaths` = declared paths that HAVE a usable blob) and
+// the disclosure `receipt_no_overlap` ("a spendable receipt whose territory misses this diff
+// — stays active").
 //
-// WHAT IS PINNED HERE:
-//   - a receipt whose files[] INTERSECT the staged set is STAMPED;
-//   - a receipt recording NO usable territory is ALWAYS STAMPED (an empty
-//     files[] is the STRONGEST unverifiable-territory signal, never a
-//     non-match) — see S4, which mutation-arm B proved was pinned by NOTHING;
-//   - a receipt whose files[] match nothing staged, WHILE another receipt does
-//     match, is DEFERRED: not stamped, not consumed, not deleted, disclosed by
-//     name — see S2/S3;
-//   - when NOTHING matches, the rule does not apply at all and every eligible
-//     receipt is stamped exactly as before — see S5, the fallback, which is the
-//     entire safety argument for shipping this on the merge-gate surface.
+// TWO SHIPPED RULES, RULED ON SEPARATELY BY SHEET AMENDMENT A13 — do not collapse them:
+//   (1) the no-match STAMPING FALLBACK is RETIRED. A receipt whose territory misses the diff
+//       is `receipt_no_overlap` and stays ACTIVE (R1-D13).
+//   (2) decision c45b6ee4's UNSCOPED partition SURVIVES. A receipt with territory.files []
+//       (source ≠ unattributable) is ALWAYS selected and stamped on a commit that otherwise
+//       succeeds — disclosed `receipt_unscoped`, consumed with an EMPTY reservation map — but
+//       it NEVER satisfies coverage of a code path (R1-D16a / R1-D16b).
+// An earlier draft of this file read (2) as a casualty of (1); A13 overturned that. The two
+// arms of R1-D16 are what keep the halves from being collapsed again in either direction.
 //
-// NET INVARIANT (S6): the stamped set is always a strict SUBSET of the old
-// behaviour's and is never empty while an eligible receipt exists. So this rule
-// can only ever REMOVE a false attestation — it can never add a trailer, invent
-// evidence, or turn a commit that succeeds today into a refusal.
-//
-// HARNESS PROVENANCE: everything from the imports down to `isoAgo` below is a
-// verbatim copy of scripts/tests/commit-reviewed-spend-warnings.test.mjs
-// LINES 52-120 (imports 52-58; root/CLI_PATH 60-61; GIT_SKIP 63-66; git() 68-72;
-// makeRepo() 74-87; ledgerPath/writeLedger/readLedger 89-97; stageChange()
-// 99-104; runCommitReviewed() 106-109; readTrailerValues() 111-114; flat 116-117;
-// isoAgo 119-120). ONE deliberate deviation, harness-only and asserted by
-// nothing: the mkdtemp prefix is 'sterling-commit-reviewed-file-scoping-' rather
-// than 'sterling-commit-reviewed-spend-', so the two suites cannot collide in
-// tmpdir. `runCommitReviewedEnv` (below) is NEW — S7 needs to plumb
-// STERLING_SESSION_ID, which is the documented fixture seam the receipt-expiry
-// mechanism reads (commit-reviewed.mjs currentSessionId()).
+// RETIRED: S4 (empty files[] is always stamped, asserted only as a trailer count) — the RULE
+//   survives per A13 and is re-cut as R1-D16a/R1-D16b, which add the disclosure code, the
+//   empty reservation map and the coverage half S4 never pinned.
+// RETIRED: S5 (the no-match FALLBACK stamps everything) — retired with the fallback itself;
+//   the non-overlap case is now the [receipt_no_overlap] disclosure (R1-D13) and, when it
+//   leaves a staged path uncovered, [coverage_incomplete] (R1-D15).
+// RETIRED: S6 (the stamped set is a strict subset) — its assertions are the trailer
+//   deepEquals in R1-D13; a separate arm restated them.
+// RETIRED: S9/S10/S11 (the agent_type+at+files multiset consume key and its shape stability)
+//   — reservation and consumption are keyed by ENTRY_ID (decision 24dc4c63: "the old
+//   agent_type+at+identity multiset key is retired for v2"), so the whole key-shape family
+//   goes; the identity-partitioning CONTRACT it protected survives as R1-D19.
+// RETIRED: S12 (a v2 entry is selected by file intersection) — every fixture in this file is
+//   v2 now, so it is no longer a distinct pin.
+// RETIRED: S13 (a structurally deficient v2 entry is withheld) — that is
+//   [ledger_entry_malformed], pinned in commit-reviewed-bytes-v2-malformed.test.mjs.
+// RETIRED: every `DEFERRED RECEIPT` / `RECORDS NO FILES` / `RECEIPT FILES DO NOT OVERLAP THIS
+//   DIFF` banner assertion — converted to [code] tokens and --json `disclosures[].code`.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +53,12 @@ const GIT_SKIP = (() => {
   const r = spawnSync('git', ['--version'], { encoding: 'utf8' });
   return !r.error && r.status === 0 ? false : 'git not available on this host';
 })();
+
+const token = (c) => new RegExp('\\[' + c + '\\]');
+const SESSION = 'this-session';
+const ENV_SESSION = { STERLING_SESSION_ID: SESSION };
+const flat = (s) => String(s ?? '').replace(/\r?\n/g, ' | ');
+const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
 
 function git(cwd, args) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
@@ -75,494 +81,384 @@ function makeRepo() {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function ledgerPath(dir) {
-  return join(dir, '.sterling', 'review-ledger.json');
-}
-function writeLedger(dir, entries) {
-  writeFileSync(ledgerPath(dir), JSON.stringify(entries));
-}
-function readLedger(dir) {
-  return existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null;
-}
+const ledgerPath = (dir) => join(dir, '.sterling', 'review-ledger.json');
+const writeLedger = (dir, entries) => writeFileSync(ledgerPath(dir), JSON.stringify(entries));
+const readLedger = (dir) => (existsSync(ledgerPath(dir)) ? JSON.parse(readFileSync(ledgerPath(dir), 'utf8')) : null);
+const readLedgerRaw = (dir) => (existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null);
+const entryById = (dir, id) => (readLedger(dir) ?? []).find((e) => e.entry_id === id);
 
-function stageChange(dir, relPath = 'src/feature.mjs', content = 'export const f = 1;\n') {
+function stageChange(dir, relPath, content = 'export const f = 1;\n') {
   const abs = join(dir, relPath);
   mkdirSync(dirname(abs), { recursive: true });
   writeFileSync(abs, content);
   git(dir, ['add', '-A']);
 }
-
-function runCommitReviewed(dir, args = []) {
-  const r = spawnSync(process.execPath, [CLI_PATH, ...args], { cwd: dir, encoding: 'utf8', timeout: 30_000 });
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+function indexBlob(dir, relPath) {
+  const out = git(dir, ['ls-files', '-s', '--', relPath]);
+  const m = out.match(/^\d+ ([0-9a-f]{40}) \d+\t/);
+  assert.ok(m, `fixture guard: ${relPath} must be staged in the index — got ${out}`);
+  return m[1];
 }
-
-function readTrailerValues(dir, sha = 'HEAD') {
-  const out = git(dir, ['log', '-1', '--format=%(trailers:key=Reviewed-By-Agent,valueonly,unfold)', sha]);
-  return out.split('\n').filter((l) => l.trim() !== '');
-}
-
-// Anti-pattern ee89c3fd guard: flatten before interpolating into a message.
-const flat = (s) => (s ?? '').replace(/\r?\n/g, ' | ');
-
-// Date.now()-relative ISO timestamps, never hardcoded dates.
-const isoAgo = (msAgo) => new Date(Date.now() - msAgo).toISOString();
-
-// NEW (not in the spend-warnings harness): S7 must present a KNOWN current
-// session so a receipt recording a different one reads FOREIGN. Env is the
-// documented override commit-reviewed.mjs's currentSessionId() checks first,
-// ahead of H1's .sterling/transient/session.json marker.
-function runCommitReviewedEnv(dir, args, env) {
+function runCommitReviewed(dir, args = [], env = ENV_SESSION) {
   const r = spawnSync(process.execPath, [CLI_PATH, ...args], {
-    cwd: dir,
-    encoding: 'utf8',
-    timeout: 30_000,
-    env: { ...process.env, ...env },
+    cwd: dir, encoding: 'utf8', timeout: 30_000, env: { ...process.env, ...env },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
+function trailerValues(dir, key, sha = 'HEAD') {
+  const out = git(dir, ['log', '-1', `--format=%(trailers:key=${key},valueonly,unfold)`, sha]);
+  return out.split('\n').filter((l) => l.trim() !== '');
+}
+const reviewedByTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Reviewed-By-Agent', sha);
+const receiptTrailers = (dir, sha = 'HEAD') => trailerValues(dir, 'Review-Receipt', sha);
+function soleJson(r) {
+  let parsed;
+  assert.doesNotThrow(() => { parsed = JSON.parse(r.stdout); },
+    `--json must print exactly ONE JSON object on stdout — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+  return parsed;
+}
+const hasDisclosure = (out, code, id) => (out.disclosures ?? []).some((d) => d.code === code && JSON.stringify(d).includes(id));
 
-// ---------------------------------------------------------------------------
-// S1 (CONTROL, placed first): the pre-file-scoping behaviour, so a green S2
-// cannot be produced by a CLI that simply stamps everything. Every receipt
-// covers the staged file, so nothing is deferred and nothing survives.
-// SABOTAGE: none needed — this arm must pass for the OPPOSITE reason to S2.
-// ---------------------------------------------------------------------------
-test('file-scoping S1 (CONTROL): two receipts that BOTH cover the staged file are both stamped and both consumed — no deferral', { skip: GIT_SKIP }, () => {
+// A REAL pre-commit hook snapshotting the ledger mid-`git commit` — after RESERVE, before
+// FINALIZE. The only way to read a reservation, which finalize then clears.
+function installSnapshotHook(dir) {
+  const p = join(dir, '.git', 'hooks', 'pre-commit');
+  writeFileSync(p, `#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+fs.copyFileSync(path.join(process.cwd(), '.sterling', 'review-ledger.json'), path.join(process.cwd(), '.sterling', 'mid-commit-snapshot.json'));
+`, { mode: 0o755 });
+  chmodSync(p, 0o755);
+}
+const snapshotEntry = (dir, id) =>
+  JSON.parse(readFileSync(join(dir, '.sterling', 'mid-commit-snapshot.json'), 'utf8')).find((e) => e.entry_id === id);
+
+function v2({
+  entry_id, agent_type, files, blobs = {}, base_sha, source = 'review-territory',
+  at = isoAgo(60_000), session_id = SESSION, branch = 'main',
+}) {
+  return {
+    schema_version: 2, entry_id, kind: 'roster_receipt', status: 'active',
+    started_at: at, finished_at: at,
+    reviewer: { agent_type, model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
+    identity: { session_id, branch, base_sha, agent_id: `agent-${entry_id.slice(0, 8)}` },
+    territory: { files, source, attribution: 'block' },
+    content_evidence: {
+      basis: 'stop-time-worktree-snapshot', status: 'complete', blobs,
+      absent_paths: [], truncated_of: null, failure_reason: null,
+    },
+    disposition: null,
+  };
+}
+
+// ===========================================================================
+// R1-D12 — CONTROL, PLACED FIRST: when every receipt covers the staged path,
+// nothing is withheld. Without it, "only the covering receipt was stamped" is
+// satisfied by a CLI that stamps at most one receipt for any reason.
+// ===========================================================================
+
+// EXPECTED: RED today only on the consumed-status assertions and the Review-Receipt trailers.
+// SABOTAGE: cap the stamped set at one receipt -> the two-element trailer deepEquals red.
+test('R1-D12 (CONTROL, first): two receipts that BOTH cover the staged path are both stamped and both consumed — nothing withheld, no receipt_no_overlap', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/laneA.mjs');
+    const id1 = '12000000-0000-4000-8000-000000000001';
+    const id2 = '12000000-0000-4000-8000-000000000002';
     writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-security', files: ['src/laneA.mjs'], at: isoAgo(2_000) },
+      v2({ entry_id: id1, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
+      v2({ entry_id: id2, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blob }, base_sha: base }),
     ]);
 
-    const r = runCommitReviewed(dir, ['-m', 'lane A, both reviewers']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.doesNotMatch(r.stderr, /DEFERRED RECEIPT/, `nothing may be deferred when every receipt matches — stderr=${flat(r.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir).sort(), ['reviewer-correctness', 'reviewer-security']);
-    assert.deepEqual(readLedger(dir), [], 'both matching receipts are consumed');
+    const r = runCommitReviewed(dir, ['-m', 'D12 both cover lane A', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir).sort(), ['reviewer-correctness', 'reviewer-security']);
+    assert.deepEqual(receiptTrailers(dir).sort(), [id1, id2].sort());
+    const out = soleJson(r);
+    assert.ok(!codes(out).includes('receipt_no_overlap'), `nothing may be withheld when every receipt covers — got ${JSON.stringify(out.disclosures)}`);
+    for (const id of [id1, id2]) assert.equal(entryById(dir, id).status, 'consumed', `${id} consumed`);
 
-    const summary = JSON.parse(r.stdout);
-    assert.deepEqual(summary.deferred_receipts, [], 'deferred_receipts is present-as-EMPTY on a clean run, never absent');
-  } finally {
-    cleanup();
-  }
+    function codes(o) { return (o.disclosures ?? []).map((d) => d.code); }
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// S2: THE MEASURED SHAPE (decision c45b6ee4 — four receipts, three slices, all
-// spent on one commit). Two lanes reviewed concurrently, only lane A staged.
-// SABOTAGE: `stampEntries` -> `eligibleEntries` at commit-reviewed.mjs:563 and
-// :781 -> two trailers and an emptied ledger; both assertions red.
-// ---------------------------------------------------------------------------
-test('file-scoping S2: with two disjoint-territory receipts, committing lane A stamps and consumes ONLY lane A — lane B survives, disclosed by name', { skip: GIT_SKIP }, () => {
+// THE MEASURED SHAPE (decision c45b6ee4: four receipts, three slices, all spent on one
+// commit). Two lanes reviewed concurrently, only lane A staged.
+// EXPECTED: RED today — today lane B is DEFERRED with prose and no code; there is no
+// [receipt_no_overlap] and no Review-Receipt trailer.
+// SABOTAGE: select every spendable receipt instead of only those whose covered paths overlap
+// the staged set -> lane B is stamped onto a commit its reviewer never saw -> the trailer
+// deepEquals and the surviving-entry assertion all red. That false attestation is the entire
+// reason the overlap rule exists.
+test('R1-D13: with two disjoint-territory receipts, committing lane A stamps and consumes ONLY lane A — lane B is disclosed [receipt_no_overlap], stays ACTIVE and byte-identical', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir, 'src/laneA.mjs');
-    const laneB = { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: isoAgo(2_000) };
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], at: isoAgo(1_000) },
-      laneB,
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'lane A only']);
-    assert.equal(r.code, 0, `a scoped commit must succeed — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-correctness'], 'ONLY the receipt covering this diff is stamped — no false attestation for lane B');
-    assert.deepEqual(readLedger(dir), [laneB], 'lane B survives BYTE-IDENTICAL: not stamped, not consumed, not deleted');
-
-    assert.match(r.stderr, /DEFERRED RECEIPT/, `the withholding is disclosed, never silent — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /reviewer-security/, `the disclosure names the receipt — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /src\/laneB\.mjs/, `and the territory it actually reviewed — stderr=${flat(r.stderr)}`);
-
-    const summary = JSON.parse(r.stdout);
-    assert.deepEqual(summary.reviewed_by, ['reviewer-correctness'], 'the report claims only what was stamped');
-    assert.ok(summary.deferred_receipts.some((d) => /reviewer-security/.test(d)), `deferred_receipts carries the same disclosure as stderr — got ${JSON.stringify(summary.deferred_receipts)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S3: the OTHER half of S2 — a deferred receipt is DEFERRED, not stranded. The
-// whole point of leaving it un-consumed is that the commit staging its real
-// territory can still spend it.
-// SABOTAGE: consume from `eligibleEntries` in the S2 run -> lane B is gone and
-// this second invocation refuses with the zero-entries guidance.
-// ---------------------------------------------------------------------------
-test('file-scoping S3: the receipt deferred by lane A is spent normally by the LATER commit that stages lane B — deferral is never stranding', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs');
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: isoAgo(2_000) },
-    ]);
-    assert.equal(runCommitReviewed(dir, ['-m', 'lane A']).code, 0);
-
     stageChange(dir, 'src/laneB.mjs');
-    const r2 = runCommitReviewed(dir, ['-m', 'lane B']);
-    assert.equal(r2.code, 0, `the deferred receipt must be spendable on its own slice — stdout=${r2.stdout} stderr=${flat(r2.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-security'], 'lane B commit carries exactly its own reviewer');
-    assert.deepEqual(readLedger(dir), [], 'and NOW it is consumed');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S4: THE UNPINNED RULE (measured: mutation arm B left the whole suite green).
-// A receipt recording NO files is the STRONGEST unverifiable-territory signal,
-// never "matches nothing" — H22's extractor legitimately records nothing for a
-// real review ("do not modify X, only review it"). Withholding here would
-// SILENTLY DESTROY merge-gate review evidence. Must be stamped even while
-// scoping is actively deferring another receipt.
-// SABOTAGE: `usableFiles(e).length === 0` -> `false` at commit-reviewed.mjs:400
-// -> reviewer-blank is deferred; the trailer and ledger assertions go red.
-// ---------------------------------------------------------------------------
-test('file-scoping S4: a receipt recording NO files is stamped even while file-scoping is deferring another receipt — empty files[] is unverifiable, never a non-match', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
+    git(dir, ['commit', '-m', 'seed lane B']);
+    const laneBBlob = git(dir, ['rev-parse', 'HEAD:src/laneB.mjs']);
     stageChange(dir, 'src/laneA.mjs');
-    const laneB = { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: isoAgo(3_000) };
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const idA = '13000000-0000-4000-8000-000000000001';
+    const idB = '13000000-0000-4000-8000-000000000002';
+    const laneB = v2({ entry_id: idB, agent_type: 'reviewer-security', files: ['src/laneB.mjs'], blobs: { 'src/laneB.mjs': laneBBlob }, base_sha: base });
     writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-blank', files: [], at: isoAgo(2_000) },
-      { agent_type: 'reviewer-absent', at: isoAgo(2_500) },     // `files` key entirely absent
-      { agent_type: 'reviewer-hostile', files: 'src/laneA.mjs', at: isoAgo(2_600) }, // non-array: unusable, not a crash
+      v2({ entry_id: idA, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base }),
       laneB,
     ]);
 
-    const r = runCommitReviewed(dir, ['-m', 'lane A + unattributed reviews']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(
-      readTrailerValues(dir).sort(),
-      ['reviewer-absent', 'reviewer-blank', 'reviewer-correctness', 'reviewer-hostile'],
-      'every unattributed receipt is stamped alongside the matching one; only the attributed non-match is withheld'
-    );
-    assert.deepEqual(readLedger(dir), [laneB], 'exactly one receipt survives, and it is the attributed non-matching one');
-    assert.match(r.stderr, /RECORDS NO FILES/, `the unverifiable-territory advisory still fires — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D13 lane A only', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness'], 'ONLY the covering receipt is stamped — no false attestation for lane B');
+    assert.deepEqual(receiptTrailers(dir), [idA], 'and only its entry_id is bound to the commit');
+    const out = soleJson(r);
+    assert.ok(hasDisclosure(out, 'receipt_no_overlap', idB), `the withholding is disclosed and names the receipt — got ${JSON.stringify(out.disclosures)}`);
+    assert.match(r.stderr, token('receipt_no_overlap'), `and reaches the human channel — stderr=${flat(r.stderr)}`);
+    assert.deepEqual(entryById(dir, idB), laneB, 'lane B survives EXACTLY as written: not stamped, not reserved, not consumed, not deleted');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// S5: THE FALLBACK — the entire safety argument for shipping this on the
-// merge-gate surface. H22's files[] attribution is MEASURED unreliable (board
-// 09e03d76: every receipt mis-attributed; research finding 289cd172: negated
-// paths recorded, positively-asserted ones dropped, globs invisible). When NO
-// receipt matches there is nothing to select on, so the rule must NOT fire —
-// refusing there would brick the CLI and train --waive-reviews.
-// SABOTAGE: drop `!fileScopingApplies ||` at commit-reviewed.mjs:400 -> the
-// INTERNAL INVARIANT VIOLATED refusal fires, exit 1, every assertion red.
-// ---------------------------------------------------------------------------
-test('file-scoping S5 (FALLBACK): when NO eligible receipt matches the staged diff, file-scoping does not apply — every receipt is stamped and consumed exactly as before, never a refusal', { skip: GIT_SKIP }, () => {
+// EXPECTED: RED today only in that the first run's consumption is now a status change;
+// the second run's behaviour is today's too.
+// SABOTAGE: consume every eligible receipt in the first run -> lane B is gone and the second
+// run refuses [no_spendable_receipt] -> red. Withholding is DEFERRAL, never stranding: the
+// commit staging lane B must still be able to spend it.
+test('R1-D14: the receipt withheld by the lane A commit is spent normally by the LATER commit that stages lane B', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
-    stageChange(dir, 'src/feature.mjs');
+    stageChange(dir, 'src/laneB.mjs');
+    git(dir, ['commit', '-m', 'seed lane B']);
+    const laneBBlobAtReview = git(dir, ['rev-parse', 'HEAD:src/laneB.mjs']);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const idA = '14000000-0000-4000-8000-000000000001';
+    const idB = '14000000-0000-4000-8000-000000000002';
     writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/elsewhere.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-security', files: ['src/also-elsewhere.mjs'], at: isoAgo(2_000) },
+      v2({ entry_id: idA, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base }),
+      v2({ entry_id: idB, agent_type: 'reviewer-security', files: ['src/laneB.mjs'], blobs: { 'src/laneB.mjs': laneBBlobAtReview }, base_sha: base }),
     ]);
 
-    const r = runCommitReviewed(dir, ['-m', 'nothing matches']);
-    assert.equal(r.code, 0, `an all-non-matching ledger must NEVER refuse — a hard block here would brick the CLI on a known-unreliable signal — stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.equal(readTrailerValues(dir).length, 2, 'both are stamped: no selection was possible');
-    assert.deepEqual(readLedger(dir), [], 'and both are consumed, exactly as before file-scoping shipped');
-    assert.doesNotMatch(r.stderr, /DEFERRED RECEIPT/, `nothing is deferred in the fallback — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /RECEIPT FILES DO NOT OVERLAP THIS DIFF/, `the pre-existing advisory still speaks here — stderr=${flat(r.stderr)}`);
-    assert.match(r.stderr, /ADVISORY ONLY/, `and still marks itself advisory — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
+    assert.equal(runCommitReviewed(dir, ['-m', 'D14 lane A']).code, 0, 'round one commits lane A');
+    assert.equal(entryById(dir, idB).status, 'active', 'lane B is still spendable after round one');
+
+    // Stage lane B's own slice, and point the still-active receipt at the bytes now staged
+    // (a fresh review of lane B) so the byte rule is satisfied and the only question left is
+    // whether the withheld receipt is still spendable.
+    stageChange(dir, 'src/laneB.mjs', 'export const laneB = 2;\n');
+    const restaged = indexBlob(dir, 'src/laneB.mjs');
+    // Point the still-active receipt at the bytes now staged (a fresh review of lane B).
+    const ledger = readLedger(dir);
+    ledger.find((e) => e.entry_id === idB).content_evidence.blobs['src/laneB.mjs'] = restaged;
+    writeLedger(dir, ledger);
+
+    const r2 = runCommitReviewed(dir, ['-m', 'D14 lane B']);
+    assert.equal(r2.code, 0, `the withheld receipt must be spendable on its own slice — stdout=${flat(r2.stdout)} stderr=${flat(r2.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-security'], 'the lane B commit carries exactly its own reviewer');
+    assert.equal(entryById(dir, idB).status, 'consumed', 'and NOW it is consumed');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// S6: the never-easier property, asserted directly rather than inferred. No
-// trailer may name a receipt that neither matches the diff nor is unattributed.
-// SABOTAGE: push a synthetic agent_type into stampEntries -> red.
-// ---------------------------------------------------------------------------
-test('file-scoping S6: no stamped trailer ever names a receipt that both records territory AND misses this diff — the stamped set is a strict subset, never an invention', { skip: GIT_SKIP }, () => {
+// THE INCOMPLETE-COVERAGE REFUSAL THAT CAUGHT A REAL DEFECT (sheet §3.2 step 1, kept as a
+// code with its byte-identical-ledger assertion).
+// EXPECTED: RED today — today an uncovered staged path is at most an advisory and the commit
+// lands; there is no [coverage_incomplete] and no facts.uncovered.
+// SABOTAGE: check coverage only over the paths the SELECTED receipts declare, instead of over
+// the STAGED set -> the uncovered lane is invisible, exit 0, a commit lands carrying a review
+// trailer for a diff half of which nobody reviewed -> every assertion reds.
+test('R1-D15: a staged code path that NO selected receipt covers refuses [coverage_incomplete] with facts.uncovered — even though another staged path IS covered; ledger byte-identical', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     stageChange(dir, 'src/laneA.mjs');
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], at: isoAgo(1_000) },
-      { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: isoAgo(2_000) },
-      { agent_type: 'reviewer-scope', files: ['src/laneC.mjs'], at: isoAgo(3_000) },
-    ]);
+    stageChange(dir, 'src/laneUnreviewed.mjs', 'export const nobody = 1;\n');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const idA = '15000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: idA, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base })]);
+    const before = readLedgerRaw(dir);
 
-    const r = runCommitReviewed(dir, ['-m', 'subset pin']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    const trailers = readTrailerValues(dir);
-    assert.ok(!trailers.includes('reviewer-security'), `a non-matching receipt must never appear as a trailer — got ${JSON.stringify(trailers)}`);
-    assert.ok(!trailers.includes('reviewer-scope'), `nor the second one — got ${JSON.stringify(trailers)}`);
-    assert.deepEqual(trailers, ['reviewer-correctness']);
-    assert.ok(trailers.length >= 1, 'and the stamped set is never empty while an eligible receipt exists — a trailer-less commit would verify vacuously and land unreviewed');
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D15 half the diff is unreviewed', '--json']);
+    assert.equal(r.code, 1, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    assert.equal(out.code, 'coverage_incomplete', `got ${JSON.stringify(out)}`);
+    assert.deepEqual(out.facts?.uncovered, ['src/laneUnreviewed.mjs'], `the facts name exactly the uncovered path — got ${JSON.stringify(out.facts)}`);
+    assert.equal(git(dir, ['rev-parse', 'HEAD']), base, 'no commit');
+    assert.equal(readLedgerRaw(dir), before, 'ledger byte-identical — the covering receipt is not consumed for a refused commit');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// S7: the two withholdings are DIFFERENT and must stay reported apart — a
-// foreign receipt (wrong session/branch, decision 0408b295) is not a
-// file-scope deferral, and their remedies differ.
-// SABOTAGE: merge deferredDisclosures into foreignDisclosures -> red.
-// ---------------------------------------------------------------------------
-test('file-scoping S7: a FOREIGN receipt and a file-scope DEFERRED receipt are disclosed through separate channels, and both survive un-consumed', { skip: GIT_SKIP }, () => {
+// UNSCOPED RECEIPTS (contract sheet §6 A13): territory.files [] with source ≠ unattributable
+// is the ALWAYS-STAMPED partition the decision KEEPS. Two arms, because the rule has two
+// halves that pull in opposite directions and either one alone is satisfiable by the wrong
+// implementation: it is always SELECTED and STAMPED (arm a), and it NEVER satisfies COVERAGE
+// (arm b). A build that only implements the first stamps unscoped receipts onto unreviewed
+// diffs; one that only implements the second bricks the "review only, do not modify" dispatch
+// whose receipt legitimately records no territory.
+// EXPECTED: arm (a) RED today on the disclosure code, the empty reservation map and the
+// consumed status; arm (b) RED today (today the unscoped receipt is stamped and the commit
+// succeeds, so exit 0 and no facts.considered).
+// SABOTAGE (arm a): treat an empty territory as a non-overlap -> the receipt is withheld,
+// merge-gate review evidence for a real review is silently dropped -> the trailer and
+// consumed assertions red.
+// SABOTAGE (arm b): let an unscoped receipt count toward coverage -> exit 0 and a code diff
+// nobody reviewed commits carrying a review trailer -> the exit-code and facts assertions red.
+// The two sabotages are one-line changes in OPPOSITE directions; neither arm sees the other's.
+test('R1-D16a (A13): an UNSCOPED receipt (territory.files []) beside a covering receipt is ALWAYS stamped and consumed, disclosed [receipt_unscoped], with an EMPTY reservation map', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    installSnapshotHook(dir);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const idCovering = '16000000-0000-4000-8000-00000000000a';
+    const idUnscoped = '16000000-0000-4000-8000-00000000000b';
+    writeLedger(dir, [
+      v2({ entry_id: idCovering, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base }),
+      v2({ entry_id: idUnscoped, agent_type: 'reviewer-blank', files: [], blobs: {}, base_sha: base }),
+    ]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D16a unscoped beside a covering receipt', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const head = git(dir, ['rev-parse', 'HEAD']);
+    assert.deepEqual(reviewedByTrailers(dir).sort(), ['reviewer-blank', 'reviewer-correctness'], 'the unscoped receipt IS stamped — withholding it would destroy real merge-gate evidence');
+    assert.deepEqual(receiptTrailers(dir).sort(), [idCovering, idUnscoped].sort(), 'and bound like any other');
+    const out = soleJson(r);
+    assert.ok(hasDisclosure(out, 'receipt_unscoped', idUnscoped), `the unscoped stamp is DISCLOSED, never silent — got ${JSON.stringify(out.disclosures)}`);
+    assert.deepEqual(snapshotEntry(dir, idUnscoped).reservation.index_blobs, {}, `an unscoped receipt reserves NOTHING — got ${JSON.stringify(snapshotEntry(dir, idUnscoped).reservation)}`);
+    for (const id of [idCovering, idUnscoped]) assert.equal(entryById(dir, id).consumption?.commit_sha, head, `${id} consumed against this commit`);
+  } finally { cleanup(); }
+});
+
+test('R1-D16b (A13): an UNSCOPED receipt ALONE against a code diff never satisfies coverage — the run refuses [coverage_incomplete] and facts.considered names it as receipt_unscoped', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     stageChange(dir, 'src/laneA.mjs');
-    const foreign = { agent_type: 'reviewer-foreign', files: ['src/laneA.mjs'], at: isoAgo(9 * 3_600_000), session_id: 'other-session', branch: 'main' };
-    const deferred = { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: isoAgo(2_000), session_id: 'this-session', branch: 'main' };
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], at: isoAgo(1_000), session_id: 'this-session', branch: 'main' },
-      foreign,
-      deferred,
-    ]);
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '16000000-0000-4000-8000-00000000000c';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-blank', files: [], blobs: {}, base_sha: base })]);
+    const before = readLedgerRaw(dir);
 
-    const r = runCommitReviewedEnv(dir, ['-m', 'foreign vs deferred'], { STERLING_SESSION_ID: 'this-session' });
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-correctness'], 'neither the foreign nor the deferred receipt is stamped');
-
-    const summary = JSON.parse(r.stdout);
-    assert.ok(summary.foreign_receipts.some((d) => /reviewer-foreign/.test(d)), `the foreign one is reported as FOREIGN — got ${JSON.stringify(summary.foreign_receipts)}`);
-    assert.ok(!summary.foreign_receipts.some((d) => /reviewer-security/.test(d)), 'the deferred one is NOT reported as foreign — different cause, different remedy');
-    assert.ok(summary.deferred_receipts.some((d) => /reviewer-security/.test(d)), `the deferred one is reported as DEFERRED — got ${JSON.stringify(summary.deferred_receipts)}`);
-    assert.ok(!summary.deferred_receipts.some((d) => /reviewer-foreign/.test(d)), 'and the foreign one is NOT reported as deferred');
-
-    const after = readLedger(dir);
-    assert.equal(after.length, 2, `both withheld receipts survive — got ${JSON.stringify(after)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D16b unscoped alone', '--json']);
+    assert.equal(r.code, 1, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    const out = soleJson(r);
+    assert.equal(out.code, 'coverage_incomplete', `got ${JSON.stringify(out)}`);
+    assert.deepEqual(out.facts?.uncovered, ['src/laneA.mjs'], `got ${JSON.stringify(out.facts)}`);
+    assert.deepEqual(out.facts?.considered, [{ entry_id: id, code: 'receipt_unscoped' }],
+      `the refusal names WHY the only receipt could not close the gap — got ${JSON.stringify(out.facts)}`);
+    assert.equal(git(dir, ['rev-parse', 'HEAD']), base, 'no commit');
+    assert.deepEqual(reviewedByTrailers(dir, base), [], 'nothing was stamped anywhere');
+    assert.equal(readLedgerRaw(dir), before, 'ledger byte-identical');
+  } finally { cleanup(); }
 });
 
-// ---------------------------------------------------------------------------
-// S8: the scoping DECISION normalizes paths, not merely the advisory. A
-// backslash-spelled receipt path must MATCH, not be deferred — a cosmetic
-// spelling difference must never withhold a real review's stamp.
-// SABOTAGE: `stagedFiles.has(f)` (drop normalizePath) in touchesStaged at
-// commit-reviewed.mjs:395 -> reviewer-correctness is deferred, red.
-// ---------------------------------------------------------------------------
-test('file-scoping S8: a backslash-spelled receipt path normalizes and MATCHES the staged path — path spelling never causes a deferral', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/café.mjs');
-    const laneB = { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: isoAgo(2_000) };
-    writeLedger(dir, [
-      { agent_type: 'reviewer-correctness', files: ['src\\café.mjs'], at: isoAgo(1_000) },
-      laneB,
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'normalized match']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-correctness'], 'the backslash path matched and was stamped');
-    assert.deepEqual(readLedger(dir), [laneB], 'and only the genuinely disjoint receipt was deferred');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S9: THE DEFERRAL CLASS'S OWN FAILURE MODE (review, HIGH — closed at
-// commit-reviewed.mjs:838). File scoping made `files` a PARTITION field, and
-// the consume identity did not include it. The rule the consume block already
-// states — every field that decides the partition must decide the consume — was
-// therefore broken by the very feature built to stop review evidence being
-// destroyed.
-// THE SHAPE, which is exactly the concurrent-lane case this feature exists for:
-// two reviewer-security dispatches in ONE message share agent_type AND the
-// Start-millisecond `at`, and being same-session same-branch they share
-// session_id/branch/base_sha too — so those five fields discriminate NOTHING.
-// One records lane A, one lane B. Committing lane A stamps A and defers B; but
-// `freshLedger.filter` claims the FIRST sameIdentity match, so with B ORDERED
-// FIRST in the file, B is spliced out instead of A. Lane B's evidence is
-// destroyed silently, "never consumed, never deleted" is broken, and A's
-// receipt is then stamped onto the lane B commit through the no-match fallback:
-// a trailer naming a review that never looked at that diff.
-// Before file scoping this was harmless — both were stamped and the multiset
-// consumed both. The DEFERRED class is what created the asymmetry.
-// ORDERING IS LOAD-BEARING: the deferred receipt is written FIRST on purpose.
-// With A first the buggy code happens to remove the right entry and the test
-// would pass while the defect stood.
-// SABOTAGE: revert the key list at commit-reviewed.mjs:838 to
-// ['session_id', 'branch', 'base_sha'] -> the surviving entry is lane A's
-// receipt rather than lane B's, reddening the deepEqual below. MEASURED: that
-// sabotage leaves S1-S8 and all four other ledger suites green, so this is the
-// only pin carrying the verdict.
-// ---------------------------------------------------------------------------
-test('file-scoping S9: two receipts identical in agent_type AND at AND session/branch/base_sha, differing ONLY in files[], consume the STAMPED one and leave the DEFERRED one byte-identical', { skip: GIT_SKIP }, () => {
+// THE CODE-PATH CLASSIFIER (A13: one exported `isCodePath`; these fixtures are its pinned
+// example — `src/**/*.mjs` is code, `docs/**/*.md` is not).
+// EXPECTED: RED today — today's classifier is an inline predicate with no pinned example, and
+// the consumed-status assertion is new either way.
+// SABOTAGE: treat every staged path as a code path -> the docs file becomes an uncovered code
+// path and the run refuses [coverage_incomplete] -> exit 0 and the consumed assertions red. A
+// prose-only commit would then be unspendable, which is the inverse failure of D15's.
+test('R1-D15b (A13): a staged NON-code path (docs/**/*.md) needs no review coverage — a commit staging a covered src/**/*.mjs beside an uncovered docs file succeeds', { skip: GIT_SKIP }, () => {
   const { dir, cleanup } = makeRepo();
   try {
     stageChange(dir, 'src/laneA.mjs');
-    // Same agent_type, same Start-millisecond, same partition fields — a
-    // genuine parallel-dispatch collision. files[] is the ONLY difference.
+    stageChange(dir, 'docs/notes.md', '# notes nobody has to review\n');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const id = '15b00000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base })]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D15b code beside prose']);
+    assert.equal(r.code, 0, `only CODE paths need coverage — stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.notEqual(git(dir, ['rev-parse', 'HEAD']), base, 'the commit was created');
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness']);
+    assert.equal(entryById(dir, id).status, 'consumed');
+  } finally { cleanup(); }
+});
+
+// EXPECTED: GREEN today and after (path normalization is the path owner's job); this pin is
+// a regression guard for a cosmetic difference silently withholding a real review's stamp.
+// THE PATH IS PURE ASCII ON PURPOSE: an earlier draft used `src/café.mjs`, which an
+// NFD-normalising filesystem re-spells on disk, so the arm could red for a unicode reason
+// having nothing to do with the separator this pin is about. One variable per pin.
+// SABOTAGE: compare declared paths against the staged set without normalizing -> the
+// backslash spelling misses, the receipt is withheld, the staged path is uncovered and the
+// run refuses [coverage_incomplete] -> every assertion reds.
+test('R1-D17: a backslash-spelled declared path normalizes and MATCHES the staged path — separator spelling never withholds a stamp', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/nested/lane.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blob = indexBlob(dir, 'src/nested/lane.mjs');
+    const id = '17000000-0000-4000-8000-000000000001';
+    writeLedger(dir, [v2({ entry_id: id, agent_type: 'reviewer-correctness', files: ['src\\nested\\lane.mjs'], blobs: { 'src\\nested\\lane.mjs': blob }, base_sha: base })]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D17 normalized match']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness'], 'the backslash path matched and was stamped');
+    assert.equal(entryById(dir, id).status, 'consumed');
+  } finally { cleanup(); }
+});
+
+// EXPECTED: RED today — today the two withholdings are separated only by two prose channels
+// (foreign_receipts / deferred_receipts); neither code exists.
+// SABOTAGE: merge the two disclosure channels into one code -> whichever assertion names the
+// other code reds. They carry DIFFERENT remedies: a foreign receipt needs a review in THIS
+// session, a non-overlapping one needs the commit that stages its own territory.
+test('R1-D18: a FOREIGN receipt and a NON-OVERLAPPING receipt are disclosed under DIFFERENT codes (receipt_foreign vs receipt_no_overlap) and both stay ACTIVE', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneB.mjs');
+    git(dir, ['commit', '-m', 'seed lane B']);
+    const laneBBlob = git(dir, ['rev-parse', 'HEAD:src/laneB.mjs']);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
+    const blobA = indexBlob(dir, 'src/laneA.mjs');
+    const idOk = '18000000-0000-4000-8000-000000000001';
+    const idForeign = '18000000-0000-4000-8000-000000000002';
+    const idNoOverlap = '18000000-0000-4000-8000-000000000003';
+    writeLedger(dir, [
+      v2({ entry_id: idOk, agent_type: 'reviewer-correctness', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blobA }, base_sha: base }),
+      v2({ entry_id: idForeign, agent_type: 'reviewer-foreign', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': blobA }, base_sha: base, session_id: 'some-other-session' }),
+      v2({ entry_id: idNoOverlap, agent_type: 'reviewer-security', files: ['src/laneB.mjs'], blobs: { 'src/laneB.mjs': laneBBlob }, base_sha: base }),
+    ]);
+
+    const r = runCommitReviewed(dir, ['-m', 'D18 foreign vs non-overlapping', '--json']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(reviewedByTrailers(dir), ['reviewer-correctness'], 'neither withheld receipt is stamped');
+    const out = soleJson(r);
+    assert.ok(hasDisclosure(out, 'receipt_foreign', idForeign), `got ${JSON.stringify(out.disclosures)}`);
+    assert.ok(!hasDisclosure(out, 'receipt_no_overlap', idForeign), 'the foreign one is NOT reported as a non-overlap — different cause, different remedy');
+    assert.ok(hasDisclosure(out, 'receipt_no_overlap', idNoOverlap), `got ${JSON.stringify(out.disclosures)}`);
+    assert.ok(!hasDisclosure(out, 'receipt_foreign', idNoOverlap), 'and the non-overlapping one is not reported as foreign');
+    for (const id of [idForeign, idNoOverlap]) assert.equal(entryById(dir, id).status, 'active', `${id} stays active`);
+  } finally { cleanup(); }
+});
+
+// IDENTITY PARTITIONING, re-cut onto entry_id keying. THE ORDERING IS LOAD-BEARING: the
+// WITHHELD receipt is written FIRST on purpose, because a consume keyed on fields that cannot
+// tell the two apart happens to remove the right entry when the stamped one is first.
+// EXPECTED: RED today — today's consume key is a multiset over (agent_type, at, identity),
+// which these two receipts share entirely, so the FIRST match is spliced out and the WRONG
+// receipt's evidence is destroyed.
+// SABOTAGE: key the reservation/consumption on anything but entry_id (agent_type + finished_at
+// + identity) -> the surviving entry is lane A's rather than lane B's -> the deepEqual reds.
+test('R1-D19: two receipts identical in agent_type, timestamps and identity — differing only in entry_id and territory — consume the COVERING one and leave the other byte-identical', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeRepo();
+  try {
+    stageChange(dir, 'src/laneB.mjs');
+    git(dir, ['commit', '-m', 'seed lane B']);
+    const laneBBlob = git(dir, ['rev-parse', 'HEAD:src/laneB.mjs']);
+    stageChange(dir, 'src/laneA.mjs');
+    const base = git(dir, ['rev-parse', 'HEAD']);
     const collidingAt = isoAgo(1_000);
-    const deferredB = { agent_type: 'reviewer-security', files: ['src/laneB.mjs'], at: collidingAt, session_id: 'this-session', branch: 'main', base_sha: 'a'.repeat(40) };
-    const stampedA = { agent_type: 'reviewer-security', files: ['src/laneA.mjs'], at: collidingAt, session_id: 'this-session', branch: 'main', base_sha: 'a'.repeat(40) };
-    writeLedger(dir, [deferredB, stampedA]); // DEFERRED FIRST — see header
+    const idB = '19000000-0000-4000-8000-000000000001';
+    const idA = '19000000-0000-4000-8000-000000000002';
+    const withheld = v2({ entry_id: idB, agent_type: 'reviewer-security', files: ['src/laneB.mjs'], blobs: { 'src/laneB.mjs': laneBBlob }, base_sha: base, at: collidingAt });
+    const covering = v2({ entry_id: idA, agent_type: 'reviewer-security', files: ['src/laneA.mjs'], blobs: { 'src/laneA.mjs': indexBlob(dir, 'src/laneA.mjs') }, base_sha: base, at: collidingAt });
+    writeLedger(dir, [withheld, covering]); // WITHHELD FIRST — see the header note
 
-    const r = runCommitReviewedEnv(dir, ['-m', 'colliding identities, lane A'], { STERLING_SESSION_ID: 'this-session' });
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-security'], 'exactly one trailer: only the lane A receipt was stamped');
-
-    const after = readLedger(dir);
-    assert.deepEqual(
-      after,
-      [deferredB],
-      `the DEFERRED lane B receipt must survive BYTE-IDENTICAL and the STAMPED lane A receipt must be the one removed — a consume keyed on fields that cannot tell them apart destroys the wrong receipt: ${JSON.stringify(after)}`
-    );
-    assert.deepEqual(after[0].files, ['src/laneB.mjs'], 'and the survivor is unambiguously the lane B receipt, not lane A wearing the same identity');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S10 (CONTROL for S9, and the "still consume correctly" half): two receipts
-// identical in EVERY field INCLUDING files[] share one partition verdict by
-// construction, so both are stamped and the multiset splice must consume BOTH.
-// Adding `files` to the identity key must not strand a genuine duplicate.
-// SABOTAGE: replace the multiset splice with a Set-based `some()` consume ->
-// one duplicate survives forever and the empty-ledger assertion reddens.
-// ---------------------------------------------------------------------------
-test('file-scoping S10 (CONTROL): two receipts identical in EVERY field including files[] are both stamped and BOTH consumed — the widened identity key strands no duplicate', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs');
-    const collidingAt = isoAgo(1_000);
-    const twin = { agent_type: 'reviewer-security', files: ['src/laneA.mjs'], at: collidingAt, session_id: 'this-session', branch: 'main', base_sha: 'a'.repeat(40) };
-    writeLedger(dir, [{ ...twin }, { ...twin }]);
-
-    const r = runCommitReviewedEnv(dir, ['-m', 'true duplicates'], { STERLING_SESSION_ID: 'this-session' });
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-security', 'reviewer-security'], 'no dedupe: one trailer per entry');
-    assert.deepEqual(readLedger(dir), [], 'BOTH duplicates are consumed — neither survives forever');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S11: the widened key must be SHAPE-STABLE across every files[] form, since a
-// key that mis-compares would either strand a stamped receipt (leak, board
-// 09e03d76) or destroy a deferred one (S9). Both sides are parsed from the SAME
-// file, so: absent normalizes to null on both sides and MATCHES; absent vs []
-// correctly does NOT match; [] vs [] and ['x'] vs ['x'] deep-equal; a non-array
-// string compares by string equality. S4's fixture already exercises all three
-// unusable shapes; this asserts the consume half of them explicitly.
-// SABOTAGE: make identityField return `e[k]` raw (dropping the undefined ->
-// null normalization) -> the absent-files receipt no longer matches itself
-// between the two reads, is never consumed, and the ledger is non-empty: red.
-// ---------------------------------------------------------------------------
-test('file-scoping S11: receipts whose files[] is absent, empty, or a non-array string are each consumed correctly once stamped — the widened identity key is shape-stable', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs');
-    // All unattributed (so all stamped via the always-stamp rule), each a
-    // different files[] shape, all sharing agent_type and `at` so the key is
-    // forced to discriminate on files alone.
-    const collidingAt = isoAgo(1_000);
-    writeLedger(dir, [
-      { agent_type: 'reviewer-shape', at: collidingAt },                          // files absent
-      { agent_type: 'reviewer-shape', files: [], at: collidingAt },               // files empty
-      { agent_type: 'reviewer-shape', files: 'src/laneA.mjs', at: collidingAt },  // files non-array
-    ]);
-
-    const r = runCommitReviewed(dir, ['-m', 'files[] shapes']);
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.equal(readTrailerValues(dir).length, 3, 'every unattributed receipt is stamped');
-    assert.deepEqual(readLedger(dir), [], 'and every one is consumed — absent, empty and non-array each match themselves across the two reads');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S12 — MUTATION-EXPOSED GAP, decision 57984926 (review-ledger-v2-lifecycle-
-// refuse-flip-and-external-review-design), cited 2026-08-31: no frozen pin in
-// this file or its siblings ever fed a v2-SHAPED ledger entry through
-// commit-reviewed's eligibility/file-scoping path — every S1-S11 fixture
-// above is flat v1. Sabotaging the adapter's `territory.files` mapping to
-// `[]` left all 84 existing tests green; only a live probe's soft RECORDS NO
-// FILES warning caught it. This pin closes that gap directly.
-// EXPECTED STATE: GREEN today (the adapter already reads v2 correctly).
-// SABOTAGE: map `territory.files` to `[]` when reading a v2 entry instead of
-// the real declared array — the receipt's usable-files count collapses to
-// zero, RECORDS NO FILES fires on stderr, and the `doesNotMatch` assertion
-// below goes red while every OTHER assertion in this file (which only ever
-// exercises flat v1 entries) stays green — that asymmetry is exactly why
-// this pin exists as its own test rather than folding into an existing one.
-// ---------------------------------------------------------------------------
-test('file-scoping S12: a v2-shaped entry (schema_version:2, territory.files, identity{session_id,branch,base_sha}) is selected by file-intersection and stamped — no RECORDS NO FILES', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs');
-    const headSha = git(dir, ['rev-parse', 'HEAD']);
-    writeLedger(dir, [
-      {
-        schema_version: 2,
-        entry_id: 'e2f1a1a0-0000-4000-8000-000000000001',
-        kind: 'roster_receipt',
-        status: 'active',
-        started_at: isoAgo(1_000),
-        finished_at: isoAgo(500),
-        reviewer: { agent_type: 'reviewer-correctness', model: 'claude-opus-5', model_family: 'anthropic', model_source: 'observed' },
-        identity: { session_id: 'this-session', branch: 'main', base_sha: headSha },
-        territory: { files: ['src/laneA.mjs'], source: 'review-territory', attribution: 'block' },
-        content_evidence: { status: 'complete', blobs: {}, absent_paths: [], truncated_of: null, failure_reason: null },
-        disposition: null,
-      },
-    ]);
-
-    const r = runCommitReviewedEnv(dir, ['-m', 'v2 entry, file-intersection'], { STERLING_SESSION_ID: 'this-session' });
-    assert.equal(r.code, 0, `stdout=${r.stdout} stderr=${flat(r.stderr)}`);
-    assert.deepEqual(readTrailerValues(dir), ['reviewer-correctness'], 'the v2 entry is selected by file-intersection and stamped exactly as a flat entry would be');
-    assert.deepEqual(readLedger(dir), [], 'the v2 entry is consumed');
-    assert.doesNotMatch(r.stderr, /RECORDS NO FILES/, `a correctly-read territory.files must never trip the no-files advisory — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// S13 — MED-2, Codex outside-family review thread 01a0586b + decision 57984926
-// (cited 2026-08-31): a STRUCTURALLY-DEFICIENT v2 entry — carrying
-// schema_version:2 but missing entry_id/started_at/identity (the fields a
-// real promotion always sets, per h22-ledger-v2-entry.test.mjs's V2-1) — must
-// never be upgraded into a spendable receipt just because it claims v2. It
-// must be withheld and disclosed, never silently stamped/consumed as though
-// it were a complete entry.
-// Mirrors scripts/tests/h22-receipt-expiry.test.mjs's B1/B2 "either reading"
-// pattern for the lone-receipt exit-code ambiguity: this pin does NOT assert
-// a fixed exit code (zero-eligible-receipts refusal vs. bare success is an
-// open question that file already discloses, not this pin's to resolve) — it
-// asserts the INVARIANT that holds under either reading.
-// EXPECTED RED until the coder adds the structural completeness check.
-// SABOTAGE: treat `schema_version === 2` alone as sufficient to consider an
-// entry eligible/spendable (skip checking entry_id/started_at/identity
-// presence) — the deficient entry gets stamped and consumed, flipping the
-// `after.length` assertion (0 instead of 1) red.
-// ---------------------------------------------------------------------------
-test('file-scoping S13 (MED-2): a structurally-deficient v2 entry ({schema_version:2, reviewer:{agent_type}} only — no entry_id/started_at/identity) must NOT be stamped or consumed, and is disclosed — holds under either reading of the lone-receipt exit-code ambiguity', { skip: GIT_SKIP }, () => {
-  const { dir, cleanup } = makeRepo();
-  try {
-    stageChange(dir, 'src/laneA.mjs');
-    writeLedger(dir, [{ schema_version: 2, reviewer: { agent_type: 'reviewer-security' } }]);
-
-    const r = runCommitReviewed(dir, ['-m', 'structurally-deficient v2']);
-
-    if (r.code === 0) {
-      assert.deepEqual(readTrailerValues(dir), [], 'if the commit succeeds bare, the deficient entry must never earn a Reviewed-By-Agent trailer');
-    }
-    const after = readLedger(dir);
-    assert.equal(after.length, 1, 'the deficient entry survives — never silently spent as a real v2 receipt, regardless of exit code');
-    assert.match(r.stderr, /reviewer-security/, `the withheld entry is named in the disclosure, not silently dropped — stderr=${flat(r.stderr)}`);
-  } finally {
-    cleanup();
-  }
+    const r = runCommitReviewed(dir, ['-m', 'D19 colliding identities']);
+    assert.equal(r.code, 0, `stdout=${flat(r.stdout)} stderr=${flat(r.stderr)}`);
+    assert.deepEqual(receiptTrailers(dir), [idA], 'exactly the covering receipt is bound to the commit');
+    assert.deepEqual(entryById(dir, idB), withheld, 'the withheld receipt survives BYTE-IDENTICAL — a key that cannot tell them apart destroys the wrong one');
+    assert.equal(entryById(dir, idA).status, 'consumed', 'and the covering one is the one consumed');
+  } finally { cleanup(); }
 });

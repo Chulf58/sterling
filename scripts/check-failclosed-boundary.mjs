@@ -442,7 +442,19 @@ const BASELINE = {
     // the Stop-settlement call-site comment inside this try now names the R9
     // attested close as a third rebaseliner. Comment-only; same single entry,
     // the region's statements are unchanged. Verified by RUNNING the check.
-    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #91cc0292" },
+    // ROTATED A TWELFTH TIME 2026-09-07 (#91cc0292 -> #33a94d57, R1 slice):
+    // the register-consumer section inside this try now reads the dispatch
+    // register through the ONE owner (scripts/lib/dispatch-register.mjs
+    // classifyRegister — tri-state status, [dispatch_status_unknown] /
+    // [register_unavailable] disclosures) instead of a raw file read + its own
+    // session+TTL predicate. Same single entry — the catch still reaches
+    // warnNonBlocking, not deny(); no unguarded top-level statement was added.
+    // Verified by RUNNING the check. Same slice, second move (#33a94d57 ->
+    // #c652bea3): the R0 exitAfterWrite migration of releaseWithPressure throws a
+    // TAGGED in-flight error from inside the try (no module-scope sentinel — the
+    // ratchet refused that shape); still one entry, the catch still reaches
+    // warnNonBlocking, no unguarded top-level statement added.
+    { statement: "try { if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers const … #c652bea3" },
   ],
   'h14-bash-allowlist.mjs': [
     { statement: 'const input = readStdin();' },
