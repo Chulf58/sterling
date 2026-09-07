@@ -39,12 +39,22 @@
 // citation context (board / todo / maintenance / decision / article / finding
 // / brief / knowledge_get).
 //
-// LIVE-STORE FIXTURE DEPENDENCY, stated so a failure is diagnosable. T4, T8
-// and T10 exercise the RESOLUTION branch and therefore depend on this repo's
-// own mounted store still holding the board item whose id starts c3705a15
-// ("prose citation resolution"). T4 is the canary: if T4, T8 and T10 fail
-// TOGETHER while T1 passes, suspect that fixture record's absence (a fixture
-// defect) before suspecting the hook. Every other arm is store-independent.
+// NO LIVE-STORE FIXTURE DEPENDENCY ANY MORE — REPAIRED 2026-09-07, AND THIS IS
+// WHY IT MATTERED. T4, T6, T8 and T10 exercise (or are admitted through) the
+// RESOLUTION branch, and they used to feed this repo's OWN mounted store
+// (`cwd: root`) with the prefix of a real board item, c3705a15 ("prose citation
+// resolution"). That board item was HARD-DELETED when it closed on 2026-09-06,
+// so the prefix stopped resolving, the resolution branch went correctly silent,
+// and T4/T8/T10 failed for a FIXTURE reason with no hook defect anywhere near
+// them. A pin whose oracle depends on a mutable live store is a pin that rots
+// on someone else's `board_remove`.
+//
+// They now SELF-PROVISION, exactly as T4b already did: an ISOLATED fixture
+// store, an id created in it by this file, and that store's directory carried
+// on the JSON stdin `cwd` field (decision d9521e96 — the raw shell cwd is not
+// what a hook reads; see `withCwd`). Every arm in this suite is therefore
+// store-independent, and T4 is no longer a canary for anything but the
+// resolution branch itself.
 //
 // CONTROL ARMS. T1 runs FIRST and must WARN: it rules out "the hook is dead /
 // silent unconditionally" as the explanation for every silence arm below — a
@@ -128,9 +138,29 @@ function makeCollisionFixture() {
   return dir;
 }
 
-// A real board item id prefix in this repo's store ("prose citation
-// resolution"), used ONLY where the arm must exercise unique resolution.
-const RESOLVING = 'c3705a15';
+// --- isolated RESOLUTION fixture (T4, T6, T8, T10) --------------------------
+// The id these arms need is one that RESOLVES UNIQUELY through the mounted
+// record universe the hook reads. It is created HERE, in an isolated store, so
+// nothing in this suite depends on the mutable contents of this repo's own
+// store (see the fixture-rot note in the header). The 8-hex prefix is kept
+// byte-identical to the old live id, so no assertion literal moves.
+const RESOLVING_ID = 'c3705a15-0000-4000-8000-000000000001';
+const RESOLVING = RESOLVING_ID.slice(0, 8);
+let resolvingDir = null;
+/** Memoized: one isolated store holding exactly one uniquely-resolving record.
+ *  Returns the directory to hand to `withCwd` (and to spawnSync's cwd, so both
+ *  the JSON `cwd` field and the OS cwd agree). */
+async function resolvingFixture() {
+  if (!resolvingDir) {
+    const Store = await getStore();
+    const dir = makeCollisionFixture();
+    const store = new Store(join(dir, '.sterling', 'sterling.db'));
+    store.create(decisionRow(RESOLVING_ID));
+    store.close();
+    resolvingDir = dir;
+  }
+  return resolvingDir;
+}
 // A synthetic 8-hex that must not resolve to anything.
 const SYNTHETIC = '9c8b7a65';
 // A real decision id (human-readable-ids-for-board-items), used whole in T11.
@@ -304,15 +334,21 @@ test('T3: dates, commit shas, hex words and colours do NOT warn', () => {
 });
 
 // ===========================================================================
-// T4 — THE RESOLUTION BRANCH, and the canary for this suite's live-store
-// fixture dependency. A bare prefix that resolves UNIQUELY is admitted with no
-// trigger word beside it.
+// T4 — THE RESOLUTION BRANCH. A bare prefix that resolves UNIQUELY is admitted
+// with no trigger word beside it.
 // SABOTAGE M11: drop the unique-resolution branch -> SILENT -> red.
-// Paired with T2 (identical shape, non-resolving id, must stay silent), so a
+// Paired with T2 (identical phrasing, non-resolving id, must stay silent), so a
 // green T4 cannot be explained by "everything is admitted".
+// The resolving id is self-provisioned in an isolated store (see
+// resolvingFixture) — T2 runs against the SAME shape with a synthetic id, so
+// the verdict still flips on resolution alone.
 // ===========================================================================
-test('T4: a bare id that resolves uniquely warns even with no trigger word', () => {
-  const r = runHook(askQuestionText(`Should we close ${RESOLVING} before merging?`));
+test('T4: a bare id that resolves uniquely warns even with no trigger word', async () => {
+  const dir = await resolvingFixture();
+  const r = runHook(
+    withCwd(askQuestionText(`Should we close ${RESOLVING} before merging?`), dir),
+    dir,
+  );
   assertWarns(r, RESOLVING, 'T4');
 });
 
@@ -405,9 +441,15 @@ test('T5: a generic type word next to the id is NOT a gloss — still warns', ()
 // gloss test.
 // SABOTAGE M1: isGlossed always false -> warns -> red.
 // ===========================================================================
-test('T6: a CLIPPED human-readable name beside the id counts as a gloss', () => {
+test('T6: a CLIPPED human-readable name beside the id counts as a gloss', async () => {
+  // Run against the isolated resolution fixture too: admission here is by
+  // citation context ("board"), and the id ALSO resolves uniquely in that
+  // store, so admission is doubly guaranteed and the silence can only come
+  // from the gloss test — which is what M1 kills.
+  const dir = await resolvingFixture();
   const r = runHook(
-    askQuestionText(`Close board item prose citation resol… (${RESOLVING}) now?`),
+    withCwd(askQuestionText(`Close board item prose citation resol… (${RESOLVING}) now?`), dir),
+    dir,
   );
   assertSilent(r, 'T6');
 });
@@ -479,19 +521,24 @@ test('T9 (OPPOSITE-REASON CONTROL): the same field shape with an unresolvable id
 // this arm may survive. That would be a second layer holding, not a hollow
 // pin — strip both (concatenate with a space) to see this arm go red.
 // ===========================================================================
-test('T8: a name in one option does NOT gloss an id sitting alone in another field', () => {
+test('T8: a name in one option does NOT gloss an id sitting alone in another field', async () => {
+  const dir = await resolvingFixture();
   const r = runHook(
-    ask({
-      question: 'Which lane should we run next',
-      header: 'Pick a lane',
-      options: [
-        {
-          label: 'prose citation resolution',
-          description: 'the deferred write-time citation warnings',
-        },
-        { label: `(${RESOLVING})`, description: 'the other candidate lane' },
-      ],
-    }),
+    withCwd(
+      ask({
+        question: 'Which lane should we run next',
+        header: 'Pick a lane',
+        options: [
+          {
+            label: 'prose citation resolution',
+            description: 'the deferred write-time citation warnings',
+          },
+          { label: `(${RESOLVING})`, description: 'the other candidate lane' },
+        ],
+      }),
+      dir,
+    ),
+    dir,
   );
   assertWarns(r, RESOLVING, 'T8');
 });
@@ -505,9 +552,14 @@ test('T8: a name in one option does NOT gloss an id sitting alone in another fie
 // SABOTAGE M4: gloss lookback line-start -> 0 (search the whole field) ->
 // "refresh" is taken as the adjacent token -> SILENT -> red.
 // ===========================================================================
-test('T10: a gloss cannot reach across a newline — the lookback is line-scoped', () => {
+test('T10: a gloss cannot reach across a newline — the lookback is line-scoped', async () => {
+  const dir = await resolvingFixture();
   const r = runHook(
-    askQuestionText(`Slice S3 still needs a rotation note refresh\n(${RESOLVING}) — proceed?`),
+    withCwd(
+      askQuestionText(`Slice S3 still needs a rotation note refresh\n(${RESOLVING}) — proceed?`),
+      dir,
+    ),
+    dir,
   );
   assertWarns(r, RESOLVING, 'T10');
 });

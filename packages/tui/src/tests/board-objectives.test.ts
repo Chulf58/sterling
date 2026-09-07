@@ -77,6 +77,32 @@ import { buildDashboardState, initialUi, reduce, QUEUE_TAB, type UiState, type D
 
 const NOW = '2026-06-10T12:00:00.000Z';
 
+/**
+ * A DISTINCT, MONOTONIC stamp per seeded record — DESCENDING from NOW.
+ *
+ * WHY (fixture race, not a behaviour change): the store's total order for
+ * query() is `ORDER BY updated_at DESC, id DESC` (deliberate, for keyset
+ * paging) and the id tiebreak is a RANDOM uuid. Every seed here used to carry
+ * the SAME constant NOW, so the tiebreak decided the order and the two
+ * insertion-order assertions in this file flipped between runs.
+ *
+ * DIRECTION, derived from those assertions: the regression test asserts
+ * `ids(s)` equals `[t1.id, t2.id]` (insertion order) and the projection test
+ * asserts the revealed children equal `[c1.id, c2.id, c3.id]` (insertion
+ * order). Under `updated_at DESC` the row that sorts FIRST needs the LATEST
+ * stamp — so the FIRST record seeded gets the latest stamp and each later seed
+ * a strictly earlier one. Hence descending.
+ *
+ * The clock is BASED 30 SECONDS AFTER NOW and decrements 1ms per seed, so the
+ * first 30,000 seeds all land inside minute 12:00 — a base AT NOW would put
+ * the second seed onward at 11:59:59.999, crossing the minute boundary. Every
+ * stamp still stays strictly OLDER than the `12:30:00` removal stamps the
+ * closed-child arms pass to store.remove().
+ */
+const NOW_MS = Date.parse(NOW) + 30_000;
+let seeded = 0;
+const seedStamp = (): string => new Date(NOW_MS - seeded++).toISOString();
+
 /** The Tasks tab (TABS[0]) — the board tab these ACs are about. */
 const TASKS_TAB = 0;
 /** The namespaced id prefix this oracle fixes for a group header row/entry. */
@@ -108,11 +134,12 @@ const VM = viewmodel as unknown as ObjectiveViewmodel;
 // --------------------------------- fixtures ---------------------------------
 
 function envelope(type: string) {
+  const at = seedStamp();
   return {
     id: randomUUID(),
     type,
-    created_at: NOW,
-    updated_at: NOW,
+    created_at: at,
+    updated_at: at,
     author: 'conductor',
     status: 'active',
     superseded_by: null,

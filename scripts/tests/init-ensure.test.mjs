@@ -10,6 +10,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { ProjectRegistry, SterlingStore } from '@sterling/store';
+import { SANCTIONED_SCRIPTS } from '../lib/store-remediation.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -449,6 +450,51 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
 // Already-fully-covered is NOT rewritten for this reason (falls through to
 // the normal matches/differs outcome). A wrong-shaped store_guard or
 // allow_scripts skips the merge with a warning, field left untouched.
+//
+// RE-CUT 2026-09-07 (re-cut discipline per decision 77c5b85a
+// `sanctioned-script-reach-carries-the-shipped-list`).
+//   OLD PREMISE: the four tests below spell the shipped list out as a 9-entry
+//     literal (and seed their "fully covered" fixture with those nine).
+//   NEW PREMISE: the list is 15 entries and grows by individual disposition
+//     (commits 5a9fe39e, b93a096e), so a re-spelled literal here made these
+//     MERGE tests a second CONTENTS pin that reds on every sanctioned addition.
+//   WHAT DID NOT CHANGE: what they pin — only the missing shipped entries are
+//     appended, after all existing entries, in SANCTIONED_SCRIPTS order;
+//     existing entries/order and hand-tunings survive; every appended entry is
+//     disclosed by name in the report detail; a fully-covered config is never
+//     'refreshed' for the merge reason and stays byte-identical.
+//   WHERE THE CONTENTS ARE PINNED: scripts/tests/store-remediation.test.mjs,
+//     which spells the literal out ONCE (and would red on a corrupted or
+//     emptied export). The anti-vacuity floor below refuses a degenerate
+//     constant here too, so deriving is not self-certification.
+assert.ok(
+  Array.isArray(SANCTIONED_SCRIPTS) && SANCTIONED_SCRIPTS.length >= 9,
+  `ANTI-VACUITY: the merge expectations below derive from SANCTIONED_SCRIPTS, so a degenerate constant would make them pass vacuously — got ${JSON.stringify(SANCTIONED_SCRIPTS)}`
+);
+assert.ok(
+  SANCTIONED_SCRIPTS.every((s) => typeof s === 'string' && s.length > 0 && !s.startsWith('/') && !s.includes('\\')),
+  'ANTI-VACUITY: SANCTIONED_SCRIPTS must be repo-relative POSIX strings (path invariant)'
+);
+assert.equal(new Set(SANCTIONED_SCRIPTS).size, SANCTIONED_SCRIPTS.length, 'ANTI-VACUITY: a duplicate in the shipped list would make the merge/no-op expectations ambiguous');
+
+/** What the merge must produce: recorded entries in their recorded order, then
+ *  ONLY the shipped entries they lack, in SANCTIONED_SCRIPTS order. */
+const sanctionedMergedWith = (preExisting) => [
+  ...preExisting,
+  ...SANCTIONED_SCRIPTS.filter((s) => !preExisting.includes(s)),
+];
+/** Exactly the entries the merge must append — and exactly the names its
+ *  'refreshed' detail must contain (the shipped detail lists them all,
+ *  comma-separated and untruncated). */
+const sanctionedAddedTo = (preExisting) => SANCTIONED_SCRIPTS.filter((s) => !preExisting.includes(s));
+/** A FULLY-COVERED fixture in deliberately NON-CANONICAL order, `extra` entries
+ *  among them: presence is membership, never position, so this must be a no-op
+ *  for the merge. Derived, so a newly sanctioned script cannot leave the seed
+ *  silently incomplete — which is exactly how this fixture went stale. */
+const sanctionedFullyCoveredNonCanonical = (extra = []) => {
+  const reversed = [...SANCTIONED_SCRIPTS].reverse();
+  return [reversed[0], ...extra, ...reversed.slice(1)];
+};
 // =============================================================================
 
 test('store_guard sanctioned merge: a config missing PART of the shipped sanctioned list gains exactly the missing part on re-init (refreshed), hand-tunings and existing allow_scripts entries/order preserved', () => {
@@ -457,10 +503,11 @@ test('store_guard sanctioned merge: a config missing PART of the shipped sanctio
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
     const configPath = join(dir, '.sterling', 'config.json');
     const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    // simulate a config frozen before migrate-stores.mjs was added to the
-    // schema default: only migration-preflight.mjs present, in a store_guard
-    // that also carries an unrelated admin-sanctioned entry.
-    cfg.store_guard = { allow_scripts: ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'] };
+    // simulate a config frozen partway through the shipped list's growth: one
+    // shipped entry (migration-preflight.mjs) present, in a store_guard that
+    // also carries an unrelated admin-sanctioned entry, everything else missing.
+    const preExisting = ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'];
+    cfg.store_guard = { allow_scripts: preExisting };
     cfg.caps.inner_loop_n = 7; // a hand-tuning that MUST survive the managed add
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
@@ -468,23 +515,20 @@ test('store_guard sanctioned merge: a config missing PART of the shipped sanctio
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\b/m, 'reported refreshed, not differs/created');
     const line = rerun.stdout.match(/^\.sterling\/config\.json\s+refreshed\s+.+$/m)[0];
-    assert.match(line, /scripts\/migrate-stores\.mjs/, 'the added script is disclosed by name in the detail text');
+    // the detail text is derived, not a hardcoded name: EVERY appended script is
+    // named in it, and no already-present shipped entry is claimed as added.
+    for (const added of sanctionedAddedTo(preExisting)) {
+      assert.ok(line.includes(added), `every added script is disclosed by name in the detail text — '${added}' missing from: ${line}`);
+    }
+    assert.ok(
+      !line.includes('scripts/migration-preflight.mjs'),
+      `the detail never claims an entry that was already recorded as added: ${line}`
+    );
 
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(
       after.store_guard.allow_scripts,
-      [
-        'scripts/some-admin-script.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExisting),
       'only the MISSING shipped sanctioned scripts are appended; existing entries and their order are untouched'
     );
     assert.equal(after.caps.inner_loop_n, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
@@ -506,32 +550,26 @@ test('store_guard sanctioned merge: a config missing EVERY shipped sanctioned sc
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
     const configPath = join(dir, '.sterling', 'config.json');
     const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    cfg.store_guard = { allow_scripts: ['scripts/some-admin-script.mjs'] };
+    const preExisting = ['scripts/some-admin-script.mjs'];
+    cfg.store_guard = { allow_scripts: preExisting };
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     const line = rerun.stdout.match(/^\.sterling\/config\.json\s+refreshed\s+.+$/m);
     assert.ok(line, 'refreshed line present');
-    assert.match(line[0], /scripts\/migration-preflight\.mjs/, 'migration-preflight.mjs disclosed');
-    assert.match(line[0], /scripts\/migrate-stores\.mjs/, 'migrate-stores.mjs disclosed');
+    // the whole shipped list is missing here, so EVERY shipped entry must be
+    // disclosed by name in the detail — derived, so the disclosure claim cannot
+    // silently shrink to whichever three names a stale literal happened to hold.
+    for (const added of sanctionedAddedTo(preExisting)) {
+      assert.ok(line[0].includes(added), `every added script is disclosed by name — '${added}' missing from: ${line[0]}`);
+    }
     assert.match(line[0], /packages\/tui\/bundle\/sterling-tui\.mjs/, 'the TUI launcher is disclosed by name — repo-relative, never a bare basename');
 
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(
       after.store_guard.allow_scripts,
-      [
-        'scripts/some-admin-script.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExisting),
       'every missing script appended, in SANCTIONED_SCRIPTS order, after the pre-existing entry'
     );
   } finally {
@@ -560,18 +598,11 @@ test('store_guard sanctioned merge: already fully covered — NOT rewritten for 
     // the config as a whole is TUNED and the correct overall outcome is
     // 'differs'; the merge-specific claim is narrower: never 'refreshed' for
     // the merge reason, and byte-identical.
-    cfg.store_guard = { allow_scripts: [
-      'scripts/migrate-stores.mjs',
-      'scripts/some-admin-script.mjs',
-      'packages/tui/bundle/sterling-tui.mjs',
-      'scripts/migration-preflight.mjs',
-      'scripts/commit-reviewed.mjs',
-      'scripts/domain-doctor.mjs',
-      'scripts/architecture-projection.mjs',
-      'scripts/consume-exit.mjs',
-      'scripts/init.mjs',
-      'scripts/dispose-run.mjs',
-    ] };
+    // DERIVED since the 2026-09-07 re-cut: a hand-listed "fully covered" seed
+    // stops being fully covered the moment a script is sanctioned, and then this
+    // test silently changes what it pins (it flipped from 'differs' to
+    // 'refreshed' — the exact failure this re-cut answers).
+    cfg.store_guard = { allow_scripts: sanctionedFullyCoveredNonCanonical(['scripts/some-admin-script.mjs']) };
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
     const before = readFileSync(configPath, 'utf8');
 
@@ -616,7 +647,8 @@ test('config raw-serialize: an unknown/future top-level key survives byte-for-by
     cfg.future_policy = { some_future_field: 'x', nested: { a: 1, b: [1, 2, 3] } };
     // AND, in the same write, missing sanctioned scripts — so the merge path
     // that writes the file back is actually exercised, not just the load gate.
-    cfg.store_guard = { allow_scripts: ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'] };
+    const preExisting = ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'];
+    cfg.store_guard = { allow_scripts: preExisting };
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     const rerun = init(dir); // flagless re-init
@@ -631,18 +663,7 @@ test('config raw-serialize: an unknown/future top-level key survives byte-for-by
     );
     assert.deepEqual(
       after.store_guard.allow_scripts,
-      [
-        'scripts/some-admin-script.mjs',
-        'scripts/migration-preflight.mjs',
-        'scripts/dispose-run.mjs',
-        'scripts/init.mjs',
-        'scripts/consume-exit.mjs',
-        'scripts/architecture-projection.mjs',
-        'scripts/domain-doctor.mjs',
-        'scripts/commit-reviewed.mjs',
-        'scripts/migrate-stores.mjs',
-        'packages/tui/bundle/sterling-tui.mjs',
-      ],
+      sanctionedMergedWith(preExisting),
       'the sanctioned merge itself still ran correctly in the same write'
     );
   } finally {

@@ -126,7 +126,17 @@ test('AGENT_MODEL_KEY covers every registered agent (totality) and folds the rev
 test('templates render with install-time vars: hook commands baked forward-slash, quoted (§6); model/effort resolved from config.models', () => {
   const content = readFileSync(join(TPL, 'coder.md'), 'utf8');
   const { installedContent } = renderInstalledAgent(content, 'coder.md', { ...OPTS, ...CFG });
-  assert.ok(installedContent.includes('"C:/tools with space/node.exe" "C:/plugin/hooks/h3-contract-gate.mjs"'));
+  // The pinned literal tracks agent-templates/coder.md's hook command, which has
+  // carried `--disable-warning=ExperimentalWarning` between the node path and the
+  // hook path since commit 41db69ad (2026-08-22); this assertion was never updated
+  // with it. What is being pinned is unchanged: BOTH substituted paths are
+  // forward-slash and QUOTED (§6), with the space-bearing node path surviving
+  // whole.
+  assert.ok(
+    installedContent.includes(
+      '"C:/tools with space/node.exe" --disable-warning=ExperimentalWarning "C:/plugin/hooks/h3-contract-gate.mjs"'
+    )
+  );
   assert.ok(!installedContent.includes('{{'), 'no tokens survive install (vars AND model/effort resolved)');
   assert.ok(!/command:.*\\\\/.test(installedContent), 'no backslashes in any emitted command');
   // model/effort resolved from config.models[AGENT_MODEL_KEY['coder']]

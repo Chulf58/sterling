@@ -72,9 +72,20 @@ function lossScenario() {
   return { dir, projectDir, domainsRoot, originalId, lostId };
 }
 
+// EVERY `sweep` CALL IN THIS FILE PASSES AN EXPLICIT `--roots`, AND MUST.
+// Without it the sweep's roots() falls back to defaultRoots(), which includes
+// this MACHINE's live ~/.sterling/domains — so a test opened real domain stores
+// it does not own. Under the concurrent full suite that produced 'database is
+// locked' and the sweep aborted with exit 2 instead of the expected 3 (it
+// passed in isolation every time, which is exactly what made it expensive).
+// The fixtures already own a domains root; pointing --roots at it keeps the
+// sweep inside the test's own tree. Where the arm needs the sweep to find
+// NOTHING resolvable, that root is simply empty — which is the same verdict the
+// arm always intended, just no longer dependent on what this machine happens
+// to have mounted.
 test('sweep reports a superseded_by that resolves in no store, and is silent once it resolves', () => {
-  const { projectDir, lostId, originalId } = lossScenario();
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  const { projectDir, domainsRoot, lostId, originalId } = lossScenario();
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(swept.code, 3, 'dangling pointers exit 3 so a caller can branch on the finding');
   assert.match(swept.stdout, new RegExp(lostId), 'names the missing target id');
   assert.match(swept.stdout, new RegExp(originalId), 'names the tombstone holding the pointer');
@@ -109,8 +120,11 @@ test('restore is dry-run by default, applies only with --apply, resurrects the D
     'provenance link back to the tombstone, same shape knowledge_promote writes'
   );
 
-  // the sweep is now clean …
-  const swept = doctor(['sweep', '--project', projectDir], projectDir);
+  // the sweep is now clean … (--roots is the fixture's own domains root, which
+  // is where the restore just materialized the domain store the successor
+  // resolves in — so the clean verdict is proven against a store this test
+  // owns, never against whatever this machine has under ~/.sterling/domains)
+  const swept = doctor(['sweep', '--project', projectDir, '--roots', domainsRoot], projectDir);
   assert.equal(swept.code, 0, 'no dangling pointers after the restore');
 
   // … and a second apply refuses: the id resolves, there is nothing to restore.
@@ -869,6 +883,11 @@ test(
   () => {
     const dir = mkdtempSync(join(tmpdir(), 'doctor-race3-'));
     const projectDir = configProject(dir, { domains: {} });
+    // This scenario declares NO domain mounts, so the sweep's roots must be an
+    // empty directory THIS TEST owns — not defaultRoots()'s live
+    // ~/.sterling/domains (see the --roots note on the first sweep test).
+    const emptyRoots = join(dir, 'domains');
+    mkdirSync(emptyRoots, { recursive: true });
     const dbPath = join(projectDir, '.sterling', 'store.db');
     const walPath = `${dbPath}-wal`;
     const shmPath = `${dbPath}-shm`;
@@ -905,7 +924,7 @@ test(
       const walBefore = readFileSync(walPath);
       const mainBefore = readFileSync(dbPath);
 
-      const r = doctor(['sweep', '--project', projectDir], projectDir);
+      const r = doctor(['sweep', '--project', projectDir, '--roots', emptyRoots], projectDir);
       // CONTROL ARM C: the sweep COMPLETED and actually read the hot store —
       // it names a dangling pointer that exists only in -wal. Without this,
       // byte-identity is equally satisfied by a sweep that never opened it.
@@ -952,6 +971,10 @@ test(
   () => {
     const dir = mkdtempSync(join(tmpdir(), 'doctor-race4-'));
     const projectDir = configProject(dir, { domains: {} });
+    // Empty roots this test owns — see the --roots note on the first sweep
+    // test. It lives OUTSIDE .sterling, so it is not in the snapshot below.
+    const emptyRoots = join(dir, 'domains');
+    mkdirSync(emptyRoots, { recursive: true });
     const sterlingDir = join(projectDir, '.sterling');
     const dbPath = join(sterlingDir, 'store.db');
 
@@ -974,7 +997,7 @@ test(
         `CONTROL ARM: the snapshot must actually cover the store, its hot -wal and the config — an empty or partial snapshot makes "unchanged" vacuous. Saw: ${nonShmNames(before).join(', ')}`
       );
 
-      const r = doctor(['sweep', '--project', projectDir], projectDir);
+      const r = doctor(['sweep', '--project', projectDir, '--roots', emptyRoots], projectDir);
       const out = r.stdout + r.stderr;
 
       // CONTROL ARMS FIRST — an "unchanged directory" has more than one

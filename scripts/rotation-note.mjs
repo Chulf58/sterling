@@ -11,7 +11,7 @@
 // Anchored to git HEAD + branch at write time so the restore can disclose drift.
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
 import { classifyRegister } from './lib/dispatch-register.mjs';
 import { readLock } from './hooks/lib/plan-lock.mjs';
 import { arg as sharedArg, fail as sharedFail } from './lib/project.mjs';
@@ -142,7 +142,8 @@ const commitsAhead = commitsAheadRaw !== null && /^\d+$/.test(commitsAheadRaw) ?
 // exact failure this closes.
 function readStaleMinutes() {
   try {
-    const cfg = JSON.parse(readFileSync(join(cwd, '.sterling', 'config.json'), 'utf8'));
+    const cfgPath = resolveStoreWritePath(cwd, '.sterling', 'config.json');
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'));
     const v = cfg?.dispatch_register?.stale_minutes;
     return typeof v === 'number' && v > 0 ? v : 60;
   } catch {
