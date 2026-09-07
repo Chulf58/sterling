@@ -91,8 +91,8 @@ test('AC1: board_edit replaces a unique passage in a user board item text withou
     // (same idiom as board_update's own test).
     const laterTools = new SterlingTools({ store, now: () => LATER });
 
-    // EXPECTED FAILURE TODAY: TS2339 "Property 'boardEdit' does not exist on
-    // type 'SterlingTools'" (compile-time) — board_edit is not implemented.
+    // Authored red-first (TS2339 on boardEdit at the time); board_edit has since
+    // landed and this arm is retained as its regression pin.
     const after = editedItem(laterTools.boardEdit(original.id, 'with header', 'with headers'));
 
     assert.equal(after.id, original.id, 'the id is PRESERVED — board_edit is an in-place edit, not a supersession (decision a91c80b5)');
@@ -269,8 +269,8 @@ test('AC4: board_get returns the full untruncated item, refuses an unknown id na
       record: { id: string; text: string };
     };
 
-    // EXPECTED FAILURE TODAY: TS2339 "Property 'boardGet' does not exist on
-    // type 'SterlingTools'" (compile-time) — board_get is not implemented.
+    // Authored red-first (TS2339 on boardGet at the time); board_get has since
+    // landed and this arm is retained as its regression pin.
     const full = tools.boardGet(item.id) as unknown as { id: string; text: string };
     assert.equal(full.id, item.id);
     assert.equal(full.text, longText, 'the FULL text, byte for byte — untruncated, unlike the digest projection');
