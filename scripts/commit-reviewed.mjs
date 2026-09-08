@@ -30,7 +30,7 @@ import { arg, hasFlag } from './lib/project.mjs';
 import { refusal, disclosure, render, toJson } from './lib/review-errors.mjs';
 import { resolveSessionIdentity, withLedgerLock } from './lib/dispatch-register.mjs';
 import {
-  readLedger, writeLedger, receiptCoveredPaths, receiptIsSpendable, isCodePath,
+  readLedger, writeLedger, receiptCoveredPaths, receiptAssignedPaths, receiptIsSpendable, isCodePath,
   normalizeReceiptPath, isUsableBlobSha,
 } from './hooks/lib/review-ledger-entry.mjs';
 import { TRAILER, formatTrailerBlock, readCommitTrailers, isSha40 } from './lib/review-trailers.mjs';
@@ -335,11 +335,14 @@ function effectiveReceiptBlobFor(receipt, path) {
 }
 
 // priorReceiptMatchesTree — A18 H2: does a PRIOR (already-consumed) receipt's
-// covered-path evidence still equal the given tree? Used only for the amend
-// re-bind's fail-closed pre-check (R1-D113); a receipt with no covered paths
-// at all trivially matches (nothing to disagree about).
+// ASSIGNED-path evidence still equal the given tree? Used only for the amend
+// re-bind's fail-closed pre-check (R1-D113); a receipt with no assigned paths
+// at all trivially matches (nothing to disagree about). Assigned (fix
+// 8590a004) — consumption.paths when the spend was scoped narrower than the
+// receipt's full covered territory, every covered path for a legacy
+// consumption — never every path the receipt merely declared.
 function priorReceiptMatchesTree(receipt, sha) {
-  const covered = receiptCoveredPaths(receipt);
+  const covered = receiptAssignedPaths(receipt);
   for (const p of covered) {
     const side = effectiveReceiptBlobFor(receipt, p);
     const actual = treeBlobFor(sha, p);
@@ -354,10 +357,25 @@ function priorReceiptMatchesTree(receipt, sha) {
   return true;
 }
 
+// computeByteRule — PER-PATH ANY-RECEIPT SATISFACTION (fix board 8590a004,
+// decision commit-reviewed-byte-rule-is-existential-per-path-spent-receipts-
+// record-assigned-paths, dae6cf46, superseding the per-(receipt, path) rule
+// this module shipped with): for each staged code path covered by any
+// selected scoped receipt, matched_by = the receipts whose effective evidence
+// for that path equals the comparison blob (sha equal, or 'absent' for a
+// deletion). The path is SATISFIED when matched_by is non-empty; a mismatch
+// is recorded ONLY when matched_by is empty — at most one aggregate per path,
+// naming every disagreeing {entry_id, receipt_blob} so a fix-after-review
+// slice (a stale roster receipt beside a later, matching delta receipt) is
+// never refused on a path some receipt genuinely attests. `receipt_blob` at
+// the top level stays the FIRST disagreeing blob (backwards compatible with
+// the pre-fix {path, receipt_blob, index_blob} shape). `matchedPathsByReceipt`
+// feeds spend selection (determineSpend): a receipt that never matched any of
+// its covered paths contributes nothing and is not spent by this commit.
 // getComparisonBlob(path) -> 40-hex sha | null (absent)
 function computeByteRule(selection, codePaths, getComparisonBlob) {
-  const mismatches = [];
   const coveredByCode = new Set();
+  const byPath = new Map(); // path -> [{receipt, receiptBlobFact, match}]
   for (const { receipt, overlap } of selection.selectedScoped) {
     for (const p of overlap) {
       coveredByCode.add(p);
@@ -375,11 +393,117 @@ function computeByteRule(selection, codePaths, getComparisonBlob) {
         receiptBlobFact = side.values[0];
         match = false;
       }
-      if (!match) mismatches.push({ path: p, receipt_blob: receiptBlobFact, index_blob: actual ?? 'absent' });
+      if (!byPath.has(p)) byPath.set(p, []);
+      byPath.get(p).push({ receipt, receiptBlobFact, match });
     }
   }
+
+  const mismatches = [];
+  const matchedPathsByReceipt = new Map(); // entry_id -> Set(path)
+  for (const [p, entries] of byPath) {
+    const matched = entries.filter((e) => e.match);
+    if (matched.length > 0) {
+      for (const e of matched) {
+        if (!matchedPathsByReceipt.has(e.receipt.entry_id)) matchedPathsByReceipt.set(e.receipt.entry_id, new Set());
+        matchedPathsByReceipt.get(e.receipt.entry_id).add(p);
+      }
+      continue;
+    }
+    const actual = getComparisonBlob(p);
+    const receipts = entries.map((e) => ({ entry_id: e.receipt.entry_id, receipt_blob: e.receiptBlobFact }));
+    mismatches.push({ path: p, receipt_blob: receipts[0].receipt_blob, index_blob: actual ?? 'absent', receipts });
+  }
+
   const uncovered = codePaths.filter((p) => !coveredByCode.has(p));
-  return { mismatches, uncovered };
+  return { mismatches, uncovered, matchedPathsByReceipt };
+}
+
+// projectMismatchesForFacts — the EXTERNAL (refusal facts / --json) view of a
+// mismatch stays EXACTLY {path, receipt_blob, index_blob} — the pre-fix shape
+// frozen byte-for-byte in commit-reviewed-bytes-refuse.test.mjs
+// R1-D31/R1-D33/R1-D124b/R1-D124c via strict deepEqual, for ANY receipt
+// count. Every consulted receipt (regardless of count) is named instead in
+// the SIBLING fact `facts.receipts_by_path` (see receiptsByPathFacts) —
+// outside `mismatches`, so it never perturbs that frozen shape.
+// `byteRule.mismatches` itself (used internally by determineSpend for
+// waiver-contributor attribution) always carries the full `receipts` array;
+// only this projection strips it.
+function projectMismatchesForFacts(mismatches) {
+  return mismatches.map(({ path, receipt_blob, index_blob }) => ({ path, receipt_blob, index_blob }));
+}
+
+// receiptsByPathFacts — F1 (review round on fix 8590a004): the ruling requires
+// EVERY disagreeing receipt to be named, including in the singleton case
+// projectMismatchesForFacts trims from `facts.mismatches` for pin
+// compatibility. This sibling fact — OUTSIDE facts.mismatches, so it never
+// touches the frozen deepEqual shape — carries the full per-path receipt list
+// regardless of count: {path: [{entry_id, receipt_blob}, ...]}.
+function receiptsByPathFacts(mismatches) {
+  const byPath = {};
+  for (const m of mismatches) byPath[m.path] = m.receipts.map((r) => ({ entry_id: r.entry_id, receipt_blob: r.receipt_blob }));
+  return byPath;
+}
+
+// determineSpend — turns the byte rule's verdict into the SPENT SET (decision
+// dae6cf46): (a) every scoped receipt contributing at least one matched path;
+// (b) under --waive-bytes, every scoped receipt whose evidence mismatched on
+// a globally unmatched path (ALL such stale receipts on that path are waiver
+// contributors — their attested bytes are gone from the tree either way, and
+// an unbound Review-Bytes-Waiver naming a never-spent receipt is exactly the
+// laundering the rejected "waive the non-spent stragglers" alternative would
+// have produced); (c) unscoped receipts, unchanged. A scoped candidate in
+// neither (a) nor (b) is left untouched — not reserved, not stamped, not
+// consumed — and is disclosed once as [receipt_not_spent_stale_bytes].
+// ASSIGNED paths for a spent scoped receipt = its matched paths UNION its
+// waived paths for this commit — the exact set the reservation and the
+// consumption record (`paths`) persist, so every downstream verifier checks
+// exactly what this receipt was actually credited for.
+function determineSpend(selection, byteRule, waiveReason, mismatchMessage) {
+  let waivedIds = [];
+  if (byteRule.mismatches.length > 0) {
+    if (!waiveReason) {
+      return {
+        error: refusal('receipt_bytes_mismatch', {
+          mismatches: projectMismatchesForFacts(byteRule.mismatches),
+          receipts_by_path: receiptsByPathFacts(byteRule.mismatches),
+        }, mismatchMessage),
+      };
+    }
+    const waivedSet = new Set();
+    for (const m of byteRule.mismatches) for (const rr of m.receipts) waivedSet.add(rr.entry_id);
+    waivedIds = [...waivedSet];
+  }
+
+  const spentPathsByReceipt = new Map(); // entry_id -> Set(path)
+  const notSpent = [];
+  for (const { receipt, overlap } of selection.selectedScoped) {
+    const matched = byteRule.matchedPathsByReceipt.get(receipt.entry_id) ?? new Set();
+    const waivedPaths = new Set();
+    if (waivedIds.includes(receipt.entry_id)) {
+      for (const m of byteRule.mismatches) {
+        if (m.receipts.some((rr) => rr.entry_id === receipt.entry_id)) waivedPaths.add(m.path);
+      }
+    }
+    const assigned = new Set([...matched, ...waivedPaths]);
+    if (assigned.size > 0) spentPathsByReceipt.set(receipt.entry_id, assigned);
+    else notSpent.push({ entry_id: receipt.entry_id, paths: [...overlap] });
+  }
+
+  const spendSelected = [
+    ...selection.selectedUnscoped,
+    ...selection.selectedScoped.filter((s) => spentPathsByReceipt.has(s.receipt.entry_id)).map((s) => s.receipt),
+  ];
+  return { waivedIds, spentPathsByReceipt, notSpent, spendSelected };
+}
+
+// bytesWaivedDisclosure — `entry_ids` is carried both inside `facts` (the
+// review-errors.mjs convention every other disclosure follows) AND at the top
+// level (the operator-facing shape: "which receipts were spent under the
+// waiver", checked directly by the P4/P9 pins) — a purely additive
+// convenience field, never a second source of truth.
+function bytesWaivedDisclosure(waivedIds, reason) {
+  const d = disclosure('bytes_waived', { entry_ids: waivedIds, reason });
+  return { ...d, entry_ids: waivedIds };
 }
 
 // ---------------------------------------------------------------------------
@@ -559,33 +683,28 @@ async function runNewCommit({ message, messageMissing, waiveReason, json, ctx, c
     };
   }
 
-  let waivedIds = [];
-  if (byteRule.mismatches.length > 0) {
-    if (!waiveReason) {
-      return { code: 1, disclosures: selection.disclosures, refusalObj: refusal('receipt_bytes_mismatch', { mismatches: byteRule.mismatches }, 'staged bytes do not match the reviewed bytes') };
-    }
-    waivedIds = [...new Set(selection.selectedScoped
-      .filter((s) => byteRule.mismatches.some((m) => s.overlap.includes(m.path)))
-      .map((s) => s.receipt.entry_id))];
-  }
+  const spend = determineSpend(selection, byteRule, waiveReason, 'staged bytes do not match the reviewed bytes');
+  if (spend.error) return { code: 1, disclosures: selection.disclosures, refusalObj: spend.error };
+  const { waivedIds, spentPathsByReceipt, notSpent, spendSelected } = spend;
 
   const disclosures = [...selection.disclosures];
-  if (waivedIds.length > 0) disclosures.push(disclosure('bytes_waived', { entry_ids: waivedIds, reason: waiveReason }));
-  if (selection.selected.length > MULTI_SPEND_THRESHOLD) disclosures.push(disclosure('multi_spend', { count: selection.selected.length }));
+  if (waivedIds.length > 0) disclosures.push(bytesWaivedDisclosure(waivedIds, waiveReason));
+  for (const ns of notSpent) disclosures.push(disclosure('receipt_not_spent_stale_bytes', { entry_id: ns.entry_id, paths: ns.paths }));
+  if (spendSelected.length > MULTI_SPEND_THRESHOLD) disclosures.push(disclosure('multi_spend', { count: spendSelected.length }));
   const staleDays = typeof config?.review_ledger?.stale_days === 'number' ? config.review_ledger.stale_days : STALE_DAYS_DEFAULT;
-  for (const r of selection.selected) disclosures.push(...ageDisclosuresFor(r, staleDays));
+  for (const r of spendSelected) disclosures.push(...ageDisclosuresFor(r, staleDays));
 
   return spendAndCommit({
-    json, message, selection, waivedIds, disclosures,
-    reservationIndexBlobsFor: (receipt, overlap) => {
+    json, message, spendSelected, spentPathsByReceipt, waivedIds, disclosures,
+    reservationIndexBlobsFor: (spentPaths) => {
       const map = {};
-      for (const p of overlap) map[p] = indexBlobs.get(p) ?? null;
+      for (const p of spentPaths) map[p] = indexBlobs.get(p) ?? null;
       return map;
     },
     buildMessage: () => `${message}\n\n${formatTrailerBlock({
-      roster: selection.selected.map((r) => r.reviewer.agent_type),
+      roster: spendSelected.map((r) => r.reviewer.agent_type),
       waiver: waivedIds,
-      receipt: selection.selected.map((r) => r.entry_id),
+      receipt: spendSelected.map((r) => r.entry_id),
     })}`,
     commitAndGetSha: (fullMessage) => {
       const before = gitOk(['rev-parse', 'HEAD']);
@@ -627,13 +746,19 @@ async function runAmend({ targetSha, waiveReason, json, ctx, config }) {
   // covered-path blobs still equal the amended tree (which --amend preserves
   // exactly, per the clean-tree guard above) — presence and status alone are
   // not enough; a receipt that never matched the tree must not be carried
-  // forward into a NEW sha (R1-D113).
+  // forward into a NEW sha (R1-D113). F2 (fix 8590a004 review round): a prior
+  // receipt ALSO named by a Review-Bytes-Waiver trailer on the OLD commit is
+  // bound once consumed, mirroring verifyOneReceiptBinding's waiver rule —
+  // its assigned paths are exactly the ones it was waived for, which never
+  // matched the tree by construction, so requiring a blob match here would
+  // make a --waive-bytes commit permanently un-amendable.
   const byId = new Map();
   for (const e of ledgerLoad.entries) if (e.kind === 'receipt') byId.set(e.receipt.entry_id, e.receipt);
+  const priorWaived = new Set(priorTrailers.waiver);
   for (const priorId of priorTrailers.receipt) {
     const priorReceipt = byId.get(priorId);
     const boundOk = priorReceipt && priorReceipt.status === 'consumed' && priorReceipt.consumption?.commit_sha === resolved
-      && priorReceiptMatchesTree(priorReceipt, resolved);
+      && (priorWaived.has(priorId) || priorReceiptMatchesTree(priorReceipt, resolved));
     if (!boundOk) {
       return { code: 1, refusalObj: refusal('target_sha_prior_receipt_unbound', { entry_id: priorId }, 'a preserved Review-Receipt trailer names a receipt not consumed for the old sha, or whose bytes do not match the amended tree') };
     }
@@ -661,33 +786,28 @@ async function runAmend({ targetSha, waiveReason, json, ctx, config }) {
     return { code: 1, disclosures: selection.disclosures, refusalObj: refusal('coverage_incomplete', { uncovered: byteRule.uncovered, considered: [...selection.considered, ...unscopedConsidered] }, 'the target diff is not fully covered') };
   }
 
-  let waivedIds = [];
-  if (byteRule.mismatches.length > 0) {
-    if (!waiveReason) {
-      return { code: 1, disclosures: selection.disclosures, refusalObj: refusal('receipt_bytes_mismatch', { mismatches: byteRule.mismatches }, 'target tree bytes do not match the reviewed bytes') };
-    }
-    waivedIds = [...new Set(selection.selectedScoped
-      .filter((s) => byteRule.mismatches.some((m) => s.overlap.includes(m.path)))
-      .map((s) => s.receipt.entry_id))];
-  }
+  const spend = determineSpend(selection, byteRule, waiveReason, 'target tree bytes do not match the reviewed bytes');
+  if (spend.error) return { code: 1, disclosures: selection.disclosures, refusalObj: spend.error };
+  const { waivedIds, spentPathsByReceipt, notSpent, spendSelected } = spend;
 
   const disclosures = [...selection.disclosures];
-  if (waivedIds.length > 0) disclosures.push(disclosure('bytes_waived', { entry_ids: waivedIds, reason: waiveReason }));
-  if (selection.selected.length > MULTI_SPEND_THRESHOLD) disclosures.push(disclosure('multi_spend', { count: selection.selected.length }));
+  if (waivedIds.length > 0) disclosures.push(bytesWaivedDisclosure(waivedIds, waiveReason));
+  for (const ns of notSpent) disclosures.push(disclosure('receipt_not_spent_stale_bytes', { entry_id: ns.entry_id, paths: ns.paths }));
+  if (spendSelected.length > MULTI_SPEND_THRESHOLD) disclosures.push(disclosure('multi_spend', { count: spendSelected.length }));
   const staleDays = typeof config?.review_ledger?.stale_days === 'number' ? config.review_ledger.stale_days : STALE_DAYS_DEFAULT;
-  for (const r of selection.selected) disclosures.push(...ageDisclosuresFor(r, staleDays));
+  for (const r of spendSelected) disclosures.push(...ageDisclosuresFor(r, staleDays));
 
   return spendAndCommit({
-    json, message: null, selection, waivedIds, disclosures,
-    reservationIndexBlobsFor: (receipt, overlap) => {
+    json, message: null, spendSelected, spentPathsByReceipt, waivedIds, disclosures,
+    reservationIndexBlobsFor: (spentPaths) => {
       const map = {};
-      for (const p of overlap) map[p] = treeBlobFor(resolved, p);
+      for (const p of spentPaths) map[p] = treeBlobFor(resolved, p);
       return map;
     },
     buildMessage: () => mergeTrailers(originalText, {
-      roster: selection.selected.map((r) => r.reviewer.agent_type),
+      roster: spendSelected.map((r) => r.reviewer.agent_type),
       waiver: waivedIds,
-      receipt: selection.selected.map((r) => r.entry_id),
+      receipt: spendSelected.map((r) => r.entry_id),
     }),
     commitAndGetSha: (fullMessage) => {
       if (fullMessage === null) return { ok: false, error: 'trailer merge failed' };
@@ -726,7 +846,7 @@ function checkPublicationGuard(targetSha) {
 
 // spendAndCommit — the shared two-phase reserve/commit/verify/finalize body.
 async function spendAndCommit({
-  json, selection, waivedIds, disclosures, reservationIndexBlobsFor, buildMessage, commitAndGetSha,
+  json, spendSelected, spentPathsByReceipt, waivedIds, disclosures, reservationIndexBlobsFor, buildMessage, commitAndGetSha,
   attestationSubject, attestationTouched, amend,
 }) {
   let nonce;
@@ -740,15 +860,16 @@ async function spendAndCommit({
       for (const ce of l.entries) if (ce.kind === 'receipt') freshByEntryId.set(ce.receipt.entry_id, ce);
       // A18 RE-VALIDATION: re-check status UNDER THE LOCK. THIS IS ALL-OR-
       // NOTHING — buildMessage() below stamps a Reviewed-By-Agent/Review-
-      // Receipt/waiver line for EVERY entry in selection.selected, so
-      // reserving only a SUBSET would commit a Review-Receipt trailer for a
-      // receipt that was never actually reserved (direct-merge later refuses
-      // that as unbound). A receipt no longer `active` here is NEVER
-      // overwritten, and NOTHING is reserved when any one of them fails —
-      // ledger byte-identical, refuse before any write.
+      // Receipt/waiver line for EVERY entry in spendSelected (fix 8590a004:
+      // the SPENT set, never the earlier candidate selection), so reserving
+      // only a SUBSET would commit a Review-Receipt trailer for a receipt
+      // that was never actually reserved (direct-merge later refuses that as
+      // unbound). A receipt no longer `active` here is NEVER overwritten, and
+      // NOTHING is reserved when any one of them fails — ledger
+      // byte-identical, refuse before any write.
       const notFoundIds = [];
       const notActiveDetails = [];
-      for (const r of selection.selected) {
+      for (const r of spendSelected) {
         const fresh = freshByEntryId.get(r.entry_id);
         if (!fresh) { notFoundIds.push(r.entry_id); continue; }
         if (fresh.receipt.status !== 'active') notActiveDetails.push({ entry_id: r.entry_id, status: fresh.receipt.status });
@@ -762,14 +883,18 @@ async function spendAndCommit({
       nonce = randomBytes(8).toString('hex');
       const at = new Date().toISOString();
       const blobsById = {};
-      const ids = selection.selected.map((r) => r.entry_id);
+      const ids = spendSelected.map((r) => r.entry_id);
       for (const id of ids) {
         const idx = freshByEntryId.get(id).index;
         const entry = rawEntries[idx];
-        const overlap = selection.selectedScoped.find((s) => s.receipt.entry_id === id)?.overlap ?? [];
-        const indexBlobs = reservationIndexBlobsFor(entry, overlap);
+        const spentPaths = [...(spentPathsByReceipt.get(id) ?? [])];
+        const indexBlobs = reservationIndexBlobsFor(spentPaths);
         blobsById[id] = indexBlobs;
-        rawEntries[idx] = { ...entry, status: 'reserved', reservation: { nonce, at, operation: 'commit-reviewed', index_blobs: indexBlobs } };
+        // X1: record whether THIS reservation is a waiver contributor —
+        // reconcile has no other way to know, and it needs to demand the
+        // Review-Bytes-Waiver trailer for it, mirroring
+        // verifyOneReceiptBinding's own waiver rule.
+        rawEntries[idx] = { ...entry, status: 'reserved', reservation: { nonce, at, operation: 'commit-reviewed', index_blobs: indexBlobs, waived: waivedIds.includes(id) } };
       }
       writeLedger(ROOT, rawEntries);
       return { ids, blobsById };
@@ -817,7 +942,7 @@ async function spendAndCommit({
   // direct-merge refuses it the same way.
   const allowedReceiptIds = new Set([...expectedReceiptIds, ...(amend?.rebind ?? [])]);
   for (const id of trailers.receipt) if (!allowedReceiptIds.has(id)) missing.push(`unexpected:${TRAILER.receipt}:${id}`);
-  const selectedById = new Map(selection.selected.map((r) => [r.entry_id, r]));
+  const selectedById = new Map(spendSelected.map((r) => [r.entry_id, r]));
   const expectedRoster = reservedIds.map((id) => selectedById.get(id)?.reviewer?.agent_type);
   for (const v of expectedRoster) {
     const idx = trailers.roster.indexOf(v);
@@ -825,6 +950,15 @@ async function spendAndCommit({
     else trailers.roster.splice(idx, 1);
   }
   for (const id of waivedIds) if (!trailers.waiver.includes(id)) missing.push(`${TRAILER.waiver}:${id}`);
+  // X2 (review round on fix 8590a004): the chain Review-Bytes-Waiver ⊆
+  // Review-Receipt ⊆ the spent set must hold on the COMMITTED message, not
+  // just "every id this run meant to waive is present" — an UNEXPECTED
+  // waiver trailer (one a hook injected, or one naming a receipt this commit
+  // does not even bind) is just as unbound an attestation as a missing one,
+  // and verifyOneReceiptBinding treats ANY Review-Bytes-Waiver-named receipt
+  // as bytes-exempt, so an extra one would silently waive a receipt this run
+  // never decided to.
+  for (const id of trailers.waiver) if (!trailers.receipt.includes(id)) missing.push(`unexpected:${TRAILER.waiver}:${id}`);
 
   // A18: VERIFY THE COMMITTED TREE — the reservation's index_blobs (exactly
   // what was staged at reserve time) must equal what actually landed. A
@@ -895,7 +1029,12 @@ async function spendAndCommit({
         const idx = indexByEntryId.get(id);
         const entry = rawEntries[idx];
         const { reservation, ...rest } = entry;
-        rawEntries[idx] = { ...rest, status: 'consumed', consumption: { commit_sha: sha, consumed_at: consumedAt, nonce } };
+        // ASSIGNED paths persist on the consumption record (fix 8590a004 /
+        // decision commit-reviewed-byte-rule-is-existential-per-path-spent-
+        // receipts-record-assigned-paths) — reservation.index_blobs already
+        // held exactly the paths this receipt was credited for.
+        const assignedPaths = Object.keys(entry.reservation?.index_blobs ?? {});
+        rawEntries[idx] = { ...rest, status: 'consumed', consumption: { commit_sha: sha, consumed_at: consumedAt, nonce, paths: assignedPaths } };
       }
       if (amend) {
         // Re-check UNDER THE LOCK that each prior receipt is still consumed

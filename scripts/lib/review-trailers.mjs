@@ -14,7 +14,7 @@
 // (it never reads HEAD implicitly, and it never walks history).
 
 import { spawnSync } from 'node:child_process';
-import { receiptCoveredPaths, normalizeReceiptPath } from '../hooks/lib/review-ledger-entry.mjs';
+import { receiptAssignedPaths, normalizeReceiptPath } from '../hooks/lib/review-ledger-entry.mjs';
 
 export const TRAILER = { roster: 'Reviewed-By-Agent', waiver: 'Review-Bytes-Waiver', receipt: 'Review-Receipt' };
 
@@ -84,9 +84,13 @@ export function formatTrailerBlock({ roster = [], waiver = [], receipt = [] } = 
 // commit is bound once consumed for it — the waiver IS the visible
 // attestation, so blob equality is not required (facts.waived:true). An
 // UNWAIVED receipt still needs content_evidence.blobs to equal this commit's
-// OWN TREE for every covered path (deletions match by membership in
-// absent_paths, per receiptCoveredPaths). Binding does NOT prove the
-// receipt's TERRITORY was reviewed at these bytes beyond its own covered
+// OWN TREE for every ASSIGNED path (receiptAssignedPaths — consumption.paths
+// when the spend was scoped to less than the receipt's full covered
+// territory, decision commit-reviewed-byte-rule-is-existential-per-path-
+// spent-receipts-record-assigned-paths; every covered path, per
+// receiptCoveredPaths, for a legacy consumption with no `paths`; deletions
+// match by membership in absent_paths). Binding does NOT prove the
+// receipt's TERRITORY was reviewed at these bytes beyond its own assigned
 // paths — a caller needing that (superseded's coverage rule) checks it
 // separately against its own reference receipt.
 // SHA HYGIENE (A19): every sha reaching git here is isSha40-validated first;
@@ -121,7 +125,22 @@ function verifyOneReceiptBinding({ cwd, sha, entryId, ledgerEntries, waived }) {
   if (waived) {
     return { ok: true, entry_id: entryId, receipt, facts: { waived: true } };
   }
-  const covered = receiptCoveredPaths(receipt);
+  const covered = receiptAssignedPaths(receipt);
+  // M1 (review round on fix 8590a004, security): an EMPTY assigned-path set
+  // must not silently mean "verify nothing" — the loop below is a no-op over
+  // zero paths and would otherwise return ok:true unconditionally. Pass
+  // through only the two LEGITIMATE zero-path shapes: unwaived-but-named-in-
+  // the-waiver-trailer is already handled above, so what remains here is a
+  // genuinely UNSCOPED receipt (territory.files.length === 0 — it never
+  // declared any path, so it has nothing to assign or verify by construction,
+  // per receiptIsSpendable's own unscoped handling). Anything else — a scoped
+  // receipt whose assigned paths narrowed (or were crafted) to nothing — is
+  // an attestation binding to no evidence at all, refused loudly rather than
+  // treated as a vacuous pass.
+  const unscoped = !Array.isArray(receipt.territory?.files) || receipt.territory.files.length === 0;
+  if (covered.length === 0 && !unscoped) {
+    return { ok: false, entry_id: entryId, code: 'superseder_commit_receipt_unbound', facts: { entry_id: entryId, reason: 'assigned-paths-empty' } };
+  }
   const absentPaths = new Set(
     (receipt.content_evidence?.absent_paths ?? [])
       .filter((p) => typeof p === 'string')

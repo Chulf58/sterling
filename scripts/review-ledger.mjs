@@ -56,7 +56,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { arg, hasFlag, argAll } from './lib/project.mjs';
-import { classifyLedgerEntry, writeLedger, withLedgerLock, receiptCoveredPaths, normalizeReceiptPath, readLedger, ledgerDigest } from './hooks/lib/review-ledger-entry.mjs';
+import { classifyLedgerEntry, writeLedger, withLedgerLock, receiptCoveredPaths, receiptAssignedPaths, normalizeReceiptPath, readLedger, ledgerDigest } from './hooks/lib/review-ledger-entry.mjs';
 import { resolveSessionIdentity } from './lib/dispatch-register.mjs';
 import { refusal, disclosure, render, toJson } from './lib/review-errors.mjs';
 import { readCommitTrailers, isRosterTrailerValue, verifyCommitReceiptBinding, isSha40 } from './lib/review-trailers.mjs';
@@ -389,10 +389,15 @@ function verifySupersededCommit(ctx) {
   });
   if (!anyNewer) return { refusal: true, code: 'superseder_commit_receipt_unbound' };
 
+  // R1 fix 8590a004: a bound receipt credits coverage only for the paths it is
+  // ASSIGNED (receiptAssignedPaths — consumption.paths when the spend was
+  // scoped narrower than its full covered territory, every covered path for a
+  // legacy consumption) — never every path it merely declared, or a receipt
+  // spent for path A while stale on path B would wrongly cover B here too.
   const targetCovered = coveredPathsForSupersession(target);
   const covered = {};
   for (const r of binding.results) {
-    for (const p of receiptCoveredPaths(r.receipt)) {
+    for (const p of receiptAssignedPaths(r.receipt)) {
       if (!(p in covered)) covered[p] = { by: r.entry_id };
     }
   }
@@ -610,8 +615,38 @@ function reservationMatchesCommitTree(sha, indexBlobs) {
   return true;
 }
 
-function findMatchingCommits(entryId, indexBlobs) {
-  return reachableCommits().filter((sha) => readCommitTrailers(root, sha).receipt.includes(entryId) && reservationMatchesCommitTree(sha, indexBlobs));
+// X1 (review round on fix 8590a004): a commit only genuinely BINDS a
+// reservation when it carries what spendAndCommit's own post-commit verify
+// would have demanded — the Review-Receipt trailer, the reservation's exact
+// tree blobs (both checked to form a CANDIDATE), the roster trailer naming
+// this receipt's OWN agent_type, and, for a reservation taken under
+// --waive-bytes (reservation.waived), the Review-Bytes-Waiver trailer naming
+// it (both checked to promote a candidate to BOUND). The two are kept
+// distinct on purpose: a candidate whose bytes/trailer genuinely don't match
+// is not this reservation's commit at all (safe to RELEASE, R1-C102's
+// "blob-mismatch" arm); a candidate that DOES match receipt+bytes but is
+// missing its roster/waiver trailer is a commit that is still out there
+// naming this reservation with the right bytes — releasing it would let the
+// same evidence be spent a second time, so it must stay RESERVED instead
+// (never released, never finalized) until a human resolves it.
+function findMatchingCommits(receipt, indexBlobs) {
+  const entryId = receipt.entry_id;
+  const agentType = receipt.reviewer?.agent_type;
+  const waived = receipt.reservation?.waived === true;
+  const candidates = [];
+  for (const sha of reachableCommits()) {
+    const trailers = readCommitTrailers(root, sha);
+    if (!trailers.receipt.includes(entryId)) continue;
+    if (!reservationMatchesCommitTree(sha, indexBlobs)) continue;
+    const missingRoster = typeof agentType === 'string' && !trailers.roster.includes(agentType);
+    const missingWaiver = waived && !trailers.waiver.includes(entryId);
+    candidates.push({
+      sha,
+      bound: !missingRoster && !missingWaiver,
+      missingTrailer: missingWaiver ? 'Review-Bytes-Waiver' : missingRoster ? 'Reviewed-By-Agent' : null,
+    });
+  }
+  return candidates;
 }
 
 async function runReconcile(rest) {
@@ -633,18 +668,67 @@ async function runReconcile(rest) {
     for (const idx of reservedIdxs) {
       const receipt = classified[idx].receipt;
       const reservation = receipt.reservation;
-      const matches = findMatchingCommits(receipt.entry_id, reservation?.index_blobs);
-      if (matches.length > 1) {
-        throw refusal('reconcile_ambiguous', { entry_id: receipt.entry_id, commits: matches }, 'more than one commit binds this reservation — resolve by hand');
+      const candidates = findMatchingCommits(receipt, reservation?.index_blobs);
+      const bound = candidates.filter((c) => c.bound);
+      if (bound.length > 1) {
+        throw refusal('reconcile_ambiguous', { entry_id: receipt.entry_id, commits: bound.map((c) => c.sha) }, 'more than one commit binds this reservation — resolve by hand');
       }
-      plans.push(matches.length === 1 ? { idx, entryId: receipt.entry_id, outcome: 'finalized', sha: matches[0], nonce: reservation.nonce } : { idx, entryId: receipt.entry_id, outcome: 'released' });
+      if (bound.length === 1) {
+        plans.push({ idx, entryId: receipt.entry_id, outcome: 'finalized', sha: bound[0].sha, nonce: reservation.nonce });
+        continue;
+      }
+      // A candidate exists (receipt trailer + exact tree bytes) but is missing
+      // the roster/waiver trailer that would BIND it — the commit is real and
+      // still out there naming this reservation, so it is neither released
+      // (that would let the same bytes be spent again) nor finalized (that
+      // would launder a verification failure through the recovery path).
+      const unresolved = candidates.find((c) => !c.bound);
+      if (unresolved) {
+        throw refusal(
+          'reconcile_unresolved',
+          { entry_id: receipt.entry_id, commit_sha: unresolved.sha, missing_trailer: unresolved.missingTrailer },
+          `a commit reachable from HEAD names this reservation and matches its bytes, but is missing its ${unresolved.missingTrailer} trailer — resolve by hand (never released: the commit still names it)`
+        );
+      }
+      plans.push({ idx, entryId: receipt.entry_id, outcome: 'released', nonce: reservation.nonce });
+    }
+
+    // X1: every entry sharing a reservation NONCE was reserved together by
+    // ONE spendAndCommit invocation and must resolve to the SAME commit — or
+    // none may finalize. A split (some members finalizing to different
+    // commits, or some finalizing while a sibling releases) means the
+    // group's own binding requirements disagree about what actually landed,
+    // exactly the shape a commit-msg hook stripping one trailer produces.
+    // Checked BEFORE any write, same atomicity as reconcile_ambiguous above.
+    const byNonce = new Map();
+    for (const plan of plans) {
+      if (!byNonce.has(plan.nonce)) byNonce.set(plan.nonce, []);
+      byNonce.get(plan.nonce).push(plan);
+    }
+    for (const [nonce, group] of byNonce) {
+      if (group.length < 2) continue;
+      const resolutions = new Set(group.map((p) => (p.outcome === 'finalized' ? p.sha : null)));
+      if (resolutions.size > 1) {
+        throw refusal(
+          'reconcile_nonce_split',
+          { nonce, entries: group.map((p) => ({ entry_id: p.entryId, outcome: p.outcome, commit_sha: p.sha ?? null })) },
+          'entries reserved together under one nonce resolved to different commits — resolve by hand'
+        );
+      }
     }
 
     const nowIso = new Date().toISOString();
     const rawEntries = ledger.rawEntries;
     for (const plan of plans) {
       const { reservation, ...rest } = rawEntries[plan.idx];
-      rawEntries[plan.idx] = plan.outcome === 'finalized' ? { ...rest, status: 'consumed', consumption: { commit_sha: plan.sha, consumed_at: nowIso, nonce: plan.nonce } } : { ...rest, status: 'active' };
+      // The reservation's index_blobs map already holds exactly the ASSIGNED
+      // paths for a scoped spend (fix 8590a004) — its keys ARE consumption.paths,
+      // so a reconciled partial-path reservation binds the same paths a clean
+      // finalize would have.
+      const assignedPaths = Object.keys(reservation?.index_blobs ?? {});
+      rawEntries[plan.idx] = plan.outcome === 'finalized'
+        ? { ...rest, status: 'consumed', consumption: { commit_sha: plan.sha, consumed_at: nowIso, nonce: plan.nonce, paths: assignedPaths } }
+        : { ...rest, status: 'active' };
     }
     writeLedger(root, rawEntries);
 
