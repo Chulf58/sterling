@@ -1768,8 +1768,9 @@ const PORCH_HAZARD_SHARE = 0.6;
 const PORCH_DIGEST_SHARE = 0.4;
 
 /** Reserve width (decimal digits) for the porch-end line's own self-reported
- *  byte count — see porchEndLine below for why this is a placeholder-then-
- *  substitute, not a true fixed point. 6 digits covers any budget under 1
+ *  byte count. porchEndLine (below) first renders with this reserved width and
+ *  then substitutes the measured count, so the reserve is a substitution slot,
+ *  not a true fixed point. 6 digits covers any budget under 1
  *  million bytes, which every configured/derived budget in this mechanism is
  *  many orders of magnitude under. */
 const PORCH_BYTE_COUNT_RESERVE = '000000';
