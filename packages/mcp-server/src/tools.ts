@@ -4,10 +4,10 @@
 
 import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { ZodError, type ZodIssue } from 'zod';
-import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
+import { ZodError, type ZodIssue, type ZodTypeAny, type ZodRawShape } from 'zod';
+import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, configSchema, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -1205,6 +1205,369 @@ const MUTATION_REFUSED_FIELDS: readonly string[] = ['scope'];
 function elementOwnsScalar(el: unknown, key: string): el is Record<string, unknown> {
   if (!el || typeof el !== 'object') return false;
   return Object.prototype.hasOwnProperty.call(el, key) && (el as Record<string, unknown>)[key] !== undefined;
+}
+
+// -----------------------------------------------------------------------
+// config_set (decision config-writes-get-a-config-set-mcp-tool-with-positive-
+// key-allowlist-raw-edit-denial-stays). H15's structured-write arm denies a
+// raw Edit/Write into ANY .sterling file, including config.json — this is the
+// one sanctioned in-session route around that denial for a fixed, reviewed
+// set of tunable keys. Module-level (not on the class) so the allowlist is
+// policy data any reader can find beside the tool, per the decision's own
+// framing ("one exported constant CONFIG_SET_ALLOWLIST beside the tool").
+//
+// CONDUCTOR-RUN BY DESIGN (review item 10): no agent-templates/*.md grants
+// this tool. That is INTENTIONAL, not an oversight to fix — the decision is
+// explicit that this server authenticates no caller, so keeping config_set
+// off every roster grant is what keeps posture knobs (tdd.enabled,
+// delegation.max_concurrent, …) and review_ledger.stale_days out of a
+// subagent's reach even though nothing in the wire protocol itself would
+// stop a caller that HELD the tool from flipping one.
+// -----------------------------------------------------------------------
+
+/**
+ * The positive allowlist of dotted config.json key paths config_set may
+ * write. Two entries are FAMILIES (`models.<key>`, `delivery.<key>`) — the
+ * concrete `<key>` is validated at call time against the canonical schema's
+ * own `models`/`delivery` object shape (configSetFamilyKeys below), never
+ * hand-duplicated here, so a schema addition (a new agent-model key, a new
+ * delivery tunable) is admitted without touching this list. Every other
+ * entry is matched by exact string equality. Anything not covered here —
+ * store_guard.*, toolchains.*, machine_role, backup_path, store_authority,
+ * review_ledger.code_globs, and every unknown key — is refused naming this
+ * list (decision statement, "WHAT SHIPS").
+ */
+export const CONFIG_SET_ALLOWLIST = [
+  'models.<key>',
+  'tdd.enabled',
+  'mutation_verification.enabled',
+  'sparring_partner.enabled',
+  'sparring_partner.model',
+  'delegation.max_concurrent',
+  'maintenance_queue.deep_threshold',
+  'delivery.<key>',
+  'dispatch_register.stale_minutes',
+  'review_ledger.stale_days',
+] as const;
+
+const CONFIG_SET_EXACT_PATHS = new Set<string>(CONFIG_SET_ALLOWLIST.filter((p) => !p.includes('<key>')));
+const CONFIG_SET_FAMILIES = ['models', 'delivery'] as const;
+type ConfigSetFamily = (typeof CONFIG_SET_FAMILIES)[number];
+
+/**
+ * Unwrap a ZodDefault-wrapped ZodObject field down to its raw shape's key
+ * set — mirrors the unwrap loop `objectShapeFor` (packages/schemas/src/
+ * records.ts) already uses for record-type schemas, applied here to a plain
+ * config.ts field instead of a RECORD_TYPES entry (that function is keyed by
+ * registered record type name, not reusable for a config sub-schema).
+ */
+function configSetFamilyKeys(family: ConfigSetFamily): string[] {
+  let schema: unknown = (configSchema.shape as Record<string, ZodTypeAny>)[family];
+  for (let i = 0; i < 5 && schema && typeof schema === 'object'; i++) {
+    const shape = (schema as { shape?: ZodRawShape }).shape;
+    if (shape) return Object.keys(shape);
+    const inner = (schema as { _def?: { innerType?: unknown; schema?: unknown } })._def;
+    schema = inner?.innerType ?? inner?.schema;
+  }
+  return [];
+}
+
+/**
+ * Verdict for one dotted `path` against CONFIG_SET_ALLOWLIST. `family` is
+ * set whenever `path` matches a family's PREFIX shape (`<family>.<one
+ * segment>`); `leaf_unknown` (vs the default "not on the allowlist" cause)
+ * is set when the shape matches a family but the concrete key is not one the
+ * schema defines for it.
+ *
+ * BOTH FAMILIES ARE MEMBERSHIP-CHECKED THE SAME WAY (review fix, item 1 —
+ * reverting an earlier asymmetric design): `models.<key>` and
+ * `delivery.<key>` both check the concrete key against the canonical
+ * schema's own object shape (configSetFamilyKeys). Making `delivery`'s zod
+ * object `.strict()` so an unknown leaf failed WHOLE-DOCUMENT VALIDATION
+ * instead was REJECTED — that turns any unmodeled on-disk delivery key
+ * (a forward-shipped field, a hand-edit) into a startup failure of
+ * parseConfig itself (server.ts boot) with no config_set available to fix
+ * it, because the server that would serve the tool never comes up. The two
+ * refusal CAUSES still stay distinguishable (packages/mcp-server/src/tests/
+ * config-set.test.ts CS-11 pins delivery specifically): an unknown key
+ * inside an allowlisted family is refused by `configSetFamilyLeafDenial`,
+ * which never says "allowlist" — the caller should keep trying delivery
+ * keys, just not that one.
+ */
+function configSetAllowlistVerdict(path: string): { allowed: boolean; family?: ConfigSetFamily; leaf_unknown?: boolean } {
+  if (CONFIG_SET_EXACT_PATHS.has(path)) return { allowed: true };
+  for (const family of CONFIG_SET_FAMILIES) {
+    const prefix = `${family}.`;
+    if (!path.startsWith(prefix)) continue;
+    const rest = path.slice(prefix.length);
+    if (!rest || rest.includes('.')) return { allowed: false, family };
+    if (configSetFamilyKeys(family).includes(rest)) return { allowed: true, family };
+    return { allowed: false, family, leaf_unknown: true };
+  }
+  return { allowed: false };
+}
+
+function configSetAllowlistDenial(path: string, family?: ConfigSetFamily): string {
+  const hint = family ? ` (${family} keys currently defined: ${configSetFamilyKeys(family).join(', ') || '<none>'})` : '';
+  return (
+    `config_set: '${path}' is not on the allowlist${hint} — allowed paths: ${CONFIG_SET_ALLOWLIST.join(', ')}. ` +
+    'Nothing was written (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays).'
+  );
+}
+
+/**
+ * The DISTINCT refusal for "the family namespace is allowlisted, but this
+ * concrete leaf is not one the schema defines" — deliberately never uses the
+ * word "allowlist" (pin CS-11): that word means "this whole path is denied
+ * by the positive-list rule", which is not true here — delivery.* and
+ * models.* stay allowlisted namespaces, only this one leaf is unrecognized.
+ */
+function configSetFamilyLeafDenial(path: string, family: ConfigSetFamily): string {
+  const keys = configSetFamilyKeys(family).join(', ') || '<none>';
+  return (
+    `config_set: '${path}' is not a defined ${family} setting — known ${family} keys: ${keys}. ` +
+    'Nothing was written.'
+  );
+}
+
+// Prototype-pollution guard (review fix, item 2): `categoryObj[key] = value`
+// further down uses bracket assignment on a PLAIN object built by spreading
+// the parsed JSON — assigning to `__proto__` there does not create an own
+// enumerable property (so it never round-trips through JSON.stringify and
+// the caller gets a "successful" receipt for a write that silently vanished
+// from the file — a false action claim) while still mutating the live
+// object's prototype chain in-process. `constructor`/`prototype` are refused
+// for the same class of reason. Checked against EVERY dotted segment of the
+// caller's raw path, before the allowlist verdict even runs, so no future
+// family or exact entry can reopen this by accident.
+const CONFIG_SET_FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
+
+/**
+ * The implementation behind SterlingTools.configSet, kept as a standalone
+ * function (rather than inline in the class method) so the module-level
+ * allowlist helpers above stay the only things it touches — no dependency on
+ * `this`, beyond the repoRoot the caller already resolved.
+ *
+ * THE WHOLE DOCUMENT IS ROUND-TRIPPED AS A PLAIN JS OBJECT, never through
+ * parseConfig's own `.parse()` output: configSchema is a non-strict
+ * `z.object`, so `.parse()` SILENTLY STRIPS any top-level key it does not
+ * model (e.g. `review_ledger.code_globs`) — writing that stripped shape back
+ * would delete an unrelated consumer's data on every unrelated config_set
+ * call. safeParse is used PURELY AS A VALIDATOR; the bytes written are the
+ * caller's own merged raw object, so every unrelated top-level and sibling
+ * key survives byte-for-byte (a pin).
+ *
+ * DISCLOSURE (review item 8, belongs beside the tool's served description
+ * too): the file is always RE-SERIALIZED as 2-space, LF-terminated JSON — a
+ * CRLF or 4-space source file is reformatted WHOLE, not edited in place. A
+ * leading UTF-8 BOM is stripped on read rather than reported as a corrupt
+ * file. Every write here is CAS-checked against the bytes this call itself
+ * observed, but a caller that skips `expected_digest` still risks a
+ * last-rename-wins loss against a genuinely concurrent writer (the TUI's own
+ * config-writeback) between ITS read and THIS call's write — passing
+ * `expected_digest` is how a caller detects that instead of silently losing
+ * it.
+ */
+function configSetImpl(
+  repoRoot: string | undefined,
+  path: string,
+  value: unknown,
+  expectedDigest: string | undefined
+): { path: string; previous_value: unknown; value: unknown; digest: string } {
+  if (!repoRoot) {
+    throw new Error(`config_set: no project root is known to this server, so .sterling/config.json cannot be resolved.`);
+  }
+  if (typeof path !== 'string' || !path.trim()) {
+    throw new Error(`config_set: 'path' is required — a dotted key path from CONFIG_SET_ALLOWLIST.`);
+  }
+  // P5: an omitted `value` is refused BEFORE anything else (review item 3) —
+  // JSON.stringify drops an object property whose value is `undefined`, so
+  // letting this through would silently DELETE the addressed leaf while the
+  // receipt still reports {value: undefined} as if something had been set.
+  // The MCP wire also refuses this at the schema layer (server.ts); this is
+  // the second, class-level layer for any direct (non-wire) caller.
+  if (value === undefined) {
+    throw new Error(
+      `config_set: 'value' is required — an omitted value would silently DELETE '${path}' via JSON.stringify while still reporting success. Pass an explicit value (null is fine) to set exactly what you intend. Nothing was written.`
+    );
+  }
+  // Prototype-pollution guard (review item 2), checked against EVERY dotted
+  // segment before the allowlist verdict runs at all.
+  if (path.split('.').some((seg) => CONFIG_SET_FORBIDDEN_SEGMENTS.has(seg))) {
+    throw new Error(
+      `config_set: '${path}' contains a forbidden path segment — __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`
+    );
+  }
+
+  const verdict = configSetAllowlistVerdict(path);
+  if (!verdict.allowed) {
+    throw new Error(
+      verdict.family && verdict.leaf_unknown ? configSetFamilyLeafDenial(path, verdict.family) : configSetAllowlistDenial(path, verdict.family)
+    );
+  }
+
+  const configDir = join(repoRoot, '.sterling');
+  const configPath = join(configDir, 'config.json');
+
+  // Symlink/escape hardening (review item 6). existsSync FOLLOWS symlinks —
+  // it reads FALSE for a DANGLING link, which used to fall straight into the
+  // "absent" branch below and let a planted dangling symlink at config.json
+  // slip past the isSymbolicLink() check entirely (renameSync then replaces
+  // the LINK ITSELF with a fresh file, silently destroying it). lstatSync in
+  // a try/catch tells absence (ENOENT) apart from every other on-disk shape
+  // without ever following a link.
+  let dirLst: ReturnType<typeof lstatSync> | null;
+  try {
+    dirLst = lstatSync(configDir);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(`config_set: could not stat .sterling at the project root (${(e as Error).message}). Nothing was written.`);
+    }
+    dirLst = null;
+  }
+  if (!dirLst) {
+    throw new Error(`config_set: no .sterling directory at the project root — this is not an initialized Sterling project. Nothing was written.`);
+  }
+  if (dirLst.isSymbolicLink()) {
+    throw new Error(`config_set: .sterling is a symlink at the project root — refusing a structured write beneath a linked directory. Nothing was written.`);
+  }
+  const realDir = realpathSync(configDir);
+  const realRoot = realpathSync(repoRoot);
+  const relDir = relative(realRoot, realDir);
+  if (relDir === '..' || relDir.startsWith(`..${sep}`) || isAbsolute(relDir)) {
+    throw new Error(`config_set: .sterling resolves outside the project root (${realDir}) — refusing. Nothing was written.`);
+  }
+
+  let fileLst: ReturnType<typeof lstatSync> | null;
+  try {
+    fileLst = lstatSync(configPath);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw new Error(`config_set: could not stat .sterling/config.json (${(e as Error).message}). Nothing was written.`);
+    }
+    fileLst = null;
+  }
+
+  let currentBytes: Buffer;
+  if (fileLst) {
+    if (fileLst.isSymbolicLink()) {
+      throw new Error(`config_set: .sterling/config.json is a symlink — refusing a structured write through a link, including a dangling one. Nothing was written.`);
+    }
+    if (!fileLst.isFile()) {
+      throw new Error(`config_set: .sterling/config.json is not a regular file — refusing. Nothing was written.`);
+    }
+    currentBytes = readFileSync(configPath);
+  } else {
+    currentBytes = Buffer.alloc(0);
+  }
+
+  const currentDigest = createHash('sha256').update(currentBytes).digest('hex');
+  if (expectedDigest !== undefined && expectedDigest !== currentDigest) {
+    throw new Error(
+      `config_set: expected_digest ${expectedDigest} does not match the current config.json digest ${currentDigest} — it changed since you read it. Nothing was written; re-read and retry.`
+    );
+  }
+
+  let raw: Record<string, unknown>;
+  if (currentBytes.length === 0) {
+    raw = {};
+  } else {
+    // BOM stripping (review item 8): a leading UTF-8 BOM is a legitimate
+    // artifact of some Windows editors/tools, not corruption — strip it
+    // before JSON.parse rather than refusing a well-formed document over one
+    // invisible leading character.
+    let text = currentBytes.toString('utf8');
+    if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      throw new Error(`config_set: .sterling/config.json is not valid JSON (${(e as Error).message}) — refusing a blind merge onto a corrupt file. Nothing was written.`);
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error(`config_set: .sterling/config.json does not contain a JSON object at its root — refusing. Nothing was written.`);
+    }
+    raw = parsed as Record<string, unknown>;
+  }
+
+  // Every allowlisted path is exactly two dotted segments (category.key) —
+  // verified above by configSetAllowlistVerdict (an exact match is a fixed
+  // two-segment literal; a family match requires exactly one segment past
+  // the family prefix).
+  const dot = path.indexOf('.');
+  const category = path.slice(0, dot);
+  const key = path.slice(dot + 1);
+
+  const existingCategory = raw[category];
+  const categoryIsObject = !!existingCategory && typeof existingCategory === 'object' && !Array.isArray(existingCategory);
+  const previousValue = categoryIsObject ? (existingCategory as Record<string, unknown>)[key] : undefined;
+
+  const mutated: Record<string, unknown> = { ...raw };
+  const categoryObj: Record<string, unknown> = categoryIsObject ? { ...(existingCategory as Record<string, unknown>) } : {};
+  categoryObj[key] = value;
+  mutated[category] = categoryObj;
+
+  const validation = configSchema.safeParse(mutated);
+  if (!validation.success) {
+    const issues = validation.error.issues.map((i: ZodIssue) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    throw new Error(`config_set: the resulting config.json would fail schema validation — ${issues}. Nothing was written.`);
+  }
+
+  const serialized = JSON.stringify(mutated, null, 2) + '\n';
+  const tmpPath = join(configDir, `config.json.tmp-${randomUUID()}`);
+  writeFileSync(tmpPath, serialized);
+
+  let renamed = false;
+  try {
+    // Preserve the existing file's mode on the replacement (review item 7) —
+    // best-effort only, never blocks the write: a chmod failure here is
+    // cosmetic (permission bits), while the write itself already validated
+    // and is ready to land.
+    if (fileLst) {
+      try {
+        chmodSync(tmpPath, fileLst.mode & 0o777);
+      } catch {
+        /* best-effort mode preservation only */
+      }
+    }
+    // CAS RE-CHECK IMMEDIATELY BEFORE THE RENAME (review item 9, Codex
+    // round): the read+hash above and the rename below straddle a window in
+    // which another writer (the TUI's config-writeback, a second concurrent
+    // config_set call) can replace the file — a naive tmp+rename would
+    // silently clobber that write with a stale snapshot, regardless of
+    // whether the CALLER passed expected_digest. Re-read and re-hash the
+    // ACTUAL on-disk bytes one more time and refuse if they moved.
+    // ACCEPTED RESIDUAL (disclosed, not silently claimed away): the window
+    // BETWEEN this re-check and the rename itself remains — rename() is
+    // atomic for VISIBILITY (a reader never sees a half-written file), not
+    // for COMPARISON, and closing that last sliver needs a filesystem lock
+    // this tool does not take.
+    let raceBytes: Buffer;
+    try {
+      raceBytes = readFileSync(configPath);
+    } catch {
+      raceBytes = Buffer.alloc(0);
+    }
+    const raceDigest = createHash('sha256').update(raceBytes).digest('hex');
+    if (raceDigest !== currentDigest) {
+      throw new Error(
+        `config_set: config.json changed on disk while this write was in flight (a concurrent writer) — read digest ${currentDigest}, now ${raceDigest}. Nothing was written; re-read and retry.`
+      );
+    }
+    renameSync(tmpPath, configPath);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* best-effort cleanup of the temp file only */
+      }
+    }
+  }
+
+  const digest = createHash('sha256').update(serialized).digest('hex');
+  return { path, previous_value: previousValue, value, digest };
 }
 
 export class SterlingTools {
@@ -7872,6 +8235,12 @@ export class SterlingTools {
     const detail = `${target.trim()} — ${reason.trim()}`;
     const { at } = this.appendSessionEvents([{ kind: 'capture_pending', detail }]);
     return { pending: detail, at };
+  }
+
+  // -- config_set (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays) ------
+
+  configSet(args: { path: string; value: unknown; expected_digest?: string }): { path: string; previous_value: unknown; value: unknown; digest: string } {
+    return configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
   }
 
   // -- enforcement taint clearer front door (board 09f05fca half 2) ------------

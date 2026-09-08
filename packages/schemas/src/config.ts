@@ -6,10 +6,17 @@ import { z } from 'zod';
 // <project>/.sterling/config.json and bakes toolchain declarations (§9.1).
 // One schema, every reader: a malformed config fails loud, never half-applies.
 
+// .strict() (review fix, config_set decision config-writes-get-a-config-set-
+// mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 5): this
+// shape has been fixed since inception, no downgrade risk — so an unknown
+// sibling key (`models.coder {"model":..,"junk":..}`) is refused by schema
+// validation rather than silently persisted (config_set writes its caller's
+// raw merged object, so a non-strict shape here would let a typo'd field
+// land on disk unrefused, same rationale as the delivery leaf check below).
 const modelEffort = z.object({
   model: z.string(),
   effort: z.enum(['low', 'medium', 'high', 'xhigh']),
-});
+}).strict();
 
 // Toolchain success predicates (decision 98549344, slug
 // toolchain-success-predicates-run-gate, board babf3a9e). Lives ALONGSIDE
@@ -410,6 +417,21 @@ export const configSchema = z.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
   delivery: z
     .object({
       injection_rung: z.enum(['prompt', 'read', 'edit']).default('prompt'),
@@ -477,6 +499,27 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .default({}),
+  // Review-ledger tunables (config_set decision config-writes-get-a-config-
+  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
+  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
+  // scripts/hooks/lib/review-ledger-entry.mjs already read
+  // config.review_ledger.stale_days / .code_globs directly off the raw
+  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
+  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
+  // config_set's own allowlist already grants `review_ledger.stale_days`
+  // (decision 1dc3f9aa), that value went through NO schema check at all
+  // before this: a config_set write of a string or a negative number would
+  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
+  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
+  // and unvalidated — this field is `.optional()` with NO `.default({})` so
+  // an absent block still parses to `undefined`, exactly as before this
+  // field existed (no new key is manufactured on an untouched config.json).
+  review_ledger: z
+    .object({
+      stale_days: z.number().int().positive().max(3650).optional(),
+    })
+    .passthrough()
+    .optional(),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;
