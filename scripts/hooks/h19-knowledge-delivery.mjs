@@ -36,6 +36,9 @@ import {
   lineSuspectBlock,
   joinSuspectBlock,
   renderPayload,
+  porchHeaderLine,
+  renderPorch,
+  resolvePorchBudget,
   rerenderRecipe,
   isDelivered,
   markDelivered,
@@ -228,6 +231,78 @@ function main(input) {
     ].filter((b) => typeof b === 'string' && b);
     const payload = renderPayload(rel, blocks, { unowned });
 
+    // FRONT PORCH — DIRECT-INJECT PATH ONLY (decision 0050a536 §5 amendment,
+    // 2026-09-08, evidence 5d2a527f; Codex thread 01a07f97). `payload` above is
+    // built ONCE, ahead of the mode branch, and stays exactly what it always
+    // was: it is what ENQUEUE stores in the pending queue (so the drain's later
+    // output is byte-identical to before this change — the porch must never
+    // leak into what gets queued), and it is also the INJECT fallback whenever
+    // the porch itself has nothing to add (budget 0, MISCONFIGURED, or the
+    // hazards-and-owners-both-empty case renderPorch itself declines). Building
+    // a SEPARATE `injectPayload`, computed only for `mode === 'inject'`, is what
+    // keeps those two shapes from ever being the same assembly step — porching
+    // the shared builder unconditionally would have changed the enqueued
+    // payload too, exactly the mistake this restructuring exists to avoid.
+    //
+    // Gated on `!unowned`: the porch's header claims 'owning knowledge for
+    // <rel>' (porchHeaderLine), which is the wrong claim over unowned
+    // territory (a hazard can attach to a path no article owns) — the frontier
+    // notice's own header stays exactly as rendered by `payload` above in that
+    // case, unmodified by this amendment.
+    let injectPayload = payload;
+    if (mode === 'inject' && !unowned) {
+      const shownDecisionsForInject = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      // NOTHING SUBTRACTED from the budget here — unlike the SubagentStart
+      // porch, no plan-lock line (or anything else) precedes this block: the
+      // tool-time hook's additionalContext IS the payload, so the budget
+      // applies to it directly.
+      const porchBudget = resolvePorchBudget(input.cwd);
+      // porchHeaderLine (not payloadHeaderLine) — the SAME bounded header
+      // staging uses (Codex review, MEDIUM 1): payloadHeaderLine interpolates
+      // `rel` UNBOUNDED, so a long governed path could inflate the skeleton
+      // before a single byte of hazard/owner text is considered, forcing the
+      // MINIMAL-porch fallback even when the bounded header would leave room.
+      // The REMAINDER's own header (renderPayload, via payloadHeaderLine)
+      // stays unclipped — only the porch, which is budget-constrained, needs
+      // this.
+      // articleBodiesCount / referencePointerCount split (roster reviewer,
+      // same round): a reference_material owner renders as ONE POINTER LINE
+      // below (renderReference), never an article body — folding it into a
+      // single count made the porch-end line's own self-report disagree with
+      // what actually renders.
+      const referenceOwnersForInject = freshOwners.filter((r) => r.type === 'reference_material');
+      const porch =
+        porchBudget > 0
+          ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget, {
+              articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
+              referencePointerCount: referenceOwnersForInject.length,
+              pathDecisionPointerCount: shownDecisionsForInject.length,
+              hasSubjectChannel: false,
+              fileKeys: [rel],
+            })
+          : { text: '', hazardsRendered: false };
+      if (porch.text) {
+        // THE REMAINDER: today's rendering minus renderHazards, but ONLY when
+        // the porch itself actually rendered hazard substance — mirrors
+        // h19-dispatch-staging.mjs's own remainder exactly (`porch.
+        // hazardsRendered`, never `porch.text` truthiness alone). Every owner
+        // still gets its full renderArticle/renderReference, the same capped
+        // renderDecisionPointers call, and the same trailing line-suspect
+        // advisory — hazards appear exactly once either way.
+        const remainderBlocks = [
+          ...(porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: [rel] })),
+          ...freshOwners.map((r) =>
+            r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+          ),
+          ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
+          joinSuspectBlock(suspectBlock ?? {}),
+        ].filter((b) => typeof b === 'string' && b);
+        injectPayload = [porch.text, ...remainderBlocks].join('\n\n');
+      }
+      // else: injectPayload stays `payload` — byte-identical to today's
+      // rendering, exactly as renderPorch's own empty-text contract promises.
+    }
+
     // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
     // makes delivery once-per-session, so writing it before the delivery actually
     // happens converts any failure into permanent silent loss: nothing retries,
@@ -312,7 +387,7 @@ function main(input) {
     }
 
     return exitAfterWrite(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }),
+      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: injectPayload } }),
       0,
       { onWritten: recordDelivered }
     );

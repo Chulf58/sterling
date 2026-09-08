@@ -57,6 +57,7 @@ import {
   payloadHeaderLine,
   porchHeaderLine,
   renderPorch,
+  resolvePorchBudget,
   extractAxisTerms,
   axisHits,
   AXIS_MIN_HITS,
@@ -85,31 +86,11 @@ const RETURN_CONTRACT =
   'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
   'relevant files/tests, and unresolved risks.';
 
-// PORCH BUDGET (config.delivery.preview_budget_bytes) — the SubagentStart
-// front-porch's byte ceiling (lib/delivery.mjs renderPorch). Measured default
-// 1800: the inline preview Claude Code 2.1.263 shows before spilling the rest
-// of a hook's additionalContext to a persisted file (research_finding
-// 518b7d21) — a platform fact, re-probe on upgrade. 0 DISABLES the porch.
-//
-// THREE-STATE GUARD, same shape as the TDD posture block above and h1-
-// session-start.mjs's configUnreadable guard (anti_pattern e0d280ee) — EXCEPT
-// this value is never RENDERED as a claim about the project the reader could
-// be misled by, it is only an internal rendering parameter, so every unusable
-// shape (absent, unparseable, non-object, non-integer, negative) collapses to
-// the SAME documented default rather than a distinct UNKNOWN state — there is
-// nothing here for a divergence to be dishonest ABOUT.
-const PORCH_BUDGET_DEFAULT = 1800;
-function resolvePorchBudget(cwd) {
-  try {
-    const cfg = loadConfig(cwd);
-    if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
-    const v = cfg?.delivery?.preview_budget_bytes;
-    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
-    return v;
-  } catch {
-    return PORCH_BUDGET_DEFAULT;
-  }
-}
+// PORCH BUDGET (config.delivery.preview_budget_bytes) — resolvePorchBudget is
+// now ONE shared resolver in lib/delivery.mjs (decision 0050a536 §5 amendment,
+// consolidation rule: the porch gained a second caller — h19-knowledge-
+// delivery.mjs's direct-inject rungs — so the resolver moved to the one file
+// both hooks already import from, rather than a second hand-copied reader).
 
 const input = readStdin();
 
@@ -343,18 +324,40 @@ function main(input) {
     const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}\n\n`, 'utf8') : 0;
     const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
 
+    // SUBJECT CHANNEL RENDERED SLICES — computed HERE, ahead of the porch build
+    // below, so the porch-end line's subject counts are the RENDERED (post-cap)
+    // ACTUALS the ruling requires (decision 0050a536 §5 amendment), not the raw
+    // candidate counts freshSubject.length would give. Splitting subjectHazards/
+    // subjectDecisions out of freshSubject is unchanged from before — only the
+    // POSITION moved, so the "beyond any file the task names" block below reads
+    // identically off the same two arrays.
+    const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
+    const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
+    const shownSubjectHazards = cappedHazards(subjectHazards);
+    const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
+
     const parts = [];
     if (freshOwners.length || freshHazards.length || freshDecisions.length) {
       const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
       // The porch's own hazard cap mirrors renderHazards' (HAZARD_CAP,
       // severity-sorted) — the SAME rendered slice is what stays out of the
       // remainder below (hazards appear once, in the porch).
+      // articleBodiesCount / referencePointerCount split (roster reviewer,
+      // same round as the Codex review): a reference_material owner renders
+      // as ONE POINTER LINE below (renderReference), never an article body —
+      // folding it into a single count made the porch-end line's own
+      // self-report disagree with what actually renders.
+      const referenceOwnersForPorch = freshOwners.filter((r) => r.type === 'reference_material');
       const porch =
         porchBudget > 0
           ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
-              articleBodiesCount: freshOwners.length,
-              decisionPointerCount: shownDecisionsForPorch.length,
-              subjectStaged: freshSubject.length > 0,
+              articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
+              referencePointerCount: referenceOwnersForPorch.length,
+              pathDecisionPointerCount: shownDecisionsForPorch.length,
+              hasSubjectChannel: true,
+              subjectHazardCount: shownSubjectHazards.length,
+              subjectDecisionPointerCount: shownSubjectDecisions.length,
+              fileKeys: rels,
             })
           : { text: '', hazardsRendered: false };
       // THE REMAINDER: unchanged from today MINUS renderHazards, but ONLY when
@@ -381,8 +384,6 @@ function main(input) {
         parts.push(renderPayload(rels.join(', '), remainderBlocks, { unowned: false }));
       }
     }
-    const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
-    const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
     if (subjectHazards.length || subjectDecisions.length) {
       const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
       // Centrality is per record AGAINST ITS OWN matching prompt — the union
@@ -414,8 +415,8 @@ function main(input) {
       ...freshOwners,
       ...cappedHazards(freshHazards),
       ...freshDecisions.slice(0, DECISION_POINTER_CAP),
-      ...cappedHazards(subjectHazards),
-      ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS),
+      ...shownSubjectHazards,
+      ...shownSubjectDecisions,
     ];
 
     // Side effect first, guard second (council wf_db9a59aa-0af precedent,

@@ -5387,12 +5387,26 @@ var PORCH_BYTE_COUNT_RESERVE = "000000";
 function porchByteLen(s) {
   return Buffer.byteLength(String(s ?? ""), "utf8");
 }
-function porchEndLine(byteCountText, { articleBodiesCount, decisionPointerCount, subjectStaged }) {
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesCount} article body(ies), ${decisionPointerCount} decision pointer(s), subject staging: ${subjectStaged ? "yes" : "no"}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+}
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+}
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
 }
 var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
 var PORCH_END_TEMPLATE_BYTES = porchByteLen(
-  porchEndLine(PORCH_BYTE_COUNT_RESERVE, { articleBodiesCount: 99, decisionPointerCount: 99, subjectStaged: false })
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99
+  })
 );
 var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
 function payloadHeaderLine(rel) {

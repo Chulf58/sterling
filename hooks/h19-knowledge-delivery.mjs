@@ -8030,16 +8030,17 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+  const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
+  const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+}
 function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
-      `TRIGGER: ${clip(ap.trigger, charCap)}`,
-      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
-    ].join("\n")
+    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8106,18 +8107,283 @@ function joinSuspectBlock({ header, lines = [], footer } = {}) {
   if (!lines.length) return "";
   return [header, ...lines.map((l) => l.line), footer].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
+var PORCH_OWNER_CAP = 3;
+var PORCH_HAZARD_FLOOR_BYTES = 90;
+var PORCH_TITLE_CLIP_BYTES = 70;
+var PORCH_OWNER_LABEL_CLIP_BYTES = 90;
+var PORCH_SLUG_CLIP_BYTES = 60;
+var PORCH_HEADER_PATH_CLIP_BYTES = 200;
+var PORCH_WIDENING_KEYS_CLIP_BYTES = 200;
+var PORCH_HAZARD_SHARE = 0.6;
 var PORCH_BYTE_COUNT_RESERVE = "000000";
 function porchByteLen(s2) {
   return Buffer.byteLength(String(s2 ?? ""), "utf8");
 }
-function porchEndLine(byteCountText, { articleBodiesCount, decisionPointerCount, subjectStaged }) {
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesCount} article body(ies), ${decisionPointerCount} decision pointer(s), subject staging: ${subjectStaged ? "yes" : "no"}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+function clipToBytes(text, maxBytes) {
+  const s2 = String(text ?? "");
+  if (maxBytes <= 0) return "";
+  if (porchByteLen(s2) <= maxBytes) return s2;
+  const ELLIPSIS = "\u2026";
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = "";
+  let used = 0;
+  for (const ch of s2) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
+}
+function clippedFileKeysLiteral(keys, maxBytes) {
+  const list = keys ?? [];
+  const admitted = [];
+  let used = 2;
+  for (const k of list) {
+    const entry = JSON.stringify(String(k));
+    const sep = admitted.length ? 1 : 0;
+    const entryBytes = porchByteLen(entry) + sep;
+    if (used + entryBytes > Math.max(maxBytes, 2)) break;
+    admitted.push(entry);
+    used += entryBytes;
+  }
+  const omitted = list.length - admitted.length;
+  const literal = `[${admitted.join(",")}]`;
+  return omitted > 0 ? `${literal} (+${omitted} keys omitted)` : literal;
+}
+function porchOwnerLine(owner) {
+  const id8 = String(owner?.id ?? "").slice(0, 8);
+  if (owner?.type === "reference_material") {
+    return `\u25B8 reference '${clipToBytes(owner.title, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}) \u2014 knowledge_get ${owner.id}`;
+  }
+  return `\u25B8 article '${clipToBytes(owner?.slug, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}, ${owner?.state ?? "unknown"}) \u2014 knowledge_get ${owner?.id}`;
+}
+function rankOwnersForPorch(owners) {
+  return [...owners ?? []].sort((a, b) => {
+    const ta = a?.type === "feature_article" ? 0 : 1;
+    const tb = b?.type === "feature_article" ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    const ua = Date.parse(a?.updated_at ?? "");
+    const ub = Date.parse(b?.updated_at ?? "");
+    return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
+  });
+}
+function porchHazardBody(hazard, textBudgetBytes) {
+  const half = Math.max(0, Math.floor(textBudgetBytes / 2));
+  const trigger = clipToBytes(hazard?.trigger, half);
+  const rightBudget = Math.max(0, textBudgetBytes - porchByteLen(trigger));
+  const rightWay = clipToBytes(hazard?.right_way, rightBudget);
+  return [`  TRIGGER: ${trigger}`, `  RIGHT WAY: ${rightWay}`].join("\n");
+}
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+}
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+}
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+}
+function porchDeferredEndLine(byteCountText, hazardCount, budget, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 budget (${budget}) too small to preview ${hazardCount} hazard(s); deferred in full below. Followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. normal instruction precedence applies.`;
+}
+function porchHeaderLine(rels) {
+  const list = Array.isArray(rels) ? rels : [rels];
+  const full = list.join(", ");
+  if (porchByteLen(full) <= PORCH_HEADER_PATH_CLIP_BYTES) return payloadHeaderLine(full);
+  const kept = [];
+  let usedBytes = 0;
+  for (const r of list) {
+    const sepBytes = kept.length ? porchByteLen(", ") : 0;
+    const rBytes = porchByteLen(r);
+    if (usedBytes + sepBytes + rBytes > PORCH_HEADER_PATH_CLIP_BYTES) break;
+    kept.push(r);
+    usedBytes += sepBytes + rBytes;
+  }
+  const remainder = list.length - kept.length;
+  const clippedList = kept.length ? `${kept.join(", ")}${remainder > 0 ? ` \u2026 (+${remainder} paths)` : ""}` : clipToBytes(full, PORCH_HEADER_PATH_CLIP_BYTES);
+  return payloadHeaderLine(clippedList);
 }
 var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
 var PORCH_END_TEMPLATE_BYTES = porchByteLen(
-  porchEndLine(PORCH_BYTE_COUNT_RESERVE, { articleBodiesCount: 99, decisionPointerCount: 99, subjectStaged: false })
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99
+  })
 );
 var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+var PORCH_BUDGET_DEFAULT = 1800;
+function resolvePorchBudget(cwd) {
+  try {
+    const cfg = loadConfig(cwd);
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
+    const v = cfg?.delivery?.preview_budget_bytes;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
+    return v;
+  } catch {
+    return PORCH_BUDGET_DEFAULT;
+  }
+}
+function renderPorch(header, hazards, owners, budget, {
+  articleBodiesCount = 0,
+  referencePointerCount = 0,
+  pathDecisionPointerCount = 0,
+  hasSubjectChannel = false,
+  subjectHazardCount = 0,
+  subjectDecisionPointerCount = 0,
+  fileKeys = []
+} = {}) {
+  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false };
+  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false };
+  if (budget < PORCH_MIN_BUDGET_BYTES) {
+    try {
+      process.stderr.write(
+        `H19 porch: preview_budget_bytes=${budget} is below the structural minimum ${PORCH_MIN_BUDGET_BYTES} bytes \u2014 MISCONFIGURED, porch disabled for this touch (today's rendering applies)
+`
+      );
+    } catch {
+    }
+    return { text: "", hazardsRendered: false };
+  }
+  const shownHazards = cappedHazards(hazards ?? []);
+  const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
+  const rankedOwners = rankOwnersForPorch(owners);
+  const endMeta = {
+    articleBodiesCount,
+    referencePointerCount,
+    pathDecisionPointerCount,
+    hasSubjectChannel,
+    subjectHazardCount,
+    subjectDecisionPointerCount
+  };
+  const minOwnerCap = 0;
+  const byteCountReserve = "0".repeat(String(budget).length);
+  function hazardSectionAt(perHazardTextBudget) {
+    const blocks = shownHazards.map(
+      (hz) => [
+        hazardHeaderLine(hz, { clipTitleBytes: PORCH_TITLE_CLIP_BYTES, clipSlugBytes: PORCH_SLUG_CLIP_BYTES }),
+        porchHazardBody(hz, Math.max(0, perHazardTextBudget))
+      ].join("\n")
+    );
+    if (hazardOverflow > 0) {
+      const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
+      blocks.push(`\u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) \u2014 ${widen} for the full set`);
+    }
+    return blocks;
+  }
+  function ownerSectionAt(admitted2, ownerLines2, overflowLine2, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
+    const blocks = admitted2.map((owner, i) => {
+      const digestBudget = Math.max(0, perOwnerDigestBudget);
+      const digest = digestBudget > 0 ? clipToBytes(owner?.what_it_does, digestBudget) : "";
+      if (digest) return `${ownerLines2[i]}
+  ${digest}`;
+      return reserveDigestSeparator ? `${ownerLines2[i]}
+  ` : ownerLines2[i];
+    });
+    if (overflowLine2) blocks.push(overflowLine2);
+    return blocks;
+  }
+  let pick = null;
+  for (let cap = Math.min(PORCH_OWNER_CAP, rankedOwners.length); cap >= minOwnerCap; cap -= 1) {
+    const admitted2 = rankedOwners.slice(0, cap);
+    const ownerOverflow = rankedOwners.length - admitted2.length;
+    const ownerLines2 = admitted2.map(porchOwnerLine);
+    const overflowLine2 = ownerOverflow > 0 ? `  \u2026 +${ownerOverflow} owners below` : "";
+    const skeletonBody = [
+      header,
+      ...hazardSectionAt(0),
+      ...ownerSectionAt(admitted2, ownerLines2, overflowLine2, 0, { reserveDigestSeparator: true })
+    ].join("\n\n");
+    const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+    const remaining2 = Math.max(0, budget - skeletonBytes2);
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    const fits = skeletonBytes2 <= budget && (shownHazards.length === 0 || remaining2 >= neededFloor);
+    pick = { admitted: admitted2, ownerOverflow, ownerLines: ownerLines2, overflowLine: overflowLine2, remaining: remaining2, skeletonBytes: skeletonBytes2 };
+    if (fits || cap === minOwnerCap) break;
+  }
+  const { admitted, ownerLines, overflowLine, remaining, skeletonBytes } = pick;
+  if (skeletonBytes > budget) {
+    let buildMinimal = function(hdr) {
+      const blocks = [hdr, allOwnersOverflow].filter(Boolean);
+      let cnt = blocks.reduce((sum, l) => sum + porchByteLen(l) + 2, 0) + porchByteLen(porchDeferredEndLine(byteCountReserve, shownHazards.length, budget, endMeta));
+      let text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
+      for (let i = 0; i < 5; i += 1) {
+        const actual = porchByteLen(text);
+        if (actual === cnt) break;
+        cnt = actual;
+        text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
+      }
+      return text;
+    };
+    const allOwnersOverflow = rankedOwners.length > 0 ? `  \u2026 +${rankedOwners.length} owners below` : "";
+    let minimalPorch = buildMinimal(header);
+    if (porchByteLen(minimalPorch) > budget) {
+      const nonHeaderBytes = porchByteLen(minimalPorch) - porchByteLen(header);
+      minimalPorch = buildMinimal(clipToBytes(header, Math.max(0, budget - nonHeaderBytes)));
+    }
+    if (porchByteLen(minimalPorch) > budget) {
+      try {
+        process.stderr.write(
+          `H19 porch: accounting regression in the MINIMAL fallback \u2014 assembled ${porchByteLen(minimalPorch)} bytes against a ${budget}-byte budget \u2014 hard-clamping
+`
+        );
+      } catch {
+      }
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+    }
+    return { text: minimalPorch, hazardsRendered: false };
+  }
+  const haveHazards = shownHazards.length > 0;
+  const haveDigests = admitted.length > 0;
+  let hazardShare = 0;
+  let digestShare = 0;
+  if (haveHazards && haveDigests) {
+    hazardShare = Math.floor(remaining * PORCH_HAZARD_SHARE);
+    digestShare = remaining - hazardShare;
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    if (hazardShare < neededFloor) {
+      const borrow = Math.min(digestShare, neededFloor - hazardShare);
+      hazardShare += borrow;
+      digestShare -= borrow;
+    }
+  } else if (haveHazards) {
+    hazardShare = remaining;
+  } else if (haveDigests) {
+    digestShare = remaining;
+  }
+  const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
+  const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
+  const hazardBlocks = hazardSectionAt(perHazard);
+  const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
+  const body = [header, ...hazardBlocks, ...ownerBlocks].join("\n\n");
+  let count = porchByteLen(body) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+  let finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
+  for (let i = 0; i < 5; i += 1) {
+    const actual = porchByteLen(finalPorch);
+    if (actual === count) break;
+    count = actual;
+    finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
+  }
+  const finalBytes = porchByteLen(finalPorch);
+  if (finalBytes > budget) {
+    try {
+      process.stderr.write(
+        `H19 porch: accounting regression \u2014 assembled porch is ${finalBytes} bytes against a ${budget}-byte budget (overrun ${finalBytes - budget} bytes); the cascade above should have made this unreachable \u2014 hard-clamping
+`
+      );
+    } catch {
+    }
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+  }
+  return { text: finalPorch, hazardsRendered: true };
+}
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
 }
@@ -8232,6 +8498,30 @@ function main(input2) {
       joinSuspectBlock(suspectBlock ?? {})
     ].filter((b) => typeof b === "string" && b);
     const payload = renderPayload(rel, blocks, { unowned });
+    let injectPayload = payload;
+    if (mode === "inject" && !unowned) {
+      const shownDecisionsForInject = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      const porchBudget = resolvePorchBudget(input2.cwd);
+      const referenceOwnersForInject = freshOwners.filter((r) => r.type === "reference_material");
+      const porch = porchBudget > 0 ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget, {
+        articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
+        referencePointerCount: referenceOwnersForInject.length,
+        pathDecisionPointerCount: shownDecisionsForInject.length,
+        hasSubjectChannel: false,
+        fileKeys: [rel]
+      }) : { text: "", hazardsRendered: false };
+      if (porch.text) {
+        const remainderBlocks = [
+          ...porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
+          ...freshOwners.map(
+            (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+          ),
+          ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
+          joinSuspectBlock(suspectBlock ?? {})
+        ].filter((b) => typeof b === "string" && b);
+        injectPayload = [porch.text, ...remainderBlocks].join("\n\n");
+      }
+    }
     const recordDelivered = () => {
       markDelivered(guard, fresh);
       if (frontierFresh) guard.frontier_files.push(rel);
@@ -8267,7 +8557,7 @@ function main(input2) {
       return allow();
     }
     return exitAfterWrite(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: payload } }),
+      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: injectPayload } }),
       0,
       { onWritten: recordDelivered }
     );

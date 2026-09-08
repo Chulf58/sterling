@@ -8049,16 +8049,17 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+  const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
+  const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+}
 function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
-      `TRIGGER: ${clip(ap.trigger, charCap)}`,
-      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
-    ].join("\n")
+    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8097,12 +8098,43 @@ var PORCH_BYTE_COUNT_RESERVE = "000000";
 function porchByteLen(s2) {
   return Buffer.byteLength(String(s2 ?? ""), "utf8");
 }
-function porchEndLine(byteCountText, { articleBodiesCount, decisionPointerCount, subjectStaged }) {
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesCount} article body(ies), ${decisionPointerCount} decision pointer(s), subject staging: ${subjectStaged ? "yes" : "no"}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+function clipToBytes(text, maxBytes) {
+  const s2 = String(text ?? "");
+  if (maxBytes <= 0) return "";
+  if (porchByteLen(s2) <= maxBytes) return s2;
+  const ELLIPSIS = "\u2026";
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = "";
+  let used = 0;
+  for (const ch of s2) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
+}
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+}
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+}
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
 }
 var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
 var PORCH_END_TEMPLATE_BYTES = porchByteLen(
-  porchEndLine(PORCH_BYTE_COUNT_RESERVE, { articleBodiesCount: 99, decisionPointerCount: 99, subjectStaged: false })
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99
+  })
 );
 var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
 function payloadHeaderLine(rel) {

@@ -2,14 +2,88 @@
 //
 // SPEC (the only source these pins were written from): decision
 // `h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun`
-// (knowledge_get 0050a536-8b10-4732-a677-f9e9428e485b) at **version 2** —
+// (knowledge_get 0050a536-8b10-4732-a677-f9e9428e485b) at **version 3** —
 // v2 corrected v1's unreadable-config sentence and added the degradation
 // ladder (bounded skeleton / below-floor misconfiguration / minimal porch /
-// pointers-only no-porch) pinned in section (p2) — whose `statement` IS the
-// specification, plus the measured incident it answers
+// pointers-only no-porch) pinned in section (p2); v3 AMENDED clause (5) —
+// SCOPE and the porch-end accounting sentence (see the AMENDMENT block
+// immediately below) — whose `statement` IS the specification, plus the
+// measured incidents it answers
 // (research_finding 518b7d21 — layer-3 live probe: one of six roster classes
 // never USED the owning article because the harness spilled the >2KB
-// additionalContext to a persisted file and the agent declined to open it).
+// additionalContext to a persisted file and the agent declined to open it;
+// research_finding 5d2a527f — RUN 2, the amendment's evidence).
+//
+// ---------------------------------------------------------------------------
+// AMENDMENT 2026-09-08 — clause (5) of decision 0050a536 at version 3, and
+// the DELIBERATE RE-CUT of F1. Written from the ruling text, never from the
+// implementation (a coder is building it in parallel; H4 refuses the read).
+//
+// EVIDENCE: research_finding 5d2a527f (knowledge_get
+// 5d2a527f-52d4-4923-be23-b129656ee9d4 — "layer-3 live agent acceptance
+// probe, RUN 2") measured the tool-time DIRECT-INJECT block at 11-15 KB on
+// ONE governed path; it spilled behind the harness's ~2 KB inline preview and
+// 3 of 5 agents never opened the spill — the same failure the porch was built
+// to close at SubagentStart, on a surface the ORIGINAL ruling had left
+// UNMEASURED and therefore scope-pinned OUT. Item (7) of the same finding is
+// the second defect: the porch-end line's `0 decision pointer(s)` counted the
+// PATH channel alone while the SUBJECT staging in the same block carried
+// 26-38 pointers, and three probed agents read the self-report as a
+// contradiction.
+//
+// WHAT CHANGES HERE, and why this is a RE-CUT and not a weakening:
+//   * F1 flips from the NEGATIVE pin ("no porch on the tool-time hook") to
+//     the POSITIVE one: h19-knowledge-delivery.mjs at rung 'read' emits a
+//     porch, budget = config.delivery.preview_budget_bytes with NOTHING
+//     subtracted (no plan line precedes that block). The old F1 is not
+//     silently dropped — the property it protected (a SubagentStart ruling
+//     must not silently change the tool-time surface) is now settled in the
+//     opposite direction by a SUPERSEDING clause of the same decision, so
+//     F1a-F1f below assert the FULL porch contract there instead. The
+//     frozen-pins wall is respected by being EXPLICIT: a wrong pin fixed
+//     forward as its own visible step against a re-read ruling, never a pin
+//     bent to fit code that does not exist yet.
+//   * F2 (no porch in the drain) STAYS and is STRENGTHENED into the ENQUEUE
+//     control. Clause (5) says the porch is NOT applied at enqueue time, so
+//     the pin now reads the QUEUED PAYLOAD FILE under
+//     .sterling/transient/delivery/ as well as the drained
+//     UserPromptSubmit output: a drain-side-only assertion is satisfiable by
+//     a payload that DOES carry a porch plus a drain that strips it, which is
+//     not what the ruling says. The file arm is what makes "not at enqueue
+//     time" mechanical.
+//   * The porch-end line's accounting sentence gains CHANNEL clauses, with
+//     POST-CAP ACTUALS for the WHOLE block:
+//       `K article body(ies); path channel: M decision pointer(s);
+//        subject staging: N hazard(s) / P decision pointer(s)`
+//     the subject clause omitted or `none` where no subject channel ran. The
+//     N-series pins parse those numbers out of the line and compare EACH
+//     against what is actually rendered below — the only shape of pin that
+//     can catch the measured defect, because a count taken over the wrong
+//     channel is still a number and reads as correct.
+//
+// WORDING IS STILL NOT PINNED. As everywhere else in this file the parsers
+// anchor on the ruling's CONTENT and on its CLAUSE LABELS ('path channel',
+// 'subject staging', the unit nouns 'article'/'decision'/'hazard'), never on
+// punctuation or the prose between them. A red on a parser means "the
+// porch-end line does not state one of the facts clause (5) requires in a
+// form a reader can attribute to a channel" — report the observed line, do
+// not loosen the parser.
+//
+// COUNTING IS BY RECORD IDENTITY, not by region. The subject block's exact
+// rendered shape is NOT fixed by any ruling this file may read, so segmenting
+// the context into path/subject regions would have made the oracle depend on
+// an unspecified layout. Instead every fixture record has a FIXED id and the
+// helpers count the lines that CITE those ids (`renderedCount`), so the
+// counts hold wherever the implementation chooses to place a channel's block.
+//
+// KNOWN LIMIT, disclosed rather than overclaimed: "budget with NOTHING
+// subtracted" is only PARTLY observable from output. An implementation that
+// over-subtracts emits a SMALLER porch, and no invariant assertion can tell
+// that from a legitimately short one. F1b therefore pins the two things that
+// ARE observable — the self-report/offset identity (which catches a budget
+// measured over the wrong span, e.g. one that subtracts a phantom preceding
+// block) and a non-degeneracy floor (which catches a porch that collapsed to
+// the minimal rung) — and stops there.
 //
 // H4 READ WALL: the authoring dispatch offered a narrow read of
 // scripts/hooks/lib/delivery.mjs for exact anchor strings. H4 DENIED it
@@ -21,27 +95,39 @@
 // the decision (`+N owners below`; the `▸ article '<slug>' (<id8>) (<state>`
 // header and its `▸ FULL RECORD: knowledge_get <uuid>` companion). The
 // PORCH-END line's wording is NOT fixed by the decision — the decision fixes
-// only its CONTENT ("the porch byte count, what follows (K article bodies,
-// M decision pointers, subject staging yes/no) and the instruction to OPEN
-// the persisted file"). isPorchEndLine() below therefore matches that CONTENT
-// tolerantly (a byte count + the word article + the word decision on one
-// line) rather than a guessed sentence. A red on the detector itself means
-// "the porch-end line does not state one of the three facts the ruling
-// requires" — report the observed line, do not loosen the detector.
+// only its CONTENT: as AMENDED (clause 5) that is the porch byte count, then
+// `K article body(ies); path channel: M decision pointer(s); subject staging:
+// N hazard(s) / P decision pointer(s)` as POST-CAP ACTUALS for the whole
+// block, then the instruction to OPEN the persisted file with normal
+// instruction precedence. isPorchEndLine() below therefore matches that
+// CONTENT tolerantly (a byte count + the word article + the word decision on
+// one line) rather than a guessed sentence, and the clause parsers key on the
+// labels rather than the punctuation. A red on the detector itself means "the
+// porch-end line does not state one of the facts the ruling requires" —
+// report the observed line, do not loosen the detector.
 //
-// CONTROL DISCIPLINE: two verdicts in this file are "no porch-end line"
-// (budget 0; the tool-time hook's scope pin) and each has more than one
-// possible cause — the porch really being absent, or the detector matching
-// nothing anywhere. TEST 0 is the control arm, placed FIRST: on the SAME
-// fixture with the default budget the detector MUST find a porch-end line.
-// If TEST 0 is red, every "no porch" verdict in this file is uninformative.
+// CONTROL DISCIPLINE: the remaining "no porch-end line" verdicts in this file
+// (budget 0; below-floor budget; pointers-only payload; the DRAIN, which
+// clause (5) keeps porch-free) each have more than one possible cause — the
+// porch really being absent, or the detector matching nothing anywhere. TEST
+// 0 is the control arm, placed FIRST: on the SAME fixture with the default
+// budget the detector MUST find a porch-end line. If TEST 0 is red, every
+// "no porch" verdict in this file is uninformative. The enqueue arm (F2a)
+// carries its own control in its body, because its haystack is a file on
+// disk rather than a hook's stdout, and the two "subject clause is none"
+// verdicts (A5, F1f) are controlled by parsing the line's OTHER clauses
+// first — a line that states nothing at all cannot pass them.
 //
 // FIXTURE OWNERSHIP (anti_pattern a1b082d1): fixed record ids, an isolated
 // temp store per test, an explicit config per test, and fixture prose
 // deliberately free of the words "article", "decision" and "byte" so the
 // porch-end detector can never match a body line. Every owner owns the SAME
 // path (src/a.mjs) so the payload header line is byte-identical across cases
-// and the budget arithmetic is not hostage to the path list.
+// and the budget arithmetic is not hostage to the path list. The two
+// SUBJECT-channel records added for clause (5) hold the same discipline: no
+// file_keys (so they are reachable ONLY through the subject channel, which is
+// what makes the path/subject counts separable), fixed ids, and prose with no
+// digits and none of the three anchor words.
 //
 // DISPATCH CLASS: `debugger` is used for the staging cases. It receives the
 // bounded ACTIVE PLAN line (scoped to coder/debugger/test-writer, decision
@@ -60,7 +146,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -99,6 +185,12 @@ const RULING_IDS = [
   '2b222222-2222-4222-8222-222222222222',
 ];
 const REF_ID = '3a111111-1111-4111-8111-111111111111';
+// The SUBJECT (mechanism-axis) channel's two records — clause (5)'s
+// `subject staging: N hazard(s) / P decision pointer(s)`. Fixed ids so the
+// counts can be taken by IDENTITY rather than by guessing the subject block's
+// layout (see the AMENDMENT header note).
+const SUBJ_HAZARD_ID = '4a111111-1111-4111-8111-111111111111';
+const SUBJ_RULING_ID = '4b222222-2222-4222-8222-222222222222';
 
 // --- byte helpers (the invariant is measured in UTF-8 BYTES, never chars) ---
 const bytes = (s) => Buffer.byteLength(s, 'utf8');
@@ -178,6 +270,82 @@ function ownerPointerLines(region) {
 }
 const DECISION_PTR_RE = /^\s*→ .*\(knowledge_get\s+[0-9a-fA-F-]{36}\)/;
 const decisionPointerCount = (ctx) => ctx.split('\n').filter((l) => DECISION_PTR_RE.test(l)).length;
+
+// --- clause (5): the porch-end line's CHANNEL ACCOUNTING -------------------
+// The ruling fixes the CONTENT and the CLAUSE LABELS, never the punctuation:
+//   `K article body(ies); path channel: M decision pointer(s);
+//    subject staging: N hazard(s) / P decision pointer(s)`
+// with the subject clause omitted, or reading `none`, where no subject
+// channel ran (the tool-time hook). Each parser is deliberately loose about
+// separators and tight about the label it keys on.
+
+/** The text of the `subject staging:` clause, or null if the clause is ABSENT. */
+function subjectClause(line) {
+  const m = line.match(/subject staging[:\s]*([^.]*)/i);
+  return m ? m[1].trim() : null;
+}
+/**
+ * true when the line makes NO POSITIVE subject claim: the clause is omitted,
+ * or reads `none`/`no`, or states explicit zeros. Deliberately broader than
+ * the literal `none` the ruling's example shows — every one of those forms
+ * says the same true thing, and pinning the spelling would red-flag a correct
+ * implementation over wording (this file pins content, not prose). What it
+ * does NOT accept is the pre-amendment boolean `yes`, or any positive count:
+ * those are claims, and a claim has to match what was rendered.
+ */
+function subjectClauseIsNone(line) {
+  const c = subjectClause(line);
+  if (c === null || c === '') return true;
+  if (/^(none|no)\b/i.test(c)) return true;
+  const hz = c.match(/(\d+)\s*hazard/i);
+  const pt = c.match(/(\d+)\s*decision/i);
+  if (hz && pt) return Number(hz[1]) === 0 && Number(pt[1]) === 0;
+  return false;
+}
+/**
+ * The four post-cap actuals the porch-end line claims. A member is null when
+ * the line states no number for it — which is a FAILURE for K/M (the ruling
+ * requires them) and is the legitimate `none` shape for N/P.
+ */
+function endLineCounts(line) {
+  const clause = subjectClause(line);
+  const none = subjectClauseIsNone(line);
+  const pathM = line.match(/path channel[^0-9]{0,16}(\d+)\s*decision/i);
+  const hz = clause && !none ? clause.match(/(\d+)\s*hazard/i) : null;
+  const pt = clause && !none ? clause.match(/(\d+)\s*decision/i) : null;
+  return {
+    articles: countFor(line, 'article'),
+    pathDecisions: pathM ? Number(pathM[1]) : null,
+    subjectHazards: none ? 0 : hz ? Number(hz[1]) : null,
+    subjectDecisions: none ? 0 : pt ? Number(pt[1]) : null,
+    subjectNone: none,
+  };
+}
+
+// --- counting what is ACTUALLY rendered, by record identity ----------------
+// A record's uuid (and its id8) appear on exactly the line(s) that cite it:
+// one hazard header, one decision pointer line. An ARTICLE is the exception —
+// its body header carries the id8 and its `▸ FULL RECORD:` line carries the
+// uuid — so article bodies are counted STRUCTURALLY instead (below).
+function mentionLines(ctx, id) {
+  const id8 = id.slice(0, 8);
+  return ctx.split('\n').filter((l) => l.includes(id) || l.includes(id8));
+}
+const renderedCount = (ctx, id) => mentionLines(ctx, id).length;
+
+// renderArticle's own body header, decision §6: `▸ article '<slug>' (<id8>)
+// (<state>…)`. The PORCH's owner pointer line cannot match it: that line
+// carries `(<id8>, <state>)` (comma, not a closing paren after the id8) and
+// its `knowledge_get <uuid>` tail on the SAME line.
+const BODY_HEADER_RE = /^▸\s+(?:article|reference)\s+'([^']*)'\s*\(([0-9a-f]{8})\)/;
+function articleBodyHeaders(ctx) {
+  return ctx
+    .split('\n')
+    .filter((l) => !l.includes('knowledge_get'))
+    .map((l) => l.match(BODY_HEADER_RE))
+    .filter(Boolean)
+    .map((m) => ({ slug: m[1], id8: m[2] }));
+}
 
 // --- harness (idioms copied, never imported, from
 //     scripts/tests/h19-dispatch-staging.test.mjs) -------------------------
@@ -343,6 +511,53 @@ function seedRulings(store, count) {
   }
 }
 
+// --- the SUBJECT (mechanism-axis) channel fixture --------------------------
+// Vocabulary trick COPIED (never imported) from
+// scripts/tests/h19-staging-axis.test.mjs, which pins this exact pattern as
+// the way a dispatch prompt triggers subject staging: six modeling-domain
+// words repeated 3x each in the record's own narrow text so they dominate its
+// top-6 by frequency, and a prompt that hits several of them centrally. Both
+// records carry NO file_keys, so they are reachable ONLY through the subject
+// channel — that separation is what lets the path/subject counts on the
+// porch-end line be told apart at all. The prose deliberately contains no
+// digits and none of this file's anchor words ("article", "decision",
+// "byte"), so no fixture line can satisfy isPorchEndLine().
+const SUBJ_TITLE = 'Boolean modifier mesh manifold topology solver stability failure';
+const SUBJ_RULING_TITLE = 'Boolean modifier mesh manifold topology solver stability ruling';
+const SUBJ_NARROW =
+  'boolean modifier boolean modifier mesh manifold mesh manifold topology solver topology solver ' +
+  'recur constantly though this bug rarely touches a game field cell during setup work';
+const SUBJ_PROMPT =
+  'Investigate why the boolean operation corrupts the mesh: check whether the modifier stack ' +
+  'introduces non-manifold geometry that breaks downstream processing.';
+
+function seedSubjectChannel(store) {
+  store.create({
+    ...envelope('anti_pattern'),
+    id: SUBJ_HAZARD_ID,
+    slug: 'subject-solver-hazard',
+    title: SUBJ_TITLE,
+    trigger: SUBJ_NARROW,
+    guidance: 'guidance about the solver stability failure',
+    wrong_way: 'wrong way around the solver stability failure',
+    right_way: 'right way around the solver stability failure',
+    source_evidence: 'measured on the modeling probe',
+    file_keys: [],
+    severity: 'warn',
+  });
+  store.create({
+    ...envelope('decision'),
+    id: SUBJ_RULING_ID,
+    slug: 'subject-solver-ruling',
+    title: SUBJ_RULING_TITLE,
+    statement: SUBJ_NARROW,
+    alternatives_rejected: [],
+    rationale: 'rationale about the solver stability failure',
+    file_keys: [],
+    authority: 'standing',
+  });
+}
+
 /** One staged SubagentStart dispatch into governed territory. */
 function stage({ budget, owners = 4, hazards = 3, rulings = 2, lock = true, agentType = 'debugger', slugPad = 0, seed, prompt = DISPATCH_PROMPT } = {}) {
   const { dir, store, cleanup } = makeProject(budgetConfig(budget));
@@ -358,6 +573,75 @@ function stage({ budget, owners = 4, hazards = 3, rulings = 2, lock = true, agen
   const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: agentType }), dir);
   const ctx = r.stdout.trim() ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext : '';
   return { ...facts, dir, store, cleanup, r, ctx };
+}
+
+/**
+ * One TOOL-TIME (direct-inject) delivery: a PostToolUse Read of a governed
+ * path at the `read` rung — the surface clause (5) brings into the porch.
+ * Same seeds as stage() so the two surfaces are comparable, and NO plan lock
+ * is written because nothing precedes this block (clause (5): "Tool-time
+ * budget = preview_budget_bytes with nothing subtracted").
+ */
+function toolTime({ budget = DEFAULT_BUDGET, owners = 4, hazards = 3, rulings = 2, rung = 'read', seed, path = 'src/a.mjs' } = {}) {
+  const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: rung, preview_budget_bytes: budget } });
+  const facts = { slugs: [], tokens: [] };
+  if (seed) seed(store, facts);
+  else {
+    facts.slugs = seedOwners(store, owners);
+    facts.tokens = seedHazards(store, hazards);
+    seedRulings(store, rulings);
+  }
+  const r = runHook(
+    'h19-knowledge-delivery.mjs',
+    { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: join(dir, path) }, cwd: dir },
+    dir
+  );
+  let ctx = '';
+  if (r.stdout.trim()) {
+    try {
+      ctx = JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '';
+    } catch {
+      ctx = '';
+    }
+  }
+  return { ...facts, dir, store, cleanup, r, ctx };
+}
+
+// --- the ENQUEUE surface: whatever the queue writes to disk ----------------
+// F2 pins clause (5)'s "NOT applied at enqueue time", so it must inspect the
+// queued PAYLOAD, not only the drain's output. The queue's file NAMES are not
+// fixed by any ruling, so the whole directory is walked and every plausible
+// decoding of each file is searched — raw text, a crude \n unescape, and every
+// string value inside the file if it parses as JSON. Missing one of those
+// decodings would make the negative verdict vacuous, which is the exact
+// hollow shape this arm exists to avoid.
+function walkFiles(base) {
+  if (!existsSync(base)) return [];
+  const out = [];
+  for (const e of readdirSync(base, { withFileTypes: true })) {
+    const p = join(base, e.name);
+    if (e.isDirectory()) out.push(...walkFiles(p));
+    else if (e.isFile()) out.push(p);
+  }
+  return out;
+}
+function textCandidates(raw) {
+  const out = [raw, raw.replace(/\\n/g, '\n')];
+  try {
+    const walk = (v) => {
+      if (typeof v === 'string') out.push(v);
+      else if (Array.isArray(v)) v.forEach(walk);
+      else if (v && typeof v === 'object') Object.values(v).forEach(walk);
+    };
+    walk(JSON.parse(raw));
+  } catch {
+    /* not JSON — the raw arms above already cover it */
+  }
+  return out;
+}
+function queuedTexts(dir) {
+  const base = join(dir, '.sterling', 'transient', 'delivery');
+  return walkFiles(base).flatMap((f) => textCandidates(readFileSync(f, 'utf8')).map((text) => ({ file: f, text })));
 }
 
 const CLEAN_STDERR = /TypeError|ReferenceError|Cannot read propert|undefined is not|^\s+at /m;
@@ -449,7 +733,9 @@ test('A4: the porch-end line states the count of article bodies below — 4, eve
   try {
     const line = porchEndLine(s.ctx);
     assert.ok(line, 'no porch-end line found (see the CONTROL test)');
-    assert.equal(countFor(line, 'article'), 4, `porch-end line states the wrong article-body count: ${line}`);
+    // Unchanged in MEANING under the clause (5) sentence: the leading clause
+    // is still `K article body(ies)`, so countFor() reads the same number.
+    assert.equal(endLineCounts(line).articles, 4, `porch-end line states the wrong article-body count: ${line}`);
   } finally {
     s.cleanup();
   }
@@ -458,23 +744,37 @@ test('A4: the porch-end line states the count of article bodies below — 4, eve
 // 3 (decision §3 requires EVERY owner below) — red. Second sabotage: count
 // the porch's admitted owners instead of the bodies actually rendered — red.
 
-test('A5: the porch-end line\'s decision-pointer count equals the pointers actually rendered below, and that is the 2 seeded rulings', () => {
+test('A5: the porch-end line\'s PATH-CHANNEL decision-pointer count equals the path pointers actually rendered below, and that is the 2 seeded rulings', () => {
   const s = stage({ budget: DEFAULT_BUDGET });
   try {
     const line = porchEndLine(s.ctx);
     assert.ok(line, 'no porch-end line found (see the CONTROL test)');
+    const counts = endLineCounts(line);
+    assert.ok(
+      counts.pathDecisions !== null,
+      `clause (5) requires the pointer count to be ATTRIBUTED to the path channel (\`path channel: M decision pointer(s)\`); this line states a bare or unlabelled count: ${line}`
+    );
     const rendered = decisionPointerCount(s.ctx);
-    assert.equal(countFor(line, 'decision'), rendered, `porch-end promises a decision-pointer count that disagrees with what is rendered below (${rendered}); line=${line}`);
+    assert.equal(counts.pathDecisions, rendered, `porch-end promises a path-channel pointer count that disagrees with what is rendered below (${rendered}); line=${line}`);
     assert.equal(rendered, 2, 'the isolated store holds exactly the 2 seeded rulings for this path');
+    // No subject channel on this fixture's prompt (it names a path only), so
+    // clause (5)'s subject clause must be absent or read `none` — never a
+    // stale `yes`, and never a number it cannot account for.
+    assert.ok(subjectClauseIsNone(line), `this dispatch prompt triggers no subject staging, so the subject clause must be absent or 'none': ${line}`);
   } finally {
     s.cleanup();
   }
 });
 // SABOTAGE: hardcode the decision count (or count candidates before the cap
 // instead of the pointers actually emitted) — the self-consistency assertion
-// goes red. The second assertion is the fixture's own control: if only IT is
-// red, the store delivered more pointers than the two seeded rulings and the
-// finding is about staging's candidate set, not about the porch.
+// goes red. Second sabotage (the MEASURED defect, research_finding 5d2a527f
+// item 7): keep the pre-amendment bare `M decision pointer(s)` wording, so the
+// number cannot be attributed to a channel — the pathDecisions assertion goes
+// red. Third sabotage: emit `subject staging: yes` unconditionally — the last
+// assertion goes red. The `rendered === 2` assertion is the fixture's own
+// control: if only IT is red, the store delivered more pointers than the two
+// seeded rulings and the finding is about staging's candidate set, not the
+// porch.
 
 test('A6: INVARIANT — the porch ends at or before byte 1800 of the COMPLETE additionalContext (plan-lock line included)', () => {
   const s = stage({ budget: DEFAULT_BUDGET });
@@ -510,6 +810,130 @@ test('A7: hazards appear ONCE in the whole context — the porch IS the hazard r
 // SABOTAGE: leave renderHazards in the remainder while the porch also renders
 // them (decision §3: "the remainder is today's rendering MINUS renderHazards")
 // — the occurrence counts become 2 and this pin goes red.
+
+// ===========================================================================
+// (n) CLAUSE (5) ACCOUNTING — the porch-end line accounts for the WHOLE block
+// with POST-CAP ACTUALS, per channel:
+//   `K article body(ies); path channel: M decision pointer(s);
+//    subject staging: N hazard(s) / P decision pointer(s)`
+// The MEASURED defect this answers (research_finding 5d2a527f item 7): the
+// first cut's `0 decision pointer(s)` counted the path channel alone while
+// the subject staging in the same block carried 26-38 pointers, and three
+// probed agents reported the self-report as a contradiction. A count over the
+// wrong channel is still a number and reads as correct, so nothing but an
+// equality against what is ACTUALLY rendered can catch it.
+//
+// FIXTURE: the standard staging fixture (4 owners, 3 path hazards, 2 path
+// rulings) plus the two subject-channel records, on a prompt that names
+// src/a.mjs AND carries the subject-matching text — the composition arm (c)
+// of scripts/tests/h19-staging-axis.test.mjs pins that both channels then
+// land in ONE payload.
+// ===========================================================================
+
+const bothChannels = () =>
+  stage({
+    budget: DEFAULT_BUDGET,
+    lock: false,
+    prompt: `Go work on src/a.mjs and report back. Separately: ${SUBJ_PROMPT}`,
+    seed: (store, facts) => {
+      facts.slugs = seedOwners(store, 4);
+      facts.tokens = seedHazards(store, 3);
+      seedRulings(store, 2);
+      seedSubjectChannel(store);
+    },
+  });
+
+test('N1a: FIXTURE CONTROL for the accounting pins — on the two-channel dispatch BOTH channels really delivered (4 article bodies, 2 path pointers, the subject hazard and the subject ruling each cited by id)', () => {
+  const s = bothChannels();
+  try {
+    assert.equal(s.r.code, 0, s.r.stderr);
+    assert.match(s.ctx, /STERLING KNOWLEDGE DELIVERY/, 'the path channel staged this dispatch');
+    assert.equal(articleBodyHeaders(s.ctx).length, 4, `expected 4 rendered article bodies on this fixture; ctx head=${bytePrefix(s.ctx, 2400)}`);
+    // Counted BY ID, not as a total: the subject channel contributes its own
+    // pointer to this block, so a bare total would be 3 here and the control
+    // would be asserting the wrong thing.
+    const pathPtrs = RULING_IDS.slice(0, 2).filter((id) => renderedCount(s.ctx, id) >= 1).length;
+    assert.equal(pathPtrs, 2, `expected both seeded PATH rulings to be delivered; ctx head=${bytePrefix(s.ctx, 2400)}`);
+    assert.ok(
+      renderedCount(s.ctx, SUBJ_HAZARD_ID) >= 1,
+      `CONTROL FAILED: the subject channel delivered no hazard, so the N/P equality pins below cannot discriminate. The trigger pattern is copied from h19-staging-axis.test.mjs arm (a); if THAT file still passes and this does not, the composed subject channel regressed. ctx head=${bytePrefix(s.ctx, 2400)}`
+    );
+    assert.ok(
+      renderedCount(s.ctx, SUBJ_RULING_ID) >= 1,
+      `CONTROL FAILED (fixture, not implementation, if this is the ONLY red): no existing test pins a subject-matched DECISION — h19-staging-axis.test.mjs only exercises anti_patterns — so this fixture's central-vocabulary decision may simply not clear the axis floors for a 'decision' record. TODO: replace it with a PROVEN subject-matched decision fixture (or pin the floor for decisions in h19-staging-axis.test.mjs) rather than loosening the P pin in N1c. ctx head=${bytePrefix(s.ctx, 2400)}`
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: drop the subject channel from the composed payload — every
+// assertion after the first two goes red, and every accounting pin below
+// becomes uninformative, which is exactly what this arm is for.
+
+test('N1b: the porch-end line\'s K (article bodies) and path-channel M (decision pointers) equal what is rendered below', () => {
+  const s = bothChannels();
+  try {
+    const line = porchEndLine(s.ctx);
+    assert.ok(line, `no porch-end line found on the two-channel fixture; ctx head=${bytePrefix(s.ctx, 2400)}`);
+    const c = endLineCounts(line);
+    assert.equal(c.articles, articleBodyHeaders(s.ctx).length, `K disagrees with the article bodies rendered below (${articleBodyHeaders(s.ctx).length}); line=${line}`);
+    assert.ok(c.pathDecisions !== null, `no PATH-CHANNEL pointer count on the line: ${line}`);
+    const pathRendered = RULING_IDS.slice(0, 2).filter((id) => renderedCount(s.ctx, id) >= 1).length;
+    assert.equal(c.pathDecisions, pathRendered, `M disagrees with the PATH-channel pointers rendered below (${pathRendered}); line=${line}`);
+    // The discriminating half: M must EXCLUDE the subject channel's pointer.
+    // Counted with the SAME detector, then filtered by the subject ruling's
+    // id, so a subject pointer rendered in some other shape cannot make this
+    // arm red for a fixture reason.
+    const subjPtrLines = s.ctx
+      .split('\n')
+      .filter((l) => DECISION_PTR_RE.test(l) && (l.includes(SUBJ_RULING_ID) || l.includes(SUBJ_RULING_ID.slice(0, 8)))).length;
+    assert.equal(
+      c.pathDecisions,
+      decisionPointerCount(s.ctx) - subjPtrLines,
+      `M must count the PATH channel only — total pointer lines below are ${decisionPointerCount(s.ctx)}, of which the subject channel contributes ${subjPtrLines}; line=${line}`
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE (the measured one): count ALL rendered pointers into the `path
+// channel:` clause (or count only the path channel into a bare total) — the
+// last equality goes red. Second sabotage: count owners admitted to the porch
+// as K instead of the bodies actually rendered — the first equality goes red.
+
+test('N1c: the porch-end line\'s subject clause (N hazards / P decision pointers) equals the subject-channel records actually rendered, each cited exactly once', () => {
+  const s = bothChannels();
+  try {
+    const line = porchEndLine(s.ctx);
+    assert.ok(line, `no porch-end line found on the two-channel fixture; ctx head=${bytePrefix(s.ctx, 2400)}`);
+    const c = endLineCounts(line);
+    assert.ok(
+      !c.subjectNone,
+      `the subject channel DID stage on this dispatch (see N1a), so clause (5) forbids an absent or 'none' subject clause here: ${line}`
+    );
+    assert.ok(c.subjectHazards !== null, `the subject clause states no hazard count: ${line}`);
+    assert.ok(c.subjectDecisions !== null, `the subject clause states no decision-pointer count: ${line}`);
+    const hzRendered = renderedCount(s.ctx, SUBJ_HAZARD_ID);
+    const ptRendered = renderedCount(s.ctx, SUBJ_RULING_ID);
+    // Unambiguity control: clause (4) leaves dedupe semantics unchanged and
+    // the cross-channel arm (d) of h19-staging-axis.test.mjs pins "exactly
+    // once", so a doubled citation would make the post-cap actual undefinable.
+    assert.ok(hzRendered <= 1, `the subject hazard is cited ${hzRendered} times; a post-cap actual cannot be read off a duplicated record`);
+    assert.ok(ptRendered <= 1, `the subject ruling is cited ${ptRendered} times; same problem`);
+    assert.equal(c.subjectHazards, hzRendered, `N disagrees with the subject hazards rendered (${hzRendered}); line=${line}`);
+    assert.equal(c.subjectDecisions, ptRendered, `P disagrees with the subject decision pointers rendered (${ptRendered}); line=${line}`);
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE (the measured one): keep the pre-amendment `subject staging: yes`
+// boolean — the subjectHazards/subjectDecisions parse comes back null and the
+// two "states no count" assertions go red. Second sabotage: report the
+// subject channel's CANDIDATE counts (pre-cap, 26-38 in the live probe)
+// instead of the rendered ones — both equalities go red. Third sabotage:
+// hardcode `subject staging: 0 hazard(s) / 0 decision pointer(s)` whenever a
+// subject channel ran — both equalities go red while N1a stays green, which
+// is the pair that separates "nothing staged" from "staged and misreported".
 
 // ===========================================================================
 // (b) BUDGET 0 DISABLES THE PORCH — the Part-2-only control. Three concerns,
@@ -1223,37 +1647,222 @@ test('E3: a reference_material owner — the porch fits and names the reference 
 // preview and this pin goes red.
 
 // ===========================================================================
-// (f) SCOPE — SubagentStart only. The tool-time hook and the drain emit NO
-// porch. Both verdicts are negatives, so each names a positive control in the
-// same body (the payload really was delivered) on top of TEST 0.
+// (f) SCOPE, clause (5) as AMENDED 2026-09-08 (decision 0050a536 v3).
+//
+// F1 IS A DELIBERATE RE-CUT, not a repair: it was "no porch on the tool-time
+// hook" and is now the POSITIVE form — h19-knowledge-delivery.mjs's
+// DIRECT-INJECT block (read/edit rungs) carries the porch, because
+// research_finding 5d2a527f measured that block at 11-15 KB on one governed
+// path, spilled behind the ~2 KB preview, with 3 of 5 agents never opening
+// the spill. Budget = config.delivery.preview_budget_bytes with NOTHING
+// subtracted (no plan line precedes this block). See the AMENDMENT block at
+// the head of this file for why this is fixed forward against a superseding
+// ruling rather than bent to fit code.
+//
+// F2 (no porch in the drain) STAYS and becomes the ENQUEUE control: clause
+// (5) keeps the porch out of the enqueue path, so the queued payload on disk
+// is inspected as well as the drained output.
+//
+// The drain-side and enqueue-side verdicts are NEGATIVES, so each names its
+// positive control in the same body on top of TEST 0.
 // ===========================================================================
 
-test('F1: SCOPE — h19-knowledge-delivery.mjs on a Read of the same governed path delivers, and emits NO porch-end line', () => {
-  const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: 'read', preview_budget_bytes: DEFAULT_BUDGET } });
+test('F1a: SCOPE (amended) — h19-knowledge-delivery.mjs on a Read of a governed path at rung \'read\' emits a PORCH, and it ends at or before byte 1800 of the COMPLETE additionalContext', () => {
+  const s = toolTime({ budget: DEFAULT_BUDGET });
+  try {
+    assert.equal(s.r.code, 0, s.r.stderr);
+    assert.match(s.ctx, /own-0/, 'positive control: the tool-time hook really did deliver this territory');
+    const end = porchEndOffset(s.ctx);
+    assert.ok(
+      end !== null,
+      `clause (5) as amended requires a porch on the DIRECT-INJECT tool-time block; none found. ctx head=${bytePrefix(s.ctx, 2400)}`
+    );
+    assert.ok(end <= DEFAULT_BUDGET, `tool-time porch overruns its budget: ends at byte ${end}, budget ${DEFAULT_BUDGET}; porch=${porchOf(s.ctx)}`);
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: keep renderPorch on the SubagentStart hook only (the pre-
+// amendment scope, which this pin used to assert) — no porch appears on the
+// tool-time block and the `end !== null` assertion goes red. Second sabotage:
+// render the porch there but budget the block at some fixed size instead of
+// preview_budget_bytes — the invariant assertion goes red.
+
+test('F1b: the tool-time budget subtracts NOTHING — the porch begins at byte 0 of the block, its self-report equals the porch emitted, and it is not a degenerate stub', () => {
+  const s = toolTime({ budget: DEFAULT_BUDGET });
+  try {
+    const line = porchEndLine(s.ctx);
+    assert.ok(line, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
+    const body = porchBody(s.ctx);
+    assert.ok(body, `could not locate the H19 header line that starts the tool-time porch; ctx head=${bytePrefix(s.ctx, 2400)}`);
+    // Nothing precedes this block, so the two spans coincide. If they differ,
+    // the budget is being measured over the wrong span — the exact arithmetic
+    // error the SubagentStart budget has to make deliberately (A6) and this
+    // surface must NOT make at all.
+    assert.equal(
+      bytes(body),
+      porchEndOffset(s.ctx),
+      `the tool-time block must START at the H19 header (nothing precedes it, nothing is subtracted): porch measures ${bytes(body)} bytes but the complete-context prefix through the same point is ${porchEndOffset(s.ctx)} bytes; head=${JSON.stringify(bytePrefix(s.ctx, 120))}`
+    );
+    assert.equal(reportedBytes(line), bytes(body), `tool-time porch self-report disagrees with the porch emitted: says ${reportedBytes(line)}, measured ${bytes(body)}; line=${line}`);
+    assert.ok(reportedBytes(line) <= DEFAULT_BUDGET, `the tool-time porch reports ${reportedBytes(line)} bytes against a budget of ${DEFAULT_BUDGET}`);
+    // Non-degeneracy: this fixture has far more to say than 1800 bytes, so a
+    // porch that came in near-empty means the budget was eaten before it was
+    // spent (an over-subtraction, or a collapse to the minimal rung).
+    assert.ok(
+      bytes(body) >= DEFAULT_BUDGET / 2,
+      `the tool-time porch is only ${bytes(body)} bytes of an ${DEFAULT_BUDGET}-byte budget on a fixture with 4 owners and 3 hazards — nothing should be subtracted here; porch=${body}`
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: subtract a phantom preceding block (reuse the SubagentStart
+// activePlanLine arithmetic on the tool-time surface) — the porch shrinks and
+// the non-degeneracy assertion goes red. Second sabotage: format the byte
+// count before the final clamp — the self-report equality goes red. LIMIT
+// disclosed at the head of this file: a SMALL over-subtraction is not
+// observable from output at all, so these three assertions are the whole
+// claim, not a proof of exact non-subtraction.
+
+test('F1c: the tool-time porch-end line is COMPLETE — terminator plus the precedence clause the whole ruling exists to deliver', () => {
+  const s = toolTime({ budget: DEFAULT_BUDGET });
+  try {
+    const line = porchEndLine(s.ctx);
+    assert.ok(line, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
+    const trimmed = line.replace(/\s+$/, '');
+    assert.match(trimmed, /[.!]$/, `the tool-time porch-end line was CUT — its last non-space character is not a sentence terminator: ${JSON.stringify(trimmed)}`);
+    assert.match(trimmed, /precedence/i, `the tool-time porch-end line must state normal instruction precedence beside the open-the-persisted-file instruction: ${JSON.stringify(trimmed)}`);
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: let the final hard clamp cut the tail of the tool-time porch-end
+// line (the measured SubagentStart defect, re-run on the new surface) — the
+// terminator assertion goes red while F1a/F1b stay green, which is why this
+// is its own pin. Second sabotage: emit the porch-end line without the
+// precedence clause on the tool-time surface only — the second assertion
+// goes red.
+
+test('F1d: the tool-time porch carries the substance — every rendered hazard\'s trigger text is inside the porch, owner lines carry slug + id8 + uuid, and hazards appear exactly ONCE in the whole block', () => {
+  const s = toolTime({ budget: DEFAULT_BUDGET });
+  try {
+    const porch = porchOf(s.ctx);
+    assert.ok(porch, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
+    for (let i = 0; i < 3; i += 1) {
+      assert.ok(porch.includes(`TRG${i}`), `hazard ${i} trigger text missing from the tool-time porch; porch=${porch}`);
+      assert.ok(porch.includes(`RW${i}`), `hazard ${i} right_way text missing from the tool-time porch; porch=${porch}`);
+      assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger text appears ${occurrences(s.ctx, `TRG${i}`)} times in the tool-time block; the porch IS the hazard rendering`);
+    }
+    const ptrs = ownerPointerLines(porch);
+    assert.ok(ptrs.length > 0, `the tool-time porch must give the owner a citable foothold inside the preview; porch=${porch}`);
+    for (const p of ptrs) {
+      assert.ok(s.slugs.includes(p.slug), `unknown slug '${p.slug}' in a tool-time porch owner line`);
+      const expected = OWNER_IDS[s.slugs.indexOf(p.slug)];
+      assert.equal(p.uuid.toLowerCase(), expected, `tool-time pointer for '${p.slug}' names the wrong uuid`);
+      assert.equal(p.id8, expected.slice(0, 8), `tool-time pointer for '${p.slug}' carries an id8 that is not the uuid's first 8 chars`);
+    }
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: render the tool-time porch as header + porch-end line only (no
+// hazards, no owner pointers) — the trigger/owner assertions go red; the
+// 11-15 KB block would still spill and the reader would still have nothing
+// citable in the preview, which is the whole point of the amendment. Second
+// sabotage: leave the tool-time hazard rendering in place BELOW the porch as
+// well — the occurrences-equal-1 assertions go red.
+
+test('F1e: the tool-time block still delivers the ARTICLE BODY below the porch, with its id8-bearing header and its FULL RECORD line', () => {
+  const s = toolTime({ budget: DEFAULT_BUDGET });
+  try {
+    const end = porchEndCharIndex(s.ctx);
+    assert.ok(end !== null, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
+    const below = s.ctx.slice(end);
+    assert.match(
+      below,
+      new RegExp(`▸ article 'own-0' \\(${OWNER_IDS[0].slice(0, 8)}\\) \\(`),
+      `the porch is a PREVIEW, not a replacement: the article body must still be rendered below it; below=${bytePrefix(below, 2000)}`
+    );
+    assert.ok(below.includes('own-0 ::'), `the article body's what_it_does must still arrive below the tool-time porch; below=${bytePrefix(below, 2000)}`);
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: let the tool-time porch REPLACE the block instead of prefacing it
+// (return after the porch) — the article body vanishes from below and both
+// assertions go red. That is the failure mode a byte budget invites, and it
+// would look like a passing invariant.
+
+test('F1f: on the tool-time block clause (5)\'s subject clause is absent or reads `none`, while K and the path-channel M still equal what is rendered', () => {
+  const s = toolTime({ budget: DEFAULT_BUDGET });
+  try {
+    const line = porchEndLine(s.ctx);
+    assert.ok(line, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
+    const c = endLineCounts(line);
+    // CONTROL FIRST: the accounting clauses parse at all on this surface, so
+    // "the subject clause is none" cannot be satisfied by a line that states
+    // nothing whatsoever.
+    assert.equal(c.articles, articleBodyHeaders(s.ctx).length, `K disagrees with the article bodies rendered in the tool-time block (${articleBodyHeaders(s.ctx).length}); line=${line}`);
+    assert.ok(c.pathDecisions !== null, `the tool-time porch-end line must attribute its pointer count to the path channel: ${line}`);
+    assert.equal(c.pathDecisions, decisionPointerCount(s.ctx), `M disagrees with the pointers rendered in the tool-time block (${decisionPointerCount(s.ctx)}); line=${line}`);
+    assert.ok(
+      subjectClauseIsNone(line),
+      `a tool-time Read runs no subject (mechanism-axis) channel, so clause (5)'s subject clause must be omitted or read 'none' — never a count it cannot account for: ${line}`
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+// SABOTAGE: carry the SubagentStart wording over verbatim so the tool-time
+// line claims `subject staging: yes` (or a stale count) — the last assertion
+// goes red. Second sabotage: emit the subject clause as `none` but drop the
+// path-channel label — the pathDecisions assertion goes red first, which is
+// why the parse controls are placed AHEAD of the negative.
+
+test('F2a: SCOPE — the porch is NOT applied at ENQUEUE time: no file the queue writes under .sterling/transient/delivery/ contains a porch-end line, in any decoding', () => {
+  const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: 'prompt', preview_budget_bytes: DEFAULT_BUDGET } });
   try {
     seedOwners(store, 4);
     seedHazards(store, 3);
     seedRulings(store, 2);
-    const r = runHook(
+    const enqueue = runHook(
       'h19-knowledge-delivery.mjs',
       { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: join(dir, 'src/a.mjs') }, cwd: dir },
       dir
     );
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /own-0/, 'positive control: the tool-time hook really did deliver this territory');
-    assert.equal(porchEndLine(ctx), null, `tool-time delivery must emit no porch; found: ${porchEndLine(ctx)}`);
-    assert.doesNotMatch(ctx, /\+\d+ owners below/, 'and no porch owner-cap disclosure');
+    assert.equal(enqueue.code, 0, enqueue.stderr);
+    const cands = queuedTexts(dir);
+    // CONTROL FIRST: something really was enqueued, and the search actually
+    // reaches its content. Either shape counts — a rendered payload (the
+    // owner slug / the H19 header) or an id-referencing entry.
+    const evidence = cands.filter(({ text }) => text.includes('own-0') || text.includes(OWNER_IDS[0]) || /STERLING KNOWLEDGE DELIVERY/.test(text));
+    assert.ok(
+      evidence.length > 0,
+      `CONTROL FAILED: nothing under .sterling/transient/delivery/ references the delivery, so "no porch in the queued payload" would be vacuous. files=${JSON.stringify(walkFiles(join(dir, '.sterling', 'transient', 'delivery')))}`
+    );
+    const withPorch = cands.filter(({ text }) => porchEndLine(text) !== null);
+    assert.deepEqual(
+      withPorch.map(({ file }) => file),
+      [],
+      `clause (5): the porch is not applied at enqueue time, so the queue payload is unchanged. Found a porch-end line in: ${JSON.stringify(
+        withPorch.map(({ file, text }) => ({ file, line: porchEndLine(text) }))
+      )}`
+    );
   } finally {
     cleanup();
   }
 });
-// SABOTAGE: move renderPorch into the shared payload builder both hooks call
-// (instead of the SubagentStart hook only) — the tool-time output grows a
-// porch and this pin goes red. The ruling scope-pins this deliberately: the
-// spill was measured on SubagentStart, tool-time was UNMEASURED.
+// SABOTAGE: render the porch inside the queued payload at enqueue time — the
+// deepEqual goes red and names the file. WHICH GUARD CARRIES THE VERDICT
+// depends on the queue's shape, and the control's failure message prints it:
+// if the queue stores RENDERED text (the shape the pre-amendment F2 sabotage
+// assumed), this arm is load-bearing on its own; if it stores ids only, this
+// arm is trivially satisfied and F2b below is what holds the line. Stated
+// here rather than assumed, because a pin whose load-bearing guard is unknown
+// is a pin that can go hollow without anyone noticing.
 
-test('F2: SCOPE — the drain (h19-delivery-drain.mjs) injects the queued payload with NO porch-end line', () => {
+test('F2b: SCOPE — the drain (h19-delivery-drain.mjs) injects the queued payload with NO porch-end line', () => {
   const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: 'prompt', preview_budget_bytes: DEFAULT_BUDGET } });
   try {
     seedOwners(store, 4);
@@ -1269,13 +1878,16 @@ test('F2: SCOPE — the drain (h19-delivery-drain.mjs) injects the queued payloa
     assert.equal(drain.code, 0, drain.stderr);
     const ctx = JSON.parse(drain.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, /own-0/, 'positive control: the drain really did inject the queued payload');
-    assert.equal(porchEndLine(ctx), null, `the drain must emit no porch; found: ${porchEndLine(ctx)}`);
+    assert.equal(porchEndLine(ctx), null, `the drain must emit no porch until that surface is measured separately (clause (5): one porch per batch is only the LIKELY shape); found: ${porchEndLine(ctx)}`);
   } finally {
     cleanup();
   }
 });
 // SABOTAGE: render the porch inside the queued payload at enqueue time (so
-// the drain carries it) — this pin goes red.
+// the drain carries it), or add a porch to the drain's own output — this pin
+// goes red. Second sabotage, the one this arm alone catches: enqueue WITH a
+// porch and strip it at drain time — F2a goes red while this stays green, so
+// the two arms are not redundant.
 
 // ===========================================================================
 // (g) renderArticle's header, on every surface (decision §6).
