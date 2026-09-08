@@ -221,10 +221,14 @@ export function parseReceipt(raw) {
   // discharge classes, supersession coverage) branches on these two exact
   // strings, so an unvalidated junk value would fall through whichever
   // branch happens to run last instead of failing loudly at classification.
+  // attribution: 'block' | 'none' | 'union' — 'none' is what H22 writes for
+  // an unattributable or resumed Start since decision 7c515e52 (alongside
+  // attribution_case); 'union' is kept for legacy entries only, since H22
+  // no longer writes it.
   if (!TERRITORY_SOURCES.has(raw.territory.source)) {
     return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'territory.source' } };
   }
-  if (raw.territory.attribution !== 'block' && raw.territory.attribution !== 'union') {
+  if (raw.territory.attribution !== 'block' && raw.territory.attribution !== 'none' && raw.territory.attribution !== 'union') {
     return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'territory.attribution' } };
   }
 
@@ -315,6 +319,7 @@ export function parseReceipt(raw) {
       files: raw.territory.files.filter((f) => typeof f === 'string'),
       source: raw.territory.source,
       attribution: raw.territory.attribution,
+      ...(typeof raw.territory.attribution_case === 'string' ? { attribution_case: raw.territory.attribution_case } : {}),
     },
     content_evidence: contentParsed.value,
     disposition,
