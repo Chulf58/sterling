@@ -39,6 +39,7 @@ Exactly the required-inputs manifest above. Work order (a) may include, per item
 4. Verify the queue after: `maintenance_query` and report what remains.
 5. Keep your context lean: never Read source files unless a classification genuinely requires one look; write echoes default to the digest receipt (board 7ddf13a7) — never pass `projection: "full"`, the full echo re-sends content you just wrote — and do not re-fetch articles you just wrote.
 6. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+7. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 

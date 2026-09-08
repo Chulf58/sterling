@@ -54,12 +54,16 @@ import {
   DECISION_POINTER_CAP,
   rankFileDecisionPointers,
   renderPayload,
+  payloadHeaderLine,
+  porchHeaderLine,
+  renderPorch,
   extractAxisTerms,
   axisHits,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
   hasRecordCentralityHit,
   recordCentralityHits,
+  stripReviewTerritoryLine,
 } from './lib/delivery.mjs';
 
 // Subject-channel decision ceiling — mirrors H20's MAX_DECISIONS: a keyword
@@ -80,6 +84,32 @@ const RETURN_CONTRACT =
   'conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw ' +
   'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
   'relevant files/tests, and unresolved risks.';
+
+// PORCH BUDGET (config.delivery.preview_budget_bytes) — the SubagentStart
+// front-porch's byte ceiling (lib/delivery.mjs renderPorch). Measured default
+// 1800: the inline preview Claude Code 2.1.263 shows before spilling the rest
+// of a hook's additionalContext to a persisted file (research_finding
+// 518b7d21) — a platform fact, re-probe on upgrade. 0 DISABLES the porch.
+//
+// THREE-STATE GUARD, same shape as the TDD posture block above and h1-
+// session-start.mjs's configUnreadable guard (anti_pattern e0d280ee) — EXCEPT
+// this value is never RENDERED as a claim about the project the reader could
+// be misled by, it is only an internal rendering parameter, so every unusable
+// shape (absent, unparseable, non-object, non-integer, negative) collapses to
+// the SAME documented default rather than a distinct UNKNOWN state — there is
+// nothing here for a divergence to be dishonest ABOUT.
+const PORCH_BUDGET_DEFAULT = 1800;
+function resolvePorchBudget(cwd) {
+  try {
+    const cfg = loadConfig(cwd);
+    if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
+    const v = cfg?.delivery?.preview_budget_bytes;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
+    return v;
+  } catch {
+    return PORCH_BUDGET_DEFAULT;
+  }
+}
 
 const input = readStdin();
 
@@ -246,7 +276,19 @@ function main(input) {
     const subjectMatches = [];
     const seenSubject = new Set();
     for (const p of prompts) {
-      const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+      // STRIP THE REVIEW-TERRITORY RECEIPT LINE before axis-term extraction —
+      // the SAME helper H20's outgoingProposalText applies (decision
+      // h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen,
+      // fix 1). This is the OTHER consumer of the raw dispatch prompt for
+      // subject-axis matching: without routing it through the identical
+      // helper, this surface and H20's dispatch-seam surface could disagree on
+      // whether a REVIEW-TERRITORY boilerplate line counts as "subject",
+      // reintroducing the same false positive one seam over. Path extraction
+      // just above (extractPathCandidates) deliberately still reads the RAW
+      // prompt — the declared territory's paths are legitimate path-channel
+      // input, only axis-term SUBJECT matching must not see the line.
+      const subjectText = stripReviewTerritoryLine(p);
+      const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
       if (terms.length < AXIS_MIN_HITS) continue;
       const candidatesBySubject = [
         ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
@@ -255,9 +297,9 @@ function main(input) {
       for (const r of candidatesBySubject) {
         if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
         const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, subjectText)) {
           seenSubject.add(r.id);
-          subjectMatches.push({ record: r, hits, prompt: p });
+          subjectMatches.push({ record: r, hits, prompt: subjectText });
         }
       }
     }
@@ -291,14 +333,53 @@ function main(input) {
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish('');
 
     const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+
+    // PORCH BUDGET applies to the PREFIX OF THE COMPLETE additionalContext —
+    // combinedContext() places activePlanLine BEFORE the payload, so its bytes
+    // (plus the '\n\n' separator combinedContext joins with) are subtracted
+    // here rather than the porch being sized against the payload alone, which
+    // would silently overrun once a plan-lock line is present.
+    const rawPorchBudget = resolvePorchBudget(input.cwd);
+    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}\n\n`, 'utf8') : 0;
+    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
+
     const parts = [];
     if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-      const blocks = [
-        ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      // The porch's own hazard cap mirrors renderHazards' (HAZARD_CAP,
+      // severity-sorted) — the SAME rendered slice is what stays out of the
+      // remainder below (hazards appear once, in the porch).
+      const porch =
+        porchBudget > 0
+          ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
+              articleBodiesCount: freshOwners.length,
+              decisionPointerCount: shownDecisionsForPorch.length,
+              subjectStaged: freshSubject.length > 0,
+            })
+          : { text: '', hazardsRendered: false };
+      // THE REMAINDER: unchanged from today MINUS renderHazards, but ONLY when
+      // the porch itself actually rendered hazard substance (hazardsRendered).
+      // renderPorch can return non-empty text WITHOUT having rendered hazards
+      // — its own MINIMAL-porch fallback, which defers hazard substance to the
+      // remainder rather than clamping a fragment — so this is keyed on
+      // `porch.hazardsRendered`, never on `porch.text` truthiness alone; every
+      // owner still gets its full renderArticle/renderReference (not only
+      // porch-admitted ones), and the same capped renderDecisionPointers call
+      // as before.
+      const remainderBlocks = [
+        ...(porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: rels })),
         ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
         ...(freshDecisions.length ? [renderDecisionPointers(rels.join(', '), freshDecisions)] : []),
       ];
-      parts.push(renderPayload(rels.join(', '), blocks, { unowned: false }));
+      if (porch.text) {
+        parts.push([porch.text, ...remainderBlocks].join('\n\n'));
+      } else {
+        // budget 0 (disabled), MISCONFIGURED, or decision-pointers-only (no
+        // porch by design): output is BYTE-IDENTICAL to before the porch —
+        // remainderBlocks above already includes renderHazards in every one
+        // of these cases, since hazardsRendered is always false when text is ''.
+        parts.push(renderPayload(rels.join(', '), remainderBlocks, { unowned: false }));
+      }
     }
     const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
     const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);

@@ -116,10 +116,16 @@ const DRAIN = 'h19-delivery-drain.mjs';
 const H23 = 'h23-output-axis.mjs';
 const H20 = 'h20-mechanism-axis.mjs';
 
-// H10's demand-block header (h10-direct-capture.mjs:1712). Used as the LIVENESS
-// arm of the inverted ownership verdict: its absence means H10 never printed a
-// demand at all, which is unmeasured — never "the path is owned".
-const H10_DUTIES_MARKER = 'H10 ▸ duties before this session ends';
+// H10's demand-block header PREFIX. Since bad0817 (decision ee8ab1f5, Stop
+// output shorter-and-fewer) the block opens with one of two lines — the
+// first-nag header 'H10 ▸ act, then Stop again:' (h10-direct-capture.mjs:1945)
+// or the compaction line 'H10 ▸ N duty(ies) unchanged since HH:MM: …' (:2033)
+// — and 'H10 ▸' is the prefix both share and nothing else in H10 prints. Used
+// as the LIVENESS arm of the inverted ownership verdict: its absence means H10
+// never printed a demand at all, which is unmeasured — never "the path is
+// owned". The previous exact-sentence marker went stale on the header rewrite
+// and scored every H10 case as harness_error on 2026-09-08 (correctly loud).
+const H10_DUTIES_MARKER = 'H10 ▸';
 
 // H23's own clip + candidate cap, mirrored verbatim (h23-output-axis.mjs:85,
 // :181-182) so a rename there is the only place these constants must move.

@@ -35,6 +35,7 @@ Exactly the required-inputs manifest. If the question is actually several questi
 2. Answer the question asked — not the neighborhood around it.
 3. Contradictions between sources are findings, not noise: report both with dates.
 4. Stop at the budget cap; a bounded honest answer beats an unbounded thorough one.
+5. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 

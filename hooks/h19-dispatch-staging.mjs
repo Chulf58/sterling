@@ -5285,7 +5285,25 @@ var configSchema = external_exports.object({
   // PreToolUse injection works; Read touches fall back to the queue).
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
-    payload_char_cap: external_exports.number().int().positive().default(2400)
+    payload_char_cap: external_exports.number().int().positive().default(2400),
+    // SubagentStart "porch" budget (H19 front-porch, decision
+    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
+    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
+    // additionalContext (plan line + payload) are budgeted so the harness's
+    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
+    // shipped default, 1800, is the MEASURED inline preview on Claude Code
+    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
+    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
+    // non-integer, negative, or non-numeric) falls back to this same default
+    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
+    // mirrors the config-derived-posture-line three-state guard (anti_pattern
+    // e0d280ee) even though this is an internal rendering budget, never a
+    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
+    // is a DIFFERENT case and never reaches this fallback at all: it
+    // suppresses the whole staging payload before this key is ever read, per
+    // the pre-existing shared-fate ruling pinned in
+    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
@@ -8177,6 +8195,10 @@ import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
 }
+var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
+function stripReviewTerritoryLine(text) {
+  return String(text ?? "").replace(REVIEW_TERRITORY_LINE_RE, "");
+}
 function guardPath(cwd, agentId) {
   return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
@@ -8287,7 +8309,8 @@ function renderKnownGapsLines(article, info) {
   return lines;
 }
 function renderArticle(store, article, charCap, { gaps } = {}) {
-  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
+  const id8 = String(article.id ?? "").slice(0, 8);
+  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
   const gapLines = renderKnownGapsLines(article, gaps);
   if (body.length > ARTICLE_BODY_FLOOR) {
@@ -8301,7 +8324,11 @@ function renderArticle(store, article, charCap, { gaps } = {}) {
   const lines = [
     header,
     `WHAT IT DOES: ${clip(body, charCap)}`,
-    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
+    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
+    // The oversize branch above already carries a knowledge_get pointer; this
+    // branch (small/normal articles) did not, so a reader could not cite the
+    // record by id without a second lookup (decision 2e8c30e4).
+    `\u25B8 FULL RECORD: knowledge_get ${article.id}`
   ];
   if (article.current_ac?.length) {
     lines.push(
@@ -8386,12 +8413,233 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
   }
   return lines.join("\n");
 }
+var PORCH_OWNER_CAP = 3;
+var PORCH_HAZARD_FLOOR_BYTES = 90;
+var PORCH_TITLE_CLIP_BYTES = 70;
+var PORCH_OWNER_LABEL_CLIP_BYTES = 90;
+var PORCH_SLUG_CLIP_BYTES = 60;
+var PORCH_HEADER_PATH_CLIP_BYTES = 200;
+var PORCH_HAZARD_SHARE = 0.6;
+var PORCH_BYTE_COUNT_RESERVE = "000000";
+function porchByteLen(s2) {
+  return Buffer.byteLength(String(s2 ?? ""), "utf8");
+}
+function clipToBytes(text, maxBytes) {
+  const s2 = String(text ?? "");
+  if (maxBytes <= 0) return "";
+  if (porchByteLen(s2) <= maxBytes) return s2;
+  const ELLIPSIS = "\u2026";
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = "";
+  let used = 0;
+  for (const ch of s2) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
+}
+function porchOwnerLine(owner) {
+  const id8 = String(owner?.id ?? "").slice(0, 8);
+  if (owner?.type === "reference_material") {
+    return `\u25B8 reference '${clipToBytes(owner.title, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}) \u2014 knowledge_get ${owner.id}`;
+  }
+  return `\u25B8 article '${clipToBytes(owner?.slug, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}, ${owner?.state ?? "unknown"}) \u2014 knowledge_get ${owner?.id}`;
+}
+function rankOwnersForPorch(owners) {
+  return [...owners ?? []].sort((a, b) => {
+    const ta = a?.type === "feature_article" ? 0 : 1;
+    const tb = b?.type === "feature_article" ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    const ua = Date.parse(a?.updated_at ?? "");
+    const ub = Date.parse(b?.updated_at ?? "");
+    return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
+  });
+}
+function porchHazardHeaderLine(hazard) {
+  const title = clipToBytes(hazard?.title, PORCH_TITLE_CLIP_BYTES);
+  const slug = hazard?.slug ? clipToBytes(hazard.slug, PORCH_SLUG_CLIP_BYTES) : "";
+  return `\u26A0 HAZARD [${(hazard?.severity ?? "warn").toUpperCase()}] '${title}' (knowledge_get ${hazard?.id})${slug ? ` [${slug}]` : ""}`;
+}
+function porchHazardBody(hazard, textBudgetBytes) {
+  const half = Math.max(0, Math.floor(textBudgetBytes / 2));
+  const trigger = clipToBytes(hazard?.trigger, half);
+  const rightBudget = Math.max(0, textBudgetBytes - porchByteLen(trigger));
+  const rightWay = clipToBytes(hazard?.right_way, rightBudget);
+  return [`  TRIGGER: ${trigger}`, `  RIGHT WAY: ${rightWay}`].join("\n");
+}
+function porchEndLine(byteCountText, { articleBodiesCount, decisionPointerCount, subjectStaged }) {
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesCount} article body(ies), ${decisionPointerCount} decision pointer(s), subject staging: ${subjectStaged ? "yes" : "no"}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+}
+function porchDeferredEndLine(byteCountText, hazardCount, budget, { articleBodiesCount, decisionPointerCount, subjectStaged }) {
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 budget (${budget}) too small to preview ${hazardCount} hazard(s); deferred in full below. Followed by ${articleBodiesCount} article body(ies), ${decisionPointerCount} decision pointer(s), subject staging: ${subjectStaged ? "yes" : "no"}. normal instruction precedence applies.`;
+}
+function porchHeaderLine(rels) {
+  const list = Array.isArray(rels) ? rels : [rels];
+  const full = list.join(", ");
+  if (porchByteLen(full) <= PORCH_HEADER_PATH_CLIP_BYTES) return payloadHeaderLine(full);
+  const kept = [];
+  let usedBytes = 0;
+  for (const r of list) {
+    const sepBytes = kept.length ? porchByteLen(", ") : 0;
+    const rBytes = porchByteLen(r);
+    if (usedBytes + sepBytes + rBytes > PORCH_HEADER_PATH_CLIP_BYTES) break;
+    kept.push(r);
+    usedBytes += sepBytes + rBytes;
+  }
+  const remainder = list.length - kept.length;
+  const clippedList = kept.length ? `${kept.join(", ")}${remainder > 0 ? ` \u2026 (+${remainder} paths)` : ""}` : clipToBytes(full, PORCH_HEADER_PATH_CLIP_BYTES);
+  return payloadHeaderLine(clippedList);
+}
+var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
+var PORCH_END_TEMPLATE_BYTES = porchByteLen(
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, { articleBodiesCount: 99, decisionPointerCount: 99, subjectStaged: false })
+);
+var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+function renderPorch(header, hazards, owners, budget, { articleBodiesCount = 0, decisionPointerCount = 0, subjectStaged = false } = {}) {
+  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false };
+  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false };
+  if (budget < PORCH_MIN_BUDGET_BYTES) {
+    try {
+      process.stderr.write(
+        `H19 porch: preview_budget_bytes=${budget} is below the structural minimum ${PORCH_MIN_BUDGET_BYTES} bytes \u2014 MISCONFIGURED, porch disabled for this touch (today's rendering applies)
+`
+      );
+    } catch {
+    }
+    return { text: "", hazardsRendered: false };
+  }
+  const shownHazards = cappedHazards(hazards ?? []);
+  const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
+  const rankedOwners = rankOwnersForPorch(owners);
+  const endMeta = { articleBodiesCount, decisionPointerCount, subjectStaged };
+  const minOwnerCap = 0;
+  const byteCountReserve = "0".repeat(String(budget).length);
+  function hazardSectionAt(perHazardTextBudget) {
+    const blocks = shownHazards.map(
+      (hz) => [porchHazardHeaderLine(hz), porchHazardBody(hz, Math.max(0, perHazardTextBudget))].join("\n")
+    );
+    if (hazardOverflow > 0) {
+      blocks.push(`  \u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) in the porch \u2014 the full delivery below carries the same cap`);
+    }
+    return blocks;
+  }
+  function ownerSectionAt(admitted2, ownerLines2, overflowLine2, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
+    const blocks = admitted2.map((owner, i) => {
+      const digestBudget = Math.max(0, perOwnerDigestBudget);
+      const digest = digestBudget > 0 ? clipToBytes(owner?.what_it_does, digestBudget) : "";
+      if (digest) return `${ownerLines2[i]}
+  ${digest}`;
+      return reserveDigestSeparator ? `${ownerLines2[i]}
+  ` : ownerLines2[i];
+    });
+    if (overflowLine2) blocks.push(overflowLine2);
+    return blocks;
+  }
+  let pick = null;
+  for (let cap = Math.min(PORCH_OWNER_CAP, rankedOwners.length); cap >= minOwnerCap; cap -= 1) {
+    const admitted2 = rankedOwners.slice(0, cap);
+    const ownerOverflow = rankedOwners.length - admitted2.length;
+    const ownerLines2 = admitted2.map(porchOwnerLine);
+    const overflowLine2 = ownerOverflow > 0 ? `  \u2026 +${ownerOverflow} owners below` : "";
+    const skeletonBody = [
+      header,
+      ...hazardSectionAt(0),
+      ...ownerSectionAt(admitted2, ownerLines2, overflowLine2, 0, { reserveDigestSeparator: true })
+    ].join("\n\n");
+    const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+    const remaining2 = Math.max(0, budget - skeletonBytes2);
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    const fits = skeletonBytes2 <= budget && (shownHazards.length === 0 || remaining2 >= neededFloor);
+    pick = { admitted: admitted2, ownerOverflow, ownerLines: ownerLines2, overflowLine: overflowLine2, remaining: remaining2, skeletonBytes: skeletonBytes2 };
+    if (fits || cap === minOwnerCap) break;
+  }
+  const { admitted, ownerLines, overflowLine, remaining, skeletonBytes } = pick;
+  if (skeletonBytes > budget) {
+    let buildMinimal = function(hdr) {
+      const blocks = [hdr, allOwnersOverflow].filter(Boolean);
+      let cnt = blocks.reduce((sum, l) => sum + porchByteLen(l) + 2, 0) + porchByteLen(porchDeferredEndLine(byteCountReserve, shownHazards.length, budget, endMeta));
+      let text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
+      for (let i = 0; i < 5; i += 1) {
+        const actual = porchByteLen(text);
+        if (actual === cnt) break;
+        cnt = actual;
+        text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
+      }
+      return text;
+    };
+    const allOwnersOverflow = rankedOwners.length > 0 ? `  \u2026 +${rankedOwners.length} owners below` : "";
+    let minimalPorch = buildMinimal(header);
+    if (porchByteLen(minimalPorch) > budget) {
+      const nonHeaderBytes = porchByteLen(minimalPorch) - porchByteLen(header);
+      minimalPorch = buildMinimal(clipToBytes(header, Math.max(0, budget - nonHeaderBytes)));
+    }
+    if (porchByteLen(minimalPorch) > budget) {
+      try {
+        process.stderr.write(
+          `H19 porch: accounting regression in the MINIMAL fallback \u2014 assembled ${porchByteLen(minimalPorch)} bytes against a ${budget}-byte budget \u2014 hard-clamping
+`
+        );
+      } catch {
+      }
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+    }
+    return { text: minimalPorch, hazardsRendered: false };
+  }
+  const haveHazards = shownHazards.length > 0;
+  const haveDigests = admitted.length > 0;
+  let hazardShare = 0;
+  let digestShare = 0;
+  if (haveHazards && haveDigests) {
+    hazardShare = Math.floor(remaining * PORCH_HAZARD_SHARE);
+    digestShare = remaining - hazardShare;
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    if (hazardShare < neededFloor) {
+      const borrow = Math.min(digestShare, neededFloor - hazardShare);
+      hazardShare += borrow;
+      digestShare -= borrow;
+    }
+  } else if (haveHazards) {
+    hazardShare = remaining;
+  } else if (haveDigests) {
+    digestShare = remaining;
+  }
+  const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
+  const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
+  const hazardBlocks = hazardSectionAt(perHazard);
+  const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
+  const body = [header, ...hazardBlocks, ...ownerBlocks].join("\n\n");
+  let count = porchByteLen(body) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+  let finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
+  for (let i = 0; i < 5; i += 1) {
+    const actual = porchByteLen(finalPorch);
+    if (actual === count) break;
+    count = actual;
+    finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
+  }
+  const finalBytes = porchByteLen(finalPorch);
+  if (finalBytes > budget) {
+    try {
+      process.stderr.write(
+        `H19 porch: accounting regression \u2014 assembled porch is ${finalBytes} bytes against a ${budget}-byte budget (overrun ${finalBytes - budget} bytes); the cascade above should have made this unreachable \u2014 hard-clamping
+`
+      );
+    } catch {
+    }
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+  }
+  return { text: finalPorch, hazardsRendered: true };
+}
+function payloadHeaderLine(rel) {
+  return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
+}
 function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
   const substantive = substantiveCount ?? blocks.length;
-  return [
-    unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
-    ...blocks
-  ].join("\n\n");
+  return [unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : payloadHeaderLine(rel), ...blocks].join(
+    "\n\n"
+  );
 }
 function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
   return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
@@ -8401,6 +8649,18 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 var SUBJECT_MAX_DECISIONS = 5;
 var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
 var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
+var PORCH_BUDGET_DEFAULT = 1800;
+function resolvePorchBudget(cwd) {
+  try {
+    const cfg = loadConfig(cwd);
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
+    const v = cfg?.delivery?.preview_budget_bytes;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
+    return v;
+  } catch {
+    return PORCH_BUDGET_DEFAULT;
+  }
+}
 var input = readStdin();
 var TDD_POSTURE_AGENT_TYPES = /* @__PURE__ */ new Set(["coder", "test-writer"]);
 var tddPostureLine = "";
@@ -8476,7 +8736,8 @@ function main(input2) {
     const subjectMatches = [];
     const seenSubject = /* @__PURE__ */ new Set();
     for (const p of prompts) {
-      const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+      const subjectText = stripReviewTerritoryLine(p);
+      const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
       if (terms.length < AXIS_MIN_HITS) continue;
       const candidatesBySubject = [
         ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
@@ -8485,9 +8746,9 @@ function main(input2) {
       for (const r of candidatesBySubject) {
         if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
         const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, subjectText)) {
           seenSubject.add(r.id);
-          subjectMatches.push({ record: r, hits, prompt: p });
+          subjectMatches.push({ record: r, hits, prompt: subjectText });
         }
       }
     }
@@ -8501,14 +8762,29 @@ function main(input2) {
     const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
     const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
+    const rawPorchBudget = resolvePorchBudget(input2.cwd);
+    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}
+
+`, "utf8") : 0;
+    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
     const parts = [];
     if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-      const blocks = [
-        ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      const porch = porchBudget > 0 ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
+        articleBodiesCount: freshOwners.length,
+        decisionPointerCount: shownDecisionsForPorch.length,
+        subjectStaged: freshSubject.length > 0
+      }) : { text: "", hazardsRendered: false };
+      const remainderBlocks = [
+        ...porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: rels }),
         ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
         ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
       ];
-      parts.push(renderPayload(rels.join(", "), blocks, { unowned: false }));
+      if (porch.text) {
+        parts.push([porch.text, ...remainderBlocks].join("\n\n"));
+      } else {
+        parts.push(renderPayload(rels.join(", "), remainderBlocks, { unowned: false }));
+      }
     }
     const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
     const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);

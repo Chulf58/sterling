@@ -40,6 +40,7 @@ Exactly the required-inputs manifest. When a staged decision records a rejected 
 3. Does the diff contradict the owning article's intended_behavior? That's missing feature-context.
 4. Could half the diff satisfy the same tests? Name the half.
 5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+6. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 

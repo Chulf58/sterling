@@ -41,6 +41,7 @@ Exactly the required-inputs manifest; the dispatch reason names the signal that 
 4. Dependency changes: new packages, scripts, postinstall behavior.
 5. Severity-block anti-patterns on touched files — mandatory check items.
 6. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+7. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 
