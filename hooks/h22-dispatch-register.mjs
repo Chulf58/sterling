@@ -6704,7 +6704,7 @@ function parseReceipt(raw) {
   if (!TERRITORY_SOURCES.has(raw.territory.source)) {
     return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
   }
-  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "union") {
+  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "none" && raw.territory.attribution !== "union") {
     return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
   }
   const contentParsed = parseContentEvidence(raw.content_evidence);
@@ -6774,7 +6774,8 @@ function parseReceipt(raw) {
     territory: {
       files: raw.territory.files.filter((f) => typeof f === "string"),
       source: raw.territory.source,
-      attribution: raw.territory.attribution
+      attribution: raw.territory.attribution,
+      ...typeof raw.territory.attribution_case === "string" ? { attribution_case: raw.territory.attribution_case } : {}
     },
     content_evidence: contentParsed.value,
     disposition,
