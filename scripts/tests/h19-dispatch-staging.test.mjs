@@ -1,8 +1,15 @@
 // H19 — dispatch staging (AC5, board 7b01f139-7341-4d3c-9991-6c1c27ceafc7).
-// SubagentStart hook: recovers the dispatch prompt(s) from the parent
-// transcript (no prompt field on stdin — research_finding 35a89a0f) and stages
-// the same governed-territory payload h19-knowledge-delivery.mjs computes for
-// a file touch. AC7 precedent holds here too: never a gate, exit 0/1 only.
+// SubagentStart hook: resolves THIS spawn's own dispatch prompt (there is no
+// prompt field on stdin — research_finding 35a89a0f) and stages the same
+// governed-territory payload h19-knowledge-delivery.mjs computes for a file
+// touch. AC7 precedent holds here too: never a gate, exit 0/1 only.
+//
+// SUPERSEDED SOURCE OF THE PROMPT (decision 7c515e52, board 5445066b): the
+// prompt used to be recovered from the PARENT TRANSCRIPT's last dispatching
+// message. That read lagged 3.4-5.5 s behind the spawn and delivered the wrong
+// territory to 4 of 6 measured spawns (finding 51506eec), so it is DELETED and
+// replaced by the per-dispatch state record (PreToolUse slot -> PostToolUse
+// binding -> locked Start resolution). See the fixture note below.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -89,20 +96,51 @@ function makeProject(configOverride = {}) {
   return { dir, store, cleanup };
 }
 
-// --- transcript fixture helpers -------------------------------------------
+// --- dispatch fixture helpers ---------------------------------------------
+//
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased). H19 no longer recovers
+// the dispatch prompt from the PARENT TRANSCRIPT: the transcript tail is the
+// MEASURED defect (finding 51506eec — 3.4-5.5 s of lag, 4 of 6 spawns saw an
+// older unrelated block), so lastDispatchPrompts is DELETED and a Start
+// resolves its own dispatch from the per-dispatch STATE RECORD written at
+// PreToolUse (and bound by PostToolUse's tool_response.agentId).
+//
+// So a dispatch is now DECLARED by firing its real PreToolUse event through
+// h22-dispatch-register.mjs — the registered owner of that seam (§7(d)) — and
+// every SubagentStart below points transcript_path at a file that does NOT
+// exist. That is the correct fixture under the new contract AND a pin in its
+// own right: a surviving transcript reader finds nothing and every staged-
+// article assertion goes red instead of passing by accident.
 
-function taskBlock(prompt, name = 'Task') {
-  return { type: 'tool_use', name, input: { prompt } };
+const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
+
+function noTranscript(dir) {
+  return join(dir, 'no-such-parent-transcript.jsonl');
 }
 
-function assistantLine(blocks) {
-  return JSON.stringify({ type: 'assistant', message: { content: blocks } });
-}
-
-function writeTranscript(dir, lines) {
-  const p = join(dir, `transcript-${randomUUID()}.jsonl`);
-  writeFileSync(p, lines.join('\n') + '\n');
-  return p;
+/** Fire a real PreToolUse Task event so a pending state record exists.
+ *  `subagent_type` MUST match the SubagentStart's agent_type — §5(iii)
+ *  derivation is exact by construction over the type. */
+function stageDispatch(dir, prompt, { subagent_type = 'general-purpose', tool_use_id = `toolu_${randomUUID().slice(0, 8)}`, session_id = 's1' } = {}) {
+  const r = spawnSync(process.execPath, [H22_PATH], {
+    input: JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id,
+      tool_input: { subagent_type, prompt, description: 'a lane' },
+      session_id,
+      cwd: dir,
+      transcript_path: noTranscript(dir),
+      prompt_id: 'p1',
+    }),
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+  assert.notEqual(r.status, 2, `PreToolUse must never deny a dispatch: ${r.stderr ?? ''}`);
+  return noTranscript(dir);
 }
 
 const subagentStart = (dir, transcriptPath, extra = {}) => ({
@@ -127,11 +165,17 @@ const guardOf = (dir, agentId) => {
 // relocated". So a dispatch with nothing to STAGE is no longer silent: it is
 // now contract-only. "AC5 undeclared dispatches unchanged" now describes the
 // STAGING side alone; the net platform output changed by design.
-test('no Task/Agent tool_use in the transcript: contract-only, exit 0 (nothing to stage, contract still fires)', () => {
+// RE-CUT (7c515e52): the case is no longer "no Task block in the transcript"
+// but "NO DISPATCH STATE AT ALL" — the §5 'no-slot' shape (a stale session
+// that never loaded the Pre registration, per §7(d)). The assertions below are
+// byte-identical: contract fires, nothing is staged, no guard is written. The
+// disclosure line that now accompanies it is pinned in
+// scripts/tests/dispatch-state-hooks.test.mjs (DSH-4).
+test('no dispatch state at all (no-slot): contract-only, exit 0 (nothing to stage, contract still fires)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'just thinking, no dispatch' }])]);
+    const transcript = noTranscript(dir);
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
@@ -169,7 +213,7 @@ test('prompt names no repo paths: contract-only, exit 0 (AC5 "undeclared dispatc
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Please investigate the login flow and report back.')])]);
+    const transcript = stageDispatch(dir, 'Please investigate the login flow and report back.');
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
@@ -188,7 +232,7 @@ test('prompt names a governed file: payload contains the article, the guard is w
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Go read src/a.mjs and fix the bug there.')])]);
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.');
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
@@ -229,87 +273,62 @@ test('prompt names a governed file: payload contains the article, the guard is w
 // suppress the contract on repeat calls — the "still fires on the second
 // call" assertion goes red.
 
-test('parallel two-dispatch message: the union of both Task prompts is considered (both governed files staged)', () => {
+// RE-CUT (7c515e52 §3/§5): a Start stages territory "from the resolved prompt
+// ALONE" — there is no union of a message's dispatch blocks any more, and the
+// 'possibly a sibling' framing is gone with it. The state-machine equivalent
+// of the old union pin is the ISOLATION pin: with two dispatches pending, a
+// Start receives EXACTLY its own. (The six-lane MEASURED interleaving is
+// pinned in scripts/tests/dispatch-state-hooks.test.mjs DSH-1.)
+test('parallel two-dispatch message: each Start stages EXACTLY its own dispatch\'s governed file, never the sibling\'s', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
     store.create(article('beta', ['src/b.mjs']));
-    const transcript = writeTranscript(dir, [
-      assistantLine([taskBlock('Agent one: work on src/a.mjs'), taskBlock('Agent two: work on src/b.mjs')]),
-    ]);
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
+    stageDispatch(dir, 'Agent one: work on src/a.mjs', { subagent_type: 'general-purpose', tool_use_id: 'toolu_par_a' });
+    stageDispatch(dir, 'Agent two: work on src/b.mjs', { subagent_type: 'coder', tool_use_id: 'toolu_par_b' });
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, noTranscript(dir)), dir); // agent_type: general-purpose
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /alpha does the alpha thing/, 'first dispatch block in the message is included');
-    assert.match(ctx, /beta does the beta thing/, 'second dispatch block in the SAME message is included too — the union');
+    assert.match(ctx, /alpha does the alpha thing/, "this spawn's OWN dispatch is staged");
+    assert.doesNotMatch(ctx, /beta does the beta thing/, 'the parallel sibling\'s territory is NEVER staged into this child — the measured defect (4 of 6 spawns) that board 5445066b exists to close');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: stage the union of every pending record (the retired
+// lastDispatchPrompts behaviour) — the doesNotMatch assertion goes red.
+// Second sabotage: drop the subagent_type filter from derivation — two
+// candidates appear, the Start goes unattributable, and the alpha match goes
+// red instead. The two arms fail differently, so the sabotages are
+// distinguishable.
 
-test('malformed transcript (corrupt JSONL): contract-only, never a throw the caller must special-case — staging silently finds nothing', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    const transcript = join(dir, 'broken.jsonl');
-    writeFileSync(transcript, 'not json at all\n{"type":"assistant","message":{"content":[{');
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
-    assert.notEqual(r.code, 2, 'never denies (AC7 precedent)');
-    assert.equal(r.code, 0, r.stderr);
-    const out = JSON.parse(r.stdout);
-    const ctx = out.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'a corrupt transcript must not suppress the unconditional contract');
-    assert.doesNotMatch(ctx, /STERLING KNOWLEDGE DELIVERY/, 'staging found nothing parseable — no knowledge payload');
-  } finally {
-    cleanup();
-  }
-});
-// Sabotage: let the transcript parse failure early-return before the
-// contract-injection branch runs (instead of only short-circuiting staging)
-// — the STERLING DEFAULT RETURN CONTRACT match above goes red.
-
-test('missing transcript_path / nonexistent file: contract-only — staging finds nothing to read', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, join(dir, 'does-not-exist.jsonl')), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const out = JSON.parse(r.stdout);
-    const ctx = out.hookSpecificOutput.additionalContext;
-    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'a missing transcript must not suppress the unconditional contract');
-    assert.doesNotMatch(ctx, /STERLING KNOWLEDGE DELIVERY/, 'no transcript to read from -> no knowledge payload');
-  } finally {
-    cleanup();
-  }
-});
-// Sabotage: bail out entirely (no output at all) when transcript_path is
-// missing/nonexistent, instead of only skipping the staging half — the
-// STERLING DEFAULT RETURN CONTRACT match above goes red.
-
-test('only the LAST assistant message with a Task/Agent block is used — an earlier stale dispatch is ignored', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    store.create(article('beta', ['src/b.mjs']));
-    const transcript = writeTranscript(dir, [
-      assistantLine([taskBlock('stale dispatch about src/a.mjs')]),
-      assistantLine([{ type: 'text', text: 'some interstitial reasoning, no dispatch' }]),
-      assistantLine([taskBlock('current dispatch about src/b.mjs')]),
-    ]);
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /beta does the beta thing/);
-    assert.doesNotMatch(ctx, /alpha does the alpha thing/, 'the earlier message is not consulted once a later one has a dispatch');
-  } finally {
-    cleanup();
-  }
-});
+// ===========================================================================
+// RETIRED HERE — three TRANSCRIPT-shape pins, by decision 7c515e52.
+//
+// RETIRED: 'malformed transcript (corrupt JSONL): contract-only ...'
+// RETIRED: 'missing transcript_path / nonexistent file: contract-only ...'
+// RETIRED: 'only the LAST assistant message with a Task/Agent block is used'
+//
+// The first two pinned the DEGRADATION of a transcript read that no longer
+// happens: H19 does not open stdin.transcript_path at SubagentStart at all, so
+// "corrupt" and "missing" are no longer distinguishable states of anything.
+// Their surviving substance — a staging failure never suppresses the
+// unconditional return contract — is pinned by the 'no dispatch state at all
+// (no-slot)' arm above and by the H19+H28 shared-fate arm below (a
+// staging-INTERNAL throw, which is the stronger case). Every remaining
+// contract pin in this file already passes a nonexistent transcript path, so
+// the never-a-throw property stays exercised throughout.
+// The third pinned message RECENCY as the disambiguator; recency is exactly
+// what the 3.4-5.5 s transcript lag made wrong (finding 51506eec), and it is
+// replaced by the tool_use_id-keyed state record. Its replacement is the
+// isolation pin above plus DSH-1.
+// ===========================================================================
 
 test('not a Sterling project (no store): contract-only — the absorbed injection needs no store', () => {
   const bare = mkdtempSync(join(tmpdir(), 'sterling-h19-stage-bare-'));
   try {
-    const transcript = writeTranscript(bare, [assistantLine([taskBlock('work on src/a.mjs')])]);
+    // No .sterling/ at all, so no dispatch state can exist here either.
+    const transcript = noTranscript(bare);
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(bare, transcript), bare);
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
@@ -468,7 +487,7 @@ test('H19+H28 combined-emit: own staging output AND the absorbed return-contract
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Go read src/a.mjs and fix the bug there.')])]);
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.', { subagent_type: 'reviewer-correctness' });
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'reviewer-correctness' }),
@@ -506,9 +525,10 @@ test('H19+H28 shared-fate: a staging-internal failure after stdin parses still e
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Go read src/a.mjs and fix the bug there.')])]);
-    // corrupt config.json AFTER project setup: this is a staging-INTERNAL
-    // failure, distinct from PIN 3a's stdin-parse-failure path.
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.', { subagent_type: 'reviewer-correctness' });
+    // corrupt config.json AFTER project setup (and AFTER the Pre event, so a
+    // real pending state record exists): this is a staging-INTERNAL failure,
+    // distinct from PIN 3a's stdin-parse-failure path.
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
     const r = runHook(
       'h19-dispatch-staging.mjs',
@@ -555,7 +575,7 @@ test('H28 exemption suppresses ONLY the contract, not staging: exempt agent_type
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Go read src/a.mjs and fix the bug there.')])]);
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.', { subagent_type: 'statusline-setup' });
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'statusline-setup' }),
@@ -611,7 +631,7 @@ function postureLine(tddOn, mutOn) {
 test('posture line (OFF/OFF) is injected into a CODER dispatch context, contract-only transcript', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
   try {
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'coder' }),
@@ -633,7 +653,7 @@ test('posture line (OFF/OFF) is injected into a CODER dispatch context, contract
 test('posture line (ON/ON, config-driven not hardcoded) is injected into a TEST-WRITER dispatch context', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: true }, mutation_verification: { enabled: true } });
   try {
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'test-writer' }),
@@ -660,7 +680,7 @@ test('posture line (ON/ON, config-driven not hardcoded) is injected into a TEST-
 test('posture line ABSENT for a dispatch class where it does not apply (reviewer-correctness)', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
   try {
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'reviewer-correctness' }),
@@ -695,7 +715,7 @@ test('posture line ABSENT for a dispatch class where it does not apply (reviewer
 test('GAP: config has NO tdd key at all (mutation_verification explicit false) -> tdd half still defaults ON', () => {
   const { dir, cleanup } = makeProject({ mutation_verification: { enabled: false } });
   try {
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'coder' }),
@@ -719,7 +739,7 @@ test('GAP: config has NO tdd key at all (mutation_verification explicit false) -
 test('GAP: config has NO mutation_verification key at all (tdd explicit false) -> mutation half still defaults ON', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: false } });
   try {
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
       subagentStart(dir, transcript, { agent_type: 'test-writer' }),
@@ -778,7 +798,7 @@ test('GAP: config UNPARSEABLE for a CODER dispatch -> no confident tests-first O
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -801,7 +821,7 @@ test('GAP: config JSON-legal but NOT AN OBJECT ([]) for a CODER dispatch -> no c
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '[]');
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -832,7 +852,7 @@ test('GAP (positive half, TIGHTENED): an UNPARSEABLE config for a CODER dispatch
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -853,7 +873,7 @@ test('GAP (positive half, TIGHTENED): a NON-OBJECT ([]) config for a CODER dispa
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [assistantLine([{ type: 'text', text: 'no dispatch here' }])]);
+    const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '[]');
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -904,7 +924,7 @@ test('rank: a standing-authority decision stages among a coder dispatch\'s point
     // the standing ruling below — a recency-only staging order would evict it.
     store.create(decisionRecord('the old standing ruling', ['src/a.mjs'], { authority: 'standing', updated_at: '2026-01-01T00:00:00.000Z' }));
 
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock('Go read src/a.mjs and fix the bug there.')])]);
+    const transcript = stageDispatch(dir, 'Go read src/a.mjs and fix the bug there.', { subagent_type: 'coder' });
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;

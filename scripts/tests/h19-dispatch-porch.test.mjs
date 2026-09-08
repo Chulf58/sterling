@@ -427,14 +427,35 @@ function writeLockFile(dir) {
   );
 }
 
-function writeTranscript(dir, prompt) {
-  const p = join(dir, `transcript-${randomUUID()}.jsonl`);
-  const line = JSON.stringify({
-    type: 'assistant',
-    message: { content: [{ type: 'tool_use', name: 'Task', input: { prompt } }] },
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased): H19 no longer reads the
+// PARENT TRANSCRIPT at SubagentStart, so a dispatch is declared by firing its
+// real PreToolUse Task event through h22-dispatch-register.mjs (the registered
+// owner of that seam, §7(d)) and the Start's transcript_path points at a file
+// that does NOT exist. EVERY PORCH ASSERTION IN THIS FILE IS UNCHANGED — only
+// how the dispatch prompt reaches the hook changed. The absent transcript is
+// also a pin: a surviving transcript reader would stage nothing here and the
+// porch/body assertions would go red rather than pass by accident.
+function stageDispatch(dir, prompt, subagent_type = 'debugger') {
+  const noTranscript = join(dir, 'no-such-parent-transcript.jsonl');
+  const r = spawnSync(process.execPath, [join(HOOKS, 'h22-dispatch-register.mjs')], {
+    input: JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id: `toolu_${randomUUID().slice(0, 8)}`,
+      tool_input: { subagent_type, prompt, description: 'a lane' },
+      session_id: 's1',
+      cwd: dir,
+      transcript_path: noTranscript,
+      prompt_id: 'p1',
+    }),
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
   });
-  writeFileSync(p, `${line}\n`);
-  return p;
+  assert.notEqual(r.status, 2, `PreToolUse must never deny a dispatch: ${r.stderr ?? ''}`);
+  return noTranscript;
 }
 
 const DISPATCH_PROMPT = 'Go work on src/a.mjs and report back.';
@@ -569,7 +590,7 @@ function stage({ budget, owners = 4, hazards = 3, rulings = 2, lock = true, agen
     seedRulings(store, rulings);
   }
   if (lock) writeLockFile(dir);
-  const transcript = writeTranscript(dir, prompt);
+  const transcript = stageDispatch(dir, prompt, agentType);
   const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: agentType }), dir);
   const ctx = r.stdout.trim() ? JSON.parse(r.stdout).hookSpecificOutput.additionalContext : '';
   return { ...facts, dir, store, cleanup, r, ctx };
@@ -1959,9 +1980,12 @@ for (const [label, value] of [['negative (-1)', -1], ['non-integer (1.5)', 1.5],
 test('H2: an UNREADABLE config (corrupt JSON) never overruns and never throws — the porch falls back to the default, it does not invent a budget', () => {
   const s = stage({ budget: DEFAULT_BUDGET });
   try {
-    // Corrupt AFTER project setup so only the hook's own config read fails.
+    // The Pre event fires FIRST, so a genuine pending slot exists for this
+    // second spawn (stage()'s own slot was already consumed by its Start, so
+    // this one is type-unique — §5(iii)); THEN the config is corrupted, so
+    // only the hook's own config read fails.
+    const transcript = stageDispatch(s.dir, DISPATCH_PROMPT);
     writeFileSync(join(s.dir, '.sterling', 'config.json'), '{ not valid json');
-    const transcript = writeTranscript(s.dir, DISPATCH_PROMPT);
     const r = runHook('h19-dispatch-staging.mjs', subagentStart(s.dir, transcript, { agent_id: 'agent-2' }), s.dir);
     assert.equal(r.code, 0, r.stderr);
     assert.doesNotMatch(r.stderr, CLEAN_STDERR, `an unreadable config must not surface as a stack trace: ${r.stderr}`);

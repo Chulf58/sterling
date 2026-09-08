@@ -6,8 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash as createHash4 } from "node:crypto";
-import { readFileSync as readFileSync5, existsSync as existsSync7, mkdirSync as mkdirSync7, readdirSync as readdirSync2, renameSync as renameSync4, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
+import { randomUUID as randomUUID3, createHash as createHash5 } from "node:crypto";
+import { readFileSync as readFileSync5, existsSync as existsSync7, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync4, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename as basename3, dirname as dirname6, join as join8 } from "node:path";
@@ -4961,7 +4961,7 @@ var runRecordSchema = external_exports.object({
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
-});
+}).strict();
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -5304,6 +5304,21 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
@@ -5362,7 +5377,25 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Review-ledger tunables (config_set decision config-writes-get-a-config-
+  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
+  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
+  // scripts/hooks/lib/review-ledger-entry.mjs already read
+  // config.review_ledger.stale_days / .code_globs directly off the raw
+  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
+  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
+  // config_set's own allowlist already grants `review_ledger.stale_days`
+  // (decision 1dc3f9aa), that value went through NO schema check at all
+  // before this: a config_set write of a string or a negative number would
+  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
+  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
+  // and unvalidated — this field is `.optional()` with NO `.default({})` so
+  // an absent block still parses to `undefined`, exactly as before this
+  // field existed (no new key is manufactured on an untouched config.json).
+  review_ledger: external_exports.object({
+    stale_days: external_exports.number().int().positive().max(3650).optional()
+  }).passthrough().optional()
 });
 
 // packages/schemas/dist/registry.js
@@ -7979,9 +8012,6 @@ function claimMarker(path) {
 // scripts/hooks/lib/dispatch-residue.mjs
 import { spawnSync } from "node:child_process";
 
-// scripts/hooks/lib/transcript.mjs
-var TAIL_BYTES = 1024 * 1024;
-
 // scripts/hooks/lib/dispatch-prompt.mjs
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 
@@ -8042,10 +8072,10 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2 } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join as join6, basename as basename2, dirname as dirname5 } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash as createHash2 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -8074,6 +8104,8 @@ var CODES = /* @__PURE__ */ new Set([
   "no_live_territory_disproved",
   "reconcile_no_match",
   "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
   // §1.4 commit-reviewed
@@ -8102,6 +8134,7 @@ var CODES = /* @__PURE__ */ new Set([
   "multi_spend",
   "bytes_waived",
   "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
   "register_unavailable",
   "dispatch_status_unknown",
   // A9 register/ledger additions
@@ -8125,7 +8158,17 @@ var CODES = /* @__PURE__ */ new Set([
   // ledger entry classification
   "ledger_entry_malformed",
   // A19 (security review): an env override of identity is disclosed, never silent
-  "session_identity_override"
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
 ]);
 function assertCode(code) {
   if (!CODES.has(code)) {
@@ -8313,11 +8356,187 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 function withRegisterLock(root, fn, opts = {}) {
   return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
+var MAX_PROMPT_BYTES = 512 * 1024;
+var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+function dispatchStateDir(root) {
+  return join6(root, ".sterling", "transient", "dispatch-state");
+}
+function dispatchStateFile(root, key) {
+  return join6(dispatchStateDir(root), `${key}.json`);
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v !== "";
+}
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function validatePostBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
+}
+function validateDerivedBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
+}
+function validateStarted(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
+}
+function validateTerminal(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
+}
+function validateRecordShape(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
+  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
+  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
+  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
+  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
+  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
+  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
+  if (typeof r.prompt === "string") {
+    const bytes = Buffer.byteLength(r.prompt, "utf8");
+    const sha = createHash2("sha256").update(r.prompt, "utf8").digest("hex");
+    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
+  } else if (r.prompt !== null) {
+    return { ok: false, reason: "prompt-type" };
+  }
+  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
+  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
+  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
+  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  return { ok: true };
+}
+function classifyRecordFile(file) {
+  let st;
+  try {
+    st = lstatSync(file);
+  } catch {
+    return { exists: false };
+  }
+  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
+  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
+  let buf;
+  try {
+    buf = readFileSync2(file);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unreadable" };
+  }
+  const text = buf.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unparseable-json" };
+  }
+  const v = validateRecordShape(record);
+  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
+  return { exists: true, poisoned: false, record };
+}
+function checkDispatchStateContainment(root, { create }) {
+  const dir = dispatchStateDir(root);
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
+    if (!create) return { ok: true, availability: "absent" };
+    mkdirSync4(dir, { recursive: true });
+    return { ok: true, availability: "ok" };
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
+  }
+  return { ok: true, availability: "ok" };
+}
+function writeRecordAtomic(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const containment = checkDispatchStateContainment(root, { create: true });
+  if (!containment.ok) {
+    throw refusal(
+      "dispatch_state_poisoned",
+      { dir, reason: containment.reason ?? containment.availability },
+      `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
+    );
+  }
+  const file = dispatchStateFile(root, key);
+  const tmp = join6(dir, `${key}.json.tmp-${randomBytes(4).toString("hex")}`);
+  writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
+  renameSync2(tmp, file);
+}
+function sessionBoundarySweep(root, opts = {}) {
+  const now = typeof opts.now === "number" ? opts.now : Date.now();
+  const dir = dispatchStateDir(root);
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) {
+    return {
+      terminated: 0,
+      pruned: 0,
+      refused: render(disclosure("dispatch_state_poisoned", { dir, reason: containment.reason }, `sessionBoundarySweep: ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"} \u2014 refusing to touch it, never following a symlink`))
+    };
+  }
+  if (containment.availability === "absent") return { terminated: 0, pruned: 0 };
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { terminated: 0, pruned: 0, refused: render(disclosure("dispatch_state_poisoned", { dir }, `sessionBoundarySweep: could not list ${dir} \u2014 left untouched`)) };
+  }
+  let terminated = 0;
+  let pruned = 0;
+  let refused;
+  for (const name of names) {
+    if (!name.endsWith(".json")) {
+      if (name.includes(".json.tmp-")) {
+        const tmpFile = join6(dir, name);
+        try {
+          const ts = lstatSync(tmpFile);
+          if (ts.isFile() && !ts.isSymbolicLink()) {
+            rmSync(tmpFile, { force: true });
+            pruned++;
+          } else if (ts.isSymbolicLink()) {
+            if (!refused) {
+              refused = render(
+                disclosure("dispatch_state_poisoned", { file: name }, `sessionBoundarySweep: '${name}' looks like an orphan tmp file but is a SYMLINK \u2014 left in place for an operator to see, never removed through`)
+              );
+            }
+          }
+        } catch {
+        }
+      }
+      continue;
+    }
+    const file = join6(dir, name);
+    const classified = classifyRecordFile(file);
+    if (!classified.exists || classified.poisoned) continue;
+    const record = classified.record;
+    const key = name.slice(0, -".json".length);
+    if (!record.terminal) {
+      const updated = { ...record, prompt: null, terminal: { at: new Date(now).toISOString(), reason: "session-boundary" } };
+      writeRecordAtomic(root, key, updated);
+      terminated++;
+      continue;
+    }
+    if (record.prompt !== null) {
+      writeRecordAtomic(root, key, { ...record, prompt: null });
+    }
+    const terminalAt = Date.parse(record.terminal.at);
+    if (!Number.isNaN(terminalAt) && now - terminalAt > SEVEN_DAYS_MS) {
+      try {
+        const s2 = lstatSync(file);
+        if (s2.isFile() && !s2.isSymbolicLink()) {
+          rmSync(file, { force: true });
+          pruned++;
+        }
+      } catch {
+      }
+    }
+  }
+  return { terminated, pruned, ...refused ? { refused } : {} };
+}
 
 // scripts/hooks/lib/review-ledger-entry.mjs
 import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, renameSync as renameSync3 } from "node:fs";
 import { join as join7, extname } from "node:path";
-import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
+import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
 function isEvidenceObject(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -8350,14 +8569,24 @@ function parseReservation(raw) {
   if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
   if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
   if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
-  return { ok: true, value: { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation } };
+  const value = { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation };
+  if (raw.waived !== void 0) {
+    if (typeof raw.waived !== "boolean") return { ok: false };
+    value.waived = raw.waived;
+  }
+  return { ok: true, value };
 }
 function parseConsumption(raw) {
   if (!isEvidenceObject(raw)) return { ok: false };
   if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
   if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
   if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  return { ok: true, value: { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce } };
+  const value = { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce };
+  if (raw.paths !== void 0) {
+    if (!Array.isArray(raw.paths) || !raw.paths.every((p) => typeof p === "string")) return { ok: false };
+    value.paths = raw.paths.slice();
+  }
+  return { ok: true, value };
 }
 function parseContentEvidence(raw) {
   if (!isEvidenceObject(raw)) return { ok: false };
@@ -8445,6 +8674,21 @@ function parseReceipt(raw) {
   if (raw.status === "consumed") {
     const c = parseConsumption(raw.consumption);
     if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
+    if (Array.isArray(c.value.paths) && c.value.paths.length > 0) {
+      const partialReceipt = {
+        territory: { files: raw.territory.files.filter((f) => typeof f === "string") },
+        content_evidence: contentParsed.value
+      };
+      const covered = new Set(receiptCoveredPaths(partialReceipt));
+      const seen = /* @__PURE__ */ new Set();
+      for (const p of c.value.paths) {
+        const n = normalizeReceiptPath(p);
+        if (n === null || !covered.has(n) || seen.has(n)) {
+          return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption.paths", entry_id: raw.entry_id } };
+        }
+        seen.add(n);
+      }
+    }
     consumption = c.value;
   } else if (raw.consumption !== void 0) {
     return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
@@ -8501,7 +8745,7 @@ function legacyFingerprint(raw) {
   } catch {
     canonical = "<unserializable>";
   }
-  return createHash2("sha256").update(canonical).digest("hex").slice(0, 32);
+  return createHash3("sha256").update(canonical).digest("hex").slice(0, 32);
 }
 function legacyReceiptHandle(raw) {
   return `receipt-${legacyFingerprint(raw)}`;
@@ -8543,6 +8787,22 @@ function classifyLedgerEntry(raw) {
     return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
   }
   return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
+}
+function receiptCoveredPaths(receipt) {
+  const files = Array.isArray(receipt?.territory?.files) ? receipt.territory.files : [];
+  const blobs = isEvidenceObject(receipt?.content_evidence?.blobs) ? receipt.content_evidence.blobs : {};
+  const absentPaths = new Set(
+    (Array.isArray(receipt?.content_evidence?.absent_paths) ? receipt.content_evidence.absent_paths : []).filter((p) => typeof p === "string").map(normalizeReceiptPath).filter((n) => n !== null)
+  );
+  const covered = [];
+  for (const f of files) {
+    if (typeof f !== "string") continue;
+    const n = normalizeReceiptPath(f);
+    if (n === null) continue;
+    const sha = blobs[f] ?? blobs[n];
+    if (isUsableBlobSha(sha) || absentPaths.has(n)) covered.push(n);
+  }
+  return covered;
 }
 function ledgerPath(root) {
   return join7(root, ".sterling", "review-ledger.json");
@@ -8722,7 +8982,7 @@ function renderUnavailable(reason) {
 import { spawnSync as spawnSync2 } from "node:child_process";
 var UNDECLARED_SOURCE_TIMEOUT_MS = 3e3;
 var UNDECLARED_SOURCE_OUTPUT_CAP = 5e6;
-function isPlainObject(v) {
+function isPlainObject2(v) {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 function isArrayOfStrings(v) {
@@ -8732,7 +8992,7 @@ function validateUndeclaredSourceConfig(config2) {
   if (config2 === null || config2 === void 0) {
     return { ok: false, reason: "project config is missing or failed to parse \u2014 coverage cannot be computed against unknown toolchains" };
   }
-  if (!isPlainObject(config2)) {
+  if (!isPlainObject2(config2)) {
     return { ok: false, reason: "project config is not an object" };
   }
   if (config2.toolchains !== void 0 && !Array.isArray(config2.toolchains)) {
@@ -8741,7 +9001,7 @@ function validateUndeclaredSourceConfig(config2) {
   const toolchains = config2.toolchains ?? [];
   for (let i = 0; i < toolchains.length; i++) {
     const entry = toolchains[i];
-    if (!isPlainObject(entry)) {
+    if (!isPlainObject2(entry)) {
       return { ok: false, reason: `config.toolchains[${i}] is not an object` };
     }
     if (!isArrayOfStrings(entry.path_globs)) {
@@ -8814,11 +9074,11 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, readdirSync, existsSync as existsSync6, mkdirSync as mkdirSync6, statSync as statSync3 } from "node:fs";
+import { createHash as createHash4 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync as mkdirSync6, statSync as statSync3 } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
-  return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
+  return createHash4("sha256").update(normalize(text), "utf8").digest("hex");
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 function parseInstalledHeader(content) {
@@ -8868,9 +9128,14 @@ async function deleteRegisterUnderLock(cwd) {
     await withRegisterLock(
       cwd,
       () => {
+        const sweep = sessionBoundarySweep(cwd, { now: Date.now() });
+        if (sweep.refused) {
+          process.stderr.write(`${sweep.refused}
+`);
+        }
         rmSync2(registerPath(cwd), { force: true });
         const registerBasename = basename3(registerPath(cwd));
-        for (const f of readdirSync2(transientDir)) {
+        for (const f of readdirSync3(transientDir)) {
           if (f.startsWith(`${registerBasename}.tmp-`)) rmSync2(join8(transientDir, f), { force: true });
         }
       },
@@ -9165,9 +9430,7 @@ if (!store) {
       })
     );
   }
-  if (input.source === "startup" || input.source === "clear") {
-    await deleteRegisterUnderLock(input.cwd);
-  }
+  await deleteRegisterUnderLock(input.cwd);
   allow();
 }
 var config = null;
@@ -9510,12 +9773,12 @@ try {
     tagRoot = realpathSync2(input.cwd);
   } catch {
   }
-  const projectTag = createHash4("sha256").update(tagRoot).digest("hex").slice(0, 16);
+  const projectTag = createHash5("sha256").update(tagRoot).digest("hex").slice(0, 16);
   const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
   const tmp = tmpdir();
   const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
   let removed = 0;
-  for (const name of readdirSync2(tmp)) {
+  for (const name of readdirSync3(tmp)) {
     if (removed >= PERCALL_TMP_SWEEP_CAP) break;
     if (!percallRe.test(name)) continue;
     const p = join8(tmp, name);
@@ -9704,7 +9967,7 @@ try {
   const unknown = [];
   let dirEntries = null;
   try {
-    dirEntries = readdirSync2(agentsDir);
+    dirEntries = readdirSync3(agentsDir);
   } catch (err) {
     if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") {
       unknown.push(
@@ -9749,7 +10012,7 @@ try {
   const unknown = [];
   let dirEntries = null;
   try {
-    dirEntries = readdirSync2(agentsDir);
+    dirEntries = readdirSync3(agentsDir);
   } catch (err) {
     if (err?.code !== "ENOENT" && err?.code !== "ENOTDIR") {
       unknown.push(

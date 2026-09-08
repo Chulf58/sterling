@@ -1,36 +1,54 @@
-// scripts/hooks/h22-dispatch-register.mjs — R1 REBUILD FROM BLANK.
+// scripts/hooks/h22-dispatch-register.mjs — R1 REBUILD, THEN EXTENDED with the
+// dispatch STATE MACHINE (decision `dispatch-state-machine-pre-slot-post-
+// binding-locked-start-resolution-replaces-transcript-attribution`).
 //
-// INVARIANT: ONE hook, registered on SubagentStart and SubagentStop, switching
-// on stdin.hook_event_name. SubagentStart derives this dispatch's territory
-// from the brief the conductor's transcript shows it was given (declared
-// REVIEW-TERRITORY wins over free-prose extraction) and appends a RegisterEntry
-// via the owner module's registerStart (scripts/lib/dispatch-register.mjs) —
-// the owner module is the ONE authority for the persisted shape, the lock and
-// the duplicate rule; this file never re-implements any of that. SubagentStop
-// marks the matching UNENDED entry ended via registerEnd (A1: marked, never
-// deleted) and, for a reviewer-class agent_type, promotes ONE ReceiptV2 into
-// the durable ledger (.sterling/review-ledger.json) under the ledger's own
-// lock — a Stop whose agent_id has no unended entry mints nothing (A4: each
-// review round has its own Start and its own receipt; nothing is ever
-// refreshed in place). Every refusal/disclosure this file renders is built
-// through scripts/lib/review-errors.mjs and carries a `[code]` token.
+// INVARIANT: ONE hook, registered on PreToolUse/PostToolUse/PostToolUseFailure
+// (matcher Task|Agent — recording dispatch-state only, never gating) and on
+// SubagentStart/SubagentStop, switching on stdin.hook_event_name. The Pre/Post/
+// Failure branches delegate entirely to scripts/lib/dispatch-register.mjs's
+// recordDispatchPre/Post/Failure. SubagentStart resolves ITS OWN territory
+// through that module's resolveAndRegisterStart (own binding, else resume,
+// else exact-by-construction derivation, else unattributable — NEVER the
+// parent transcript, which is measurably lagged) and appends a RegisterEntry
+// in the same call; the owner module is the ONE authority for the persisted
+// shape, the lock and the duplicate rule; this file never re-implements any of
+// that. SubagentStop closes the register round and the dispatch-state record
+// together via finishDispatchAndRegisterEnd (A1: marked, never deleted) and,
+// for a reviewer-class agent_type, promotes ONE ReceiptV2 into the durable
+// ledger (.sterling/review-ledger.json) under the ledger's own lock — a Stop
+// whose agent_id has no unended entry mints nothing (A4: each review round has
+// its own Start and its own receipt; nothing is ever refreshed in place).
+// Every refusal/disclosure this file renders is built through
+// scripts/lib/review-errors.mjs and carries a `[code]` token.
 // DOES NOT GUARANTEE: that a positionally-attributed Start-time territory is
 // safe for a reviewer-class receipt (see the Stop-time rebind below, which is
 // what makes that safe); that an unattributed/unbound territory reflects
 // anything the agent actually touched (observed_reads is corroboration only);
 // that concurrent writers never lose a register append under a timed-out lock
-// (bounded — see the owner module's own contract). NEVER A GATE: this hook is
-// class 'advisory' in check-failclosed-boundary and must never call deny().
+// (bounded — see the owner module's own contract); that a Pre-denied dispatch
+// (H8/H27) ever clears its orphaned pending dispatch-state record before the
+// session boundary. NEVER A GATE: this hook is class 'advisory' in
+// check-failclosed-boundary and must never call deny().
 import { existsSync, readFileSync, statSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
-import { lastDispatchBlocks, extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
+import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates, isReviewerClass } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import { readFromStart } from './lib/transcript.mjs';
-import { registerStart, registerEnd, readRegister, registerPath } from '../lib/dispatch-register.mjs';
+import {
+  registerStart,
+  registerEnd,
+  readRegister,
+  registerPath,
+  recordDispatchPre,
+  recordDispatchPost,
+  recordDispatchFailure,
+  resolveAndRegisterStart,
+  finishDispatchAndRegisterEnd,
+} from '../lib/dispatch-register.mjs';
 import { withLedgerLock, readLedger, writeLedger } from './lib/review-ledger-entry.mjs';
 import { refusal, disclosure, render } from '../lib/review-errors.mjs';
 import { observedToolPaths } from './lib/observed-territory.mjs';
@@ -207,57 +225,13 @@ function isUsableIndexSha(v) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-block attribution (Start-side; unchanged positional rules)
+// Territory helpers — operate on the SINGLE {subagent_type, prompt} block (if
+// any) the dispatch-state resolution attributes to this Start. The Start-side
+// POSITIONAL WALK-BACK FUNCTION that used to read the parent transcript is
+// DELETED — resolveAndRegisterStart's resolution is now the sole source of
+// "which prompt is mine" (decision dispatch-state-machine-pre-slot-post-
+// binding-locked-start-resolution-replaces-transcript-attribution).
 // ---------------------------------------------------------------------------
-
-const MAX_WALK_BACK = 20;
-const SAFE_ATTRIBUTION_CASE = 'current-message-unique';
-
-function attributeBlocks(transcriptPath, agentType) {
-  const lastBlocks = lastDispatchBlocks(transcriptPath, 0);
-  if (typeof agentType !== 'string' || agentType === '') {
-    return {
-      blocks: lastBlocks,
-      attribution: 'union',
-      positional: { safe: false, case: 'no-agent-type', detail: 'this SubagentStart carried no usable agent_type, so no block could be type-matched at all' },
-    };
-  }
-  let matched = lastBlocks.filter((b) => typeof b.subagent_type === 'string' && b.subagent_type === agentType);
-  if (matched.length === 1) {
-    return { blocks: matched, attribution: 'block', positional: { safe: true, case: SAFE_ATTRIBUTION_CASE, detail: `exactly one '${agentType}' block in the current dispatching message` } };
-  }
-  if (matched.length > 1) {
-    return {
-      blocks: matched,
-      attribution: 'union',
-      positional: { safe: false, case: 'same-type-siblings', detail: `${matched.length} same-type ('${agentType}') blocks sit in the current dispatching message and no stdin field says WHICH one this spawn is` },
-    };
-  }
-  for (let skip = 1; skip <= MAX_WALK_BACK; skip++) {
-    const blocks = lastDispatchBlocks(transcriptPath, skip);
-    if (!blocks.length) continue;
-    matched = blocks.filter((b) => typeof b.subagent_type === 'string' && b.subagent_type === agentType);
-    if (matched.length === 1) {
-      return {
-        blocks: matched,
-        attribution: 'block',
-        positional: { safe: false, case: 'walk-back', detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched one ${skip} dispatching message(s) earlier` },
-      };
-    }
-    if (matched.length > 1) {
-      return {
-        blocks: matched,
-        attribution: 'union',
-        positional: { safe: false, case: 'walk-back', detail: `no '${agentType}' block in the current dispatching message; the bounded backward walk matched ${matched.length} same-type blocks ${skip} dispatching message(s) earlier` },
-      };
-    }
-  }
-  return {
-    blocks: lastBlocks,
-    attribution: 'union',
-    positional: { safe: false, case: 'terminal-union', detail: `no '${agentType}' block was found in the current dispatching message or anywhere in the bounded backward walk, so territory fell back to the union of the last message's blocks` },
-  };
-}
 
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
@@ -562,139 +536,168 @@ try {
     event === 'SubagentStop'
       ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe`
       : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
-  if (event !== 'SubagentStart' && event !== 'SubagentStop') {
+  const KNOWN_EVENTS = new Set(['PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'SubagentStart', 'SubagentStop']);
+  if (!KNOWN_EVENTS.has(event)) {
     warnNonBlocking(`H22: unexpected hook_event_name '${event}' — no entry was added or removed; the register cannot track dispatches until this event name is handled`);
   }
-  if (!input.agent_id) {
+  if ((event === 'SubagentStart' || event === 'SubagentStop') && !input.agent_id) {
     warnNonBlocking(`H22: ${event} carried no agent_id (entries are keyed by agent_id) — ${consequence}`);
   }
 
   const lines = [];
 
-  if (event === 'SubagentStart') {
-    const { blocks: matchedBlocks, attribution, positional } = attributeBlocks(input.transcript_path, input.agent_type);
-    const territory = resolveTerritory(matchedBlocks);
-    let filesSource = territory.files_source;
+  // PreToolUse / PostToolUse / PostToolUseFailure — dispatch-state recording
+  // only, on the Task|Agent matcher (decision dispatch-state-machine-...).
+  // Anything else reaching this hook on these events is a matcher mismatch:
+  // allow and disclose, never gate (this hook is advisory-class).
+  if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'PostToolUseFailure') {
+    if (input.tool_name !== 'Task' && input.tool_name !== 'Agent') {
+      warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher — allowing, nothing tracked`);
+    } else {
+      const recorder = event === 'PreToolUse' ? recordDispatchPre : event === 'PostToolUse' ? recordDispatchPost : recordDispatchFailure;
+      const result = await recorder(input.cwd, input);
+      if (result.disclosures?.length) lines.push(...result.disclosures);
+    }
+    if (lines.length) process.stderr.write(lines.join('\n') + '\n');
+    allow();
+  } else if (event === 'SubagentStart' && (typeof input.agent_id !== 'string' || input.agent_id === '')) {
+    // X2 (Codex review): a Start with no usable agent_id must not proceed
+    // into resolveAndRegisterStart at all — parseRegisterEntry would refuse
+    // the round anyway (agent_id is one of its four required fields), so
+    // reaching the resolver first only risks a derivation committed for an
+    // identity nobody can ever match. The generic missing-agent_id warn above
+    // already fired; this is a pure skip.
+  } else if (event === 'SubagentStart') {
     const reviewerStart = typeof input.agent_type === 'string' && isReviewerClass(input.agent_type);
 
-    // A11: a PRESENT-but-unusable declaration is disclosed for EVERY class
-    // (decision 8f137474 §5 — the malformed-fallback warning was never
-    // reviewer-scoped); only the NO-DECLARATION-AT-ALL absence warning below
-    // is reviewer-only (it is about receipt risk, which only a reviewer-class
-    // dispatch carries).
-    for (const m of territory.malformed) {
-      lines.push(render(disclosure('territory_declaration_malformed', { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));
-    }
-    if (reviewerStart) {
-      // Fires whenever the AGGREGATE result is not review-territory —
-      // whether NOTHING was declared at all, or something was declared but
-      // fell back after failing to parse (h22-observed-territory.test.mjs
-      // P2-malformed-marker): either way this reviewer-class dispatch is
-      // relying on free-prose extraction, which is the receipt risk this
-      // warning names. The per-line territory_declaration_malformed above
-      // already named the specific bad content; this is the separate
-      // "so now what" statement about the dispatch as a whole.
-      if (territory.files_source !== 'review-territory') {
-        lines.push(
-          render(disclosure('territory_declaration_missing', {}, `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s)`))
-        );
+    const { entry: registeredEntry, refusal: startRefusal } = await resolveAndRegisterStart(input.cwd, input, (res) => {
+      const matchedBlocks = typeof res.prompt === 'string' ? [{ subagent_type: res.subagent_type, prompt: res.prompt }] : [];
+      const territory = resolveTerritory(matchedBlocks);
+      const territoryFilesSource = territory.files_source;
+      // positionalSafe mirrors the old positional.safe test one seam over:
+      // 'post' and 'derived-type-unique' are the two sources the state
+      // machine PROVES rather than guesses (§5); every other source
+      // (resume, unattributable) is exactly as untrustworthy as the old
+      // walk-back/union fallbacks were.
+      const positionalSafe = res.source === 'post' || res.source === 'derived-type-unique';
+
+      // A11: a PRESENT-but-unusable declaration is disclosed for EVERY class
+      // (decision 8f137474 §5); only the NO-DECLARATION-AT-ALL absence
+      // warning below is reviewer-only (receipt risk, reviewer-class only).
+      for (const m of territory.malformed) {
+        lines.push(render(disclosure('territory_declaration_malformed', { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));
       }
-      if (!positional.safe) {
+      if (reviewerStart) {
+        if (territoryFilesSource !== 'review-territory') {
+          lines.push(
+            render(disclosure('territory_declaration_missing', {}, `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s)`))
+          );
+        }
+        if (!positionalSafe) {
+          lines.push(
+            render(
+              disclosure(
+                'receipt_unattributable',
+                { case: res.case },
+                `H22: UNATTRIBUTABLE TERRITORY — reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
+              )
+            )
+          );
+        }
+      }
+
+      let files, claimedFiles, claimedGlobPrefixes, attribution, filesSource;
+      if (matchedBlocks.length && positionalSafe) {
+        files = normalizeRegisterPaths(territory.candidates, input.cwd);
+        claimedFiles = normalizeRegisterPaths(claimedFromBlocks(matchedBlocks), input.cwd);
+        claimedGlobPrefixes = normalizeRegisterPaths(globPrefixesFromBlocks(matchedBlocks), input.cwd);
+        attribution = 'block';
+        filesSource = territoryFilesSource;
+      } else {
+        files = [];
+        claimedFiles = [];
+        claimedGlobPrefixes = [];
+        attribution = 'none';
         filesSource = 'unattributable';
+      }
+
+      const configuredResourceNames = loadExclusiveResourceNames(input.cwd);
+      const claimed =
+        attribution === 'block' && configuredResourceNames.length
+          ? claimedResources(matchedBlocks.map((b) => b.prompt).join('\n'), configuredResourceNames)
+          : [];
+
+      // SPEC B (6): "you do not hold <resource>" — read BEFORE this spawn's
+      // own entry exists, so a sole/first claimant never sees itself.
+      if (configuredResourceNames.length) {
+        const existing = readRegister(input.cwd);
+        if (existing.availability === 'ok') {
+          for (const name of configuredResourceNames) {
+            const holder = existing.entries.find((e) => !e.ended && Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
+            if (holder) lines.push(`You do not hold '${name}' — it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
+          }
+        }
+      }
+
+      const entry = {
+        agent_id: input.agent_id,
+        agent_type: typeof input.agent_type === 'string' ? input.agent_type : null,
+        session_id: input.session_id,
+        files,
+        files_source: filesSource,
+        claimed_files: claimedFiles,
+        claimed_glob_prefixes: claimedGlobPrefixes,
+        attribution,
+        attribution_case: res.case,
+        at: new Date().toISOString(),
+      };
+      if (claimed.length) entry.exclusive_resources = claimed;
+      if (reviewerStart) entry.configured_model = configuredReviewerModel(input.cwd);
+      return entry;
+    });
+
+    if (startRefusal) {
+      if (startRefusal.code === 'register_unavailable') {
+        // A24 (pin review MEDIUM), preserved verbatim in substance: a CORRUPT
+        // register is read-only — registerStart's own refusal writes nothing
+        // and never resets it to a fresh array, which would silently destroy
+        // the corruption signal every availability pin depends on.
         lines.push(
           render(
             disclosure(
-              'receipt_unattributable',
-              { case: positional.case },
-              `H22: UNATTRIBUTABLE TERRITORY — reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to a dispatch block by position [${positional.case}]: ${positional.detail}`
+              'register_unavailable',
+              startRefusal.facts ?? {},
+              `H22: dispatch register unavailable (${startRefusal.facts?.reason ?? 'unknown'}) at ${startRefusal.facts?.path ?? registerPath(input.cwd)} — this Start writes nothing; resetting it would destroy the corruption signal every availability pin depends on and silently discard any unended round the file held`
             )
           )
         );
+      } else {
+        lines.push(render(startRefusal));
       }
     }
-
-    const files = normalizeRegisterPaths(territory.candidates, input.cwd);
-    const claimedFiles = normalizeRegisterPaths(claimedFromBlocks(matchedBlocks), input.cwd);
-    const claimedGlobPrefixes = normalizeRegisterPaths(globPrefixesFromBlocks(matchedBlocks), input.cwd);
-
-    const configuredResourceNames = loadExclusiveResourceNames(input.cwd);
-    const claimed =
-      attribution === 'block' && configuredResourceNames.length
-        ? claimedResources(matchedBlocks.map((b) => b.prompt).join('\n'), configuredResourceNames)
-        : [];
-
-    // SPEC B (6): "you do not hold <resource>" — read BEFORE this spawn's own
-    // entry exists, so a sole/first claimant never sees itself.
-    if (configuredResourceNames.length) {
-      const existing = readRegister(input.cwd);
-      if (existing.availability === 'ok') {
-        for (const name of configuredResourceNames) {
-          const holder = existing.entries.find((e) => !e.ended && Array.isArray(e.exclusive_resources) && e.exclusive_resources.includes(name));
-          if (holder) lines.push(`You do not hold '${name}' — it is currently held by ${holder.agent_type}:${holder.agent_id}.`);
-        }
-      }
-    }
-
-    const entry = {
-      agent_id: input.agent_id,
-      agent_type: typeof input.agent_type === 'string' ? input.agent_type : null,
-      session_id: input.session_id,
-      files,
-      files_source: filesSource,
-      claimed_files: claimedFiles,
-      claimed_glob_prefixes: claimedGlobPrefixes,
-      attribution,
-      at: new Date().toISOString(),
-    };
-    if (claimed.length) entry.exclusive_resources = claimed;
-    if (reviewerStart) entry.configured_model = configuredReviewerModel(input.cwd);
-
-    // A24 (pin review MEDIUM): a CORRUPT register is read-only — this Start
-    // writes NOTHING and never resets it to a fresh array. The owner's
-    // registerStart (scripts/lib/dispatch-register.mjs) treats any
-    // non-'ok' availability as an empty list and writes THAT back, which
-    // would silently destroy the corruption signal every availability pin
-    // depends on (R1-A49/A85/A86/A66 all read 'corrupt' straight off the
-    // bytes on disk) and discard whatever unended rounds the file held — so
-    // this hook never calls registerStart at all when the register is
-    // already corrupt, checked here rather than relying on the owner to
-    // refuse internally.
-    if (readRegister(input.cwd).availability === 'corrupt') {
-      lines.push(
-        render(
-          disclosure(
-            'register_unavailable',
-            { path: registerPath(input.cwd), reason: 'corrupt' },
-            `H22: dispatch register unavailable (corrupt) at ${registerPath(input.cwd)} — this Start writes nothing; resetting it would destroy the corruption signal every availability pin depends on and silently discard any unended round the file held`
-          )
-        )
-      );
-    } else {
-      try {
-        await registerStart(input.cwd, entry);
-      } catch (e) {
-        if (e?.code === 'register_agent_id_duplicate' || e?.code === 'register_lock_held') {
-          lines.push(render(e));
-        } else {
-          throw e;
-        }
-      }
-    }
+    void registeredEntry; // observed via `lines`/the register write itself; not otherwise needed here
   } else if (event === 'SubagentStop') {
-    // SELECT + MARK UNDER THE SAME LOCK HOLD: registerEnd returns {found,
-    // entry} — the exact entry it just ended, through the ONE parser — so
-    // this hook never re-reads the register outside the lock and promotes a
-    // snapshot that may already have moved on. Codex round-2 HIGH: the prior
-    // shape fell back to an UNLOCKED read on register_lock_held and still
-    // promoted from it — the register stayed unended, so a LATER Stop could
-    // end and promote the SAME round again (two receipts for one review).
-    // There is no lock-held fallback anymore: this Stop writes NOTHING (no
-    // receipt, no register mutation) and disclosed-degrades instead —
-    // promotion happens ONLY from registerEnd's own returned {found:true}.
+    // SELECT + MARK UNDER THE SAME COMPOSITE OPERATION: finishDispatchAndRegisterEnd
+    // ends the register round FIRST, then terminalizes the matching dispatch-
+    // state record — the ORDER a crash cannot make unsafe (§4a). Codex
+    // round-2 HIGH (kept from the prior shape): there is no lock-held
+    // fallback — a Stop that cannot take the lock writes NOTHING (no receipt,
+    // no register mutation) and disclosed-degrades instead; promotion happens
+    // ONLY from the composite's own returned {found:true}.
     let departing;
+    let sidecarToolUseId;
+    if (typeof input.agent_transcript_path === 'string' && input.agent_transcript_path !== '') {
+      const sidecar = sidecarForChildTranscript(input.agent_transcript_path);
+      if (sidecar.ok) sidecarToolUseId = sidecar.meta.toolUseId;
+    }
     try {
-      const ended = await registerEnd(input.cwd, input.agent_id, 'subagent-stop', { sessionId: input.session_id });
-      departing = ended.found ? ended.entry : undefined;
+      const finished = await finishDispatchAndRegisterEnd(input.cwd, {
+        session_id: input.session_id,
+        agent_id: input.agent_id,
+        sidecarToolUseId,
+        event: 'subagent-stop',
+      });
+      departing = finished.found ? finished.entry : undefined;
     } catch (e) {
       if (e?.code === 'register_lock_held') {
         lines.push(

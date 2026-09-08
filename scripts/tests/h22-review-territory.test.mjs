@@ -147,14 +147,67 @@ function writeParentTranscript(dir, lines, name = 'parent.jsonl') {
   return p;
 }
 
-const taskLine = (blocks) => ({ type: 'assistant', message: { content: blocks } });
-const taskBlock = (name, prompt) => ({ type: 'tool_use', name, input: { prompt } });
-// Typed variant (mirrors scripts/tests/h22-attribution.test.mjs's local
-// taskBlockTyped) — carries subagent_type so several blocks in one message
-// can be forced into the SAME-TYPE union path for the multi-block arms below.
-const taskBlockTyped = (name, subagent_type, prompt) => ({ type: 'tool_use', name, input: { subagent_type, prompt } });
-function multiDispatch(dir, blocks) {
-  writeParentTranscript(dir, [taskLine(blocks)]);
+// ===========================================================================
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased).
+//
+// H22's SubagentStart no longer reads the parent transcript: it resolves ONE
+// prompt from the per-dispatch state record (PreToolUse slot -> PostToolUse
+// binding -> locked Start resolution) and parses that prompt alone with the
+// SAME parseReviewTerritory (§3 keeps the parser authority in
+// scripts/hooks/lib/dispatch-prompt.mjs — pinned in
+// scripts/tests/dispatch-state-hooks.test.mjs DSH-10). EVERY marker-parsing
+// assertion in this file is therefore UNCHANGED; only how the prompt arrives
+// changed, so `singleDispatch(dir, prompt)` keeps its exact signature and
+// every call site is byte-identical.
+//
+// The MULTI-BLOCK arms (T7/T7b) are re-cut, because "several blocks in one
+// message" is no longer a thing a Start can see: each dispatch is its own
+// record, and a Start either owns exactly one of them or is unattributable.
+// ===========================================================================
+
+let toolUseSeq = 0;
+function preInput(dir, { prompt, subagent_type = 'coder', tool_use_id, session_id = 's1' }) {
+  return {
+    hook_event_name: 'PreToolUse',
+    tool_name: 'Task',
+    tool_use_id: tool_use_id ?? `toolu_rt_${(toolUseSeq += 1)}`,
+    tool_input: { subagent_type, prompt, description: 'a lane' },
+    session_id,
+    cwd: dir,
+    transcript_path: join(dir, 't', 'parent.jsonl'),
+    prompt_id: 'pr-1',
+  };
+}
+function postInput(dir, { prompt, subagent_type = 'coder', tool_use_id, agentId, session_id = 's1' }) {
+  return {
+    hook_event_name: 'PostToolUse',
+    tool_name: 'Task',
+    tool_use_id,
+    tool_input: { subagent_type, prompt, description: 'a lane' },
+    tool_response: {
+      isAsync: true, status: 'async_launched', agentId, description: 'a lane',
+      resolvedModel: 'claude-x', prompt, outputFile: join(dir, 'out.txt'), canReadOutputFile: true,
+    },
+    session_id,
+    cwd: dir,
+    transcript_path: join(dir, 't', 'parent.jsonl'),
+    prompt_id: 'pr-1',
+  };
+}
+/** Declare a dispatch by firing its real PreToolUse event. Returns the
+ *  tool_use_id so a caller can bind it authoritatively with a Post. */
+function stagePre(dir, args) {
+  const input = preInput(dir, args);
+  const r = runHook(input, dir);
+  assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
+  return input.tool_use_id;
+}
+function stagePost(dir, args) {
+  const r = runHook(postInput(dir, args), dir);
+  assert.notEqual(r.code, 2, `PostToolUse must never deny: ${r.stderr}`);
+  return r;
 }
 
 // Store-root ledger — deliberately NOT under .sterling/transient/ (mirrors
@@ -172,8 +225,13 @@ function registerEntry(agentId, agentType, files, filesSource, at = new Date().t
   return { agent_id: agentId, agent_type: agentType, session_id: 's1', files, files_source: filesSource, at };
 }
 
-function singleDispatch(dir, prompt) {
-  writeParentTranscript(dir, [taskLine([taskBlock('Task', prompt)])]);
+// Signature preserved from the transcript era (see the RE-CUT note above):
+// declares ONE pending dispatch of the type the following SubagentStart will
+// carry (h22Input's default agent_type is 'coder'), so §5(iii) derivation is
+// type-unique. A second call in the same project is safe because the first
+// slot is consumed by its own Start.
+function singleDispatch(dir, prompt, subagent_type = 'coder') {
+  return stagePre(dir, { prompt, subagent_type });
 }
 
 function entryFor(dir, agentId) {
@@ -605,9 +663,11 @@ test('(T5c) companion to T5/T5b, re-homed to the register layer: a non-reviewer 
 // implementation only copies the key when the source has it).
 //
 // EXPECTED STATE: GREEN today and after the fix.
-// SABOTAGE: after landing the fix, always write `attribution: entry.attribution ?? 'union'`
+// SABOTAGE: after landing the fix, always write `attribution: entry.attribution ?? 'none'`
 // (fabricate a default when absent) — flips this control red, while leaving
 // (T6a) below unaffected (it always supplies a real attribution value).
+// (Literal updated from 'union' to 'none' by the 7c515e52 re-cut; the
+// fabricate-a-default defect it names is unchanged.)
 // ===========================================================================
 
 test('(T6b) CONTROL: a legacy register entry with no `attribution` key promotes to a ledger entry with no `attribution` key either — never fabricated', () => {
@@ -636,23 +696,29 @@ test('(T6b) CONTROL: a legacy register entry with no `attribution` key promotes 
 
 // ===========================================================================
 // (T6a) NEW PIN: the ledger receipt also carries the register entry's
-// `attribution` value (e.g. 'union', the shape this harness's untyped
-// taskBlock() naturally produces) — RED until the parallel coder lands it.
+// `attribution` value — RED until the parallel coder lands it.
 //
 // EXPECTED RED today: today's promotion writes a fixed six-key object
 // (agent_type/files/at/base_sha/branch/session_id per decision 0408b295)
 // that never includes `attribution` for any input. Fails at
-// `assert.equal(entry.attribution, 'union')` (undefined today).
+// `assert.equal(entry.attribution, 'none')` (undefined today).
 // SABOTAGE: drop the `attribution: entry.attribution` copy from the
 // promotion object literal (leave everything else) — flips this back red
 // without touching (T6b)'s legacy-absence guarantee.
 // ===========================================================================
 
-test('(T6a) SubagentStop promotion copies the register entry\'s attribution value ("union") into the ledger receipt', () => {
+// RE-CUT LITERAL (7c515e52 §3): the imprecise attribution value is now
+// 'none', not 'union' — the union mechanism is deleted. The PROPERTY pinned
+// here is unchanged and is the point of the test: whatever value the register
+// entry carries is COPIED VERBATIM into the receipt, never normalized,
+// re-derived or upgraded at promotion time. 'none' is chosen deliberately over
+// 'block' because a copier that hardcodes the precise value would still pass a
+// 'block' fixture.
+test('(T6a) SubagentStop promotion copies the register entry\'s attribution value ("none") into the ledger receipt', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [
-      { agent_id: 'rev-attr', agent_type: 'reviewer-performance', session_id: 's1', files: ['src/attr.mjs'], files_source: 'free-prose-fallback', attribution: 'union', at: '2026-08-28T00:03:00.000Z' },
+      { agent_id: 'rev-attr', agent_type: 'reviewer-performance', session_id: 's1', files: ['src/attr.mjs'], files_source: 'free-prose-fallback', attribution: 'none', at: '2026-08-28T00:03:00.000Z' },
     ]);
     const r = runHook(h22Input(dir, { agent_id: 'rev-attr', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -664,43 +730,49 @@ test('(T6a) SubagentStop promotion copies the register entry\'s attribution valu
       return Array.isArray(files) && files.includes('src/attr.mjs');
     });
     assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.territory?.attribution ?? entry.attribution, 'union', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
+    assert.equal(entry.territory?.attribution ?? entry.attribution, 'none', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
   } finally {
     cleanup();
   }
 });
 
 // ===========================================================================
-// (T7) COVERAGE GAP, multi-block arm: two same-type blocks in one dispatch
-// message, ONE carries a valid REVIEW-TERRITORY declaration, the OTHER is
-// plain prose with a sibling path and no marker at all. Per this spec, the
-// entry's files must be EXACTLY the declared array — the sibling block's
-// free-prose path is dropped entirely, files_source: "review-territory".
+// (T7) RE-CUT — SIBLING ISOLATION. Two same-type dispatches are in flight; MY
+// dispatch declares a valid REVIEW-TERRITORY, the SIBLING's prompt is plain
+// prose naming another path. My Start is bound authoritatively by my own
+// PostToolUse (tool_response.agentId — the measured seam, finding 2bad782a),
+// so §5(i) resolves my prompt and my prompt ONLY.
+// The ASSERTIONS ARE PRESERVED from the multi-block original (files[] is
+// exactly the declared array; the sibling's prose path never appears;
+// files_source 'review-territory') — what changed is that the sibling's prose
+// is now unreachable BY CONSTRUCTION rather than by a per-block override
+// inside a union.
 //
-// EXPECTED RED today: today's per-block union merges the free-prose
-// extraction of BOTH blocks regardless of any marker, so `entry.files`
-// would be a TWO-element array (the declared path text also matches the
-// plain-path regex, plus the sibling's prose path) instead of the expected
-// one-element declared array. Fails at the `deepEqual` (2 != 1) and at
-// `entry.files_source` (undefined today).
-// SABOTAGE: when unioning several same-type blocks, never let a per-block
-// REVIEW-TERRITORY override that BLOCK's contribution to the union — always
-// union raw free-prose extraction across every block regardless of markers
-// — the sibling's prose path leaks back into `entry.files`.
+// EXPECTED RED today: no Pre/Post branches exist, so no state record is
+// written; today's Start reads the parent transcript, which this fixture never
+// plants. `entry.files` comes out [] and `entry.files_source` undefined —
+// fails the deepEqual and the files_source equality.
+// SABOTAGE: union the same-type candidates instead of resolving the bound one
+// (the retired attribution:'union' path) — the sibling's prose path leaks back
+// into entry.files and both the deepEqual and the !includes go red.
+// SABOTAGE: ignore the Post binding and derive over the pending set — two
+// candidates make the Start unattributable, so files:[] reddens the deepEqual
+// instead. The two sabotages fail differently, so they are distinguishable.
 // ===========================================================================
 
-test('(T7) multi-block: one same-type block declares REVIEW-TERRITORY, its sibling is plain prose — files[] is exactly the declared array, sibling prose dropped', () => {
+test('(T7) sibling isolation: my own dispatch declares REVIEW-TERRITORY while a same-type sibling is plain prose — files[] is exactly my declared array, sibling prose dropped', () => {
   const { dir, cleanup } = makeProject();
   try {
-    multiDispatch(dir, [
-      taskBlockTyped('Task', 'coder', 'REVIEW-TERRITORY: ["packages/mcp-server/src/decl.ts"]\nPlease focus review on the declared scope only.'),
-      taskBlockTyped('Task', 'coder', 'Also see scripts/sibling-prose.mjs for background context, no declaration here.'),
-    ]);
+    const minePrompt = 'REVIEW-TERRITORY: ["packages/mcp-server/src/decl.ts"]\nPlease focus review on the declared scope only.';
+    const mine = stagePre(dir, { prompt: minePrompt, subagent_type: 'coder' });
+    stagePre(dir, { prompt: 'Also see scripts/sibling-prose.mjs for background context, no declaration here.', subagent_type: 'coder' });
+    stagePost(dir, { tool_use_id: mine, prompt: minePrompt, subagent_type: 'coder', agentId: 'agent-t7' });
+
     const r = runHook(h22Input(dir, { agent_id: 'agent-t7', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const entry = entryFor(dir, 'agent-t7');
-    assert.deepEqual(entry.files, ['packages/mcp-server/src/decl.ts'], 'files[] is exactly the declared array; the sibling block\'s free-prose path is dropped entirely');
-    assert.ok(!entry.files.includes('scripts/sibling-prose.mjs'), 'the marker-less sibling block never contributes a free-prose path once a co-block declaration exists');
+    assert.deepEqual(entry.files, ['packages/mcp-server/src/decl.ts'], 'files[] is exactly the declared array; the sibling dispatch\'s free-prose path is dropped entirely');
+    assert.ok(!entry.files.includes('scripts/sibling-prose.mjs'), 'the marker-less sibling dispatch never contributes a free-prose path — its prompt is not mine and is never parsed');
     assert.equal(entry.files_source, 'review-territory');
   } finally {
     cleanup();
@@ -708,42 +780,44 @@ test('(T7) multi-block: one same-type block declares REVIEW-TERRITORY, its sibli
 });
 
 // ===========================================================================
-// (T7b) COVERAGE GAP, valid+malformed siblings: one same-type block declares
-// a VALID REVIEW-TERRITORY, its sibling carries a MALFORMED one. Per the
-// review request: the declared (valid) array wins, and exactly ONE stderr
-// warning fires (naming the malformed sibling's content) — no duplicate and
-// no silent swallow.
+// (T7b) RE-CUT — A SIBLING'S MALFORMED DECLARATION IS NOT MY WARNING. The old
+// pin required EXACTLY ONE stderr warning for a malformed SIBLING block,
+// because a union parsed every same-type block in the message. Under
+// 7c515e52 §3 a consumer parses THE RESOLVED PROMPT ALONE, so a sibling's
+// malformed marker is not merely deduplicated — it is NEVER SEEN. The pin is
+// therefore inverted deliberately, and stated as such rather than deleted:
+// ZERO occurrences of the sibling's malformed content, and my own valid
+// declaration still wins.
+// Its counter-arm — a malformed declaration in MY OWN prompt still warns
+// exactly as today — is (T3a) above, unchanged; without that arm this zero
+// assertion would be satisfiable by deleting the malformed warning entirely.
 //
-// EXPECTED RED today: today has no REVIEW-TERRITORY awareness at all, so
-// `entry.files` unions BOTH blocks' free-prose matches (the valid block's
-// declared path plus the malformed sibling's other mentioned path,
-// 'scripts/sibling-malformed.mjs') instead of the expected one-element
-// valid array, `entry.files_source` is undefined, and stderr is empty
-// (zero occurrences of the malformed content, not exactly one). Fails at
-// the `deepEqual`, the `files_source` equality, and the occurrence-count
-// assertion.
-// SABOTAGE: when a valid declaration wins over a malformed sibling, warn
-// once PER BLOCK instead of once per malformed declaration encountered (or
-// vice versa: suppress the warning entirely because "another block already
-// supplied files") — either change flips the occurrence-count assertion
-// away from exactly 1.
+// EXPECTED RED today: today's Start reads the (absent) transcript, so
+// `entry.files` is [] and `entry.files_source` undefined — fails the
+// deepEqual and the files_source equality. The zero-occurrence assertion
+// happens to hold today for the wrong reason (nothing is parsed at all),
+// which is exactly why (T3a) is named as its counter-arm.
+// SABOTAGE: parse any prompt other than the resolved one (a union, or a scan
+// of every pending record) — the occurrences assertion goes red at 1 while
+// (T3a) stays green.
 // ===========================================================================
 
-test('(T7b) multi-block: a valid REVIEW-TERRITORY sibling wins over a malformed one — declared array wins, exactly one stderr warning', () => {
+test('(T7b) sibling isolation: a same-type sibling\'s MALFORMED declaration produces no warning on my Start — only the resolved prompt is parsed, and my valid declaration wins', () => {
   const { dir, cleanup } = makeProject();
   try {
-    multiDispatch(dir, [
-      taskBlockTyped('Task', 'coder', 'REVIEW-TERRITORY: ["packages/mcp-server/src/decl.ts"]\nFocus on the declared scope.'),
-      taskBlockTyped('Task', 'coder', 'REVIEW-TERRITORY: [not-json\nAlso scripts/sibling-malformed.mjs is unrelated context.'),
-    ]);
+    const minePrompt = 'REVIEW-TERRITORY: ["packages/mcp-server/src/decl.ts"]\nFocus on the declared scope.';
+    const mine = stagePre(dir, { prompt: minePrompt, subagent_type: 'coder' });
+    stagePre(dir, { prompt: 'REVIEW-TERRITORY: [not-json\nAlso scripts/sibling-malformed.mjs is unrelated context.', subagent_type: 'coder' });
+    stagePost(dir, { tool_use_id: mine, prompt: minePrompt, subagent_type: 'coder', agentId: 'agent-t7b' });
+
     const r = runHook(h22Input(dir, { agent_id: 'agent-t7b', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr, 'H22 never denies a spawn, even with a malformed sibling declaration');
     const entry = entryFor(dir, 'agent-t7b');
-    assert.deepEqual(entry.files, ['packages/mcp-server/src/decl.ts'], 'the valid declared array wins over the malformed sibling');
-    assert.ok(!entry.files.includes('scripts/sibling-malformed.mjs'), 'the malformed sibling never contributes a free-prose fallback path once a valid co-block declaration wins');
+    assert.deepEqual(entry.files, ['packages/mcp-server/src/decl.ts'], 'my valid declared array is what lands');
+    assert.ok(!entry.files.includes('scripts/sibling-malformed.mjs'), 'the malformed sibling never contributes a free-prose fallback path');
     assert.equal(entry.files_source, 'review-territory');
     const occurrences = (r.stderr.match(/\[not-json/g) || []).length;
-    assert.equal(occurrences, 1, 'exactly one stderr warning names the malformed sibling declaration — never zero (swallowed) and never duplicated');
+    assert.equal(occurrences, 0, "a SIBLING's malformed declaration is not my warning — a consumer parses the resolved prompt alone (§3); its counter-arm is (T3a), where MY OWN malformed marker still warns");
   } finally {
     cleanup();
   }

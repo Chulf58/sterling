@@ -12,11 +12,13 @@
 // subagent's own context (not the parent's), on the WSL CLI headless surface,
 // CC 2.1.220. Its stdin carries session_id, transcript_path, cwd, prompt_id,
 // agent_id, agent_type, hook_event_name — THERE IS NO PROMPT FIELD. The
-// dispatch prompt is therefore recovered from the PARENT transcript at
-// transcript_path (H6 precedent, scripts/hooks/lib/transcript.mjs): find the
-// LAST assistant message holding one or more Task/Agent tool_use blocks, and
-// take the union of every such block's `prompt` in that one message — an
-// accepted, disclosed imprecision for parallel dispatches (board item).
+// dispatch prompt is therefore recovered through the dispatch-state machine
+// (scripts/lib/dispatch-register.mjs's resolveDispatchStart) — NOT the parent
+// transcript, which is measurably LAGGED at this event and cannot attribute a
+// prompt to a spawn safely by any ordering trick (decision
+// dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-
+// replaces-transcript-attribution, superseding the earlier transcript-tail
+// recovery this file used).
 //
 // Never a gate (AC7 precedent): internal failure degrades to no output, exit 1
 // non-blocking (P5) — dispatch staging is an aid layered on top of the file-
@@ -37,10 +39,13 @@ import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfi
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h1-session-start.mjs and scripts/plan-lock.mjs.
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
-// Prompt recovery + path extraction moved to lib/dispatch-prompt.mjs when H22's
-// dispatch register became a second consumer — one mechanism, imported never
-// reimplemented (decision f5638a84). Behavior here is unchanged.
-import { lastDispatchPrompts, extractPathCandidates } from './lib/dispatch-prompt.mjs';
+// Path extraction lives in lib/dispatch-prompt.mjs — one mechanism, imported
+// never reimplemented (decision f5638a84). Prompt RECOVERY no longer reads the
+// parent transcript (decision dispatch-state-machine-pre-slot-post-binding-
+// locked-start-resolution-replaces-transcript-attribution): this hook resolves
+// its own dispatch's prompt through the dispatch-state machine instead.
+import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { resolveDispatchStart } from '../lib/dispatch-register.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -165,6 +170,13 @@ const PLAN_LINE_AGENT_TYPES = new Set(['coder', 'debugger', 'test-writer']);
 const PLAN_TITLE_MAX = 120;
 const PLAN_PATH_MAX = 320;
 let activePlanLine = '';
+// UNATTRIBUTABLE-START DISCLOSURE (decision dispatch-state-machine-pre-slot-
+// post-binding-locked-start-resolution-replaces-transcript-attribution §6):
+// set inside main() once resolveDispatchStart's verdict is known, and folded
+// into combinedContext() beside the return contract — never a transcript
+// fallback, exactly one line, on 'unattributable' only ('resume' emits
+// nothing extra).
+let unattributableLine = '';
 try {
   if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
     // The shared VALIDATING reader: a record that is JSON but not a lock stages
@@ -198,6 +210,7 @@ function combinedContext(payload) {
   if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine) out.push(tddPostureLine);
+  if (unattributableLine) out.push(unattributableLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
   return out.join('\n\n');
 }
@@ -219,12 +232,26 @@ function finish(payload) {
 // THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL INSIDE IT IS A `return`: the
 // exit now happens in the stdout write callback, so a bare `finish('')` would
 // no longer stop the statements after it the way its hard exit did.
-function main(input) {
+async function main(input) {
   try {
     const store = openStore(input.cwd);
     if (!store) return finish(''); // not a Sterling project — no ceremony for the payload half (P1)
 
-    const prompts = lastDispatchPrompts(input.transcript_path);
+    // DISPATCH-STATE RESOLUTION replaces the old parent-transcript prompt scan
+    // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
+    // resolution-replaces-transcript-attribution §5/§6). 'resume' emits nothing
+    // extra; 'unattributable' stages no territory and gets exactly one line
+    // beside the return contract; a resolved prompt is staged normally.
+    const resolution = await resolveDispatchStart(
+      input.cwd,
+      { session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type },
+      { consumer: 'h19' }
+    );
+    if (resolution.source === 'unattributable') {
+      unattributableLine = `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${resolution.case}] — no territory was staged; file-touch delivery still fires on your first Read/Edit`;
+    }
+
+    const prompts = typeof resolution.prompt === 'string' ? [resolution.prompt] : [];
     const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
 
     const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
@@ -389,10 +416,11 @@ function main(input) {
       // Centrality is per record AGAINST ITS OWN matching prompt — the union
       // never enters the match, so the header cannot credit a sibling's terms.
       const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(', ');
-      // With parallel dispatches this hook cannot attribute a prompt to THIS
-      // spawned agent (SubagentStart carries no prompt field) — say so rather
-      // than claim 'your task' for a sibling's subject (review finding 5).
-      const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
+      // The dispatch-state resolver attributes exactly one prompt (or none) to
+      // THIS spawn — there is no longer a sibling-ambiguous case to hedge for
+      // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
+      // resolution-replaces-transcript-attribution §6).
+      const subjectLabel = `your task's SUBJECT`;
       // A subject match has no file_keys answer — the widening query is
       // rank_terms-shaped (review finding 4).
       const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
@@ -469,4 +497,4 @@ function main(input) {
   }
 }
 
-main(input);
+await main(input);

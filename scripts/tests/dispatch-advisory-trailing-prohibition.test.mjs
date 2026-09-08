@@ -217,20 +217,52 @@ function makeProject() {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
+// ===========================================================================
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased): SubagentStart no longer
+// reads the parent transcript; it resolves ONE prompt from the per-dispatch
+// state record written at PreToolUse. The FIXTURE KEEPS ITS NAME AND
+// SIGNATURE — one entry per [subagent_type, prompt] — so GROUP D's call sites
+// and assertions are byte-identical; each entry now fires a REAL PreToolUse
+// Task event through h22. SubagentStart's transcript_path points at a file
+// that does NOT exist: correct under the new contract, and a pin in its own
+// right (a surviving transcript reader would extract nothing and (D0)/(D1)
+// would go red rather than pass by accident). GROUPS A-C are untouched — the
+// detector is called directly, and h26 reads a hand-seeded register.
+// ===========================================================================
+let toolUseSeq = 0;
 function writeTranscript(dir, blocks) {
-  const p = join(dir, 't', 'parent.jsonl');
-  mkdirSync(dirname(p), { recursive: true });
-  const line = {
-    type: 'assistant',
-    message: { content: blocks.map(([subagent_type, prompt]) => ({ type: 'tool_use', name: 'Task', input: { subagent_type, prompt } })) },
-  };
-  writeFileSync(p, JSON.stringify(line) + '\n');
+  for (const [subagent_type, prompt] of blocks) {
+    const r = runHook(
+      H22_PATH,
+      {
+        hook_event_name: 'PreToolUse',
+        tool_name: 'Task',
+        tool_use_id: `toolu_tp_${(toolUseSeq += 1)}`,
+        tool_input: { subagent_type, prompt, description: 'a lane' },
+        session_id: 's1',
+        cwd: dir,
+        transcript_path: join(dir, 't', 'parent.jsonl'),
+        prompt_id: 'pr-1',
+      },
+      dir
+    );
+    assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
+  }
 }
 
 function subagentStart(dir, { agent_id = 'a1', agent_type = 'coder', session_id = 's1' } = {}) {
   return runHook(
     H22_PATH,
-    { hook_event_name: 'SubagentStart', session_id, transcript_path: join(dir, 't', 'parent.jsonl'), cwd: dir, agent_id, agent_type },
+    {
+      hook_event_name: 'SubagentStart',
+      session_id,
+      transcript_path: join(dir, 't', 'no-such-parent-transcript.jsonl'),
+      cwd: dir,
+      agent_id,
+      agent_type,
+    },
     dir
   );
 }

@@ -115,20 +115,49 @@ function makeProject() {
   return { dir, store, cleanup };
 }
 
-// --- transcript fixture helpers (h19-dispatch-staging.test.mjs pattern) ----
+// --- dispatch fixture helpers ---------------------------------------------
+//
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased): H19 no longer recovers
+// the dispatch prompt from the PARENT TRANSCRIPT (3.4-5.5 s of lag, 4 of 6
+// spawns saw an older unrelated block — finding 51506eec). A dispatch is now
+// declared by firing its real PreToolUse Task event through
+// h22-dispatch-register.mjs, the registered owner of that seam (§7(d)), and
+// SubagentStart's transcript_path points at a file that does NOT exist.
+//
+// This matters for the NEGATIVE arms too, not just the delivering ones: with
+// no state record at all, b/e/f/g would pass VACUOUSLY (nothing is staged, so
+// every doesNotMatch trivially holds) — a hollow pass that reads exactly like
+// a real one. Staging a real Pre in every arm is what keeps those pins
+// load-bearing.
 
-function taskBlock(prompt, name = 'Task') {
-  return { type: 'tool_use', name, input: { prompt } };
+const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
+
+function noTranscript(dir) {
+  return join(dir, 'no-such-parent-transcript.jsonl');
 }
 
-function assistantLine(blocks) {
-  return JSON.stringify({ type: 'assistant', message: { content: blocks } });
-}
-
-function writeTranscript(dir, lines) {
-  const p = join(dir, `transcript-${randomUUID()}.jsonl`);
-  writeFileSync(p, lines.join('\n') + '\n');
-  return p;
+/** Fire a real PreToolUse Task event; `subagent_type` MUST match the Start's
+ *  agent_type (§5(iii) derivation is exact by construction over the type). */
+function stageDispatch(dir, prompt, { subagent_type = 'general-purpose', tool_use_id = `toolu_ax_${randomUUID().slice(0, 8)}` } = {}) {
+  const r = spawnSync(process.execPath, [H22_PATH], {
+    input: JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id,
+      tool_input: { subagent_type, prompt, description: 'a lane' },
+      session_id: 's1',
+      cwd: dir,
+      transcript_path: noTranscript(dir),
+      prompt_id: 'p1',
+    }),
+    encoding: 'utf8',
+    cwd: dir,
+    timeout: 60_000,
+  });
+  assert.notEqual(r.status, 2, `PreToolUse must never deny a dispatch: ${r.stderr ?? ''}`);
+  return noTranscript(dir);
 }
 
 const subagentStart = (dir, transcriptPath, extra = {}) => ({
@@ -184,7 +213,7 @@ test('a. no path in the prompt, but the prompt matches a stored anti_pattern\'s 
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock(CENTRAL_PROMPT)])]);
+    const transcript = stageDispatch(dir, CENTRAL_PROMPT);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.notEqual(r.stdout, '', 'a subject match with no path must still deliver (today: silent early exit)');
@@ -221,7 +250,7 @@ test('b. no path, prompt hits only the record\'s PERIPHERAL (non-central) words:
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock(PERIPHERAL_PROMPT)])]);
+    const transcript = stageDispatch(dir, PERIPHERAL_PROMPT);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
@@ -247,9 +276,7 @@ test('c. prompt names a governed file AND subject-matches a different anti_patte
   try {
     store.create(article('alpha', ['src/a.mjs']));
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER)); // no file_keys — subject-channel only
-    const transcript = writeTranscript(dir, [
-      assistantLine([taskBlock(`Go read src/a.mjs and fix the bug there. Separately: ${CENTRAL_PROMPT}`)]),
-    ]);
+    const transcript = stageDispatch(dir, `Go read src/a.mjs and fix the bug there. Separately: ${CENTRAL_PROMPT}`);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.notEqual(r.stdout, '');
@@ -271,9 +298,7 @@ test('d. a record reachable through BOTH the path channel (owns the named file) 
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER, ['src/a.mjs']));
-    const transcript = writeTranscript(dir, [
-      assistantLine([taskBlock(`Go read src/a.mjs. ${CENTRAL_PROMPT}`)]),
-    ]);
+    const transcript = stageDispatch(dir, `Go read src/a.mjs. ${CENTRAL_PROMPT}`);
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.notEqual(r.stdout, '');
@@ -297,7 +322,7 @@ test('e. a second identical SubagentStart after a subject-only delivery is contr
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock(CENTRAL_PROMPT)])]);
+    const transcript = stageDispatch(dir, CENTRAL_PROMPT);
     const first = runHook(subagentStart(dir, transcript), dir);
     assert.equal(first.code, 0, first.stderr);
     assert.notEqual(first.stdout, '', 'sanity: the first run must actually deliver something to guard against');
@@ -334,9 +359,7 @@ test('f. floors preserved: a prompt sharing only ONE distinct term with the reco
     // satisfiable by that single shared word. The pre-existing AXIS_MIN_HITS
     // (>=2 distinct prompt-term hits) must still silence it on its own.
     store.create(antiPattern(TERSE_TITLE, TERSE_TRIGGER));
-    const transcript = writeTranscript(dir, [
-      assistantLine([taskBlock('Refactor the quaternion interpolation code in the physics module.')]),
-    ]);
+    const transcript = stageDispatch(dir, 'Refactor the quaternion interpolation code in the physics module.');
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
@@ -362,9 +385,7 @@ test('g. no path candidates AND no subject match in the prompt: contract-only un
   try {
     store.create(article('alpha', ['src/a.mjs']));
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
-    const transcript = writeTranscript(dir, [
-      assistantLine([taskBlock('Please investigate the login flow and report back.')]),
-    ]);
+    const transcript = stageDispatch(dir, 'Please investigate the login flow and report back.');
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
@@ -383,16 +404,36 @@ test('g. no path candidates AND no subject match in the prompt: contract-only un
 // unconditional contract emit — fails the STERLING DEFAULT RETURN CONTRACT
 // match instead.
 
-// --- h. per-prompt matching: a long sibling prompt cannot dilute a short one
-//        (review finding 5, commit follows 45bb722) -------------------------
-
-test('h. parallel dispatch: subject matching runs PER PROMPT, so a long sibling prompt cannot dilute a short matching one to silence', () => {
+// --- h. RE-CUT: ONE PROMPT PER START, so a long sibling prompt is not even
+//        visible to this Start (was: per-prompt matching inside a union;
+//        review finding 5, commit follows 45bb722) -------------------------
+//
+// RE-CUT BY DECISION 7c515e52 (board 5445066b). The original arm pinned that
+// subject matching ran PER PROMPT *within a union of the dispatching message's
+// prompts* — the union was the thing that could dilute a short prompt, and
+// per-prompt matching was the fix. The UNION SEMANTICS ARE DELETED: a Start
+// resolves exactly ONE prompt (its own) from its own state record, so a
+// sibling's prompt is not merely matched separately, it is NEVER READ. The
+// property under test is preserved and strengthened — a long, term-dominating
+// sibling cannot silence this spawn's match — while the mechanism that made
+// dilution possible no longer exists.
+//
+// Also re-cut: the old `/dispatched in this turn/` assertion pinned the
+// header's parallel-dispatch HEDGE. §3 of the decision removes it verbatim:
+// "a single prompt, so the subject label is 'your task's SUBJECT' — the
+// 'possibly a sibling' wording is gone". So the hedge must now be ABSENT.
+// DISCLOSED, NOT GUESSED: §3 names the label but no exact rendered sentence,
+// so this pin asserts only the ABSENCE of the hedge (which the ruling states
+// directly) — the positive wording stays unpinned here rather than invented,
+// and is owned by the porch/header pins in
+// scripts/tests/h19-dispatch-porch.test.mjs.
+test('h. parallel dispatch: a Start sees only ITS OWN prompt, so a long sibling prompt cannot dilute a short matching one to silence', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
-    // Sibling prompt: 20 distinct unrelated words repeated 3x each — under a
-    // UNION match these dominate the top-16 extracted terms and evict
-    // boolean/mesh/modifier entirely, silencing the short prompt's match.
+    // Sibling prompt: 20 distinct unrelated words repeated 3x each — under the
+    // DELETED union match these dominated the top-16 extracted terms and
+    // evicted boolean/mesh/modifier entirely, silencing the short prompt.
     const sibWords = [
       'ledger', 'warehouse', 'invoice', 'shipment', 'customs', 'freight', 'container', 'harbor',
       'manifest', 'pallet', 'carrier', 'tariff', 'voyage', 'dockyard', 'consignment', 'logistics',
@@ -400,14 +441,32 @@ test('h. parallel dispatch: subject matching runs PER PROMPT, so a long sibling 
     ];
     const sibling = Array.from({ length: 3 }, () => sibWords.join(' ')).join(' ');
     const short = 'Investigate why the boolean operation corrupts the mesh: the modifier stack introduces non-manifold geometry.';
-    const transcript = writeTranscript(dir, [assistantLine([taskBlock(sibling), taskBlock(short)])]);
+    // Two dispatches in flight, DIFFERENT types, so each Start's slot is
+    // type-unique (§5(iii)); this Start is the short-prompt agent.
+    stageDispatch(dir, sibling, { subagent_type: 'explorer', tool_use_id: 'toolu_ax_sibling' });
+    const transcript = stageDispatch(dir, short, { subagent_type: 'general-purpose', tool_use_id: 'toolu_ax_short' });
+
     const r = runHook(subagentStart(dir, transcript), dir);
     assert.equal(r.code, 0, r.stderr);
-    assert.notEqual(r.stdout, '', 'the short prompt matches on its own — per-prompt matching must deliver');
+    assert.notEqual(r.stdout, '', 'the short prompt matches on its own — this Start must deliver');
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, new RegExp(CENTRAL_TITLE), 'the subject-matched record reaches the spawned agent');
-    assert.match(ctx, /dispatched in this turn/, 'with parallel dispatches the header does not claim "your task"');
+    for (const w of ['ledger', 'warehouse', 'freight', 'quotation']) {
+      assert.doesNotMatch(ctx, new RegExp(w, 'i'), `the sibling dispatch's vocabulary ('${w}') never reaches this spawn — its prompt is not this spawn's prompt`);
+    }
+    assert.doesNotMatch(
+      ctx,
+      /dispatched in this turn/,
+      "§3: with exactly one resolved prompt the 'possibly a sibling' hedge is gone — a hedge here would tell the agent its own staged subject might not be its own"
+    );
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: union every pending record's prompt before extracting axis terms
+// (the deleted behaviour) — the sibling's 60 dominating terms evict
+// boolean/mesh/modifier and the CENTRAL_TITLE match goes red, while the
+// sibling-vocabulary doesNotMatch arms go red too if the union is also staged.
+// SABOTAGE: keep the parallel-dispatch hedge in the header builder — the last
+// assertion goes red on its own, which is why it is separate from the content
+// arms.
