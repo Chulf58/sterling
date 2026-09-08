@@ -7,6 +7,7 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync, rmSync, renameSync, statSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
+import { loadConfig } from './common.mjs';
 
 export function deliveryDir(cwd) {
   return join(cwd, '.sterling', 'transient', 'delivery');
@@ -37,19 +38,50 @@ export {
   hasFullNarrowCentralityCoverage,
 } from '@sterling/store';
 
+/** THE CANONICAL REVIEW-TERRITORY TERMINAL-LINE SHAPE (decision
+ *  h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen,
+ *  fix 1). A code-touching dispatch brief carries a machine-readable
+ *  `REVIEW-TERRITORY: ["path", ...]` line by convention (decision
+ *  review-territory-structured-receipt-files) — a RECEIPT field, not the
+ *  prompt's SUBJECT, and left in axis-term extraction it makes any record
+ *  about reviewer territory fire on EVERY code-touching dispatch (measured:
+ *  b60b5cc5 on probe-001). Matches ONLY the canonical terminal-line shape — a
+ *  line that begins with `REVIEW-TERRITORY:` immediately followed by a JSON
+ *  array, to end of line — so a PROSE mention ("the REVIEW-TERRITORY
+ *  convention", or the line quoted mid-sentence with no bare array after the
+ *  colon) SURVIVES untouched: stripping is structural (this exact generated
+ *  field shape), never lexical (the words "review" or "territory" anywhere in
+ *  the text). Rejected alternative (Codex, adopted): adding review/reviewer/
+ *  territory to AXIS_STOPWORDS instead — that would globally erase legitimate
+ *  reviewer-territory SUBJECTS the store genuinely rules on. */
+const REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
+
+/** Remove every REVIEW-TERRITORY terminal line from `text`, leaving everything
+ *  else — including a prose mention of the convention — untouched. Pure: no
+ *  I/O, no mutation of the input. */
+export function stripReviewTerritoryLine(text) {
+  return String(text ?? '').replace(REVIEW_TERRITORY_LINE_RE, '');
+}
+
 /** The OUTGOING text H20 scans, PER SURFACE — the two do not share an input
  *  shape, and assuming they do yields a hook that silently never fires.
- *  Task/Agent puts the whole brief in tool_input.prompt; AskUserQuestion has NO
- *  prompt field at all, only questions[{question, header, options[{label,
- *  description}]}]. Option text is included deliberately and is arguably the
- *  most important part: board 4e6eb510's incident was a MOCKUP inside an
- *  AskUserQuestion option which the user then picked, nearly overturning a
- *  ruling whose own alternatives_rejected already contained that exact
- *  proposal. Returns '' for any other tool, so an unrecognised surface is
- *  INERT rather than half-scanned. */
+ *  Task/Agent (and codex consult) puts the whole brief in tool_input.prompt;
+ *  AskUserQuestion has NO prompt field at all, only questions[{question,
+ *  header, options[{label, description}]}]. Option text is included
+ *  deliberately and is arguably the most important part: board 4e6eb510's
+ *  incident was a MOCKUP inside an AskUserQuestion option which the user then
+ *  picked, nearly overturning a ruling whose own alternatives_rejected already
+ *  contained that exact proposal. Returns '' for any other tool, so an
+ *  unrecognised surface is INERT rather than half-scanned.
+ *
+ *  The `prompt` branch strips the REVIEW-TERRITORY receipt line before axis
+ *  matching ever sees the text (fix 1 above) — the `questions[]` branch is
+ *  deliberately NEVER stripped, because AskUserQuestion never carries that
+ *  convention's line and a real "REVIEW-TERRITORY" mention typed by a human
+ *  into an option/label must survive verbatim. */
 export function outgoingProposalText(toolInput) {
   const ti = toolInput ?? {};
-  if (typeof ti.prompt === 'string' && ti.prompt.trim()) return ti.prompt;
+  if (typeof ti.prompt === 'string' && ti.prompt.trim()) return stripReviewTerritoryLine(ti.prompt);
   if (Array.isArray(ti.questions)) {
     return ti.questions
       .flatMap((q) => [
@@ -1238,7 +1270,12 @@ export function renderArticle(store, article, charCap, { gaps } = {}) {
   // `state` is the ARTICLE's build state, the trailing bracket is the RECORD's
   // lifecycle status (decision db3392db part 1) — two different facts, printed
   // side by side rather than collapsed into one token.
-  const header = `▸ article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ''})${statusAnnotation(article)}`;
+  // ID ON THE HEADER (decision 2e8c30e4 human-readable ids — name first, id
+  // retained): the 8-char prefix rides in its OWN parenthetical, ahead of the
+  // (state, concept_family) group, so a reader citing this article by id never
+  // has to fall back to knowledge_query to learn what it even is first.
+  const id8 = String(article.id ?? '').slice(0, 8);
+  const header = `▸ article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ''})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? '');
   // OVERSIZE (board 725299c8): digest the body and POINT to the full record
   // instead of rendering the article whole. Withholding intended_behavior, the
@@ -1259,6 +1296,10 @@ export function renderArticle(store, article, charCap, { gaps } = {}) {
     header,
     `WHAT IT DOES: ${clip(body, charCap)}`,
     `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
+    // The oversize branch above already carries a knowledge_get pointer; this
+    // branch (small/normal articles) did not, so a reader could not cite the
+    // record by id without a second lookup (decision 2e8c30e4).
+    `▸ FULL RECORD: knowledge_get ${article.id}`,
   ];
   // Board a9280db7: on a probe|tool article, current_ac can be the structured
   // not_applicable exemption object instead of an array — `?.length` is
@@ -1334,6 +1375,25 @@ export function cappedHazards(hazards, cap = HAZARD_CAP) {
  *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
  *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
  *  reader must choose to follow reproduces the skippable step delivery deletes. */
+/** THE ONE HAZARD HEADER LINE BUILDER (consolidation, decision 6f3e334c still
+ *  governs: hazards are SUBSTANCE, rendered the SAME WAY wherever they appear
+ *  — two header formats for one hazard block, depending on which surface
+ *  rendered it, is the "enforced in two places" smell). Both `renderHazards`
+ *  (the full/queued rendering) and the porch's own hazard preview
+ *  (lib/delivery.mjs renderPorch) call this and NOTHING ELSE builds the line.
+ *
+ *  `clipTitleBytes`/`clipSlugBytes`, when given, apply a BYTE-safe clip
+ *  (clipToBytes) — the porch's own budget constraint, since a pathological
+ *  title/slug must never blow its byte ceiling. Omitted (renderHazards' own
+ *  call), title/slug render exactly as stored, unclipped — byte-for-byte
+ *  today's behavior. */
+export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+  const title = typeof clipTitleBytes === 'number' ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
+  const slug =
+    ap?.slug ? (typeof clipSlugBytes === 'number' ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug) : '';
+  return `⚠ ANTI-PATTERN [${(ap?.severity ?? 'warn').toUpperCase()}] for this path — '${title}'${slug ? ` [${slug}]` : ''} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+}
+
 /** `total` / `suppressed` (fixer F3) exist for the DRAIN, which is handed only
  *  the ids that were SHOWN in the original payload (some of which may since have
  *  died) and must still replay the ORIGINAL '+N more' tail rather than deriving
@@ -1344,11 +1404,7 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map((ap) =>
-    [
-      `⚠ ANTI-PATTERN [${(ap.severity ?? 'warn').toUpperCase()}] for this path — '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ''} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
-      `TRIGGER: ${clip(ap.trigger, charCap)}`,
-      `RIGHT WAY: ${clip(ap.right_way, charCap)}`,
-    ].join('\n')
+    [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
   );
   if (dropped > 0) {
     // `remedy` overrides the widening query for callers whose match was not a
@@ -1593,14 +1649,781 @@ export function joinSuspectBlock({ header, lines = [], footer } = {}) {
  *  tombstones — precisely the false-assurance failure renderFrontier's own
  *  comment (decision ca23c811) exists to prevent, arriving from the other side.
  *  Omitted, it falls back to blocks.length, so producer calls are unchanged. */
+// ---------------------------------------------------------------------------
+// THE SUBAGENTSTART "PORCH" (H19 front-porch). On Claude Code 2.1.263 the
+// harness shows a spawned subagent only the first ~2KB of a hook's
+// additionalContext INLINE and spills the rest to a persisted file the agent
+// must choose to open (research_finding 518b7d21) — a hazard block buried
+// behind three anti-pattern blocks was measured NEVER SEEN by one of six
+// probed agents. The porch is a BOUNDED PREFIX built to survive that cut: the
+// H19 header, every rendered hazard (substance, not a pointer — decision
+// 6f3e334c's ordering rationale: hazards are substance, decisions are capped
+// pointers, and this porch preserves that ordering even inside its own
+// budget), then owner pointers with a shrinking digest, then a porch-end line
+// disclosing what follows and how to reach it if truncated.
+//
+// SCOPE (AMENDED 2026-09-08, decision 0050a536 §5, evidence 5d2a527f):
+// h19-dispatch-staging.mjs's file-touch (path-channel) payload, AND
+// h19-knowledge-delivery.mjs's DIRECT-INJECT tool-time block (the 'read'/
+// 'edit' rungs, where the payload is emitted as additionalContext in-process)
+// — that surface measured 11-15KB on a governed path and spilled behind the
+// harness's 2KB preview exactly like the SubagentStart case did. NOT applied
+// at ENQUEUE time (the 'prompt' rung's queued payload) or by h19-delivery-
+// drain.mjs (the queued-prompt rung, which injects one turn later) — both
+// keep today's block order, no porch, so the queue's own byte-for-byte
+// content is unchanged by this amendment.
+//
+// BYTES, NOT CHARS: every clip in this section measures UTF-8 bytes
+// (Buffer.byteLength) — a multibyte hazard title or slug must never push the
+// assembled porch past `budget` while looking short in JS string length.
+//
+// THE INVARIANT: Buffer.byteLength(renderPorch(...)) <= budget ALWAYS, for any
+// budget > 0. The cascade that holds it: reduce admitted owners (down to 0)
+// until the FIXED lines (header + owner pointer lines + porch-end) fit: then
+// split what remains 60/40 between hazards and digests (100% to whichever
+// exists alone, redistributed toward the hazard floor first when both exist);
+// then, only if that still cannot meet the per-hazard floor, clip hazards
+// below it; a final byte-safe hard clip is the absolute last resort so the
+// invariant never depends on any single step above being exhaustive. No cut is
+// ever silent: the porch-end line states the byte count and what follows, and
+// an owner/hazard cap always renders its own "+N more"/"NOT shown" line.
+// ---------------------------------------------------------------------------
+
+/** How many owner pointers the porch admits before the rest are disclosed as
+ *  '+N owners below' — deliberately small (this is the PREVIEW, not the full
+ *  delivery; every owner still gets its full renderArticle/renderReference in
+ *  the REMAINDER that follows the porch, porch-admission or not). */
+export const PORCH_OWNER_CAP = 3;
+
+/** Soft per-hazard floor (bytes) for the combined TRIGGER+RIGHT WAY clipped
+ *  text: the allocator prefers to meet this by reducing owners / borrowing from
+ *  the digest share first, and only clips below it as the documented last
+ *  resort (never an overrun). Small enough that even a tight budget can host
+ *  all HAZARD_CAP hazards at some substance; large enough that a hazard
+ *  clipped exactly to it is still legible (a clause or two), not a fragment. */
+export const PORCH_HAZARD_FLOOR_BYTES = 90;
+
+/** Clip budget for a hazard's TITLE inside its porch header line — independent
+ *  of the trigger/right_way floor above, since a title is identification, not
+ *  the substance the floor protects. */
+export const PORCH_TITLE_CLIP_BYTES = 70;
+
+/** Clip budget for a slug/title inside an owner pointer line — generous vs a
+ *  real kebab slug, bounding only a pathological one (mirrors ARTICLE_SLUG_CLIP
+ *  above, byte- rather than char-counted here since porch math is all bytes). */
+export const PORCH_OWNER_LABEL_CLIP_BYTES = 90;
+
+/** Clip budget for a hazard's `[<slug>]` suffix in its porch scaffold line —
+ *  the HIGH finding a Codex review found (delivery.mjs, hazard scaffold):
+ *  `hazard.slug` was interpolated UNBOUNDED, so a single pathological slug
+ *  (e.g. a multibyte string repeated a thousand times) blew the skeleton past
+ *  ANY budget before a single byte of clippable text was ever considered —
+ *  the final clamp then cut everything after the header, losing the owner
+ *  disclosure and the porch-end line entirely. Every other variable field a
+ *  porch scaffold line interpolates is independently bounded already: the
+ *  hazard/owner title/slug via PORCH_TITLE_CLIP_BYTES/PORCH_OWNER_LABEL_CLIP_
+ *  BYTES, id8 by construction (`.slice(0, 8)` bounds any input to at most 8
+ *  chars), the full uuid by the store's own fixed format, and `state` by its
+ *  closed zod enum (packages/schemas/src/records.ts — longest member
+ *  'deprecated', 10 chars) — this was the one unclipped variable field left.
+ *
+ *  LOW (roster reviewer, consolidation round): since hazardHeaderLine unified
+ *  the porch's hazard header with renderHazards' own (decision 6f3e334c), the
+ *  porch scaffold line also carries statusAnnotation(ap) — a THIRD unclipped
+ *  variable field, distinct from title/slug above. It is bounded in practice
+ *  the same way `state` is: `status` is a closed enum, `superseded_by` (when
+ *  present) is the store's own fixed-format uuid, so its worst case is small
+ *  and fixed-width, not attacker-growable the way a free-text title/slug is.
+ *  The skeleton still MEASURES it (hazardSectionAt's skeleton pass renders the
+ *  real header, statusAnnotation included, before any clipped text is added),
+ *  so the byte invariant holds regardless — this note is a completeness
+ *  record, not a defect: no dedicated clip constant is warranted for a field
+ *  that cannot grow. */
+export const PORCH_SLUG_CLIP_BYTES = 60;
+
+/** Clip budget for the PATH LIST portion of the porch's OWN header line —
+ *  the SECOND HIGH finding a Codex review found: `payloadHeaderLine(rels.join
+ *  (', '))` interpolates the caller's `rel`/`rels` UNBOUNDED, so a single huge
+ *  path (or a long multi-file dispatch's joined list) could blow the skeleton
+ *  past ANY budget before the header's own fixed check even got a chance —
+ *  measured: budget 1800, a 1000-char rel, one hazard, four owners assembled
+ *  to ~3442 bytes and the final hard clamp cut everything after the header,
+ *  losing the owner disclosure and the porch-end line entirely, exactly the
+ *  failure mode PORCH_SLUG_CLIP_BYTES closed for hazard slugs. See
+ *  porchHeaderLine below — the REMAINDER's own header (renderPayload, via
+ *  payloadHeaderLine) is UNCHANGED and stays unclipped; only the porch's own
+ *  copy is bounded, since only the porch is budget-constrained. */
+export const PORCH_HEADER_PATH_CLIP_BYTES = 200;
+
+/** Clip budget for the file_keys LIST inside the porch's own hazard-overflow
+ *  widening query (consolidation: the porch's overflow line must state the
+ *  SAME `knowledge_query types:["anti_pattern"] file_keys:[…] cap:N` widening
+ *  disclosure renderHazards emits, decision 6f3e334c — "never drop the
+ *  line", clip it instead). Generous vs an ordinary file_keys join; bounds
+ *  only a pathological one, mirroring PORCH_HEADER_PATH_CLIP_BYTES for the
+ *  porch's own header line. */
+export const PORCH_WIDENING_KEYS_CLIP_BYTES = 200;
+
+const PORCH_HAZARD_SHARE = 0.6;
+const PORCH_DIGEST_SHARE = 0.4;
+
+/** Reserve width (decimal digits) for the porch-end line's own self-reported
+ *  byte count. porchEndLine (below) first renders with this reserved width and
+ *  then substitutes the measured count, so the reserve is a substitution slot,
+ *  not a true fixed point. 6 digits covers any budget under 1
+ *  million bytes, which every configured/derived budget in this mechanism is
+ *  many orders of magnitude under. */
+const PORCH_BYTE_COUNT_RESERVE = '000000';
+
+function porchByteLen(s) {
+  return Buffer.byteLength(String(s ?? ''), 'utf8');
+}
+
+/** Byte-safe clip: never splits a UTF-8 codepoint, appends a single '…'
+ *  (itself budgeted) only when truncation actually happened and there is room
+ *  for it. `maxBytes <= 0` yields ''. Distinct from the existing char-counted
+ *  `clip()` above — the porch's whole point is a BYTE ceiling the harness
+ *  itself measures in, so a multibyte string must never be measured wrong. */
+function clipToBytes(text, maxBytes) {
+  const s = String(text ?? '');
+  if (maxBytes <= 0) return '';
+  if (porchByteLen(s) <= maxBytes) return s;
+  const ELLIPSIS = '…';
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = '';
+  let used = 0;
+  for (const ch of s) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
+}
+
+/** A byte-bounded, JSON-SAFE `[...]` array literal for the porch's widening
+ *  `file_keys:[...]` query (Codex review, MEDIUM 2). Two defects a naive
+ *  `clipToBytes` over the pre-joined, already-quoted string reproduces: (1) a
+ *  clip that lands MID-ENTRY drops the closing quote, so `file_keys:["aaaa…]
+ *  cap:4` is not valid JSON-ish query syntax at all; (2) a raw quote or
+ *  backslash INSIDE a filename, interpolated unescaped, breaks the query the
+ *  same way. Fixed by admitting WHOLE `JSON.stringify`-escaped entries, in
+ *  order, only while the running total still fits `maxBytes` — the first
+ *  entry that would overrun stops admission (never skip ahead to a shorter
+ *  later one, which would silently reorder what the query names) — and the
+ *  literal is ALWAYS balanced (`[]` at minimum, comma-joined otherwise).
+ *  Dropped keys are disclosed as `(+N keys omitted)` immediately after the
+ *  literal, never silently — mirroring every other cut this mechanism makes. */
+function clippedFileKeysLiteral(keys, maxBytes) {
+  const list = keys ?? [];
+  const admitted = [];
+  let used = 2; // '[' + ']'
+  for (const k of list) {
+    const entry = JSON.stringify(String(k));
+    const sep = admitted.length ? 1 : 0; // ',' between entries
+    const entryBytes = porchByteLen(entry) + sep;
+    if (used + entryBytes > Math.max(maxBytes, 2)) break;
+    admitted.push(entry);
+    used += entryBytes;
+  }
+  const omitted = list.length - admitted.length;
+  const literal = `[${admitted.join(',')}]`;
+  return omitted > 0 ? `${literal} (+${omitted} keys omitted)` : literal;
+}
+
+/** One owner pointer line: `▸ article '<slug>' (<id8>, <state>) — knowledge_get
+ *  <uuid>` or the reference_material equivalent — name first, id retained
+ *  (decision 2e8c30e4), same spelling Part 2 gives renderArticle's own header. */
+function porchOwnerLine(owner) {
+  const id8 = String(owner?.id ?? '').slice(0, 8);
+  if (owner?.type === 'reference_material') {
+    return `▸ reference '${clipToBytes(owner.title, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}) — knowledge_get ${owner.id}`;
+  }
+  return `▸ article '${clipToBytes(owner?.slug, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}, ${owner?.state ?? 'unknown'}) — knowledge_get ${owner?.id}`;
+}
+
+/** Owner ranking for porch admission: feature_article before reference_material
+ *  (an article carries substance a reference pointer does not), then most
+ *  recently updated first — a stable, deterministic order so which 3 of N
+ *  owners get admitted never depends on query/array order alone. */
+function rankOwnersForPorch(owners) {
+  return [...(owners ?? [])].sort((a, b) => {
+    const ta = a?.type === 'feature_article' ? 0 : 1;
+    const tb = b?.type === 'feature_article' ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    const ua = Date.parse(a?.updated_at ?? '');
+    const ub = Date.parse(b?.updated_at ?? '');
+    return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
+  });
+}
+
+/** The hazard's clipped substance, given a total byte budget for TRIGGER +
+ *  RIGHT WAY combined: split evenly, trigger first (so a very short trigger
+ *  never starves right_way of budget it did not use). */
+function porchHazardBody(hazard, textBudgetBytes) {
+  const half = Math.max(0, Math.floor(textBudgetBytes / 2));
+  const trigger = clipToBytes(hazard?.trigger, half);
+  const rightBudget = Math.max(0, textBudgetBytes - porchByteLen(trigger));
+  const rightWay = clipToBytes(hazard?.right_way, rightBudget);
+  return [`  TRIGGER: ${trigger}`, `  RIGHT WAY: ${rightWay}`].join('\n');
+}
+
+/** The porch-end line's SUBJECT STAGING clause — whole-block POST-CAP ACTUALS
+ *  (decision 0050a536 §5 amendment 2026-09-08, evidence 5d2a527f). A caller
+ *  with no subject channel at all (the tool-time hook) states `none` rather
+ *  than a hazard/pointer count that was never computed; a caller that DOES
+ *  stage a subject channel (SubagentStart) always states its two RENDERED
+ *  (post-cap) counts, even when both are zero — the earlier `0 decision
+ *  pointer(s)` reading as a contradiction against the path-channel count on the
+ *  SAME line was exactly the LOW finding this amendment answers, so the two
+ *  channels' counts are now labelled separately rather than sharing one bare
+ *  number. */
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : 'none';
+}
+
+/** The porch-end line's ARTICLE-BODY / REFERENCE-POINTER clause (roster
+ *  reviewer, same round as the porch's Codex review: a reference_material
+ *  owner renders as ONE POINTER LINE via renderReference below, never an
+ *  article body — folding it into `articleBodiesCount` made the porch-end
+ *  line's own self-report disagree with what actually renders, the exact
+ *  self-report-vs-reality defect clause (5) exists to prevent). `K article
+ *  body(ies)` covers feature_article owners only; `referencePointerCount`
+ *  (R) renders its own trailing clause and is OMITTED ENTIRELY at 0, rather
+ *  than stating "0 reference pointer(s)" as noise on the common case where
+ *  every owner is a full article. */
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0
+    ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)`
+    : `${articleBodiesCount} article body(ies)`;
+}
+
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return (
+    `▸ PORCH END (${byteCountText} bytes) — followed by ${articleBodiesClause(meta)}; ` +
+    `path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. ` +
+    `If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or ` +
+    `acting; normal instruction precedence applies.`
+  );
+}
+
+/** The MINIMAL-porch fallback (Codex review, HIGH item B): when even the
+ *  smallest possible skeleton for THIS call's real header/hazards/owners
+ *  (zero admitted owners, every hazard scaffold at zero clipped text) still
+ *  exceeds `budget`, no amount of clipping or clamping produces a sensible
+ *  preview — the correct answer is not a clamped fragment (which silently
+ *  drops the owner disclosure and the porch-end line, exactly the HIGH
+ *  finding that motivated this) but a SHORT, COMPLETE porch that states the
+ *  shortfall plainly and defers everything — hazards INCLUDED — to the full,
+ *  unclipped remainder below (the caller renders hazards itself in this case;
+ *  see `hazardsRendered` on renderPorch's return). Reuses the EXACT SAME
+ *  "+N owners below" line the normal cascade uses (never a second spelling),
+ *  and folds the shortfall into ONE porch-end-shaped line so there is still
+ *  exactly one line a caller's own porch-end detector will find. */
+function porchDeferredEndLine(byteCountText, hazardCount, budget, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return (
+    `▸ PORCH END (${byteCountText} bytes) — budget (${budget}) too small to preview ${hazardCount} hazard(s); deferred in full below. ` +
+    `Followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); ` +
+    `subject staging: ${subjectStagingClause(meta)}. normal instruction precedence applies.`
+  );
+}
+
+/** The PORCH's OWN header line — same wording as payloadHeaderLine, but the
+ *  path-list portion is bounded to PORCH_HEADER_PATH_CLIP_BYTES, with an
+ *  in-progress '…' plus a '(+N paths)' tail when whole path segments had to
+ *  be dropped to fit. Whole segments are kept where possible (never split one
+ *  path's bytes mid-string); only when even the FIRST segment alone overflows
+ *  the clip budget does this fall back to a byte-safe clip of the joined
+ *  text. `rels` is the ARRAY the caller already has (not a pre-joined
+ *  string), so the '+N paths' count is exact. The REMAINDER's own header
+ *  (renderPayload, via payloadHeaderLine) is a SEPARATE call and stays fully
+ *  unclipped — only the porch, which is budget-bounded, needs this. */
+export function porchHeaderLine(rels) {
+  const list = Array.isArray(rels) ? rels : [rels];
+  const full = list.join(', ');
+  if (porchByteLen(full) <= PORCH_HEADER_PATH_CLIP_BYTES) return payloadHeaderLine(full);
+  const kept = [];
+  let usedBytes = 0;
+  for (const r of list) {
+    const sepBytes = kept.length ? porchByteLen(', ') : 0;
+    const rBytes = porchByteLen(r);
+    if (usedBytes + sepBytes + rBytes > PORCH_HEADER_PATH_CLIP_BYTES) break;
+    kept.push(r);
+    usedBytes += sepBytes + rBytes;
+  }
+  const remainder = list.length - kept.length;
+  const clippedList = kept.length
+    ? `${kept.join(', ')}${remainder > 0 ? ` … (+${remainder} paths)` : ''}`
+    : clipToBytes(full, PORCH_HEADER_PATH_CLIP_BYTES); // even the first segment alone overflows — byte-safe clip
+  return payloadHeaderLine(clippedList);
+}
+
+/** Fixed byte cost of the payload header TEMPLATE with an EMPTY `rel` — used
+ *  only to derive PORCH_MIN_BUDGET_BYTES below, and DELIBERATELY the MINIMAL
+ *  (not worst-case-clipped-width) header cost — the same reasoning
+ *  PORCH_MINIMAL_HAZARD_SCAFFOLD_BYTES used to carry for the hazard side
+ *  before hazard floor was dropped from this floor entirely: PORCH_MIN_
+ *  BUDGET_BYTES is a cheap, generic SANITY floor over the CONFIG VALUE, not a
+ *  guarantee that covers a genuinely long real `rel` — that case is handled
+ *  per-call, with the REAL (now bounded via porchHeaderLine) header, by the
+ *  `skeletonBytes > budget` check inside renderPorch below, which degrades to
+ *  the MINIMAL porch rather than inflating this floor and misclassifying an
+ *  ordinary short-path, tight-but-workable budget as misconfigured. */
+const PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(''));
+
+/** The porch-end line's own template cost: a representative two-digit
+ *  K/M/N/P/R (a delivery serving 99+ article bodies, reference pointers or
+ *  decision pointers is already far past every existing cap in this
+ *  mechanism) and its longer subject-staging spelling (the two-count "N
+ *  hazard(s) / P decision pointer(s)" form is longer than the
+ *  caller-has-no-subject-channel 'none' spelling) PLUS the reference-pointer
+ *  clause (longer than its own omitted-at-zero form) — the template must be
+ *  the LONGEST either line can render, never the common case, or a real call
+ *  with a reference owner could exceed a floor sized without one. */
+const PORCH_END_TEMPLATE_BYTES = porchByteLen(
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99,
+  })
+);
+
+/** The smallest `preview_budget_bytes` at which a porch can ALWAYS host its
+ *  own MINIMAL boilerplate (Codex review, HIGH item B) — COMPUTED from the
+ *  templates above, never a guessed round number: the header template (real
+ *  `rel` text only ever adds bytes) plus the porch-end line's own template and
+ *  the separator between them. NO hazard/owner allowance is folded in here —
+ *  that is exactly what the MINIMAL-PORCH fallback above exists for, so this
+ *  floor only needs to cover the smallest thing a porch can EVER be (header +
+ *  one porch-end-shaped line). A configured budget below this can never host
+ *  even that, so it is treated as MISCONFIGURED — the porch is disabled
+ *  outright (today's pre-porch rendering applies) rather than attempted and
+ *  clamped. A budget ABOVE this floor that still cannot host a SPECIFIC
+ *  call's full cascade (real hazards/owners) degrades to the MINIMAL porch
+ *  instead (see `skeletonBytes > budget` below) — the two checks compose:
+ *  this one catches an unusable CONFIG VALUE, that one catches a call whose
+ *  real DATA cannot fit even though the config value itself is sane. */
+export const PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+
+/** THE PORCH BUDGET (config.delivery.preview_budget_bytes) — ONE resolver, now
+ *  shared by every porch caller (decision 0050a536 §5 amendment 2026-09-08:
+ *  the porch extends from SubagentStart to h19-knowledge-delivery.mjs's
+ *  direct-inject rungs, and the consolidation rule holds — one source, not a
+ *  second hand-copied reader). Measured default 1800: the inline preview
+ *  Claude Code 2.1.263 shows before spilling the rest of a hook's
+ *  additionalContext to a persisted file (research_finding 518b7d21) — a
+ *  platform fact, re-probe on upgrade. 0 DISABLES the porch.
+ *
+ *  THREE-STATE GUARD (same shape as h1-session-start.mjs's configUnreadable
+ *  guard, anti_pattern e0d280ee) — EXCEPT this value is never RENDERED as a
+ *  claim about the project the reader could be misled by, it is only an
+ *  internal rendering parameter, so every unusable shape (absent, unparseable,
+ *  non-object, non-integer, negative) collapses to the SAME documented
+ *  default rather than a distinct UNKNOWN state — there is nothing here for a
+ *  divergence to be dishonest ABOUT.
+ *
+ *  LOW (roster reviewer, consolidation round): this resolver's own catch is a
+ *  SECOND line of defense, not the ONLY one — both current callers already
+ *  reach a hard config-read failure earlier in their own try/catch (the
+ *  tddPostureLine/activePlanLine reads in h19-dispatch-staging.mjs; the
+ *  charCap read in h19-knowledge-delivery.mjs) before this resolver ever runs,
+ *  so a genuinely unreadable config is caught upstream of the porch. A future
+ *  caller that reaches `resolvePorchBudget` WITHOUT first surviving its own
+ *  config read would still get PORCH_BUDGET_DEFAULT here, but two things that
+ *  depend on the upstream catch having already fired would degrade: the
+ *  shared-fate suppression pattern this file's hooks use (a config throw is
+ *  meant to be visible ONCE, at the earliest read, not swallowed silently at
+ *  every subsequent optional-chained call), and the MISCONFIGURED/deferred
+ *  porch-end line's own `budget (${budget})` disclosure, which would then
+ *  report the SILENT fallback value rather than the value that actually
+ *  failed to parse. */
+export const PORCH_BUDGET_DEFAULT = 1800;
+export function resolvePorchBudget(cwd) {
+  try {
+    const cfg = loadConfig(cwd);
+    if (cfg === null || typeof cfg !== 'object' || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
+    const v = cfg?.delivery?.preview_budget_bytes;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
+    return v;
+  } catch {
+    return PORCH_BUDGET_DEFAULT;
+  }
+}
+
+/** Render the SubagentStart porch: a bounded PREFIX of the complete
+ *  additionalContext (see the file-header comment above for the full design).
+ *
+ *  RETURNS `{ text, hazardsRendered }`, never a bare string — `text` is ''
+ *  when there is nothing to show (no hazards and no owners), when `budget` is
+ *  not a positive finite number, or when `budget` is below the structural
+ *  MISCONFIGURED floor; `hazardsRendered` is true only when this porch itself
+ *  rendered the hazards' substance. The CALLER MUST check `hazardsRendered`:
+ *  false means the porch either doesn't exist (`text === ''`) or exists but
+ *  deliberately DEFERRED hazard substance to the remainder (the MINIMAL-porch
+ *  fallback, `skeletonBytes > budget` below) — in either case the caller's
+ *  OWN renderHazards call is what must run, or the hazards are lost. This is
+ *  the one piece of this contract a bare string could not express.
+ *
+ *  `hazards`/`owners` are the FRESH (unrendered) arrays — this function applies
+ *  its own severity cap (cappedHazards, HAZARD_CAP) and owner rank/cap
+ *  (PORCH_OWNER_CAP) internally, exactly mirroring what the REMAINDER (the
+ *  caller's own renderHazards/renderArticle calls) will do for hazards, and
+ *  more narrowly than the remainder for owners (every owner still gets its
+ *  full render afterward, porch-admitted or not).
+ *
+ *  `articleBodiesCount` (K, path channel, feature_article owners ONLY) /
+ *  `referencePointerCount` (R, path channel, reference_material owners —
+ *  roster reviewer finding: a reference owner renders as ONE POINTER LINE via
+ *  renderReference below, never an article body, so folding it into K made
+ *  the porch-end line's own self-report disagree with what actually renders)
+ *  / `pathDecisionPointerCount` (M, path channel) / `hasSubjectChannel` +
+ *  `subjectHazardCount` (N) + `subjectDecisionPointerCount` (P) describe what
+ *  the CALLER will render AFTER the porch, as whole-block POST-CAP ACTUALS
+ *  (decision 0050a536 §5 amendment) — the porch does not compute these
+ *  itself, since the subject-channel block (when the caller has one at all)
+ *  is assembled entirely outside this function's view. A caller with no
+ *  subject channel (the tool-time hook) passes `hasSubjectChannel: false` and
+ *  the porch-end line states `subject staging: none` rather than a count that
+ *  was never computed; `referencePointerCount` omitted (or 0) renders no
+ *  reference clause at all, rather than a noisy "0 reference pointer(s))" on
+ *  the common all-article case.
+ *
+ *  `fileKeys` (consolidation, decision 6f3e334c): the path(s) this touch
+ *  governs — needed ONLY to build the hazard-overflow widening query in the
+ *  SAME shape renderHazards emits (`knowledge_query types:["anti_pattern"]
+ *  file_keys:[…] cap:N`) when the porch itself caps hazards away. Omitted
+ *  (or `[]`), the widening query names no path — callers that always have a
+ *  path (both current callers) must pass it, or the overflow line silently
+ *  degrades to an unrunnable empty file_keys list. */
+export function renderPorch(
+  header,
+  hazards,
+  owners,
+  budget,
+  {
+    articleBodiesCount = 0,
+    referencePointerCount = 0,
+    pathDecisionPointerCount = 0,
+    hasSubjectChannel = false,
+    subjectHazardCount = 0,
+    subjectDecisionPointerCount = 0,
+    fileKeys = [],
+  } = {}
+) {
+  if (!Number.isFinite(budget) || budget <= 0) return { text: '', hazardsRendered: false };
+  // ACCEPTED (Codex review, item C): a touch whose only fresh knowledge is
+  // decision pointers (zero hazards, zero owners) gets no porch — a decision-
+  // pointer block is a handful of capped one-line pointers (DECISION_POINTER_
+  // CAP = 8) and cannot itself spill past the harness's inline preview, so
+  // there is nothing here for a porch to protect. The caller only ever
+  // builds a porch when freshOwners.length || freshHazards.length ||
+  // freshDecisions.length is true, so this branch IS reachable (a decision-
+  // only touch) — it is a real, intended no-op, not dead code.
+  if (!hazards?.length && !owners?.length) return { text: '', hazardsRendered: false };
+
+  // MISCONFIGURED BUDGET (Codex review, HIGH item B, first half): a budget
+  // below the structural minimum can never host even the smallest real
+  // porch — attempting one would only ever produce a clamped fragment or an
+  // empty string with no diagnosis. Disable the porch outright (today's
+  // pre-porch rendering applies) and disclose the shortfall loudly, once,
+  // rather than silently.
+  if (budget < PORCH_MIN_BUDGET_BYTES) {
+    try {
+      process.stderr.write(
+        `H19 porch: preview_budget_bytes=${budget} is below the structural minimum ${PORCH_MIN_BUDGET_BYTES} bytes — MISCONFIGURED, porch disabled for this touch (today's rendering applies)\n`
+      );
+    } catch {
+      /* a failed stderr write must not change the already-decided outcome */
+    }
+    return { text: '', hazardsRendered: false };
+  }
+
+  const shownHazards = cappedHazards(hazards ?? []);
+  const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
+  const rankedOwners = rankOwnersForPorch(owners);
+
+  const endMeta = {
+    articleBodiesCount,
+    referencePointerCount,
+    pathDecisionPointerCount,
+    hasSubjectChannel,
+    subjectHazardCount,
+    subjectDecisionPointerCount,
+  };
+  const minOwnerCap = 0; // the ABSOLUTE invariant outranks the documented "reduce owners down to 1" — see file header
+
+  // PER-CALL byte-count placeholder, sized from THIS budget (Codex review,
+  // MEDIUM item 2) — PORCH_BYTE_COUNT_RESERVE's fixed 6-digit placeholder
+  // assumed every budget stays under 1,000,000 bytes; a budget >= 1,000,000
+  // bytes with >1MB of real bodies could assemble to a 7-digit count the
+  // fixed reserve never budgeted for, understating the placeholder during
+  // the fit-check and reproducing the same self-referential substitution
+  // problem the convergence loop below exists to solve, one order of
+  // magnitude up. The porch can never legitimately need more digits than the
+  // budget it must not exceed, so `String(budget).length` is an exact bound,
+  // not a guess — no reserve-outgrows-itself case survives this.
+  const byteCountReserve = '0'.repeat(String(budget).length);
+
+  // BUG THIS REPLACES (found via the frozen porch pins, decision 0050a536):
+  // the previous "fixed lines" accounting counted ONLY header + owner pointer
+  // lines + overflow + porch-end — it left every hazard's scaffold line
+  // ("⚠ HAZARD [...] '<title>' (knowledge_get <id>)") and its "  TRIGGER: " /
+  // "  RIGHT WAY: " label prefixes as UNCOUNTED overhead riding on top of
+  // hazardShare, which only ever budgeted the CLIPPED TEXT. With HAZARD_CAP=3
+  // that overhead (~100+ bytes per hazard) silently ate hundreds of bytes the
+  // arithmetic never subtracted from anything, so the assembled porch
+  // overran its budget and the final hard-clamp cut the string mid-word,
+  // before ever reaching the owner-cap disclosure or the porch-end line.
+  //
+  // THE FIX: build a "SKELETON" — every block at its ZERO-clipped-text form
+  // (hazard scaffolding + empty TRIGGER:/RIGHT WAY: values; owner pointer
+  // lines with no digest) — through the EXACT SAME section builders and join
+  // the final assembly uses, so its measured byte length already contains
+  // every header, label, id, and separator with nothing left uncounted.
+  // `remaining = budget - skeletonBytes` is then the true room left for
+  // CLIPPED TEXT ALONE, and hazardShare + digestShare (drawn from it) can
+  // never explain an overrun: total = skeletonBytes + real_clipped_bytes,
+  // and real_clipped_bytes <= hazardShare + digestShare <= remaining by
+  // construction of Math.floor division, so total <= budget.
+  //
+  // MEDIUM FIX (independent review, round 2): a SECOND uncounted-overhead bug
+  // lived in the owner section specifically. The skeleton called
+  // ownerSectionAt(..., 0), which renders a BARE owner line (no digest, no
+  // separator) whenever digestBudget is 0 — but the FINAL pass often has
+  // perOwner > 0, and `${ownerLines[i]}\n  ${digest}` then adds a "\n  "
+  // (3 bytes) per admitted owner that the skeleton never reserved. Measured
+  // on a real 3-owner clipped-digest fixture: "▸ PORCH END (1803 bytes)"
+  // against a budget of 1800 — a 3-byte overrun, one per admitted owner,
+  // silently eaten by the label the skeleton assumed away. Fixed by
+  // `reserveDigestSeparator`: the SKELETON pass now always reserves the
+  // "\n  " bytes for every admitted owner (a 1-byte-placeholder-digest
+  // equivalent, per the review's own suggested alternative), so the real
+  // pass can never add bytes the skeleton did not already count — at worst
+  // the skeleton over-reserves by 3 bytes for an owner whose final digest
+  // happens to clip to nothing, which is conservative, never an overrun.
+  function hazardSectionAt(perHazardTextBudget) {
+    const blocks = shownHazards.map((hz) =>
+      [
+        hazardHeaderLine(hz, { clipTitleBytes: PORCH_TITLE_CLIP_BYTES, clipSlugBytes: PORCH_SLUG_CLIP_BYTES }),
+        porchHazardBody(hz, Math.max(0, perHazardTextBudget)),
+      ].join('\n')
+    );
+    if (hazardOverflow > 0) {
+      // THE SAME OVERFLOW DISCLOSURE renderHazards EMITS (consolidation,
+      // decision 6f3e334c: hazards are substance, rendered the SAME WAY
+      // wherever they appear) — dropped count + the file_keys-scoped
+      // widening query, never a porch-only phrasing. `hazards.length` is the
+      // FULL total (the outer, unrendered array), matching what renderHazards
+      // would report as `fullTotal` for the identical array. The file_keys
+      // list renders as a byte-bounded, JSON-safe literal (clippedFileKeysLiteral)
+      // — never a raw clip over the pre-joined string, which can sever a
+      // closing quote mid-entry or leave an unescaped quote/backslash inside a
+      // filename unrunnable — and a drop is disclosed, never silent (this
+      // fixed line is counted in the skeleton like every other, since
+      // hazardSectionAt(0) — the skeleton pass — includes it unconditionally,
+      // independent of the per-hazard text budget argument).
+      const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
+      blocks.push(`… ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) — ${widen} for the full set`);
+    }
+    return blocks;
+  }
+  function ownerSectionAt(admitted, ownerLines, overflowLine, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
+    const blocks = admitted.map((owner, i) => {
+      const digestBudget = Math.max(0, perOwnerDigestBudget);
+      const digest = digestBudget > 0 ? clipToBytes(owner?.what_it_does, digestBudget) : '';
+      if (digest) return `${ownerLines[i]}\n  ${digest}`;
+      // Reserve the SAME "\n  " bytes a real (non-empty) digest would cost,
+      // even though this measurement pass has none — see the MEDIUM fix note
+      // above. Never emitted in the FINAL pass (reserveDigestSeparator is
+      // only ever true for the skeleton), so the real output never shows a
+      // trailing blank digest line.
+      return reserveDigestSeparator ? `${ownerLines[i]}\n  ` : ownerLines[i];
+    });
+    if (overflowLine) blocks.push(overflowLine);
+    return blocks;
+  }
+
+  // Choose the LARGEST owner cap (PORCH_OWNER_CAP down to minOwnerCap) whose
+  // SKELETON (header + hazard scaffolding at zero text + admitted owner
+  // pointer lines at zero digest, WITH the digest separator reserved + overflow
+  // line + porch-end) leaves room for at least the hazard floor — i.e. reduce
+  // owners first, exactly as the design states.
+  let pick = null;
+  for (let cap = Math.min(PORCH_OWNER_CAP, rankedOwners.length); cap >= minOwnerCap; cap -= 1) {
+    const admitted = rankedOwners.slice(0, cap);
+    const ownerOverflow = rankedOwners.length - admitted.length;
+    const ownerLines = admitted.map(porchOwnerLine);
+    const overflowLine = ownerOverflow > 0 ? `  … +${ownerOverflow} owners below` : '';
+    const skeletonBody = [
+      header,
+      ...hazardSectionAt(0),
+      ...ownerSectionAt(admitted, ownerLines, overflowLine, 0, { reserveDigestSeparator: true }),
+    ].join('\n\n');
+    const skeletonBytes = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+    const remaining = Math.max(0, budget - skeletonBytes);
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    const fits = skeletonBytes <= budget && (shownHazards.length === 0 || remaining >= neededFloor);
+    pick = { admitted, ownerOverflow, ownerLines, overflowLine, remaining, skeletonBytes };
+    if (fits || cap === minOwnerCap) break;
+  }
+
+  const { admitted, ownerLines, overflowLine, remaining, skeletonBytes } = pick;
+
+  // STRUCTURALLY IMPOSSIBLE FOR THIS CALL (Codex review, HIGH item B, second
+  // half): budget cleared PORCH_MIN_BUDGET_BYTES (so it is not a bare
+  // misconfiguration), yet even the SMALLEST skeleton this specific call can
+  // produce — zero admitted owners, every hazard scaffold at zero clipped
+  // text — still exceeds it (a long `rel`, more hazards than a generic floor
+  // assumed, or simply many owners to disclose). No amount of clipping fixes
+  // a skeleton that already overruns before a single byte of clippable text
+  // is considered, so the answer is the documented MINIMAL porch: the header,
+  // the SAME "+N owners below" line the normal cascade uses (now naming EVERY
+  // owner, since none are admitted), and ONE porch-end-shaped line stating the
+  // shortfall — never a clamped fragment. Hazards are DEFERRED to the
+  // remainder here (`hazardsRendered: false`), which the caller must render
+  // itself — see this function's own doc comment.
+  if (skeletonBytes > budget) {
+    const allOwnersOverflow = rankedOwners.length > 0 ? `  … +${rankedOwners.length} owners below` : '';
+    // Byte-converged assembly, PARAMETERISED on the header — a very tight
+    // budget combined with a long (though already porchHeaderLine-clipped)
+    // path can still leave no room for the fixed disclosure lines alongside
+    // the full-width header (Codex re-check: measured 639 bytes against a
+    // 600-byte budget with an ~1.6KB governed path). Retried below with a
+    // FURTHER-clipped header rather than falling straight to the hard clamp,
+    // so "the header is wide" degrades the header, never the sentence.
+    function buildMinimal(hdr) {
+      const blocks = [hdr, allOwnersOverflow].filter(Boolean);
+      let cnt =
+        blocks.reduce((sum, l) => sum + porchByteLen(l) + 2, 0) +
+        porchByteLen(porchDeferredEndLine(byteCountReserve, shownHazards.length, budget, endMeta));
+      let text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join('\n\n');
+      for (let i = 0; i < 5; i += 1) {
+        const actual = porchByteLen(text);
+        if (actual === cnt) break;
+        cnt = actual;
+        text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join('\n\n');
+      }
+      return text;
+    }
+    let minimalPorch = buildMinimal(header);
+    if (porchByteLen(minimalPorch) > budget) {
+      // Concatenation is byte-additive, so the bytes NOT contributed by the
+      // header are exactly this difference — clip the header down to
+      // whatever room is left for it specifically, then rebuild (which
+      // re-converges the byte count for the new, shorter total).
+      const nonHeaderBytes = porchByteLen(minimalPorch) - porchByteLen(header);
+      minimalPorch = buildMinimal(clipToBytes(header, Math.max(0, budget - nonHeaderBytes)));
+    }
+    // Even the MINIMAL porch (now with its header degraded too) is a
+    // byte-safe absolute last resort — see the matching note on the normal
+    // path's own final clamp below.
+    if (porchByteLen(minimalPorch) > budget) {
+      try {
+        process.stderr.write(
+          `H19 porch: accounting regression in the MINIMAL fallback — assembled ${porchByteLen(minimalPorch)} bytes against a ${budget}-byte budget — hard-clamping\n`
+        );
+      } catch {
+        /* a failed stderr write must not change the clamp outcome */
+      }
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+    }
+    return { text: minimalPorch, hazardsRendered: false };
+  }
+
+  // 60/40 hazards/digests, redistributed toward the hazard floor first (borrow
+  // from digest), then 100% to whichever axis exists alone.
+  const haveHazards = shownHazards.length > 0;
+  const haveDigests = admitted.length > 0;
+  let hazardShare = 0;
+  let digestShare = 0;
+  if (haveHazards && haveDigests) {
+    hazardShare = Math.floor(remaining * PORCH_HAZARD_SHARE);
+    digestShare = remaining - hazardShare;
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    if (hazardShare < neededFloor) {
+      const borrow = Math.min(digestShare, neededFloor - hazardShare);
+      hazardShare += borrow;
+      digestShare -= borrow;
+    }
+  } else if (haveHazards) {
+    hazardShare = remaining;
+  } else if (haveDigests) {
+    digestShare = remaining;
+  }
+
+  const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
+  const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
+  const hazardBlocks = hazardSectionAt(perHazard);
+  const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
+
+  const body = [header, ...hazardBlocks, ...ownerBlocks].join('\n\n');
+
+  // THE PORCH-END LINE MUST STATE THE BYTE COUNT OF THE PORCH AS EMITTED
+  // (independent review, MEDIUM fix item 2). Substituting a real (usually
+  // narrower) digit string for byteCountReserve's placeholder changes the
+  // line's OWN length, which changes the true total — so a single
+  // placeholder-then-substitute pass states a number that is no longer true
+  // of the string it appears in. This is a genuine fixed-point (count =
+  // byteLength of a string that itself contains `count`), so it is SOLVED by
+  // iterating: reassemble with the last computed count as the new candidate
+  // and re-measure, until the stated count matches the assembled length.
+  // Bounded at a handful of iterations — the digit width can only shift once
+  // or twice (e.g. 999 -> 1000) before it is stable, never unboundedly, since
+  // porchByteLen(body) is fixed and only the count's own digit count can move
+  // the total; byteCountReserve is sized from `budget` itself (see above), so
+  // the placeholder can never be narrower than any count this loop could ever
+  // legitimately produce.
+  let count = porchByteLen(body) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+  let finalPorch = [body, porchEndLine(String(count), endMeta)].join('\n\n');
+  for (let i = 0; i < 5; i += 1) {
+    const actual = porchByteLen(finalPorch);
+    if (actual === count) break;
+    count = actual;
+    finalPorch = [body, porchEndLine(String(count), endMeta)].join('\n\n');
+  }
+
+  // Absolute safety net: the cascade above is designed to hold the invariant
+  // unconditionally and to be UNREACHABLE on every real dispatch, but a hard
+  // byte-safe clip closes the gap for any input the cascade did not
+  // anticipate rather than let the invariant depend on that being exhaustive.
+  // LOUD, NEVER SILENT (independent review, item 3): if this ever fires, the
+  // arithmetic above it failed to hold its own invariant — that is an
+  // accounting REGRESSION, not a normal degrade path, so it is disclosed on
+  // stderr naming the overrun rather than swallowed.
+  const finalBytes = porchByteLen(finalPorch);
+  if (finalBytes > budget) {
+    try {
+      process.stderr.write(
+        `H19 porch: accounting regression — assembled porch is ${finalBytes} bytes against a ${budget}-byte budget ` +
+          `(overrun ${finalBytes - budget} bytes); the cascade above should have made this unreachable — hard-clamping\n`
+      );
+    } catch {
+      /* a failed stderr write must not change the clamp outcome */
+    }
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+  }
+  return { text: finalPorch, hazardsRendered: true };
+}
+
+/** The owned-territory header line — factored out (was inlined in
+ *  renderPayload) so the SubagentStart porch (renderPorch below) can lead
+ *  with the IDENTICAL line renderPayload uses, rather than a second hand-
+ *  copied string the two could drift apart on. */
+export function payloadHeaderLine(rel) {
+  return `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
+}
+
 export function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
   const substantive = substantiveCount ?? blocks.length;
-  return [
-    unowned
-      ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 })
-      : `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
-    ...blocks,
-  ].join('\n\n');
+  return [unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : payloadHeaderLine(rel), ...blocks].join(
+    '\n\n'
+  );
 }
 
 // ---------------------------------------------------------------------------

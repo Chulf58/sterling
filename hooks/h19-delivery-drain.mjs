@@ -4926,7 +4926,7 @@ var runRecordSchema = external_exports.object({
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
-});
+}).strict();
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -5269,9 +5269,42 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
-    payload_char_cap: external_exports.number().int().positive().default(2400)
+    payload_char_cap: external_exports.number().int().positive().default(2400),
+    // SubagentStart "porch" budget (H19 front-porch, decision
+    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
+    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
+    // additionalContext (plan line + payload) are budgeted so the harness's
+    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
+    // shipped default, 1800, is the MEASURED inline preview on Claude Code
+    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
+    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
+    // non-integer, negative, or non-numeric) falls back to this same default
+    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
+    // mirrors the config-derived-posture-line three-state guard (anti_pattern
+    // e0d280ee) even though this is an internal rendering budget, never a
+    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
+    // is a DIFFERENT case and never reaches this fallback at all: it
+    // suppresses the whole staging payload before this key is ever read, per
+    // the pre-existing shared-fate ruling pinned in
+    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
@@ -5309,7 +5342,25 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Review-ledger tunables (config_set decision config-writes-get-a-config-
+  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
+  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
+  // scripts/hooks/lib/review-ledger-entry.mjs already read
+  // config.review_ledger.stale_days / .code_globs directly off the raw
+  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
+  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
+  // config_set's own allowlist already grants `review_ledger.stale_days`
+  // (decision 1dc3f9aa), that value went through NO schema check at all
+  // before this: a config_set write of a string or a negative number would
+  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
+  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
+  // and unvalidated — this field is `.optional()` with NO `.default({})` so
+  // an absent block still parses to `undefined`, exactly as before this
+  // field existed (no new key is manufactured on an untouched config.json).
+  review_ledger: external_exports.object({
+    stale_days: external_exports.number().int().positive().max(3650).optional()
+  }).passthrough().optional()
 });
 
 // packages/schemas/dist/registry.js
@@ -7983,7 +8034,8 @@ function renderKnownGapsLines(article, info) {
   return lines;
 }
 function renderArticle(store, article, charCap, { gaps } = {}) {
-  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
+  const id8 = String(article.id ?? "").slice(0, 8);
+  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
   const gapLines = renderKnownGapsLines(article, gaps);
   if (body.length > ARTICLE_BODY_FLOOR) {
@@ -7997,7 +8049,11 @@ function renderArticle(store, article, charCap, { gaps } = {}) {
   const lines = [
     header,
     `WHAT IT DOES: ${clip(body, charCap)}`,
-    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
+    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
+    // The oversize branch above already carries a knowledge_get pointer; this
+    // branch (small/normal articles) did not, so a reader could not cite the
+    // record by id without a second lookup (decision 2e8c30e4).
+    `\u25B8 FULL RECORD: knowledge_get ${article.id}`
   ];
   if (article.current_ac?.length) {
     lines.push(
@@ -8026,16 +8082,17 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+  const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
+  const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+}
 function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
-      `TRIGGER: ${clip(ap.trigger, charCap)}`,
-      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
-    ].join("\n")
+    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8070,12 +8127,57 @@ function joinSuspectBlock({ header, lines = [], footer } = {}) {
   if (!lines.length) return "";
   return [header, ...lines.map((l) => l.line), footer].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
+var PORCH_BYTE_COUNT_RESERVE = "000000";
+function porchByteLen(s2) {
+  return Buffer.byteLength(String(s2 ?? ""), "utf8");
+}
+function clipToBytes(text, maxBytes) {
+  const s2 = String(text ?? "");
+  if (maxBytes <= 0) return "";
+  if (porchByteLen(s2) <= maxBytes) return s2;
+  const ELLIPSIS = "\u2026";
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = "";
+  let used = 0;
+  for (const ch of s2) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
+}
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+}
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+}
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+}
+var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
+var PORCH_END_TEMPLATE_BYTES = porchByteLen(
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99
+  })
+);
+var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+function payloadHeaderLine(rel) {
+  return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
+}
 function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
   const substantive = substantiveCount ?? blocks.length;
-  return [
-    unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
-    ...blocks
-  ].join("\n\n");
+  return [unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : payloadHeaderLine(rel), ...blocks].join(
+    "\n\n"
+  );
 }
 var DELIVERY_RECIPE_VERSION = 2;
 var isStr = (v) => typeof v === "string";

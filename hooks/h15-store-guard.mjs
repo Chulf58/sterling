@@ -4792,7 +4792,7 @@ var runRecordSchema = external_exports.object({
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
-});
+}).strict();
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -5135,9 +5135,42 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
-    payload_char_cap: external_exports.number().int().positive().default(2400)
+    payload_char_cap: external_exports.number().int().positive().default(2400),
+    // SubagentStart "porch" budget (H19 front-porch, decision
+    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
+    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
+    // additionalContext (plan line + payload) are budgeted so the harness's
+    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
+    // shipped default, 1800, is the MEASURED inline preview on Claude Code
+    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
+    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
+    // non-integer, negative, or non-numeric) falls back to this same default
+    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
+    // mirrors the config-derived-posture-line three-state guard (anti_pattern
+    // e0d280ee) even though this is an internal rendering budget, never a
+    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
+    // is a DIFFERENT case and never reaches this fallback at all: it
+    // suppresses the whole staging payload before this key is ever read, per
+    // the pre-existing shared-fate ruling pinned in
+    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
@@ -5175,7 +5208,25 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Review-ledger tunables (config_set decision config-writes-get-a-config-
+  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
+  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
+  // scripts/hooks/lib/review-ledger-entry.mjs already read
+  // config.review_ledger.stale_days / .code_globs directly off the raw
+  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
+  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
+  // config_set's own allowlist already grants `review_ledger.stale_days`
+  // (decision 1dc3f9aa), that value went through NO schema check at all
+  // before this: a config_set write of a string or a negative number would
+  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
+  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
+  // and unvalidated — this field is `.optional()` with NO `.default({})` so
+  // an absent block still parses to `undefined`, exactly as before this
+  // field existed (no new key is manufactured on an untouched config.json).
+  review_ledger: external_exports.object({
+    stale_days: external_exports.number().int().positive().max(3650).optional()
+  }).passthrough().optional()
 });
 function parseConfig(raw) {
   return configSchema.parse(raw);
@@ -5719,6 +5770,7 @@ THE DESTINATION DECIDES, NOT THE CALLER'S CWD: every \`.sterling\` directory thi
 PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination's path COMPONENTS under the HOST's name rules (case-folded, and on Windows with each component's trailing dots and spaces dropped, since Win32 opens \`.sterling.\` and \`.sterling \` as the real directory), never by a per-file allowlist and never by a string prefix.
 NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.
 Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
+REMEDY for config.json specifically: use the config_set MCP tool (an allowlisted, schema-validated key write) or the TUI System tab \u2014 never a raw edit of the file. CONDUCTOR-RUN: config_set is not granted to roster agents by design, so a subagent hitting this denial has no config_set of its own to fall back on \u2014 surface the need to the conductor instead.
 WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only \u2014 a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project's store is not covered, deliberately.
 If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`;
 }

@@ -196,24 +196,73 @@ const taskLine = (blocks) => ({ type: 'assistant', message: { content: blocks } 
 const taskBlock = (name, prompt) => ({ type: 'tool_use', name, input: { prompt } });
 
 // ===========================================================================
-// (1) SubagentStart extraction: LAST Task/Agent-bearing assistant message only,
-//     union of that message's blocks' input.prompt path-like tokens.
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased). SubagentStart no longer
+// reads the PARENT TRANSCRIPT: it resolves ONE prompt from the per-dispatch
+// state record (PreToolUse slot -> PostToolUse binding -> locked Start
+// resolution). So a dispatch is declared by firing its real PreToolUse event,
+// and every re-cut Start below points transcript_path at a file that does NOT
+// exist — the correct fixture, and a pin that no transcript is read.
 // ===========================================================================
 
-test('H22 SubagentStart: appends a correct entry, extracting repo-relative files from the LAST Task/Agent-bearing assistant message only (an earlier decoy dispatch is ignored)', () => {
+let toolUseSeq = 0;
+// `omitType: true` stages a record whose tool_input has NO subagent_type KEY
+// AT ALL. It exists because `subagent_type = 'coder'` is a destructuring
+// DEFAULT and JS applies a default to an explicitly-passed `undefined` — so
+// `stagePre(dir, { subagent_type: undefined })` staged a 'coder' record and
+// silently tested the opposite of what its caller claimed (caught by the
+// coordinator 2026-09-08 against the landed hook: the typed Start derived it
+// and wrote attribution 'block'). An absent KEY and a present-but-undefined
+// VALUE are different facts about the platform's stdin, and only the explicit
+// flag can express the first one.
+function stagePre(dir, { prompt, subagent_type = 'coder', omitType = false, tool_use_id, session_id = 's1', tool_name = 'Task' } = {}) {
+  const id = tool_use_id ?? `toolu_dr_${(toolUseSeq += 1)}`;
+  const tool_input = omitType ? { prompt, description: 'a lane' } : { subagent_type, prompt, description: 'a lane' };
+  if (omitType) {
+    assert.ok(!('subagent_type' in tool_input), 'harness: omitType must leave the KEY absent, not set it to undefined');
+  }
+  const r = runHook(
+    'h22-dispatch-register.mjs',
+    {
+      hook_event_name: 'PreToolUse',
+      tool_name,
+      tool_use_id: id,
+      tool_input,
+      session_id,
+      cwd: dir,
+      transcript_path: join(dir, 't', 'parent.jsonl'),
+      prompt_id: 'pr-1',
+    },
+    dir
+  );
+  assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
+  return id;
+}
+function noTranscript(dir) {
+  return join(dir, 't', 'no-such-parent-transcript.jsonl');
+}
+const startInput = (dir, over = {}) => h22Input(dir, { transcript_path: noTranscript(dir), ...over });
+
+// ===========================================================================
+// (1) RE-CUT — SubagentStart extraction comes from THIS spawn's OWN resolved
+//     prompt; a co-pending dispatch of another type never contributes.
+//     The two substantive assertions are preserved verbatim (the three-path
+//     set, and src/decoy.mjs never appearing); what changed is that the decoy
+//     is now a SEPARATE PENDING DISPATCH rather than an earlier message, which
+//     is the shape that actually exists under the state machine.
+// ===========================================================================
+
+test('H22 SubagentStart: appends a correct entry, extracting repo-relative files from THIS spawn\'s own resolved dispatch prompt (a co-pending decoy dispatch of another type is ignored)', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeParentTranscript(dir, [
-      textLine('conductor opens the turn'),
-      taskLine([taskBlock('Task', 'stub dispatch touching src/decoy.mjs only')]),
-      textLine('conductor narrates between dispatches'),
-      taskLine([
-        taskBlock('Task', 'Please modify scripts/hooks/h22-dispatch-register.mjs and scripts/tests/h22-dispatch-register.test.mjs'),
-        taskBlock('Agent', 'Also check packages/schemas/src/config.ts for the config shape.'),
-      ]),
-    ]);
+    stagePre(dir, { subagent_type: 'explorer', prompt: 'stub dispatch touching src/decoy.mjs only' });
+    stagePre(dir, {
+      subagent_type: 'coder',
+      prompt: 'Please modify scripts/hooks/h22-dispatch-register.mjs and scripts/tests/h22-dispatch-register.test.mjs. Also check packages/schemas/src/config.ts for the config shape.',
+    });
 
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-1', agent_type: 'coder' }), dir);
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'agent-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.ok(registerExists(dir), 'dispatch-register.json created');
 
@@ -227,13 +276,17 @@ test('H22 SubagentStart: appends a correct entry, extracting repo-relative files
     assert.deepEqual(
       [...entry.files].sort(),
       ['packages/schemas/src/config.ts', 'scripts/hooks/h22-dispatch-register.mjs', 'scripts/tests/h22-dispatch-register.test.mjs'],
-      'files is the union of the LAST dispatch-bearing message only'
+      'files is the path set of THIS dispatch\'s own prompt'
     );
-    assert.ok(!entry.files.includes('src/decoy.mjs'), 'the earlier decoy dispatch never contributes files');
+    assert.ok(!entry.files.includes('src/decoy.mjs'), 'the co-pending decoy dispatch never contributes files');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: drop the subagent_type filter from derivation — two candidates
+// exist, the Start goes unattributable, and the three-path deepEqual goes red.
+// SABOTAGE: union every pending record's prompt (the retired behaviour) —
+// src/decoy.mjs appears and the !includes goes red.
 
 // ===========================================================================
 // (2) Two parallel starts, same session -> two entries; a matching Stop
@@ -243,20 +296,12 @@ test('H22 SubagentStart: appends a correct entry, extracting repo-relative files
 test('R1-A90: two SubagentStart calls (same session) produce two distinct entries; SubagentStop MARKS exactly the matching one ended and deletes nothing', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/one.mjs')])], 'p1.jsonl');
-    writeParentTranscript(dir, [taskLine([taskBlock('Agent', 'work on src/two.mjs')])], 'p2.jsonl');
+    stagePre(dir, { subagent_type: 'coder', prompt: 'work on src/one.mjs' });
+    stagePre(dir, { subagent_type: 'reviewer', prompt: 'work on src/two.mjs', tool_name: 'Agent' });
 
-    const start1 = runHook(
-      'h22-dispatch-register.mjs',
-      h22Input(dir, { agent_id: 'a1', agent_type: 'coder', transcript_path: join(dir, 't', 'p1.jsonl') }),
-      dir
-    );
+    const start1 = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'a1', agent_type: 'coder' }), dir);
     assert.equal(start1.code, 0, start1.stderr);
-    const start2 = runHook(
-      'h22-dispatch-register.mjs',
-      h22Input(dir, { agent_id: 'b1', agent_type: 'reviewer', transcript_path: join(dir, 't', 'p2.jsonl') }),
-      dir
-    );
+    const start2 = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'b1', agent_type: 'reviewer' }), dir);
     assert.equal(start2.code, 0, start2.stderr);
 
     let reg = readRegister(dir);
@@ -315,8 +360,9 @@ test('R1-A91: a foreign-session entry SURVIVES both a Start and a Stop — H22 n
       { agent_id: 'own1', agent_type: 'coder', session_id: 's1', files: ['src/own.mjs'], at: new Date().toISOString() },
       { agent_id: 'foreign1', agent_type: 'coder', session_id: 's2', files: ['src/foreign.mjs'], at: new Date().toISOString() },
     ]);
-    writeParentTranscript(started.dir, [textLine('no dispatch blocks in this transcript')]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(started.dir, { agent_id: 'new1', agent_type: 'coder', session_id: 's1' }), started.dir);
+    // No Pre event is staged for this spawn: the §5 'no-slot' shape, which is
+    // what "nothing to extract territory from" now means.
+    const r = runHook('h22-dispatch-register.mjs', startInput(started.dir, { agent_id: 'new1', agent_type: 'coder', session_id: 's1' }), started.dir);
     assert.equal(r.code, 0, r.stderr);
     const reg = readRegister(started.dir);
     assert.equal(reg.length, 3, 'own1 + foreign1 preserved, new1 appended');
@@ -324,7 +370,7 @@ test('R1-A91: a foreign-session entry SURVIVES both a Start and a Stop — H22 n
     assert.ok(reg.some((e) => e.agent_id === 'own1'));
     const fresh = reg.find((e) => e.agent_id === 'new1');
     assert.ok(fresh, 'the new entry was appended');
-    assert.deepEqual(fresh.files, [], 'no dispatch-bearing message in this transcript — files is an empty array, not a crash');
+    assert.deepEqual(fresh.files, [], 'no dispatch state for this spawn (no-slot) — files is an empty array, not a crash');
   } finally {
     started.cleanup();
   }
@@ -362,8 +408,8 @@ test('R1-A93: a Start whose agent_id matches an UNENDED same-session entry is re
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, [{ agent_id: 'dup-1', agent_type: 'coder', session_id: 's1', files: ['src/x.mjs'], at: new Date().toISOString(), attribution: 'block' }]);
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/y.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'dup-1', agent_type: 'coder' }), dir);
+    stagePre(dir, { subagent_type: 'coder', prompt: 'work on src/y.mjs' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'dup-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, 'a register refusal never denies the spawn');
     assert.match(out(r), /\[register_agent_id_duplicate\]/, `the refusal carries its code — out=${out(r)}`);
     const reg = readRegister(dir);
@@ -382,8 +428,8 @@ test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a ne
       at: new Date().toISOString(), attribution: 'block', round: 1,
       ended: { at: new Date().toISOString(), event: 'subagent-stop' },
     }]);
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/y.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'dup-1', agent_type: 'coder' }), dir);
+    stagePre(dir, { subagent_type: 'coder', prompt: 'work on src/y.mjs' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'dup-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.doesNotMatch(out(r), /\[register_agent_id_duplicate\]/, 'an ended predecessor is not a duplicate');
     const reg = readRegister(dir);
@@ -391,7 +437,22 @@ test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a ne
     const unended = reg.filter((e) => !e.ended);
     assert.equal(unended.length, 1, 'exactly one live round at a time');
     assert.equal(unended[0].round, 2, 'round n+1, 1-based');
-    assert.ok(unended[0].files.includes('src/y.mjs'), 'the new round derives its own territory from the brief');
+    // RE-CUT, AND THE RULING IS INVERTED HERE — stated plainly rather than
+    // quietly dropped. The old assertion was
+    // `assert.ok(unended[0].files.includes('src/y.mjs'))`: round n+1 derived
+    // its own territory from "the brief" found in the parent transcript.
+    // Decision 7c515e52 §5(ii) makes THIS EXACT SHAPE a RESUME — an existing
+    // register round for (session_id, agent_id) is resume evidence — and §5
+    // rules that a resume "stages nothing", consumes no slot, and appends its
+    // round with files:[] files_source:'unattributable' attribution:'none'.
+    // The reason is the round-2 FATAL case Codex found: if a resumed agent
+    // could claim a fresh same-type pending slot, it would be handed a
+    // STRANGER's territory, and H19's delivery guard would make that
+    // misattribution permanent. The pending slot below proves it was left for
+    // its real owner.
+    assert.deepEqual(unended[0].files, [], 'a RESUMED round stages nothing and declares no territory (§5(ii)) — it must never claim the fresh pending slot beside it');
+    assert.equal(unended[0].attribution, 'none');
+    assert.equal(unended[0].files_source, 'unattributable');
   } finally {
     cleanup();
   }
@@ -404,8 +465,10 @@ test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a ne
 test('H22: a non-Sterling cwd (no .sterling/) exits 0 and writes nothing at all', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h22-bare-'));
   try {
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'work on src/anything.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir), dir);
+    // A Pre event here must not create .sterling/ either — the dispatch-state
+    // directory is as project-scoped as the register (7c515e52 §1).
+    stagePre(dir, { subagent_type: 'coder', prompt: 'work on src/anything.mjs' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, {}), dir);
     assert.equal(r.code, 0, r.stderr);
     assert.equal(existsSync(join(dir, '.sterling')), false, 'no .sterling/ is ever created outside a Sterling project');
     assert.equal(registerExists(dir), false);
@@ -434,8 +497,8 @@ test('R1-A99: a CORRUPT dispatch-register.json is left byte-identical — the St
   try {
     const corrupt = '{ this is not valid json at all';
     writeRegisterRaw(dir, corrupt);
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'fix up src/z.mjs please')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'c1', agent_type: 'coder' }), dir);
+    stagePre(dir, { subagent_type: 'coder', prompt: 'fix up src/z.mjs please' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'c1', agent_type: 'coder' }), dir);
     assert.notEqual(r.code, 2, 'the hook never denies a spawn, corruption included');
     assert.equal(r.code, 0, r.stderr);
 
@@ -456,8 +519,8 @@ test('R1-A99 CONTROL: a VALID register still gets the entry appended, with its t
   const { dir, cleanup } = makeProject();
   try {
     writeRegisterRaw(dir, []);
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'fix up src/z.mjs please')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'c1', agent_type: 'coder' }), dir);
+    stagePre(dir, { subagent_type: 'coder', prompt: 'fix up src/z.mjs please' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'c1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const reg = readRegister(dir);
     const entry = reg.find((e) => e.agent_id === 'c1');
@@ -732,128 +795,137 @@ test('H1 (source=startup): no dispatch-register.json present is a silent no-op, 
 
 const taskBlockTyped = (name, subagent_type, prompt) => ({ type: 'tool_use', name, input: { subagent_type, prompt } });
 
-// --------------------------- PIN A: null-path never 'block' ---------------------------
-// PIN A (decision h22-per-block-attribution 5d3747c1): stdin.agent_type
-// absent/null/non-string must mint attribution:'union', never 'block' — even
-// when the last dispatching message contains exactly one Task block that
-// itself lacks input.subagent_type (undefined must not match undefined).
+// --------------------------- PIN A (RE-CUT): a type-less Start never derives ---------------------------
+// PIN A, re-cut onto 7c515e52 §6: "agent_type missing on Start -> no
+// derivation ('no-agent-type'); a post_binding still resolves." The ORIGINAL
+// property is preserved exactly — an absent/null/non-string stdin.agent_type
+// must NEVER produce a precise attribution by matching a type-less dispatch
+// (undefined must not match undefined) — but the fail-closed VALUE is now
+// 'none' with files:[], because the union fallback the old pin expected is
+// deleted. PIN A-CONTROL below is the opposite-reason arm the original set
+// lacked: without it, all four arms would also pass an implementation that
+// simply never attributes anything.
+//
+// WHICH GUARD CARRIES THE VERDICT (stated, not assumed — verified against the
+// landed hook by the coder, 2026-09-08): these three arms strip BOTH guards at
+// once — the Start has no usable agent_type AND the pending record has no
+// subagent_type key — so the verdict is carried by whichever fires first, and
+// in the landed implementation that is §5's 'no-agent-type' SHORT-CIRCUIT,
+// before derivation is ever attempted. They therefore do NOT isolate the
+// type-less-RECORD rule; PIN B below is the arm that does, with a real
+// stdin.agent_type. Defense in depth, deliberately: the pair is what makes
+// each guard independently sabotage-detectable.
 //
 // EXPECTED RED today: h22 writes no `attribution` field at all, so
-// `entry.attribution` is `undefined` in every case below, failing
-// `assert.equal(entry.attribution, 'union', ...)`.
+// `entry.attribution` is `undefined` in every arm — fails
+// `assert.equal(entry.attribution, 'none', ...)`.
 
-test("H22 PIN A (null-path never 'block', agent_type absent): a sole last-message block lacking subagent_type never wins attribution:block when stdin.agent_type is absent", () => {
+for (const [label, agentType] of [['absent', undefined], ['null', null], ['non-string', 42]]) {
+  test(`H22 PIN A (no derivation without a type, agent_type ${label}): a pending dispatch whose subagent_type KEY is absent is never matched — attribution 'none', files []`, () => {
+    const { dir, cleanup } = makeProject();
+    try {
+      stagePre(dir, { omitType: true, prompt: `touch src/pinA-${label}.mjs` });
+      const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: `agent-pinA-${label}`, agent_type: agentType }), dir);
+      assert.equal(r.code, 0, r.stderr);
+      const reg = readRegister(dir);
+      const entry = reg.find((e) => e.agent_id === `agent-pinA-${label}`);
+      assert.ok(entry, 'the round is still appended');
+      assert.equal(entry.attribution, 'none', `a ${label} stdin.agent_type must never mint a precise attribution — undefined does not match undefined`);
+      assert.deepEqual(entry.files, [], 'and no territory is recovered by any fallback: the union is deleted');
+    } finally {
+      cleanup();
+    }
+  });
+}
+// SABOTAGE: compare types with a loose equality that lets undefined match
+// undefined (or treat a missing agent_type as a wildcard) — the attribution
+// and files assertions go red in all three arms while PIN A-CONTROL below
+// stays green.
+
+test('H22 PIN A-CONTROL (placed after the set it controls, and required by it): a Start with NO agent_type STILL resolves through its authoritative Post binding — the type check is not a way of never attributing', () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinA-absent.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinA-absent', agent_type: undefined }), dir);
+    const prompt = 'work on src/pinA-control.mjs';
+    const id = stagePre(dir, { subagent_type: 'coder', prompt });
+    const post = runHook(
+      'h22-dispatch-register.mjs',
+      {
+        hook_event_name: 'PostToolUse',
+        tool_name: 'Task',
+        tool_use_id: id,
+        tool_input: { subagent_type: 'coder', prompt, description: 'a lane' },
+        tool_response: {
+          isAsync: true, status: 'async_launched', agentId: 'agent-pinA-ctrl', description: 'a lane',
+          resolvedModel: 'claude-x', prompt, outputFile: join(dir, 'out.txt'), canReadOutputFile: true,
+        },
+        session_id: 's1',
+        cwd: dir,
+        transcript_path: join(dir, 't', 'parent.jsonl'),
+        prompt_id: 'pr-1',
+      },
+      dir
+    );
+    assert.equal(post.code, 0, post.stderr);
+
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'agent-pinA-ctrl', agent_type: undefined }), dir);
     assert.equal(r.code, 0, r.stderr);
-    const reg = readRegister(dir);
-    const entry = reg.find((e) => e.agent_id === 'agent-pinA-absent');
-    assert.ok(entry, 'entry was appended');
-    assert.equal(entry.attribution, 'union', 'absent stdin.agent_type must never mint attribution:block, even against a lone type-less block');
-    assert.deepEqual(entry.files, ['src/pinA-absent.mjs'], 'the union fallback still recovers the last message\'s block files');
+    const entry = readRegister(dir).find((e) => e.agent_id === 'agent-pinA-ctrl');
+    assert.ok(entry, 'the round is appended');
+    assert.deepEqual(entry.files, ['src/pinA-control.mjs'], 'an authoritative binding needs no agent_type at all (§6)');
+    assert.equal(entry.attribution, 'block');
+    assert.equal(entry.attribution_case, 'post');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: return early on a missing agent_type BEFORE the my-binding branch
+// (§5(i)) — this control goes red while every PIN A arm above stays green,
+// which is the whole reason it exists.
 
-test("H22 PIN A (null-path never 'block', agent_type null): a sole last-message block lacking subagent_type never wins attribution:block when stdin.agent_type is null", () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinA-null.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinA-null', agent_type: null }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const reg = readRegister(dir);
-    const entry = reg.find((e) => e.agent_id === 'agent-pinA-null');
-    assert.ok(entry, 'entry was appended');
-    assert.equal(entry.attribution, 'union', 'null stdin.agent_type must never mint attribution:block, even against a lone type-less block');
-    assert.deepEqual(entry.files, ['src/pinA-null.mjs'], 'the union fallback still recovers the last message\'s block files');
-  } finally {
-    cleanup();
-  }
-});
-
-test("H22 PIN A (null-path never 'block', agent_type non-string): a sole last-message block lacking subagent_type never wins attribution:block when stdin.agent_type is a non-string value", () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinA-nonstring.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinA-nonstring', agent_type: 42 }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const reg = readRegister(dir);
-    const entry = reg.find((e) => e.agent_id === 'agent-pinA-nonstring');
-    assert.ok(entry, 'entry was appended');
-    assert.equal(entry.attribution, 'union', 'a non-string stdin.agent_type must never mint attribution:block, even against a lone type-less block');
-    assert.deepEqual(entry.files, ['src/pinA-nonstring.mjs'], 'the union fallback still recovers the last message\'s block files');
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- PIN B: block without subagent_type never matches ---------------------------
-// PIN B (decision h22-per-block-attribution 5d3747c1): a tool_use block whose
-// input lacks subagent_type must never produce attribution:'block' for any
-// starting agent; with stdin.agent_type a real string and no string-equal
-// block match anywhere, the entry falls back to attribution:'union' over the
-// last message's blocks.
+// --------------------------- PIN B (RE-CUT): a type-less DISPATCH is never a candidate ---------------------------
+// PIN B, re-cut: the mirror of PIN A, and THE ARM THAT ISOLATES THE RECORD-SIDE
+// GUARD. stdin.agent_type is a real string here, so §5's 'no-agent-type'
+// short-circuit cannot fire and the verdict can only come from the candidate
+// filter refusing a record whose subagent_type key is absent — which is
+// exactly the guard PIN A's three arms cannot distinguish.
 //
-// EXPECTED RED today: h22 writes no `attribution` field at all, so
-// `entry.attribution` is `undefined`, failing
-// `assert.equal(entry.attribution, 'union', ...)`.
+// FIXTURE CORRECTION (coordinator, 2026-09-08): this arm previously passed
+// `subagent_type: undefined`, which a destructuring DEFAULT turns back into
+// 'coder' — so it staged a TYPED record, the typed Start derived it correctly,
+// and the pin was red for a fixture reason while asserting the opposite of
+// what it staged. It now uses `omitType: true`, which leaves the KEY absent.
+//
+// EXPECTED RED today: `entry.attribution` is undefined — fails the
+// attribution assertion.
 
-test("H22 PIN B (block without subagent_type never matches): a real stdin.agent_type with a sole last-message block lacking subagent_type falls back to attribution:union, never 'block'", () => {
+test("H22 PIN B (a pending dispatch without subagent_type is never a candidate): a real stdin.agent_type finds no slot — attribution 'none', files []", () => {
   const { dir, cleanup } = makeProject();
   try {
-    writeParentTranscript(dir, [taskLine([taskBlockTyped('Task', undefined, 'touch src/pinB.mjs')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinB', agent_type: 'coder' }), dir);
+    stagePre(dir, { omitType: true, prompt: 'touch src/pinB.mjs' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'agent-pinB', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const reg = readRegister(dir);
     const entry = reg.find((e) => e.agent_id === 'agent-pinB');
-    assert.ok(entry, 'entry was appended');
-    assert.equal(entry.attribution, 'union', 'a block lacking subagent_type can never produce attribution:block, even as the sole block in the last message');
-    assert.deepEqual(entry.files, ['src/pinB.mjs'], 'the union fallback still recovers the last message\'s block files');
+    assert.ok(entry, 'the round is still appended');
+    assert.equal(entry.attribution, 'none', 'a record lacking subagent_type can never be derived onto any agent');
+    assert.deepEqual(entry.files, [], 'no union fallback recovers it');
   } finally {
     cleanup();
   }
 });
+// SABOTAGE: treat a record with no subagent_type as matching every type — the
+// two assertions go red while PIN A-CONTROL (a genuine Post binding) stays
+// green.
 
-// --------------------------- PIN C: prompt-less message does not truncate the walk ---------------------------
-// PIN C (decision h22-per-block-attribution 5d3747c1): when the LAST
-// dispatching assistant message has zero type-matching blocks, an
-// INTERMEDIATE earlier dispatching assistant message exists whose Task
-// blocks all lack a string prompt, and a still-earlier dispatching message
-// contains exactly one block whose subagent_type string-equals
-// stdin.agent_type — the backward walk must reach that still-earlier
-// message: the entry gets that block's files and attribution:'block'.
-//
-// EXPECTED RED today: h22 only ever looks at the LAST dispatching message
-// (no backward walk exists yet), so `entry.files` would be
-// ['src/pinC-last.mjs'] (extracted from the last message, unioning all its
-// blocks regardless of type) instead of ['src/pinC-early.mjs'], failing the
-// `assert.deepEqual(entry.files, ['src/pinC-early.mjs'], ...)` assertion; and
-// `entry.attribution` is `undefined`, failing the attribution assertion too.
-
-test('H22 PIN C (prompt-less intermediate message does not truncate the backward walk): zero matches in the last message + a prompt-less intermediate dispatching message + a still-earlier single type-matching block — the walk reaches the still-earlier block', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeParentTranscript(dir, [
-      taskLine([taskBlockTyped('Task', 'coder', 'M1: fix up src/pinC-early.mjs')]), // M1 — still-earlier, sole type match for stdin.agent_type='coder'
-      textLine('conductor narrates between dispatches'),
-      taskLine([{ type: 'tool_use', name: 'Task', input: { subagent_type: 'test-writer' } }]), // M2 — intermediate, mismatched type AND no prompt field at all
-      textLine('conductor narrates again'),
-      taskLine([taskBlockTyped('Task', 'reviewer', 'M3: review src/pinC-last.mjs')]), // M3 — last dispatching message, zero coder matches
-    ]);
-
-    const r = runHook('h22-dispatch-register.mjs', h22Input(dir, { agent_id: 'agent-pinC', agent_type: 'coder' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-
-    const reg = readRegister(dir);
-    const entry = reg.find((e) => e.agent_id === 'agent-pinC');
-    assert.ok(entry, 'entry was appended');
-    assert.deepEqual(entry.files, ['src/pinC-early.mjs'], "the walk reaches M1's matching block, skipping past M2's prompt-less non-match and M3's non-match");
-    assert.ok(!entry.files.includes('src/pinC-last.mjs'), 'M3 (the last message, zero type matches) never contributes files here');
-    assert.equal(entry.attribution, 'block', 'a single type-matching block found by walking back past a prompt-less intermediate message is still precise block attribution');
-  } finally {
-    cleanup();
-  }
-});
+// ===========================================================================
+// RETIRED HERE — 'PIN C (prompt-less intermediate message does not truncate
+// the backward walk)', by decision 7c515e52.
+// PIN C pinned the BOUNDED BACKWARD WALK through earlier dispatching assistant
+// messages. There is no walk and no message list: SubagentStart never reads the
+// parent transcript (its 3.4-5.5 s lag is the measured defect, finding
+// 51506eec), and a dispatch is located by its tool_use_id-keyed record. The
+// concern PIN C actually protected — a dispatch record with no usable prompt
+// must not silently attribute something else — survives as PIN B above (a
+// record missing its type is no candidate) and, for a missing/oversize prompt,
+// as scripts/tests/dispatch-state-owner.test.mjs DS-P05/DS-P06.
+// ===========================================================================

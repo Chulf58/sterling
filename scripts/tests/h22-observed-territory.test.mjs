@@ -248,8 +248,43 @@ function writeParentTranscript(dir, lines, name = 'parent.jsonl') {
   writeFileSync(p, lines.map((l) => JSON.stringify(l)).join('\n') + '\n');
   return p;
 }
-function singleDispatch(dir, prompt, name = 'parent.jsonl') {
-  writeParentTranscript(dir, [taskLine([taskBlock('Task', prompt)])], name);
+// ===========================================================================
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased): at SubagentStart H22
+// resolves ONE prompt from the per-dispatch state record written at
+// PreToolUse, and never reads the parent transcript. PART 2's declaration
+// warning is computed from THAT prompt, so every PART 2 assertion below is
+// UNCHANGED and only the fixture changed: singleDispatch() now fires the real
+// PreToolUse event, and its `subagent_type` must match the Start's agent_type
+// (§5(iii) derivation is exact by construction over the type).
+// PART 3 (SubagentStop / observed evidence) is untouched by the decision — it
+// reads stdin.agent_transcript_path, seeds the register directly, and keeps
+// planting transcripts.
+// ===========================================================================
+let toolUseSeq = 0;
+function singleDispatch(dir, prompt, subagent_type = 'coder') {
+  const tool_use_id = `toolu_obs_${(toolUseSeq += 1)}`;
+  const r = runHook(
+    {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id,
+      tool_input: { subagent_type, prompt, description: 'a lane' },
+      session_id: 's1',
+      cwd: dir,
+      transcript_path: join(dir, 't', 'parent.jsonl'),
+      prompt_id: 'pr-1',
+    },
+    dir
+  );
+  assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
+  return tool_use_id;
+}
+// The Start's transcript_path deliberately points at a file that does not
+// exist: correct under the new contract, and a pin that no transcript is read.
+function startInput(dir, over = {}) {
+  return h22Input(dir, { transcript_path: join(dir, 't', 'no-such-parent-transcript.jsonl'), ...over });
 }
 
 const registerEntry = (over = {}) => ({
@@ -650,8 +685,8 @@ test('(P1-glob-dir-included) a directory-shaped Glob `path` IS included — Glob
 test('(P2-CONTROL) a reviewer-* dispatch with a valid REVIEW-TERRITORY declaration produces no absence warning', () => {
   const { dir, cleanup } = makeProject();
   try {
-    singleDispatch(dir, 'REVIEW-TERRITORY: ["packages/mcp-server/src/auth.ts"]\nplease review');
-    const r = runHook(h22Input(dir, { agent_id: 'rev-ok', agent_type: 'reviewer-correctness' }), dir);
+    singleDispatch(dir, 'REVIEW-TERRITORY: ["packages/mcp-server/src/auth.ts"]\nplease review', 'reviewer-correctness');
+    const r = runHook(startInput(dir, { agent_id: 'rev-ok', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assertNoWarningAtAll(r.stderr);
   } finally {
@@ -669,8 +704,8 @@ test('(P2-CONTROL) a reviewer-* dispatch with a valid REVIEW-TERRITORY declarati
 test('(P2-no-marker) a reviewer-* dispatch with NO REVIEW-TERRITORY marker at all gets a loud absence warning; exit stays 0', () => {
   const { dir, cleanup } = makeProject();
   try {
-    singleDispatch(dir, 'Please review the recent diff for correctness, no declaration given.');
-    const r = runHook(h22Input(dir, { agent_id: 'rev-no-marker', agent_type: 'reviewer-correctness' }), dir);
+    singleDispatch(dir, 'Please review the recent diff for correctness, no declaration given.', 'reviewer-correctness');
+    const r = runHook(startInput(dir, { agent_id: 'rev-no-marker', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assertNoDeclarationWarning(r.stderr);
   } finally {
@@ -708,8 +743,8 @@ test('(P2-no-marker) a reviewer-* dispatch with NO REVIEW-TERRITORY marker at al
 test('(P2-malformed-marker) a reviewer-* dispatch whose marker is malformed (falls back to free-prose) still gets the absence warning', () => {
   const { dir, cleanup } = makeProject();
   try {
-    singleDispatch(dir, 'REVIEW-TERRITORY: [not-json\nscripts/decoy.mjs is the actual file.');
-    const r = runHook(h22Input(dir, { agent_id: 'rev-malformed', agent_type: 'reviewer-correctness' }), dir);
+    singleDispatch(dir, 'REVIEW-TERRITORY: [not-json\nscripts/decoy.mjs is the actual file.', 'reviewer-correctness');
+    const r = runHook(startInput(dir, { agent_id: 'rev-malformed', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assertNoDeclarationWarning(r.stderr);
     assert.match(
@@ -734,8 +769,8 @@ test('(P2-malformed-marker) a reviewer-* dispatch whose marker is malformed (fal
 test('(P2-empty-array-is-valid) REVIEW-TERRITORY: [] is an explicit, valid declaration — no absence warning', () => {
   const { dir, cleanup } = makeProject();
   try {
-    singleDispatch(dir, 'This is audit-only.\nREVIEW-TERRITORY: []');
-    const r = runHook(h22Input(dir, { agent_id: 'rev-empty', agent_type: 'reviewer-correctness' }), dir);
+    singleDispatch(dir, 'This is audit-only.\nREVIEW-TERRITORY: []', 'reviewer-correctness');
+    const r = runHook(startInput(dir, { agent_id: 'rev-empty', agent_type: 'reviewer-correctness' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assertNoWarningAtAll(r.stderr);
   } finally {
@@ -753,8 +788,8 @@ test('(P2-empty-array-is-valid) REVIEW-TERRITORY: [] is an explicit, valid decla
 test('(P2-non-reviewer-silent) a non-reviewer agent_type ("coder") with no marker gets no warning at all', () => {
   const { dir, cleanup } = makeProject();
   try {
-    singleDispatch(dir, 'Implement the feature, no declaration here.');
-    const r = runHook(h22Input(dir, { agent_id: 'coder-1', agent_type: 'coder' }), dir);
+    singleDispatch(dir, 'Implement the feature, no declaration here.', 'coder');
+    const r = runHook(startInput(dir, { agent_id: 'coder-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assertNoWarningAtAll(r.stderr);
   } finally {
@@ -772,8 +807,8 @@ test('(P2-non-reviewer-silent) a non-reviewer agent_type ("coder") with no marke
 test('(P2-boundary-no-hyphen) agent_type "reviewer" (no trailing hyphen) is not reviewer-class for this warning — no warning fires', () => {
   const { dir, cleanup } = makeProject();
   try {
-    singleDispatch(dir, 'Look at this, no declaration here.');
-    const r = runHook(h22Input(dir, { agent_id: 'bare-reviewer', agent_type: 'reviewer' }), dir);
+    singleDispatch(dir, 'Look at this, no declaration here.', 'reviewer');
+    const r = runHook(startInput(dir, { agent_id: 'bare-reviewer', agent_type: 'reviewer' }), dir);
     assert.equal(r.code, 0, r.stderr);
     assertNoWarningAtAll(r.stderr);
   } finally {

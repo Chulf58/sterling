@@ -1039,10 +1039,23 @@ test('G2: reset on a sandbox with no delivery dir is a no-op, not a throw', () =
 
 const PROBES = [
   {
-    file: 'probe-001-agent-positive.json',
-    id: 'probe-001-agent-positive',
+    file: 'probe-004-agent-positive-h15-cluster.json',
+    id: 'probe-004-agent-positive-h15-cluster',
     kind: 'agent',
-    expected_ids: ['5b82e94f-3f42-415b-b8d1-983b78e50095', 'a206a529-28fe-4271-b7a1-dd40593e2401'],
+    // probe-001 was REPLACED (not repointed) by probe-004 per the probe README's
+    // replace-don't-repoint contract — decision
+    // h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen
+    // (knowledge_get 80d897b2). The seven ids are the adjudicated H15 realpath /
+    // clone-provenance cluster, each opened and verified on-subject.
+    expected_ids: [
+      '5b82e94f-3f42-415b-b8d1-983b78e50095',
+      'a206a529-28fe-4271-b7a1-dd40593e2401',
+      'caecf8a6-b520-49fd-9b8b-ed41660a9fab',
+      '43bebe5c-87ae-4ff4-af60-afc351f895d9',
+      '1434cd54-04d9-42de-b7f2-2e7a3fda288d',
+      '95c2c109-ea95-4be3-921b-92cbda6cc9b8',
+      '37e588fb-95ca-43a5-b325-669c42fb1ac0',
+    ],
     expect_deny: false,
   },
   {

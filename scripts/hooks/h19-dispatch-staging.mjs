@@ -12,11 +12,13 @@
 // subagent's own context (not the parent's), on the WSL CLI headless surface,
 // CC 2.1.220. Its stdin carries session_id, transcript_path, cwd, prompt_id,
 // agent_id, agent_type, hook_event_name — THERE IS NO PROMPT FIELD. The
-// dispatch prompt is therefore recovered from the PARENT transcript at
-// transcript_path (H6 precedent, scripts/hooks/lib/transcript.mjs): find the
-// LAST assistant message holding one or more Task/Agent tool_use blocks, and
-// take the union of every such block's `prompt` in that one message — an
-// accepted, disclosed imprecision for parallel dispatches (board item).
+// dispatch prompt is therefore recovered through the dispatch-state machine
+// (scripts/lib/dispatch-register.mjs's resolveDispatchStart) — NOT the parent
+// transcript, which is measurably LAGGED at this event and cannot attribute a
+// prompt to a spawn safely by any ordering trick (decision
+// dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-
+// replaces-transcript-attribution, superseding the earlier transcript-tail
+// recovery this file used).
 //
 // Never a gate (AC7 precedent): internal failure degrades to no output, exit 1
 // non-blocking (P5) — dispatch staging is an aid layered on top of the file-
@@ -37,10 +39,13 @@ import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfi
 // Plan-lock primitives — ONE implementation, shared with h31-plan-lock.mjs,
 // h1-session-start.mjs and scripts/plan-lock.mjs.
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
-// Prompt recovery + path extraction moved to lib/dispatch-prompt.mjs when H22's
-// dispatch register became a second consumer — one mechanism, imported never
-// reimplemented (decision f5638a84). Behavior here is unchanged.
-import { lastDispatchPrompts, extractPathCandidates } from './lib/dispatch-prompt.mjs';
+// Path extraction lives in lib/dispatch-prompt.mjs — one mechanism, imported
+// never reimplemented (decision f5638a84). Prompt RECOVERY no longer reads the
+// parent transcript (decision dispatch-state-machine-pre-slot-post-binding-
+// locked-start-resolution-replaces-transcript-attribution): this hook resolves
+// its own dispatch's prompt through the dispatch-state machine instead.
+import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { resolveDispatchStart } from '../lib/dispatch-register.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
@@ -54,12 +59,17 @@ import {
   DECISION_POINTER_CAP,
   rankFileDecisionPointers,
   renderPayload,
+  payloadHeaderLine,
+  porchHeaderLine,
+  renderPorch,
+  resolvePorchBudget,
   extractAxisTerms,
   axisHits,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
   hasRecordCentralityHit,
   recordCentralityHits,
+  stripReviewTerritoryLine,
 } from './lib/delivery.mjs';
 
 // Subject-channel decision ceiling — mirrors H20's MAX_DECISIONS: a keyword
@@ -80,6 +90,12 @@ const RETURN_CONTRACT =
   'conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw ' +
   'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
   'relevant files/tests, and unresolved risks.';
+
+// PORCH BUDGET (config.delivery.preview_budget_bytes) — resolvePorchBudget is
+// now ONE shared resolver in lib/delivery.mjs (decision 0050a536 §5 amendment,
+// consolidation rule: the porch gained a second caller — h19-knowledge-
+// delivery.mjs's direct-inject rungs — so the resolver moved to the one file
+// both hooks already import from, rather than a second hand-copied reader).
 
 const input = readStdin();
 
@@ -154,6 +170,13 @@ const PLAN_LINE_AGENT_TYPES = new Set(['coder', 'debugger', 'test-writer']);
 const PLAN_TITLE_MAX = 120;
 const PLAN_PATH_MAX = 320;
 let activePlanLine = '';
+// UNATTRIBUTABLE-START DISCLOSURE (decision dispatch-state-machine-pre-slot-
+// post-binding-locked-start-resolution-replaces-transcript-attribution §6):
+// set inside main() once resolveDispatchStart's verdict is known, and folded
+// into combinedContext() beside the return contract — never a transcript
+// fallback, exactly one line, on 'unattributable' only ('resume' emits
+// nothing extra).
+let unattributableLine = '';
 try {
   if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
     // The shared VALIDATING reader: a record that is JSON but not a lock stages
@@ -187,6 +210,7 @@ function combinedContext(payload) {
   if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine) out.push(tddPostureLine);
+  if (unattributableLine) out.push(unattributableLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
   return out.join('\n\n');
 }
@@ -208,12 +232,26 @@ function finish(payload) {
 // THE BODY IS A FUNCTION, AND EVERY TERMINAL CALL INSIDE IT IS A `return`: the
 // exit now happens in the stdout write callback, so a bare `finish('')` would
 // no longer stop the statements after it the way its hard exit did.
-function main(input) {
+async function main(input) {
   try {
     const store = openStore(input.cwd);
     if (!store) return finish(''); // not a Sterling project — no ceremony for the payload half (P1)
 
-    const prompts = lastDispatchPrompts(input.transcript_path);
+    // DISPATCH-STATE RESOLUTION replaces the old parent-transcript prompt scan
+    // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
+    // resolution-replaces-transcript-attribution §5/§6). 'resume' emits nothing
+    // extra; 'unattributable' stages no territory and gets exactly one line
+    // beside the return contract; a resolved prompt is staged normally.
+    const resolution = await resolveDispatchStart(
+      input.cwd,
+      { session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type },
+      { consumer: 'h19' }
+    );
+    if (resolution.source === 'unattributable') {
+      unattributableLine = `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${resolution.case}] — no territory was staged; file-touch delivery still fires on your first Read/Edit`;
+    }
+
+    const prompts = typeof resolution.prompt === 'string' ? [resolution.prompt] : [];
     const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
 
     const rels = [...new Set(candidates.map((c) => repoRel(c, input.cwd)).filter(Boolean))].filter(
@@ -246,7 +284,19 @@ function main(input) {
     const subjectMatches = [];
     const seenSubject = new Set();
     for (const p of prompts) {
-      const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+      // STRIP THE REVIEW-TERRITORY RECEIPT LINE before axis-term extraction —
+      // the SAME helper H20's outgoingProposalText applies (decision
+      // h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen,
+      // fix 1). This is the OTHER consumer of the raw dispatch prompt for
+      // subject-axis matching: without routing it through the identical
+      // helper, this surface and H20's dispatch-seam surface could disagree on
+      // whether a REVIEW-TERRITORY boilerplate line counts as "subject",
+      // reintroducing the same false positive one seam over. Path extraction
+      // just above (extractPathCandidates) deliberately still reads the RAW
+      // prompt — the declared territory's paths are legitimate path-channel
+      // input, only axis-term SUBJECT matching must not see the line.
+      const subjectText = stripReviewTerritoryLine(p);
+      const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
       if (terms.length < AXIS_MIN_HITS) continue;
       const candidatesBySubject = [
         ...store.query({ types: ['anti_pattern'], rank_terms: terms, cap: 40 }),
@@ -255,9 +305,9 @@ function main(input) {
       for (const r of candidatesBySubject) {
         if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
         const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, subjectText)) {
           seenSubject.add(r.id);
-          subjectMatches.push({ record: r, hits, prompt: p });
+          subjectMatches.push({ record: r, hits, prompt: subjectText });
         }
       }
     }
@@ -291,26 +341,86 @@ function main(input) {
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish('');
 
     const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+
+    // PORCH BUDGET applies to the PREFIX OF THE COMPLETE additionalContext —
+    // combinedContext() places activePlanLine BEFORE the payload, so its bytes
+    // (plus the '\n\n' separator combinedContext joins with) are subtracted
+    // here rather than the porch being sized against the payload alone, which
+    // would silently overrun once a plan-lock line is present.
+    const rawPorchBudget = resolvePorchBudget(input.cwd);
+    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}\n\n`, 'utf8') : 0;
+    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
+
+    // SUBJECT CHANNEL RENDERED SLICES — computed HERE, ahead of the porch build
+    // below, so the porch-end line's subject counts are the RENDERED (post-cap)
+    // ACTUALS the ruling requires (decision 0050a536 §5 amendment), not the raw
+    // candidate counts freshSubject.length would give. Splitting subjectHazards/
+    // subjectDecisions out of freshSubject is unchanged from before — only the
+    // POSITION moved, so the "beyond any file the task names" block below reads
+    // identically off the same two arrays.
+    const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
+    const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
+    const shownSubjectHazards = cappedHazards(subjectHazards);
+    const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
+
     const parts = [];
     if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-      const blocks = [
-        ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      // The porch's own hazard cap mirrors renderHazards' (HAZARD_CAP,
+      // severity-sorted) — the SAME rendered slice is what stays out of the
+      // remainder below (hazards appear once, in the porch).
+      // articleBodiesCount / referencePointerCount split (roster reviewer,
+      // same round as the Codex review): a reference_material owner renders
+      // as ONE POINTER LINE below (renderReference), never an article body —
+      // folding it into a single count made the porch-end line's own
+      // self-report disagree with what actually renders.
+      const referenceOwnersForPorch = freshOwners.filter((r) => r.type === 'reference_material');
+      const porch =
+        porchBudget > 0
+          ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
+              articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
+              referencePointerCount: referenceOwnersForPorch.length,
+              pathDecisionPointerCount: shownDecisionsForPorch.length,
+              hasSubjectChannel: true,
+              subjectHazardCount: shownSubjectHazards.length,
+              subjectDecisionPointerCount: shownSubjectDecisions.length,
+              fileKeys: rels,
+            })
+          : { text: '', hazardsRendered: false };
+      // THE REMAINDER: unchanged from today MINUS renderHazards, but ONLY when
+      // the porch itself actually rendered hazard substance (hazardsRendered).
+      // renderPorch can return non-empty text WITHOUT having rendered hazards
+      // — its own MINIMAL-porch fallback, which defers hazard substance to the
+      // remainder rather than clamping a fragment — so this is keyed on
+      // `porch.hazardsRendered`, never on `porch.text` truthiness alone; every
+      // owner still gets its full renderArticle/renderReference (not only
+      // porch-admitted ones), and the same capped renderDecisionPointers call
+      // as before.
+      const remainderBlocks = [
+        ...(porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: rels })),
         ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
         ...(freshDecisions.length ? [renderDecisionPointers(rels.join(', '), freshDecisions)] : []),
       ];
-      parts.push(renderPayload(rels.join(', '), blocks, { unowned: false }));
+      if (porch.text) {
+        parts.push([porch.text, ...remainderBlocks].join('\n\n'));
+      } else {
+        // budget 0 (disabled), MISCONFIGURED, or decision-pointers-only (no
+        // porch by design): output is BYTE-IDENTICAL to before the porch —
+        // remainderBlocks above already includes renderHazards in every one
+        // of these cases, since hazardsRendered is always false when text is ''.
+        parts.push(renderPayload(rels.join(', '), remainderBlocks, { unowned: false }));
+      }
     }
-    const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
-    const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
     if (subjectHazards.length || subjectDecisions.length) {
       const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
       // Centrality is per record AGAINST ITS OWN matching prompt — the union
       // never enters the match, so the header cannot credit a sibling's terms.
       const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(', ');
-      // With parallel dispatches this hook cannot attribute a prompt to THIS
-      // spawned agent (SubagentStart carries no prompt field) — say so rather
-      // than claim 'your task' for a sibling's subject (review finding 5).
-      const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
+      // The dispatch-state resolver attributes exactly one prompt (or none) to
+      // THIS spawn — there is no longer a sibling-ambiguous case to hedge for
+      // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
+      // resolution-replaces-transcript-attribution §6).
+      const subjectLabel = `your task's SUBJECT`;
       // A subject match has no file_keys answer — the widening query is
       // rank_terms-shaped (review finding 4).
       const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
@@ -333,8 +443,8 @@ function main(input) {
       ...freshOwners,
       ...cappedHazards(freshHazards),
       ...freshDecisions.slice(0, DECISION_POINTER_CAP),
-      ...cappedHazards(subjectHazards),
-      ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS),
+      ...shownSubjectHazards,
+      ...shownSubjectDecisions,
     ];
 
     // Side effect first, guard second (council wf_db9a59aa-0af precedent,
@@ -387,4 +497,4 @@ function main(input) {
   }
 }
 
-main(input);
+await main(input);

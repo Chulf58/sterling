@@ -312,6 +312,62 @@ test('R1-B34: parseReceipt validates territory.source and territory.attribution 
 });
 
 // ===========================================================================
+// R1-B34b — 'none' JOINS THE ATTRIBUTION ENUM (and 'union' stays for legacy).
+// Since decision 7c515e52, H22 writes attribution 'none' for an unattributable
+// or RESUMED Start — the case where there is no dispatch slot to attribute the
+// review to — and it never writes 'union' any more. 'union' therefore stays
+// ACCEPTED for entries already in consumer ledgers, while 'none' must parse or
+// every receipt the current H22 writes is malformed at classification: not
+// merely unspendable, but INVISIBLE, because a malformed entry never becomes a
+// receipt at all. That is the shape of an outage, not a degradation.
+//
+// `attribution_case` rides beside it as the READABLE reason ('no-slot'), so the
+// distinction between "attributed to nobody because there was no slot" and a
+// junk value is legible downstream rather than inferred.
+//
+// THE CONTROL IS 'bogus', PLACED SECOND AND LOAD-BEARING: widening an enum by
+// removing its validation would make this whole test green while re-opening
+// exactly the hole R1-B34 exists to close (an unvalidated attribution falls
+// through whichever branch the implementation wrote last). So the arms must
+// disagree: 'none' parses, 'bogus' is malformed naming the field.
+// ===========================================================================
+
+// EXPECTED TODAY: RED. The closed set is block|union, so 'none' does not parse: the first
+// assertion below (`ok.ok === true`) fires, and R1-B34's own BAD-value loop stays green
+// throughout — which is why this is a separate arm rather than another entry in that loop.
+// SABOTAGE (the widening this pin authorises, done wrong): drop the attribution validation
+// instead of adding 'none' to the set -> the 'bogus' control reds while every 'none' assertion
+// goes green. That single pair of results is the difference between admitting one new value and
+// re-opening the enum.
+// SABOTAGE (dropping the reason): admit 'none' but discard attribution_case -> the
+// attribution_case assertion reds alone; without it 'no-slot' is indistinguishable from any
+// other reason a receipt ended up attributed to nobody.
+// SABOTAGE (the legacy half): replace 'union' with 'none' in the set rather than adding to it
+// -> the 'union' arm reds; every union-attributed entry in a consumer ledger would become
+// malformed on upgrade.
+test('R1-B34b (7c515e52): territory.attribution accepts "none" with attribution_case "no-slot" and still accepts legacy "union" — while "bogus" stays ledger_entry_malformed {field:"territory.attribution"}', () => {
+  const { parseReceipt, classifyLedgerEntry } = mod();
+
+  const noSlot = receiptV2({ territory: { files: ['src/a.mjs'], source: 'unattributable', attribution: 'none', attribution_case: 'no-slot' } });
+  const ok = parseReceipt(noSlot);
+  assert.equal(ok.ok, true, 'a receipt H22 writes for a resumed or unattributable Start must PARSE — a malformed entry is not an unspendable receipt, it is no receipt at all');
+  assert.equal(ok.receipt.territory.attribution, 'none', 'and the value survives parsing, readable downstream');
+  assert.equal(ok.receipt.territory.attribution_case, 'no-slot', 'beside the CASE that explains it — "attributed to nobody because there was no slot" is a fact, not an inference');
+  assert.equal(classifyLedgerEntry(noSlot).kind, 'receipt', 'so it is classified as a receipt, never malformed');
+
+  const legacyUnion = parseReceipt(receiptV2({ territory: { files: ['src/a.mjs'], source: 'review-territory', attribution: 'union' } }));
+  assert.equal(legacyUnion.ok, true, 'CONTROL (legacy): "union" is no longer written but is still ACCEPTED — consumer ledgers already carry it');
+  assert.equal(legacyUnion.receipt.territory.attribution, 'union');
+
+  const raw = receiptV2({ territory: { files: ['src/a.mjs'], source: 'review-territory', attribution: 'bogus' } });
+  assert.notEqual(parseReceipt(raw).ok, true, 'CONTROL (the enum is still CLOSED): an unknown attribution does not parse');
+  const classified = classifyLedgerEntry(raw);
+  assert.equal(classified.kind, 'malformed', 'admitting "none" must not be implemented by deleting the validation');
+  assert.equal(classified.code, 'ledger_entry_malformed');
+  assert.equal(classified.facts.field, 'territory.attribution', 'and the facts still name WHICH field');
+});
+
+// ===========================================================================
 // R1-B24 — A9: receiptCoveredPaths is declared territory WITH usable byte
 // evidence. A declared path with no blob (or an unusable one) is NOT covered.
 // CONTROL FIRST: a fully-evidenced receipt covers its declared path, so a

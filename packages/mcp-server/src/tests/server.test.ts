@@ -89,6 +89,11 @@ const SERVED_TOOLS = [
   'maintenance_remove',
   'handoff_write',
   'handoff_read',
+  // The one sanctioned in-session config write: a positive allowlist of key
+  // paths, whole-document schema validation, CAS on the file digest — the raw
+  // Edit/Write denial on every .sterling file STAYS for both channels
+  // (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays).
+  'config_set',
 ];
 
 async function harness() {

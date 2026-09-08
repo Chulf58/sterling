@@ -280,6 +280,40 @@ const textLine = (t) => ({ type: 'assistant', message: { content: [{ type: 'text
 const taskLine = (blocks) => ({ type: 'assistant', message: { content: blocks } });
 const taskBlock = (name, subagent_type, prompt) => ({ type: 'tool_use', name, input: { subagent_type, prompt } });
 
+// ===========================================================================
+// STATE-MACHINE RE-CUT (board 5445066b, decision
+// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
+// knowledge_get 7c515e52 — opened, not paraphrased): SubagentStart no longer
+// reads the parent transcript; it resolves ONE prompt from the per-dispatch
+// state record written at PreToolUse. Only SPEC B's four Start-side fixtures
+// used a planted transcript, and they now fire the real Pre event instead;
+// every resource-claim assertion is byte-identical. (Decision 41a28e1d's
+// rejected alternative "mint resource claims under attribution:'union'" is
+// unaffected in substance: the imprecise value is now 'none', and a claim is
+// still minted only for a precisely attributed Start.)
+// ===========================================================================
+let toolUseSeq = 0;
+function stageDispatch(dir, { subagent_type = 'coder', prompt, session_id = 's1' }) {
+  const r = runHook(
+    'h22-dispatch-register.mjs',
+    {
+      hook_event_name: 'PreToolUse',
+      tool_name: 'Task',
+      tool_use_id: `toolu_res_${(toolUseSeq += 1)}`,
+      tool_input: { subagent_type, prompt, description: 'a lane' },
+      session_id,
+      cwd: dir,
+      transcript_path: join(dir, 't', 'parent.jsonl'),
+      prompt_id: 'pr-1',
+    },
+    dir
+  );
+  assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
+}
+// transcript_path deliberately points at a file that does not exist.
+const startInput = (dir, over = {}) =>
+  h22StartInput(dir, { transcript_path: join(dir, 't', 'no-such-parent-transcript.jsonl'), ...over });
+
 function h26TaskInput(dir, { subagent_type = 'coder', prompt, session_id = 's1', tool_name = 'Task' } = {}) {
   return { hook_event_name: 'PreToolUse', tool_name, session_id, cwd: dir, tool_input: { subagent_type, prompt } };
 }
@@ -522,8 +556,8 @@ test('SPEC A (7): a git-probe failure still prints the residue line, marked tree
 test('SPEC B (1): a dispatch brief claiming a configured resource writes exclusive_resources on the H22 register entry', () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'coder', 'This dispatch will hold the windowed-godot slot for its run; do not start a second one.')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22StartInput(dir, { agent_id: 'holder-1', agent_type: 'coder' }), dir);
+    stageDispatch(dir, { subagent_type: 'coder', prompt: 'This dispatch will hold the windowed-godot slot for its run; do not start a second one.' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'holder-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const reg = readRegister(dir);
     const entry = reg.find((e) => e.agent_id === 'holder-1');
@@ -543,8 +577,8 @@ test('SPEC B (1): a dispatch brief claiming a configured resource writes exclusi
 test('SPEC B (2): a negated mention of a configured resource writes NO exclusive_resources field at all', () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'coder', 'No windowed-godot run for this dispatch — another lane holds that slot. Proceed with the file changes only.')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22StartInput(dir, { agent_id: 'nonholder-1', agent_type: 'coder' }), dir);
+    stageDispatch(dir, { subagent_type: 'coder', prompt: 'No windowed-godot run for this dispatch — another lane holds that slot. Proceed with the file changes only.' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'nonholder-1', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const reg = readRegister(dir);
     const entry = reg.find((e) => e.agent_id === 'nonholder-1');
@@ -673,8 +707,8 @@ test('SPEC B (6): SubagentStart injects "you do not hold <resource>" naming the 
   const { dir, cleanup } = makeGitProject();
   try {
     writeRegisterRaw(dir, [liveEntry('holder-4', 'coder', [], { extra: { exclusive_resources: ['windowed-godot'] } })]);
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'reviewer', 'Please review src/a.mjs for correctness; no windowed run needed here.')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22StartInput(dir, { agent_id: 'spawn-1', agent_type: 'reviewer' }), dir);
+    stageDispatch(dir, { subagent_type: 'reviewer', prompt: 'Please review src/a.mjs for correctness; no windowed run needed here.' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'spawn-1', agent_type: 'reviewer' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const text = parseAdditionalContext(r) || out(r);
     assert.match(text, /do not hold/i, 'the notice states the spawn does not hold the resource');
@@ -697,8 +731,8 @@ test('SPEC B (6): SubagentStart injects "you do not hold <resource>" naming the 
 test('SPEC B (6) CONTROL: an empty register plus a self-claim never produces a self-referential "you do not hold" notice', () => {
   const { dir, cleanup } = makeGitProject();
   try {
-    writeParentTranscript(dir, [taskLine([taskBlock('Task', 'coder', 'This dispatch will hold the windowed-godot slot for its run.')])]);
-    const r = runHook('h22-dispatch-register.mjs', h22StartInput(dir, { agent_id: 'sole-claimant', agent_type: 'coder' }), dir);
+    stageDispatch(dir, { subagent_type: 'coder', prompt: 'This dispatch will hold the windowed-godot slot for its run.' });
+    const r = runHook('h22-dispatch-register.mjs', startInput(dir, { agent_id: 'sole-claimant', agent_type: 'coder' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const text = parseAdditionalContext(r) || out(r);
     assert.doesNotMatch(text, /do not hold/i, 'the sole/first claimant of a resource is never told it does not hold what it just claimed');

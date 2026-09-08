@@ -4940,7 +4940,7 @@ var runRecordSchema = external_exports.object({
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
-});
+}).strict();
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -5283,9 +5283,42 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
-    payload_char_cap: external_exports.number().int().positive().default(2400)
+    payload_char_cap: external_exports.number().int().positive().default(2400),
+    // SubagentStart "porch" budget (H19 front-porch, decision
+    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
+    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
+    // additionalContext (plan line + payload) are budgeted so the harness's
+    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
+    // shipped default, 1800, is the MEASURED inline preview on Claude Code
+    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
+    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
+    // non-integer, negative, or non-numeric) falls back to this same default
+    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
+    // mirrors the config-derived-posture-line three-state guard (anti_pattern
+    // e0d280ee) even though this is an internal rendering budget, never a
+    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
+    // is a DIFFERENT case and never reaches this fallback at all: it
+    // suppresses the whole staging payload before this key is ever read, per
+    // the pre-existing shared-fate ruling pinned in
+    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
@@ -5323,7 +5356,25 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Review-ledger tunables (config_set decision config-writes-get-a-config-
+  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
+  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
+  // scripts/hooks/lib/review-ledger-entry.mjs already read
+  // config.review_ledger.stale_days / .code_globs directly off the raw
+  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
+  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
+  // config_set's own allowlist already grants `review_ledger.stale_days`
+  // (decision 1dc3f9aa), that value went through NO schema check at all
+  // before this: a config_set write of a string or a negative number would
+  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
+  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
+  // and unvalidated — this field is `.optional()` with NO `.default({})` so
+  // an absent block still parses to `undefined`, exactly as before this
+  // field existed (no new key is manufactured on an untouched config.json).
+  review_ledger: external_exports.object({
+    stale_days: external_exports.number().int().positive().max(3650).optional()
+  }).passthrough().optional()
 });
 
 // packages/schemas/dist/registry.js
@@ -8122,71 +8173,562 @@ function readLock(sterlingDir) {
 }
 
 // scripts/hooks/lib/dispatch-prompt.mjs
-import { existsSync as existsSync5 } from "node:fs";
-
-// scripts/hooks/lib/transcript.mjs
-import { openSync as openSync2, readSync as readSync2, closeSync as closeSync2, fstatSync as fstatSync2, existsSync as existsSync4, statSync as statSync2, readdirSync } from "node:fs";
-var TAIL_BYTES = 1024 * 1024;
-function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync4(path)) return null;
-  const fd = openSync2(path, "r");
-  try {
-    const size = fstatSync2(fd).size;
-    const len = Math.min(size, bytes);
-    const buf = Buffer.alloc(len);
-    readSync2(fd, buf, 0, len, size - len);
-    return buf.toString("utf8");
-  } finally {
-    closeSync2(fd);
-  }
-}
-
-// scripts/hooks/lib/dispatch-prompt.mjs
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
 }
-function lastDispatchPrompts(transcriptPath) {
-  if (!transcriptPath || !existsSync5(transcriptPath)) return [];
-  const tail = readTail(transcriptPath);
-  if (tail === null) return [];
-  const lines = tail.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let entry;
+
+// scripts/lib/dispatch-register.mjs
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
+import { hostname } from "node:os";
+import { join as join4, basename as basename2, dirname as dirname3 } from "node:path";
+import { randomBytes, createHash } from "node:crypto";
+
+// scripts/lib/review-errors.mjs
+var CODES = /* @__PURE__ */ new Set([
+  // §1.4 ledger verbs
+  "ledger_corrupt",
+  "ledger_absent",
+  "ledger_digest_mismatch",
+  "ledger_lock_held",
+  "entry_not_found",
+  "entry_selector_ambiguous",
+  "entry_not_active",
+  "class_unknown",
+  "class_not_applicable",
+  "superseder_not_found",
+  "superseder_not_reviewer_class",
+  "superseder_not_newer",
+  "superseder_branch_mismatch",
+  "superseder_lifecycle_unacceptable",
+  "superseder_coverage_incomplete",
+  "superseder_commit_not_ancestor",
+  "superseder_commit_trailer_not_roster",
+  "superseder_commit_receipt_unbound",
+  "superseder_commit_blob_mismatch",
+  "covering_not_allowed",
+  "covering_receipt_invalid",
+  "no_live_territory_disproved",
+  "reconcile_no_match",
+  "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
+  "record_external_duplicate",
+  "argument_invalid",
+  // §1.4 commit-reviewed
+  "nothing_staged",
+  "message_missing",
+  "no_spendable_receipt",
+  "receipt_bytes_mismatch",
+  "coverage_incomplete",
+  "reservation_conflict",
+  "commit_failed",
+  "finalize_failed",
+  "waiver_reason_missing",
+  // A13 additions
+  "target_sha_prior_receipt_unbound",
+  "commit_verify_failed",
+  "not_sterling_project",
+  "receipt_unscoped",
+  // §1.4 disclosures (never refuse)
+  "receipt_unattributable",
+  "receipt_foreign",
+  "receipt_identity_unknown",
+  "receipt_deferred",
+  "receipt_stale",
+  "receipt_age_unverifiable",
+  "receipt_no_overlap",
+  "multi_spend",
+  "bytes_waived",
+  "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
+  "register_unavailable",
+  "dispatch_status_unknown",
+  // A9 register/ledger additions
+  "register_entry_malformed",
+  "register_agent_id_duplicate",
+  "register_lock_held",
+  "receipt_not_active",
+  "receipt_foreign_session",
+  "receipt_foreign_branch",
+  // A9 --target-sha amend mode
+  "target_sha_unresolvable",
+  "target_sha_not_head",
+  "target_sha_tree_dirty",
+  "target_sha_published",
+  "target_sha_publication_unprovable",
+  // A11 additions
+  "territory_declaration_missing",
+  "territory_declaration_malformed",
+  "dispatch_overlap",
+  "dispatch_residue",
+  // ledger entry classification
+  "ledger_entry_malformed",
+  // A19 (security review): an env override of identity is disclosed, never silent
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
+]);
+function assertCode(code) {
+  if (!CODES.has(code)) {
+    throw new TypeError(`review-errors: '${code}' is not in the closed CODES set \u2014 a typo is a defect, not a new code`);
+  }
+}
+function refusal(code, facts = {}, message = code) {
+  assertCode(code);
+  const err = new Error(message);
+  err.kind = "refusal";
+  err.code = code;
+  err.facts = facts;
+  return err;
+}
+
+// scripts/lib/dispatch-register.mjs
+function registerPath(root) {
+  return join4(root, ".sterling", "transient", "dispatch-register.json");
+}
+function registerLockDir(root) {
+  return join4(root, ".sterling", "transient", "dispatch-register.lock");
+}
+function parseRegisterEntry(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
+  }
+  if (typeof raw.agent_id !== "string" || !raw.agent_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "agent_id" } };
+  }
+  if (typeof raw.session_id !== "string" || !raw.session_id) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "session_id" } };
+  }
+  if (!Array.isArray(raw.files)) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "files" } };
+  }
+  if (typeof raw.at !== "string" || !raw.at) {
+    return { ok: false, code: "register_entry_malformed", facts: { reason: "at" } };
+  }
+  return { ok: true, entry: { ...raw, files: raw.files.slice() } };
+}
+function readRawArray(root) {
+  const p = registerPath(root);
+  if (!existsSync4(p)) return { availability: "absent", arr: [] };
+  let raw;
+  try {
+    raw = readFileSync2(p, "utf8");
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { availability: "corrupt", arr: [] };
+  }
+  if (!Array.isArray(parsed)) return { availability: "corrupt", arr: [] };
+  return { availability: "ok", arr: parsed };
+}
+function readRegister(root) {
+  const { availability, arr } = readRawArray(root);
+  if (availability !== "ok") return { availability, entries: [], dropped: 0 };
+  let dropped = 0;
+  const entries = [];
+  for (const raw of arr) {
+    const r = parseRegisterEntry(raw);
+    if (r.ok) entries.push(r.entry);
+    else dropped += 1;
+  }
+  return { availability: "ok", entries, dropped };
+}
+var LOCK_CODE_BY_BASENAME = {
+  "dispatch-register.lock": "register_lock_held",
+  "review-ledger.lock": "ledger_lock_held"
+};
+function lockCodeFor(lockDir) {
+  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readOwner(lockDir) {
+  try {
+    return JSON.parse(readFileSync2(join4(lockDir, "owner.json"), "utf8"));
+  } catch {
+    return null;
+  }
+}
+function looksDeadOwner(o) {
+  return !!o && o.host === hostname() && !isPidAlive(o.pid);
+}
+function statIno(p) {
+  try {
+    return statSync2(p).ino;
+  } catch {
+    return null;
+  }
+}
+function sleepAsync(ms) {
+  return new Promise((resolve2) => setTimeout(resolve2, ms));
+}
+async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+  const retryMs = opts.retryMs ?? 50;
+  const timeoutMs = opts.timeoutMs ?? 1e3;
+  const start = Date.now();
+  for (; ; ) {
     try {
-      entry = JSON.parse(line);
+      mkdirSync3(dirname3(lockDir), { recursive: true });
+      mkdirSync3(lockDir);
+      break;
+    } catch (e) {
+      if (e?.code !== "EEXIST") throw e;
+      const owner = readOwner(lockDir);
+      if (looksDeadOwner(owner)) {
+        const examinedIno = statIno(lockDir);
+        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
+        let renamed = false;
+        try {
+          renameSync2(lockDir, tombstone);
+          renamed = true;
+        } catch {
+        }
+        if (renamed) {
+          const tombstoneOwner = readOwner(tombstone);
+          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
+          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+            try {
+              rmSync(tombstone, { recursive: true, force: true });
+            } catch {
+            }
+          } else {
+            try {
+              renameSync2(tombstone, lockDir);
+            } catch (restoreErr) {
+              if (restoreErr?.code === "EEXIST") {
+                process.stderr.write(
+                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
+`
+                );
+                throw refusal(
+                  lockCodeFor(lockDir),
+                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
+                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
+                );
+              }
+            }
+          }
+        }
+      }
+      if (Date.now() - start >= timeoutMs) {
+        throw refusal(
+          lockCodeFor(lockDir),
+          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
+          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+        );
+      }
+      await sleepAsync(retryMs);
+    }
+  }
+  writeFileSync2(
+    join4(lockDir, "owner.json"),
+    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
+  );
+  try {
+    return await fn();
+  } finally {
+    try {
+      rmSync(lockDir, { recursive: true, force: true });
     } catch {
+    }
+  }
+}
+var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
+var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
+var DERIVE_RETRY_INTERVAL_MS = 10;
+var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
+var DERIVE_TOTAL_BUDGET_MS = 150;
+function dispatchStateDir(root) {
+  return join4(root, ".sterling", "transient", "dispatch-state");
+}
+function dispatchStateFile(root, key) {
+  return join4(dispatchStateDir(root), `${key}.json`);
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
+}
+function dispatchState(record) {
+  if (record?.terminal) return "terminal";
+  if (record?.started) return "started";
+  if (record?.post_binding || record?.derived_binding) return "bound";
+  return "pending";
+}
+function isNonEmptyString(v) {
+  return typeof v === "string" && v !== "";
+}
+function isPlainObject(v) {
+  return !!v && typeof v === "object" && !Array.isArray(v);
+}
+function validatePostBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at);
+}
+function validateDerivedBinding(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && isNonEmptyString(v.by);
+}
+function validateStarted(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.agent_id) && isNonEmptyString(v.at) && Array.isArray(v.by) && v.by.every((x) => typeof x === "string");
+}
+function validateTerminal(v) {
+  return v === void 0 || isPlainObject(v) && isNonEmptyString(v.at) && isNonEmptyString(v.reason);
+}
+function validateRecordShape(r) {
+  if (!r || typeof r !== "object" || Array.isArray(r)) return { ok: false, reason: "not-an-object" };
+  if (r.schema !== 1) return { ok: false, reason: "unknown-schema-version" };
+  if (typeof r.tool_use_id !== "string" || !r.tool_use_id) return { ok: false, reason: "tool_use_id" };
+  if (typeof r.session_id !== "string" && r.session_id !== null) return { ok: false, reason: "session_id" };
+  if (!ORIGINS.has(r.origin)) return { ok: false, reason: "origin" };
+  if (typeof r.prompt_bytes !== "number") return { ok: false, reason: "prompt_bytes" };
+  if (typeof r.prompt_sha256 !== "string") return { ok: false, reason: "prompt_sha256" };
+  if (typeof r.prompt === "string") {
+    const bytes = Buffer.byteLength(r.prompt, "utf8");
+    const sha = createHash("sha256").update(r.prompt, "utf8").digest("hex");
+    if (bytes !== r.prompt_bytes || sha !== r.prompt_sha256) return { ok: false, reason: "prompt-hash-mismatch" };
+  } else if (r.prompt !== null) {
+    return { ok: false, reason: "prompt-type" };
+  }
+  if (!validatePostBinding(r.post_binding)) return { ok: false, reason: "post_binding-shape" };
+  if (!validateDerivedBinding(r.derived_binding)) return { ok: false, reason: "derived_binding-shape" };
+  if (!validateStarted(r.started)) return { ok: false, reason: "started-shape" };
+  if (!validateTerminal(r.terminal)) return { ok: false, reason: "terminal-shape" };
+  return { ok: true };
+}
+function classifyRecordFile(file) {
+  let st;
+  try {
+    st = lstatSync(file);
+  } catch {
+    return { exists: false };
+  }
+  if (st.isSymbolicLink()) return { exists: true, poisoned: true, reason: "symlink" };
+  if (!st.isFile()) return { exists: true, poisoned: true, reason: "non-regular-file" };
+  let buf;
+  try {
+    buf = readFileSync2(file);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unreadable" };
+  }
+  const text = buf.toString("utf8");
+  if (!Buffer.from(text, "utf8").equals(buf)) return { exists: true, poisoned: true, reason: "invalid-utf8" };
+  let record;
+  try {
+    record = JSON.parse(text);
+  } catch {
+    return { exists: true, poisoned: true, reason: "unparseable-json" };
+  }
+  const v = validateRecordShape(record);
+  if (!v.ok) return { exists: true, poisoned: true, reason: v.reason };
+  return { exists: true, poisoned: false, record };
+}
+function checkDispatchStateContainment(root, { create }) {
+  const dir = dispatchStateDir(root);
+  let st;
+  try {
+    st = lstatSync(dir);
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { ok: false, availability: "unavailable" };
+    if (!create) return { ok: true, availability: "absent" };
+    mkdirSync3(dir, { recursive: true });
+    return { ok: true, availability: "ok" };
+  }
+  if (st.isSymbolicLink() || !st.isDirectory()) {
+    return { ok: false, availability: "poisoned", reason: st.isSymbolicLink() ? "symlink" : "non-regular-file" };
+  }
+  return { ok: true, availability: "ok" };
+}
+function writeRecordAtomic(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const containment = checkDispatchStateContainment(root, { create: true });
+  if (!containment.ok) {
+    throw refusal(
+      "dispatch_state_poisoned",
+      { dir, reason: containment.reason ?? containment.availability },
+      `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
+    );
+  }
+  const file = dispatchStateFile(root, key);
+  const tmp = join4(dir, `${key}.json.tmp-${randomBytes(4).toString("hex")}`);
+  writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
+  renameSync2(tmp, file);
+}
+function readDispatchState(root) {
+  const dir = dispatchStateDir(root);
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", records: [], poisoned: [] };
+  if (containment.availability === "absent") return { availability: "absent", records: [], poisoned: [] };
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return { availability: "unavailable", records: [], poisoned: [] };
+  }
+  const records = [];
+  const poisoned = [];
+  for (const name of names) {
+    if (!name.endsWith(".json")) {
+      if (name.includes(".json.tmp-")) poisoned.push({ file: name, reason: "orphan-tmp-file" });
       continue;
     }
-    if (entry.type !== "assistant") continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    const blocks = content.filter((b) => b?.type === "tool_use" && (b.name === "Task" || b.name === "Agent"));
-    if (!blocks.length) continue;
-    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === "string");
+    const key = name.slice(0, -".json".length);
+    const classified = classifyRecordFile(join4(dir, name));
+    if (!classified.exists) continue;
+    if (classified.poisoned) {
+      poisoned.push({ file: name, reason: classified.reason });
+      continue;
+    }
+    if (dispatchStateKey(classified.record.tool_use_id) !== key) {
+      poisoned.push({ file: name, reason: "key-mismatch" });
+      continue;
+    }
+    records.push({ key, file: name, record: classified.record });
   }
-  return [];
+  return { availability: "ok", records, poisoned };
+}
+function hasRegisterRound(root, sessionId, agentId) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return false;
+  return entries.some((e) => e && e.agent_id === agentId && e.session_id === sessionId);
+}
+function appendStartedBy(record, consumer) {
+  const prior = record.started;
+  const by = Array.isArray(prior?.by) ? [...prior.by] : [];
+  if (consumer && !by.includes(consumer)) by.push(consumer);
+  return { ...record, started: { agent_id: prior?.agent_id ?? record.post_binding?.agent_id ?? record.derived_binding?.agent_id, at: prior?.at ?? (/* @__PURE__ */ new Date()).toISOString(), by } };
+}
+function buildResolution(source, caseName, record) {
+  return {
+    source,
+    case: caseName,
+    prompt: typeof record?.prompt === "string" ? record.prompt : null,
+    subagent_type: record?.subagent_type ?? null,
+    tool_use_id: record?.tool_use_id ?? null,
+    record: record ?? null
+  };
+}
+function unattributable(caseName, agentType, extra = {}) {
+  return { source: "unattributable", case: caseName, prompt: null, subagent_type: agentType ?? null, tool_use_id: null, record: null, ...extra };
+}
+function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) {
+  if (typeof agent_id !== "string" || agent_id === "") {
+    return { verdict: "resolved", value: unattributable("no-agent-id", agent_type) };
+  }
+  const scan = readDispatchState(root);
+  if (scan.availability === "ok") {
+    for (const { key, record } of scan.records) {
+      const boundId = record.post_binding?.agent_id ?? record.derived_binding?.agent_id;
+      if (boundId === agent_id && record.session_id === session_id && !record.terminal) {
+        const updated = appendStartedBy(record, consumer);
+        writeRecordAtomic(root, key, updated);
+        const source = record.post_binding ? "post" : "derived-type-unique";
+        return { verdict: "resolved", value: buildResolution(source, source, updated) };
+      }
+    }
+  }
+  const resumeHit = scan.availability === "ok" && scan.records.some(
+    ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
+  );
+  if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
+    return { verdict: "resolved", value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
+  }
+  if (typeof agent_type !== "string" || agent_type === "") {
+    return { verdict: "resolved", value: unattributable("no-agent-type", agent_type) };
+  }
+  if (scan.availability === "unavailable") {
+    return { verdict: "resolved", value: unattributable("state-unavailable", agent_type) };
+  }
+  if (scan.poisoned.length > 0) {
+    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type) };
+  }
+  const candidates = scan.records.filter(
+    ({ record }) => dispatchState(record) === "pending" && record.session_id === session_id && typeof record.subagent_type === "string" && record.subagent_type === agent_type
+  );
+  if (candidates.length === 0) {
+    return { verdict: "resolved", value: unattributable("no-slot", agent_type) };
+  }
+  if (candidates.length === 1) {
+    const { key, record } = candidates[0];
+    if (record.post_binding) {
+      return { verdict: "resolved", value: buildResolution("post", "post", record) };
+    }
+    const at = (/* @__PURE__ */ new Date()).toISOString();
+    const updated = { ...record, derived_binding: { agent_id, at, by: consumer }, started: { agent_id, at, by: consumer ? [consumer] : [] } };
+    writeRecordAtomic(root, key, updated);
+    return { verdict: "resolved", value: buildResolution("derived-type-unique", "derived-type-unique", updated) };
+  }
+  return { verdict: "siblings-retry", count: candidates.length };
+}
+async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, opts = {}) {
+  const consumer = opts.consumer;
+  const now = typeof opts.now === "function" ? opts.now : () => Date.now();
+  const sleep = typeof opts.sleep === "function" ? opts.sleep : sleepAsync;
+  async function tryLocked(timeoutMs, retryMs) {
+    try {
+      return await withOwnerMkdirLock(registerLockDir(root), () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs });
+    } catch (e) {
+      if (e?.code === "register_lock_held") return { verdict: "lock-held" };
+      throw e;
+    }
+  }
+  const initialTimeoutMs = typeof opts.lockTimeoutMs === "number" ? opts.lockTimeoutMs : 1e3;
+  const initialRetryMs = typeof opts.retryMs === "number" ? opts.retryMs : 50;
+  let result = await tryLocked(initialTimeoutMs, initialRetryMs);
+  if (result.verdict === "lock-held") {
+    return unattributable("lock-held", agent_type);
+  }
+  if (result.verdict === "resolved") return result.value;
+  const retryStart = now();
+  for (; ; ) {
+    if (now() - retryStart >= DERIVE_TOTAL_BUDGET_MS) {
+      return unattributable("same-type-siblings-in-flight", agent_type, { count: result.count });
+    }
+    await sleep(DERIVE_RETRY_INTERVAL_MS);
+    result = await tryLocked(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
+    if (result.verdict === "resolved") return result.value;
+  }
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync6, rmSync, renameSync as renameSync2, statSync as statSync3, readdirSync as readdirSync2 } from "node:fs";
-import { join as join4, dirname as dirname3 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, rmSync as rmSync2, renameSync as renameSync3, statSync as statSync3, readdirSync as readdirSync2 } from "node:fs";
+import { join as join5, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
-  return join4(cwd, ".sterling", "transient", "delivery");
+  return join5(cwd, ".sterling", "transient", "delivery");
+}
+var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r?$/gm;
+function stripReviewTerritoryLine(text) {
+  return String(text ?? "").replace(REVIEW_TERRITORY_LINE_RE, "");
 }
 function guardPath(cwd, agentId) {
-  return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+  return join5(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
 function emptyGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function readGuard(path) {
   try {
-    if (!existsSync6(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
+    if (!existsSync5(path)) return emptyGuard();
+    return { ...emptyGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
@@ -8194,10 +8736,10 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
-  mkdirSync3(dirname3(path), { recursive: true });
+  mkdirSync4(dirname4(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync2(tmp, JSON.stringify(guard));
-  renameSync2(tmp, path);
+  writeFileSync3(tmp, JSON.stringify(guard));
+  renameSync3(tmp, path);
 }
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
@@ -8287,7 +8829,8 @@ function renderKnownGapsLines(article, info) {
   return lines;
 }
 function renderArticle(store, article, charCap, { gaps } = {}) {
-  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
+  const id8 = String(article.id ?? "").slice(0, 8);
+  const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
   const gapLines = renderKnownGapsLines(article, gaps);
   if (body.length > ARTICLE_BODY_FLOOR) {
@@ -8301,7 +8844,11 @@ function renderArticle(store, article, charCap, { gaps } = {}) {
   const lines = [
     header,
     `WHAT IT DOES: ${clip(body, charCap)}`,
-    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`
+    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
+    // The oversize branch above already carries a knowledge_get pointer; this
+    // branch (small/normal articles) did not, so a reader could not cite the
+    // record by id without a second lookup (decision 2e8c30e4).
+    `\u25B8 FULL RECORD: knowledge_get ${article.id}`
   ];
   if (article.current_ac?.length) {
     lines.push(
@@ -8330,16 +8877,17 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+  const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
+  const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+}
 function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [
-      `\u26A0 ANTI-PATTERN [${(ap.severity ?? "warn").toUpperCase()}] for this path \u2014 '${ap.title}'${ap.slug ? ` [${ap.slug}]` : ""} (full record: knowledge_get ${ap.id})${statusAnnotation(ap)}`,
-      `TRIGGER: ${clip(ap.trigger, charCap)}`,
-      `RIGHT WAY: ${clip(ap.right_way, charCap)}`
-    ].join("\n")
+    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8386,12 +8934,291 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
   }
   return lines.join("\n");
 }
+var PORCH_OWNER_CAP = 3;
+var PORCH_HAZARD_FLOOR_BYTES = 90;
+var PORCH_TITLE_CLIP_BYTES = 70;
+var PORCH_OWNER_LABEL_CLIP_BYTES = 90;
+var PORCH_SLUG_CLIP_BYTES = 60;
+var PORCH_HEADER_PATH_CLIP_BYTES = 200;
+var PORCH_WIDENING_KEYS_CLIP_BYTES = 200;
+var PORCH_HAZARD_SHARE = 0.6;
+var PORCH_BYTE_COUNT_RESERVE = "000000";
+function porchByteLen(s2) {
+  return Buffer.byteLength(String(s2 ?? ""), "utf8");
+}
+function clipToBytes(text, maxBytes) {
+  const s2 = String(text ?? "");
+  if (maxBytes <= 0) return "";
+  if (porchByteLen(s2) <= maxBytes) return s2;
+  const ELLIPSIS = "\u2026";
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = "";
+  let used = 0;
+  for (const ch of s2) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
+}
+function clippedFileKeysLiteral(keys, maxBytes) {
+  const list = keys ?? [];
+  const admitted = [];
+  let used = 2;
+  for (const k of list) {
+    const entry = JSON.stringify(String(k));
+    const sep = admitted.length ? 1 : 0;
+    const entryBytes = porchByteLen(entry) + sep;
+    if (used + entryBytes > Math.max(maxBytes, 2)) break;
+    admitted.push(entry);
+    used += entryBytes;
+  }
+  const omitted = list.length - admitted.length;
+  const literal = `[${admitted.join(",")}]`;
+  return omitted > 0 ? `${literal} (+${omitted} keys omitted)` : literal;
+}
+function porchOwnerLine(owner) {
+  const id8 = String(owner?.id ?? "").slice(0, 8);
+  if (owner?.type === "reference_material") {
+    return `\u25B8 reference '${clipToBytes(owner.title, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}) \u2014 knowledge_get ${owner.id}`;
+  }
+  return `\u25B8 article '${clipToBytes(owner?.slug, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}, ${owner?.state ?? "unknown"}) \u2014 knowledge_get ${owner?.id}`;
+}
+function rankOwnersForPorch(owners) {
+  return [...owners ?? []].sort((a, b) => {
+    const ta = a?.type === "feature_article" ? 0 : 1;
+    const tb = b?.type === "feature_article" ? 0 : 1;
+    if (ta !== tb) return ta - tb;
+    const ua = Date.parse(a?.updated_at ?? "");
+    const ub = Date.parse(b?.updated_at ?? "");
+    return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
+  });
+}
+function porchHazardBody(hazard, textBudgetBytes) {
+  const half = Math.max(0, Math.floor(textBudgetBytes / 2));
+  const trigger = clipToBytes(hazard?.trigger, half);
+  const rightBudget = Math.max(0, textBudgetBytes - porchByteLen(trigger));
+  const rightWay = clipToBytes(hazard?.right_way, rightBudget);
+  return [`  TRIGGER: ${trigger}`, `  RIGHT WAY: ${rightWay}`].join("\n");
+}
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+}
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+}
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+}
+function porchDeferredEndLine(byteCountText, hazardCount, budget, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 budget (${budget}) too small to preview ${hazardCount} hazard(s); deferred in full below. Followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. normal instruction precedence applies.`;
+}
+function porchHeaderLine(rels) {
+  const list = Array.isArray(rels) ? rels : [rels];
+  const full = list.join(", ");
+  if (porchByteLen(full) <= PORCH_HEADER_PATH_CLIP_BYTES) return payloadHeaderLine(full);
+  const kept = [];
+  let usedBytes = 0;
+  for (const r of list) {
+    const sepBytes = kept.length ? porchByteLen(", ") : 0;
+    const rBytes = porchByteLen(r);
+    if (usedBytes + sepBytes + rBytes > PORCH_HEADER_PATH_CLIP_BYTES) break;
+    kept.push(r);
+    usedBytes += sepBytes + rBytes;
+  }
+  const remainder = list.length - kept.length;
+  const clippedList = kept.length ? `${kept.join(", ")}${remainder > 0 ? ` \u2026 (+${remainder} paths)` : ""}` : clipToBytes(full, PORCH_HEADER_PATH_CLIP_BYTES);
+  return payloadHeaderLine(clippedList);
+}
+var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
+var PORCH_END_TEMPLATE_BYTES = porchByteLen(
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99
+  })
+);
+var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+var PORCH_BUDGET_DEFAULT = 1800;
+function resolvePorchBudget(cwd) {
+  try {
+    const cfg = loadConfig(cwd);
+    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
+    const v = cfg?.delivery?.preview_budget_bytes;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
+    return v;
+  } catch {
+    return PORCH_BUDGET_DEFAULT;
+  }
+}
+function renderPorch(header, hazards, owners, budget, {
+  articleBodiesCount = 0,
+  referencePointerCount = 0,
+  pathDecisionPointerCount = 0,
+  hasSubjectChannel = false,
+  subjectHazardCount = 0,
+  subjectDecisionPointerCount = 0,
+  fileKeys = []
+} = {}) {
+  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false };
+  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false };
+  if (budget < PORCH_MIN_BUDGET_BYTES) {
+    try {
+      process.stderr.write(
+        `H19 porch: preview_budget_bytes=${budget} is below the structural minimum ${PORCH_MIN_BUDGET_BYTES} bytes \u2014 MISCONFIGURED, porch disabled for this touch (today's rendering applies)
+`
+      );
+    } catch {
+    }
+    return { text: "", hazardsRendered: false };
+  }
+  const shownHazards = cappedHazards(hazards ?? []);
+  const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
+  const rankedOwners = rankOwnersForPorch(owners);
+  const endMeta = {
+    articleBodiesCount,
+    referencePointerCount,
+    pathDecisionPointerCount,
+    hasSubjectChannel,
+    subjectHazardCount,
+    subjectDecisionPointerCount
+  };
+  const minOwnerCap = 0;
+  const byteCountReserve = "0".repeat(String(budget).length);
+  function hazardSectionAt(perHazardTextBudget) {
+    const blocks = shownHazards.map(
+      (hz) => [
+        hazardHeaderLine(hz, { clipTitleBytes: PORCH_TITLE_CLIP_BYTES, clipSlugBytes: PORCH_SLUG_CLIP_BYTES }),
+        porchHazardBody(hz, Math.max(0, perHazardTextBudget))
+      ].join("\n")
+    );
+    if (hazardOverflow > 0) {
+      const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
+      blocks.push(`\u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) \u2014 ${widen} for the full set`);
+    }
+    return blocks;
+  }
+  function ownerSectionAt(admitted2, ownerLines2, overflowLine2, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
+    const blocks = admitted2.map((owner, i) => {
+      const digestBudget = Math.max(0, perOwnerDigestBudget);
+      const digest = digestBudget > 0 ? clipToBytes(owner?.what_it_does, digestBudget) : "";
+      if (digest) return `${ownerLines2[i]}
+  ${digest}`;
+      return reserveDigestSeparator ? `${ownerLines2[i]}
+  ` : ownerLines2[i];
+    });
+    if (overflowLine2) blocks.push(overflowLine2);
+    return blocks;
+  }
+  let pick = null;
+  for (let cap = Math.min(PORCH_OWNER_CAP, rankedOwners.length); cap >= minOwnerCap; cap -= 1) {
+    const admitted2 = rankedOwners.slice(0, cap);
+    const ownerOverflow = rankedOwners.length - admitted2.length;
+    const ownerLines2 = admitted2.map(porchOwnerLine);
+    const overflowLine2 = ownerOverflow > 0 ? `  \u2026 +${ownerOverflow} owners below` : "";
+    const skeletonBody = [
+      header,
+      ...hazardSectionAt(0),
+      ...ownerSectionAt(admitted2, ownerLines2, overflowLine2, 0, { reserveDigestSeparator: true })
+    ].join("\n\n");
+    const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+    const remaining2 = Math.max(0, budget - skeletonBytes2);
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    const fits = skeletonBytes2 <= budget && (shownHazards.length === 0 || remaining2 >= neededFloor);
+    pick = { admitted: admitted2, ownerOverflow, ownerLines: ownerLines2, overflowLine: overflowLine2, remaining: remaining2, skeletonBytes: skeletonBytes2 };
+    if (fits || cap === minOwnerCap) break;
+  }
+  const { admitted, ownerLines, overflowLine, remaining, skeletonBytes } = pick;
+  if (skeletonBytes > budget) {
+    let buildMinimal = function(hdr) {
+      const blocks = [hdr, allOwnersOverflow].filter(Boolean);
+      let cnt = blocks.reduce((sum, l) => sum + porchByteLen(l) + 2, 0) + porchByteLen(porchDeferredEndLine(byteCountReserve, shownHazards.length, budget, endMeta));
+      let text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
+      for (let i = 0; i < 5; i += 1) {
+        const actual = porchByteLen(text);
+        if (actual === cnt) break;
+        cnt = actual;
+        text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
+      }
+      return text;
+    };
+    const allOwnersOverflow = rankedOwners.length > 0 ? `  \u2026 +${rankedOwners.length} owners below` : "";
+    let minimalPorch = buildMinimal(header);
+    if (porchByteLen(minimalPorch) > budget) {
+      const nonHeaderBytes = porchByteLen(minimalPorch) - porchByteLen(header);
+      minimalPorch = buildMinimal(clipToBytes(header, Math.max(0, budget - nonHeaderBytes)));
+    }
+    if (porchByteLen(minimalPorch) > budget) {
+      try {
+        process.stderr.write(
+          `H19 porch: accounting regression in the MINIMAL fallback \u2014 assembled ${porchByteLen(minimalPorch)} bytes against a ${budget}-byte budget \u2014 hard-clamping
+`
+        );
+      } catch {
+      }
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+    }
+    return { text: minimalPorch, hazardsRendered: false };
+  }
+  const haveHazards = shownHazards.length > 0;
+  const haveDigests = admitted.length > 0;
+  let hazardShare = 0;
+  let digestShare = 0;
+  if (haveHazards && haveDigests) {
+    hazardShare = Math.floor(remaining * PORCH_HAZARD_SHARE);
+    digestShare = remaining - hazardShare;
+    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
+    if (hazardShare < neededFloor) {
+      const borrow = Math.min(digestShare, neededFloor - hazardShare);
+      hazardShare += borrow;
+      digestShare -= borrow;
+    }
+  } else if (haveHazards) {
+    hazardShare = remaining;
+  } else if (haveDigests) {
+    digestShare = remaining;
+  }
+  const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
+  const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
+  const hazardBlocks = hazardSectionAt(perHazard);
+  const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
+  const body = [header, ...hazardBlocks, ...ownerBlocks].join("\n\n");
+  let count = porchByteLen(body) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
+  let finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
+  for (let i = 0; i < 5; i += 1) {
+    const actual = porchByteLen(finalPorch);
+    if (actual === count) break;
+    count = actual;
+    finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
+  }
+  const finalBytes = porchByteLen(finalPorch);
+  if (finalBytes > budget) {
+    try {
+      process.stderr.write(
+        `H19 porch: accounting regression \u2014 assembled porch is ${finalBytes} bytes against a ${budget}-byte budget (overrun ${finalBytes - budget} bytes); the cascade above should have made this unreachable \u2014 hard-clamping
+`
+      );
+    } catch {
+    }
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+  }
+  return { text: finalPorch, hazardsRendered: true };
+}
+function payloadHeaderLine(rel) {
+  return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
+}
 function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
   const substantive = substantiveCount ?? blocks.length;
-  return [
-    unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`,
-    ...blocks
-  ].join("\n\n");
+  return [unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : payloadHeaderLine(rel), ...blocks].join(
+    "\n\n"
+  );
 }
 function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
   return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
@@ -8431,6 +9258,7 @@ var PLAN_LINE_AGENT_TYPES = /* @__PURE__ */ new Set(["coder", "debugger", "test-
 var PLAN_TITLE_MAX = 120;
 var PLAN_PATH_MAX = 320;
 var activePlanLine = "";
+var unattributableLine = "";
 try {
   if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
     const read = readLock(sterlingDirOf(input.cwd));
@@ -8449,6 +9277,7 @@ function combinedContext(payload) {
   if (activePlanLine) out.push(activePlanLine);
   if (payload) out.push(payload);
   if (tddPostureLine) out.push(tddPostureLine);
+  if (unattributableLine) out.push(unattributableLine);
   if (!EXEMPT_AGENT_TYPES.has(input.agent_type)) out.push(RETURN_CONTRACT);
   return out.join("\n\n");
 }
@@ -8460,11 +9289,19 @@ function finish(payload) {
   if (out) return exitAfterWrite(envelope(out), 0);
   return allow();
 }
-function main(input2) {
+async function main(input2) {
   try {
     const store = openStore(input2.cwd);
     if (!store) return finish("");
-    const prompts = lastDispatchPrompts(input2.transcript_path);
+    const resolution = await resolveDispatchStart(
+      input2.cwd,
+      { session_id: input2.session_id, agent_id: input2.agent_id, agent_type: input2.agent_type },
+      { consumer: "h19" }
+    );
+    if (resolution.source === "unattributable") {
+      unattributableLine = `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${resolution.case}] \u2014 no territory was staged; file-touch delivery still fires on your first Read/Edit`;
+    }
+    const prompts = typeof resolution.prompt === "string" ? [resolution.prompt] : [];
     const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
     const rels = [...new Set(candidates.map((c) => repoRel(c, input2.cwd)).filter(Boolean))].filter(
       (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/")
@@ -8476,7 +9313,8 @@ function main(input2) {
     const subjectMatches = [];
     const seenSubject = /* @__PURE__ */ new Set();
     for (const p of prompts) {
-      const terms = extractAxisTerms(p, MAX_RANK_TERMS);
+      const subjectText = stripReviewTerritoryLine(p);
+      const terms = extractAxisTerms(subjectText, MAX_RANK_TERMS);
       if (terms.length < AXIS_MIN_HITS) continue;
       const candidatesBySubject = [
         ...store.query({ types: ["anti_pattern"], rank_terms: terms, cap: 40 }),
@@ -8485,9 +9323,9 @@ function main(input2) {
       for (const r of candidatesBySubject) {
         if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
         const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, p)) {
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, subjectText)) {
           seenSubject.add(r.id);
-          subjectMatches.push({ record: r, hits, prompt: p });
+          subjectMatches.push({ record: r, hits, prompt: subjectText });
         }
       }
     }
@@ -8501,21 +9339,43 @@ function main(input2) {
     const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
     const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
+    const rawPorchBudget = resolvePorchBudget(input2.cwd);
+    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}
+
+`, "utf8") : 0;
+    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
+    const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
+    const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
+    const shownSubjectHazards = cappedHazards(subjectHazards);
+    const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
     const parts = [];
     if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-      const blocks = [
-        ...renderHazards(freshHazards, charCap, { fileKeys: rels }),
+      const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      const referenceOwnersForPorch = freshOwners.filter((r) => r.type === "reference_material");
+      const porch = porchBudget > 0 ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
+        articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
+        referencePointerCount: referenceOwnersForPorch.length,
+        pathDecisionPointerCount: shownDecisionsForPorch.length,
+        hasSubjectChannel: true,
+        subjectHazardCount: shownSubjectHazards.length,
+        subjectDecisionPointerCount: shownSubjectDecisions.length,
+        fileKeys: rels
+      }) : { text: "", hazardsRendered: false };
+      const remainderBlocks = [
+        ...porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: rels }),
         ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
         ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
       ];
-      parts.push(renderPayload(rels.join(", "), blocks, { unowned: false }));
+      if (porch.text) {
+        parts.push([porch.text, ...remainderBlocks].join("\n\n"));
+      } else {
+        parts.push(renderPayload(rels.join(", "), remainderBlocks, { unowned: false }));
+      }
     }
-    const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
-    const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
     if (subjectHazards.length || subjectDecisions.length) {
       const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
       const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
-      const subjectLabel = prompts.length > 1 ? `the SUBJECT of a task dispatched in this turn (possibly a sibling's)` : `your task's SUBJECT`;
+      const subjectLabel = `your task's SUBJECT`;
       const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
       const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
       const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
@@ -8532,8 +9392,8 @@ function main(input2) {
       ...freshOwners,
       ...cappedHazards(freshHazards),
       ...freshDecisions.slice(0, DECISION_POINTER_CAP),
-      ...cappedHazards(subjectHazards),
-      ...subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS)
+      ...shownSubjectHazards,
+      ...shownSubjectDecisions
     ];
     const recordStaged = () => {
       guard.records.push(...fresh.map((r) => r.id));
@@ -8556,4 +9416,4 @@ function main(input2) {
     return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
   }
 }
-main(input);
+await main(input);

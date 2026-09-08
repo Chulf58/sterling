@@ -1,17 +1,15 @@
-// DISPATCH-PROMPT RECOVERY — the one mechanism for reading the conductor's
-// dispatch prompt off the PARENT transcript and pulling path candidates out of
-// it. Extracted verbatim from h19-dispatch-staging.mjs (2026-08-20) when the H22
-// dispatch register became a second consumer: one mechanism, imported never
-// reimplemented (decision f5638a84 constraint). Behavior is unchanged — h19's
-// delivery logic still calls exactly these functions.
+// DISPATCH-PROMPT PARSING — path-candidate extraction and the REVIEW-TERRITORY
+// structured declaration parser, both operating on a dispatch prompt's TEXT.
 //
-// Why the transcript at all: SubagentStart/SubagentStop stdin carries
-// session_id, transcript_path, cwd, prompt_id, agent_id, agent_type,
-// hook_event_name — THERE IS NO PROMPT FIELD (live-probed: research_finding
-// 35a89a0f for Start, 20b44518 for Stop). The dispatch prompt is therefore
-// recovered from the parent transcript (H6 precedent, ./transcript.mjs).
-import { existsSync } from 'node:fs';
-import { readTail } from './transcript.mjs';
+// THE PARENT-TRANSCRIPT PROMPT READER FUNCTIONS THAT USED TO LIVE HERE ARE
+// DELETED (decision `dispatch-state-machine-pre-slot-post-binding-locked-
+// start-resolution-replaces-transcript-attribution`): the parent transcript is LAGGED at
+// SubagentStart (measured, not assumed) and cannot attribute a prompt to a
+// spawn safely by any ordering trick. Every consumer now recovers its own
+// prompt (if any) from scripts/lib/dispatch-register.mjs's resolveDispatchStart,
+// which resolves a per-dispatch state record instead of reading the transcript
+// tail. This file keeps only the TEXT-shaped parsers those consumers still
+// call once they have a prompt string in hand.
 import { normalizeRepoPath } from '@sterling/schemas';
 
 // Path-candidate extraction from free-form prompt prose. No shared extractor
@@ -122,77 +120,4 @@ export function parseReviewTerritory(text) {
     return { present: true, valid: false, raw };
   }
   return { present: true, valid: true, files: parsed };
-}
-
-/** The union of every Task/Agent tool_use block's `prompt` in the LAST
- *  assistant message (scanned from the tail) that carries at least one such
- *  block. Returns [] on anything short of a clean read: missing transcript,
- *  no assistant entries, malformed JSON — recovery degrades to silence rather
- *  than a throw a caller must special-case. */
-export function lastDispatchPrompts(transcriptPath) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  const tail = readTail(transcriptPath);
-  if (tail === null) return [];
-  const lines = tail.split('\n');
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue; // first line of the tail window may be truncated
-    }
-    if (entry.type !== 'assistant') continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    const blocks = content.filter((b) => b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent'));
-    if (!blocks.length) continue; // this assistant turn dispatched nothing — keep scanning backward
-    return blocks.map((b) => b.input?.prompt).filter((p) => typeof p === 'string');
-  }
-  return [];
-}
-
-/** Per-block {subagent_type, prompt} for every Task/Agent tool_use block in a
- *  DISPATCHING assistant message read from the transcript tail — the
- *  per-block sibling of lastDispatchPrompts() above, which stays
- *  byte-identical because h19-dispatch-staging consumes it (decision
- *  5d3747c1, slug h22-per-block-attribution). `skip` (default 0) skips that
- *  many dispatching messages, most-recent-first, before returning the next
- *  match's blocks — the mechanism a caller uses to walk BACKWARD through
- *  recent dispatching messages (H22's cross-batch race: batch B's message
- *  can land in the transcript before batch A's SubagentStarts fire). Returns
- *  [] on anything short of a clean read, or once `skip` runs past the number
- *  of dispatching messages present in the tail window — recovery degrades to
- *  silence rather than a throw a caller must special-case, same posture as
- *  lastDispatchPrompts(). */
-export function lastDispatchBlocks(transcriptPath, skip = 0) {
-  if (!transcriptPath || !existsSync(transcriptPath)) return [];
-  const tail = readTail(transcriptPath);
-  if (tail === null) return [];
-  const lines = tail.split('\n');
-  let remaining = skip;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let entry;
-    try {
-      entry = JSON.parse(line);
-    } catch {
-      continue; // first line of the tail window may be truncated
-    }
-    if (entry.type !== 'assistant') continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    const blocks = content.filter((b) => b?.type === 'tool_use' && (b.name === 'Task' || b.name === 'Agent'));
-    if (!blocks.length) continue; // this assistant turn dispatched nothing — keep scanning backward
-    if (remaining > 0) {
-      remaining--;
-      continue; // this dispatching message is being skipped over for the walk-back
-    }
-    return blocks
-      .map((b) => ({ subagent_type: b.input?.subagent_type, prompt: b.input?.prompt }))
-      .filter((b) => typeof b.prompt === 'string');
-  }
-  return [];
 }

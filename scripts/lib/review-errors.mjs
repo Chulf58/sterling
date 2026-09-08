@@ -36,6 +36,8 @@ export const CODES = new Set([
   'no_live_territory_disproved',
   'reconcile_no_match',
   'reconcile_ambiguous',
+  'reconcile_nonce_split',
+  'reconcile_unresolved',
   'record_external_duplicate',
   'argument_invalid',
   // §1.4 commit-reviewed
@@ -64,6 +66,7 @@ export const CODES = new Set([
   'multi_spend',
   'bytes_waived',
   'legacy_entries_present',
+  'receipt_not_spent_stale_bytes',
   'register_unavailable',
   'dispatch_status_unknown',
   // A9 register/ledger additions
@@ -88,6 +91,16 @@ export const CODES = new Set([
   'ledger_entry_malformed',
   // A19 (security review): an env override of identity is disclosed, never silent
   'session_identity_override',
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  'dispatch_state_collision',
+  'dispatch_post_late',
+  'dispatch_post_mismatch',
+  'dispatch_post_refused',
+  'dispatch_state_poisoned',
+  'dispatch_unattributable',
+  'dispatch_lock_held',
+  'dispatch_post_only',
 ]);
 
 function assertCode(code) {

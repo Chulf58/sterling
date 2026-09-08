@@ -35,6 +35,7 @@ Exactly the required-inputs manifest. Existing decisions are constraints: design
 2. Reuse before invention: prefer the structures the owning articles already describe.
 3. Decomposability: the design must split into independently testable phases.
 4. Name the risks: which interface is most likely wrong, and what evidence would show it early.
+5. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 

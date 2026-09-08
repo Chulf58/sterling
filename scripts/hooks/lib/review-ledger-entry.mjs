@@ -76,21 +76,44 @@ export function parseDisposition(raw) {
   };
 }
 
+// `waived` is ADDITIVE (X1, review round on fix 8590a004): whether THIS
+// reservation was taken for a receipt spent under --waive-bytes — recorded at
+// reserve time so `reconcile` (which has no other way to know) can demand the
+// Review-Bytes-Waiver trailer for it, mirroring verifyOneReceiptBinding's own
+// waiver rule. Absent on a pre-fix reservation, which reconcile then treats as
+// not-waived (its pre-fix behaviour, unchanged).
 export function parseReservation(raw) {
   if (!isEvidenceObject(raw)) return { ok: false };
   if (typeof raw.nonce !== 'string' || raw.nonce === '') return { ok: false };
   if (typeof raw.at !== 'string' || raw.at === '') return { ok: false };
   if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
   if (typeof raw.operation !== 'string' || raw.operation === '') return { ok: false };
-  return { ok: true, value: { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation } };
+  const value = { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation };
+  if (raw.waived !== undefined) {
+    if (typeof raw.waived !== 'boolean') return { ok: false };
+    value.waived = raw.waived;
+  }
+  return { ok: true, value };
 }
 
+// `paths` is ADDITIVE (fix 8590a004 / decision commit-reviewed-byte-rule-is-
+// existential-per-path-spent-receipts-record-assigned-paths): the exact set
+// of paths this consumption is accountable for, when the spend was scoped to
+// less than the receipt's full covered territory. A consumption with no
+// `paths` key is a LEGACY record and keeps the all-covered-paths
+// interpretation (receiptAssignedPaths below) — never coerced to `[]`, which
+// would silently unbind an old receipt from everything it attested.
 export function parseConsumption(raw) {
   if (!isEvidenceObject(raw)) return { ok: false };
   if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
   if (typeof raw.consumed_at !== 'string' || raw.consumed_at === '') return { ok: false };
   if (typeof raw.nonce !== 'string' || raw.nonce === '') return { ok: false };
-  return { ok: true, value: { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce } };
+  const value = { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce };
+  if (raw.paths !== undefined) {
+    if (!Array.isArray(raw.paths) || !raw.paths.every((p) => typeof p === 'string')) return { ok: false };
+    value.paths = raw.paths.slice();
+  }
+  return { ok: true, value };
 }
 
 // A3: a missing `basis` on a pre-rebuild v2 entry reads as
@@ -198,10 +221,14 @@ export function parseReceipt(raw) {
   // discharge classes, supersession coverage) branches on these two exact
   // strings, so an unvalidated junk value would fall through whichever
   // branch happens to run last instead of failing loudly at classification.
+  // attribution: 'block' | 'none' | 'union' — 'none' is what H22 writes for
+  // an unattributable or resumed Start since decision 7c515e52 (alongside
+  // attribution_case); 'union' is kept for legacy entries only, since H22
+  // no longer writes it.
   if (!TERRITORY_SOURCES.has(raw.territory.source)) {
     return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'territory.source' } };
   }
-  if (raw.territory.attribution !== 'block' && raw.territory.attribution !== 'union') {
+  if (raw.territory.attribution !== 'block' && raw.territory.attribution !== 'none' && raw.territory.attribution !== 'union') {
     return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'territory.attribution' } };
   }
 
@@ -228,6 +255,31 @@ export function parseReceipt(raw) {
   if (raw.status === 'consumed') {
     const c = parseConsumption(raw.consumption);
     if (!c.ok) return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'consumption' } };
+    // X3 (review round on fix 8590a004): M2's receiptAssignedPaths silently
+    // NARROWS consumption.paths to its intersection with receiptCoveredPaths
+    // — that is the right behaviour for an honest record whose caller passed
+    // a superset by accident, but a paths array that is DUPLICATED (post-
+    // normalization), normalizes to null (traversal/absolute/drive-prefix),
+    // or names a path OUTSIDE this receipt's own covered territory was never
+    // a legitimate assignment at all (every legitimate one is already ⊆
+    // covered, by construction — determineSpend derives it from the overlap).
+    // Fail closed here instead: the whole entry is malformed. `[]` (a
+    // genuinely unscoped spend) has nothing to validate and still parses.
+    if (Array.isArray(c.value.paths) && c.value.paths.length > 0) {
+      const partialReceipt = {
+        territory: { files: raw.territory.files.filter((f) => typeof f === 'string') },
+        content_evidence: contentParsed.value,
+      };
+      const covered = new Set(receiptCoveredPaths(partialReceipt));
+      const seen = new Set();
+      for (const p of c.value.paths) {
+        const n = normalizeReceiptPath(p);
+        if (n === null || !covered.has(n) || seen.has(n)) {
+          return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'consumption.paths', entry_id: raw.entry_id } };
+        }
+        seen.add(n);
+      }
+    }
     consumption = c.value;
   } else if (raw.consumption !== undefined) {
     return { ok: false, code: 'ledger_entry_malformed', facts: { field: 'consumption' } };
@@ -267,6 +319,7 @@ export function parseReceipt(raw) {
       files: raw.territory.files.filter((f) => typeof f === 'string'),
       source: raw.territory.source,
       attribution: raw.territory.attribution,
+      ...(typeof raw.territory.attribution_case === 'string' ? { attribution_case: raw.territory.attribution_case } : {}),
     },
     content_evidence: contentParsed.value,
     disposition,
@@ -379,6 +432,42 @@ export function receiptCoveredPaths(receipt) {
     if (isUsableBlobSha(sha) || absentPaths.has(n)) covered.push(n);
   }
   return covered;
+}
+
+// receiptAssignedPaths — the paths a CONSUMED receipt is accountable for at
+// its consuming commit (fix 8590a004 / decision commit-reviewed-byte-rule-is-
+// existential-per-path-spent-receipts-record-assigned-paths): a scoped spend
+// may credit a receipt for only SOME of its covered paths (it matched path A,
+// was stale on path B, and a different receipt matched B), so every verifier
+// that re-checks a consumed receipt against a tree — commit verification, the
+// --target-sha amend rebind, direct-merge's binding check, the superseded
+// discharge verifier — must check exactly those paths, never every path the
+// receipt merely declared. `consumption.paths` (when present) is that exact
+// set; its ABSENCE is a LEGACY consumption record and keeps the pre-fix
+// all-covered-paths interpretation via receiptCoveredPaths.
+// M2 (review round on fix 8590a004): normalized, deduped, and INTERSECTED
+// with receiptCoveredPaths — every LEGITIMATE assignment is already a subset
+// of covered paths (determineSpend derives it from the matched/waived overlap
+// with the receipt's own covered paths), so the intersection is a pure
+// narrowing with no false negatives. It closes two routes that would
+// otherwise credit a receipt for bytes it never attested: a hand-widened
+// `consumption.paths` naming an undeclared/unbacked path, and a crafted
+// `reservation.index_blobs` (whose keys `reconcile` persists verbatim as
+// consumption.paths, scripts/review-ledger.mjs) naming one. It also makes a
+// traversal path (e.g. '../x', which normalizeReceiptPath refuses to null and
+// drops) shrink the assigned set toward empty rather than silently pass
+// through — the empty-set case is then M1's job in review-trailers.mjs.
+export function receiptAssignedPaths(receipt) {
+  const paths = receipt?.consumption?.paths;
+  if (Array.isArray(paths)) {
+    const covered = new Set(receiptCoveredPaths(receipt));
+    const normalized = paths
+      .filter((p) => typeof p === 'string')
+      .map(normalizeReceiptPath)
+      .filter((n) => n !== null && covered.has(n));
+    return [...new Set(normalized)];
+  }
+  return receiptCoveredPaths(receipt);
 }
 
 // A13/A15: the ONE predicate deciding which staged paths need review

@@ -136,8 +136,12 @@ function agoISO(minutesAgo) {
 
 // Per decision h22-per-block-attribution (5d3747c1): H26 now warns only on
 // entries provably matched to their starting agent's own dispatch block
-// (attribution:'block'); imprecise unions and legacy pre-attribution entries
-// are suppressed. Every fixture in THIS file exercises overlap detection
+// (attribution:'block'); imprecise entries and legacy pre-attribution entries
+// are suppressed. (Since decision 7c515e52 — the dispatch STATE MACHINE, board
+// 5445066b — the imprecise value written at Start is 'none'; the deleted
+// 'union' value no longer exists. H26's own semantics are UNCHANGED: it
+// compares exact 'block' entries only, which is why this file needed no
+// re-cut.) Every fixture in THIS file exercises overlap detection
 // itself (liveness, staleness, path exclusion, path normalization, malformed
 // entries) rather than the attribution mechanism (which is pinned exclusively
 // in scripts/tests/h22-attribution.test.mjs) — so the default here is the

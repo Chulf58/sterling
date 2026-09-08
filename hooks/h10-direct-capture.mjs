@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID3, createHash as createHash2 } from "node:crypto";
+import { randomUUID as randomUUID3, createHash as createHash3 } from "node:crypto";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, writeSync, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
 import { join as join5, basename as basename3 } from "node:path";
@@ -4960,7 +4960,7 @@ var runRecordSchema = external_exports.object({
 var modelEffort = external_exports.object({
   model: external_exports.string(),
   effort: external_exports.enum(["low", "medium", "high", "xhigh"])
-});
+}).strict();
 var successPredicateSchema = external_exports.object({
   output_regex: external_exports.string().optional(),
   output_regex_absent: external_exports.string().optional(),
@@ -5303,9 +5303,42 @@ var configSchema = external_exports.object({
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
   // PreToolUse injection works; Read touches fall back to the queue).
+  // NOT .strict() (review-reverted, config_set decision config-writes-get-a-
+  // config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays
+  // item 1): a first attempt made this object .strict() so config_set's
+  // whole-document validation would refuse an unrecognized delivery leaf.
+  // That is a FORWARD-COMPATIBILITY BRICK with no in-session remedy — ANY
+  // unknown key already sitting in a project's delivery block (a forward-
+  // shipped field, a hand-edit) turns EVERY parseConfig call into a startup
+  // failure of the MCP server itself (server.ts's boot-time parseConfig)
+  // AND an H15 environment-defect deny for every other Bash/store call on
+  // that project, with no config_set available to fix it because the server
+  // never came up to serve the tool. config_set instead membership-checks
+  // the delivery leaf itself (configSetAllowlistVerdict, tools.ts) exactly
+  // as it already does for models.<key> — this schema stays permissive so a
+  // config.json carrying an unmodeled delivery key never bricks anything
+  // that merely READS the file.
   delivery: external_exports.object({
     injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
-    payload_char_cap: external_exports.number().int().positive().default(2400)
+    payload_char_cap: external_exports.number().int().positive().default(2400),
+    // SubagentStart "porch" budget (H19 front-porch, decision
+    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
+    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
+    // additionalContext (plan line + payload) are budgeted so the harness's
+    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
+    // shipped default, 1800, is the MEASURED inline preview on Claude Code
+    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
+    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
+    // non-integer, negative, or non-numeric) falls back to this same default
+    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
+    // mirrors the config-derived-posture-line three-state guard (anti_pattern
+    // e0d280ee) even though this is an internal rendering budget, never a
+    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
+    // is a DIFFERENT case and never reaches this fallback at all: it
+    // suppresses the whole staging payload before this key is ever read, per
+    // the pre-existing shared-fate ruling pinned in
+    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
@@ -5343,7 +5376,25 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Review-ledger tunables (config_set decision config-writes-get-a-config-
+  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
+  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
+  // scripts/hooks/lib/review-ledger-entry.mjs already read
+  // config.review_ledger.stale_days / .code_globs directly off the raw
+  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
+  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
+  // config_set's own allowlist already grants `review_ledger.stale_days`
+  // (decision 1dc3f9aa), that value went through NO schema check at all
+  // before this: a config_set write of a string or a negative number would
+  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
+  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
+  // and unvalidated — this field is `.optional()` with NO `.default({})` so
+  // an absent block still parses to `undefined`, exactly as before this
+  // field existed (no new key is manufactured on an untouched config.json).
+  review_ledger: external_exports.object({
+    stale_days: external_exports.number().int().positive().max(3650).optional()
+  }).passthrough().optional()
 });
 function parseConfig(raw) {
   return configSchema.parse(raw);
@@ -7779,10 +7830,10 @@ function openStore(cwd) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2 } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join as join3, basename as basename2, dirname as dirname3 } from "node:path";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
 var CODES = /* @__PURE__ */ new Set([
@@ -7811,6 +7862,8 @@ var CODES = /* @__PURE__ */ new Set([
   "no_live_territory_disproved",
   "reconcile_no_match",
   "reconcile_ambiguous",
+  "reconcile_nonce_split",
+  "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
   // §1.4 commit-reviewed
@@ -7839,6 +7892,7 @@ var CODES = /* @__PURE__ */ new Set([
   "multi_spend",
   "bytes_waived",
   "legacy_entries_present",
+  "receipt_not_spent_stale_bytes",
   "register_unavailable",
   "dispatch_status_unknown",
   // A9 register/ledger additions
@@ -7862,7 +7916,17 @@ var CODES = /* @__PURE__ */ new Set([
   // ledger entry classification
   "ledger_entry_malformed",
   // A19 (security review): an env override of identity is disclosed, never silent
-  "session_identity_override"
+  "session_identity_override",
+  // dispatch state machine (decision dispatch-state-machine-pre-slot-post-
+  // binding-locked-start-resolution-replaces-transcript-attribution, §2/§5/§6)
+  "dispatch_state_collision",
+  "dispatch_post_late",
+  "dispatch_post_mismatch",
+  "dispatch_post_refused",
+  "dispatch_state_poisoned",
+  "dispatch_unattributable",
+  "dispatch_lock_held",
+  "dispatch_post_only"
 ]);
 function assertCode(code) {
   if (!CODES.has(code)) {
@@ -8089,9 +8153,11 @@ function formatDispatchRef(row) {
   const { entry, status, ageMs } = row;
   return `${entry.agent_type}:${entry.agent_id} (registered ${formatAge(ageMs)}; ${status})`;
 }
+var MAX_PROMPT_BYTES = 512 * 1024;
+var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 
 // scripts/hooks/lib/settlement.mjs
-import { createHash, randomUUID as randomUUID2 } from "node:crypto";
+import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
 import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
@@ -8164,7 +8230,7 @@ function parseTouchesContent(raw) {
 }
 function hashFile(root, rel) {
   try {
-    return createHash("sha256").update(readFileSync3(join4(root, rel))).digest("hex");
+    return createHash2("sha256").update(readFileSync3(join4(root, rel))).digest("hex");
   } catch {
     return void 0;
   }
@@ -8248,7 +8314,7 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync as readdirSync2 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync4(path)) return null;
@@ -8804,7 +8870,7 @@ try {
       return /* @__PURE__ */ new Set();
     }
   })();
-  const dispatchUnknownKey = (row) => createHash2("sha256").update(JSON.stringify([row.entry.agent_id, row.entry.round ?? null, row.entry.at ?? null])).digest("hex");
+  const dispatchUnknownKey = (row) => createHash3("sha256").update(JSON.stringify([row.entry.agent_id, row.entry.round ?? null, row.entry.at ?? null])).digest("hex");
   const pendingDispatchUnknownKeys = [];
   for (const row of bitingUnknown) {
     const key = dispatchUnknownKey(row);
@@ -9167,7 +9233,7 @@ try {
       if (lane === "concept") return "concept_family";
       return "article_demand";
     };
-    const fingerprint = createHash2("sha256").update(
+    const fingerprint = createHash3("sha256").update(
       JSON.stringify({
         remedy_version: REMEDY_VERSION,
         lanes: openLanes,

@@ -605,6 +605,20 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
   );
 
   server.registerTool(
+    'config_set',
+    {
+      description:
+        "CONDUCTOR-RUN: config_set is not granted to any roster agent by design (this server authenticates no caller, so keeping it off every agent-template grant is what keeps posture knobs and review_ledger.stale_days out of subagent reach). The sanctioned in-session route to flip an ALLOWLISTED .sterling/config.json setting (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays) — H15's structured-write arm denies every raw Edit/Write into .sterling/ regardless of tool, and that denial STAYS; this tool is the one carve-out, narrowed to a positive allowlist of tunable keys (see CONFIG_SET_ALLOWLIST beside SterlingTools.configSet in tools.ts: models.<key>, tdd.enabled, mutation_verification.enabled, sparring_partner.enabled, sparring_partner.model, delegation.max_concurrent, maintenance_queue.deep_threshold, delivery.<key>, dispatch_register.stale_minutes, review_ledger.stale_days). Everything else — store_guard.*, toolchains.*, machine_role, backup_path, store_authority, review_ledger.code_globs, any unknown key — is REFUSED naming the path and the allowlist; an unrecognized leaf INSIDE an allowlisted family (e.g. delivery.typo) is refused separately, by the known keys for that family, never worded as an allowlist violation. `path` is a dotted key (e.g. 'tdd.enabled'); `value` is REQUIRED (an omitted value would delete the key). `expected_digest` is an optional CAS token (sha256 hex of the current config.json bytes) — a stale token refuses naming both digests, nothing written; PASS IT to avoid a last-rename-wins loss against a concurrent writer (e.g. the TUI's own config-writeback) — this call also re-checks the on-disk digest immediately before its own rename and refuses on any change even when expected_digest was omitted, though the sliver of time between that re-check and the rename itself is not covered (rename() is atomic for visibility, not for comparison). Reads/writes ONLY the active project's canonical .sterling/config.json (no path argument — a foreign project is unreachable by construction); a symlinked or non-regular config.json is refused (including a dangling symlink, and a symlinked .sterling directory itself). The whole resulting document is validated against the canonical config schema before anything is written; unrelated keys are byte-preserved, but the file is always RE-SERIALIZED as 2-space LF JSON — a CRLF or 4-space source is reformatted whole, and a leading UTF-8 BOM is stripped on read rather than treated as corruption. Returns {path, previous_value, value, digest} — digest is the NEW sha256, usable as the next call's expected_digest.",
+      inputSchema: strict({
+        path: z.string(),
+        value: z.unknown().refine((v) => v !== undefined, { message: "'value' is required" }),
+        expected_digest: z.string().optional(),
+      }),
+    },
+    ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest }))
+  );
+
+  server.registerTool(
     'run_state',
     {
       description: 'Current run record — the conductor source of truth for run state (re-read after compaction; never trust recall).',

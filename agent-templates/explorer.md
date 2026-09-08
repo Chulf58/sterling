@@ -35,6 +35,7 @@ Exactly the required-inputs manifest.
 3. Bound the map: name what you did NOT explore and why it's out of reach.
 4. Cite file:line for every load-bearing claim.
 5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+6. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 

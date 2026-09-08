@@ -57,8 +57,15 @@ expectations are written by hand, here.
 
 ## The arms, and why each one is here
 
-- **probe-001 (positive)** — governed subject, delivery expected. Answers "does it
-  fire when it should".
+- **probe-004-agent-positive-h15-cluster (positive)** — governed subject, delivery
+  expected. Answers "does it fire when it should". Replaces the original
+  probe-001-agent-positive (2026-09-08, decision
+  h20-specificity-rebuild-not-fourth-patch-structural-fixes-now-red-probes-frozen):
+  the H15 realpath/provenance cluster it targets grew after the probe was
+  written, so its `expected_ids` were stale — see the probe's own `note` for
+  which ids were added and why, and why b60b5cc5 is asserted ABSENT rather
+  than simply omitted (it is the pin for the REVIEW-TERRITORY-line-stripping
+  fix, not a genuine subject match).
 - **probe-002 (deny)** — a first-attempt question whose subject the deny-once
   ruling itself settles. Answers "does the one blocking surface still block", and
   exercises the no-prompt `questions[]`/options shape.

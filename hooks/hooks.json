@@ -53,7 +53,8 @@
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h20-mechanism-axis.mjs\"" },
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h25-dispatch-capability.mjs\"" },
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h26-dispatch-overlap.mjs\"" },
-          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h27-dispatch-signatures.mjs\"" }
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h27-dispatch-signatures.mjs\"" },
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" }
         ]
       },
       {
@@ -98,6 +99,12 @@
         "hooks": [{ "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h16-event-register.mjs\"" }]
       },
       {
+        "matcher": "Task|Agent",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" }
+        ]
+      },
+      {
         "matcher": "Bash|PowerShell",
         "hooks": [
           { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h19-bash-delivery.mjs\"" },
@@ -118,6 +125,12 @@
       }
     ],
     "PostToolUseFailure": [
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          { "type": "command", "command": "node --disable-warning=ExperimentalWarning \"${CLAUDE_PLUGIN_ROOT}/hooks/h22-dispatch-register.mjs\"" }
+        ]
+      },
       {
         "matcher": "mcp__codex__codex|mcp__codex__codex-reply",
         "hooks": [

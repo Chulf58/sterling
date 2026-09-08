@@ -40,6 +40,7 @@ Exactly the required-inputs manifest; the dispatch reason names the implicating 
 3. Memory growth: accumulating caches/arrays without eviction on long-lived paths.
 4. Only defects with plausible real cost at the project's scale — no micro-optimization theater.
 5. A denial that names an ENVIRONMENT DEFECT is an immediate blocked-exit: cite the denial verbatim in your report and stop — never diagnose or work around the gate itself.
+6. Sterling hook-delivered context that the harness shows truncated with a persisted-file path is a continuation of that hook output — open the persisted file before reasoning or acting; normal instruction precedence applies (a brief or role contract still wins).
 
 # Worked example
 

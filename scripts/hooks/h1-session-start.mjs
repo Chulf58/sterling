@@ -24,7 +24,7 @@ import {
   sanitizeForContext as planLockClean,
 } from './lib/plan-lock.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
-import { withRegisterLock, readRegister, registerPath } from '../lib/dispatch-register.mjs';
+import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } from '../lib/dispatch-register.mjs';
 import { classifyLedgerEntry, readLedger } from './lib/review-ledger-entry.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
@@ -59,6 +59,22 @@ async function deleteRegisterUnderLock(cwd) {
     await withRegisterLock(
       cwd,
       () => {
+        // DISPATCH-STATE SESSION-BOUNDARY SWEEP RUNS FIRST (X3, Codex review;
+        // decision dispatch-state-machine-pre-slot-post-binding-locked-start-
+        // resolution-replaces-transcript-attribution §4b), inside this SAME
+        // lock hold — one lock for register AND dispatch state. ORDER is
+        // load-bearing: a crash AFTER the sweep but before the register
+        // delete leaves only the sweep's conservative, already-terminalized
+        // state on disk (harmless); the REVERSE order would leave the
+        // register gone but dispatch-state records still looking live with no
+        // register evidence to explain them. Every non-terminal record
+        // becomes terminal {reason:'session-boundary'}; tombstones older than
+        // 7 days are pruned. A lock failure (caught below) leaves this
+        // unattempted too — the existing posture, unchanged.
+        const sweep = sessionBoundarySweep(cwd, { now: Date.now() });
+        if (sweep.refused) {
+          process.stderr.write(`${sweep.refused}\n`);
+        }
         rmSync(registerPath(cwd), { force: true });
         // Orphaned atomic-write staging files (a crash between write and rename
         // in H22/H10) die at the same boundary (P4). Derived from the SAME
@@ -635,12 +651,13 @@ if (!store) {
   // (config.json present, per H22's widened gate) but no sterling.db yet
   // must still get it HERE, on this early exit, or its register accumulates
   // forever and every startup re-reports the same residue without ever
-  // wiping. Gated to startup|clear only, mirroring
-  // computeH1DeadDispatchResidue's own gate above — resume/compact stay
-  // untouched on this branch too, same as the store-present path below.
-  if (input.source === 'startup' || input.source === 'clear') {
-    await deleteRegisterUnderLock(input.cwd);
-  }
+  // wiping. UNCONDITIONAL (C6, correctness review) — this now matches the
+  // store-present call site below EXACTLY: decision ec9eacaa deletes the
+  // in-flight dispatch register on EVERY source, resume included (an entry
+  // can only ever defer a duty on behalf of an agent this NEW session cannot
+  // observe), so a source-gated call here disagreed with that same-file
+  // ruling for a project whose store had not been initialized yet.
+  await deleteRegisterUnderLock(input.cwd);
   allow(); // not a Sterling project — no further ceremony (P1)
 }
 
