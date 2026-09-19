@@ -574,15 +574,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     ({ reason, lane }) => json(tools.noCapture(reason, lane))
   );
 
-  server.registerTool(
-    'enforcement_reconcile',
-    {
-      description:
-        "Run the enforcement taint clearer (scripts/enforcement-reconcile.mjs) — the only sanctioned removal path for H17's (B) surface taint latch, and the only way to mint the persistent (B) baseline list (decision b-baseline-hash-list-concrete-design, D2/D5). Default (adopt:false) is VERIFY: it clears the latch only on an exact match against the existing baseline list PLUS a clean tracked (A) enforcement surface, and refuses — latch intact — on any delta, any (A) dirt, a missing list, or any abnormal shape. adopt:true is the explicit human-acceptance operation: it re-mints the baseline from the current surface (the sanctioned discharge after a legitimate (B) change — a TUI config edit, sync-agents, init) and names (A) dirt loudly. Run it with agents QUIESCED; the returned {cleared, reason} is the module's own verdict, verbatim. THIS IS A FRONT DOOR, NOT AN AUTHORITY BOUNDARY, and the distinction is the ruling (fe861066's honesty clause): this server has no authenticated caller identity, an agent whose frontmatter omits `tools:` receives all mounted tools, and any caller able to run Node under this UID can import the module and self-assert callerRole. That no agent template grants this tool (pinned by AC-R11) is DISTRIBUTION POLICY only. 'Only the conductor can clear' is NOT claimed as a mechanical property — what this tool removes is the friction of the alternative (a raw `node -e \"import(...)\"`, the exact shape H15 denies), not an attacker's capability. DISCLOSED CHANNEL CHANGE (roster security review, 2026-09-06): H17's latch is registered on BASH in agent frontmatter and does not gate an agent's MCP, Edit, Write or Task calls, so the predecessor route sat INSIDE the latch's own denial perimeter — an agent that tripped the latch had its clearing route denied by the very latch it tripped — while this tool does not. No shipped agent template grants it, and the two Bash-bearing roster agents have Bash denied while the latch stands; the reachable case is a caller outside the roster (an all-tools dispatch whose frontmatter omits `tools:`, or direct Node import). Since adopt:true re-mints from the current surface in one pass with no diff against the prior list, that caller's tamper-then-clear is a single call. This is disclosure, not a claim of containment.",
-      inputSchema: strict({ adopt: z.boolean().default(false) }),
-    },
-    async ({ adopt }) => json(await tools.enforcementReconcile(adopt))
-  );
+  // enforcement_reconcile was removed together with H17 (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — see tools.ts.
 
   server.registerTool(
     'concept_designed',
@@ -618,43 +611,9 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest }))
   );
 
-  server.registerTool(
-    'run_state',
-    {
-      description: 'Current run record — the conductor source of truth for run state (re-read after compaction; never trust recall).',
-      inputSchema: strict({ run_id: z.string().optional() }),
-    },
-    ({ run_id }) => json(tools.runState(run_id))
-  );
-
-  server.registerTool(
-    'agent_exit',
-    {
-      description:
-        'The exit wire (never prose): record your typed exit signal + payload before finishing. Signals: complete{handoff_ref} | research-needed{question,context,blocking} | review-unresolved | blocked{reason} | tests-invalid{evidence} | contract-violated{path,rule} | bug-found{description,location,depends_on_current_work,workaround_built} | phase-overflow{agent,fill_pct}. agent-died is conductor-reported, never agent-emitted. Invalid signal or payload is rejected — correct and re-call.',
-      inputSchema: strict({
-        run_id: z.string().optional(),
-        phase_id: z.string(),
-        agent_role: z.string(),
-        signal: z.string(),
-        payload: passthrough.optional(),
-      }),
-    },
-    (args) => json(tools.agentExit(args))
-  );
-
-  server.registerTool(
-    'run_signal',
-    {
-      description:
-        "The brain: computes the reaction to the recorded exit and returns the next action; the conductor executes exactly that. Routing (§5.2): abnormal exits come here immediately; normal 'complete' only at the PHASE BOUNDARY — intra-phase completes are consumed via scripts/consume-exit.mjs as the next §8.1 step, never signalled here.",
-      inputSchema: strict({
-        run_id: z.string().optional(),
-        exit: strict({ signal: z.string(), payload: passthrough.optional(), phase_id: z.string().optional(), agent_role: z.string().optional() }).optional(),
-      }),
-    },
-    (args) => json(tools.runSignal(args))
-  );
+  // run_state / agent_exit / run_signal — the staged pipeline's run protocol
+  // — were removed (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1). See tools.ts.
 
   server.registerTool(
     'knowledge_link',
@@ -685,14 +644,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     }
   );
 
-  server.registerTool(
-    'run_escalate',
-    {
-      description: 'Surface a judgment branch / typed escalation onto the active run record.',
-      inputSchema: strict({ payload: passthrough }),
-    },
-    ({ payload }) => json(tools.runEscalate(payload))
-  );
+  // run_escalate was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
   // maintenance_enqueue is deliberately NOT wire-registered (decision
   // 6269b714, todo-stays-one-type…keep): system items are minted only by
@@ -720,23 +673,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     (args) => json(tools.maintenanceQueryResult(args))
   );
 
-  server.registerTool(
-    'handoff_write',
-    {
-      description: 'Write your phase handoff (schema-validated). Run-scoped transient state — never enters the durable store.',
-      inputSchema: strict({ run_id: z.string().optional(), handoff: passthrough }),
-    },
-    (args) => json(tools.handoffWrite(args))
-  );
-
-  server.registerTool(
-    'handoff_read',
-    {
-      description: 'Read handoffs for a phase, or those touching the given files.',
-      inputSchema: strict({ run_id: z.string().optional(), phase_id: z.string().optional(), files: z.array(z.string()).optional() }),
-    },
-    (args) => json(tools.handoffRead(args))
-  );
+  // handoff_write / handoff_read were removed with the staged pipeline
+  // (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
   return { server, store, tools };
 }

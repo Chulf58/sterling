@@ -19,8 +19,10 @@
 //
 // IMPLEMENTED 2026-08-25 (board d5942fa0): assertLiveSchemaVersion re-reads
 // PRAGMA user_version inside tx()'s BEGIN IMMEDIATE (post-lock, closing the
-// check-then-act TOCTOU); the 3 autocommit writers writeHandoff/writeSelection/
-// recordCheckSkipped are wrapped in tx() to inherit it. All five pins below are
+// check-then-act TOCTOU); autocommit writers including writeSelection/
+// recordCheckSkipped are wrapped in tx() to inherit it (writeHandoff was a
+// third such writer until the staged pipeline's removal per decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1). All five pins below are
 // GREEN. Their ORIGINAL red-before-green roles, kept for provenance:
 //   - B1 (control): passes for the OPPOSITE reason to B2 — a live write with no
 //     version drift succeeds — ruling out "this store just throws on every
