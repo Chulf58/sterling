@@ -62,7 +62,7 @@ Your final text IS the deliverable — the conductor consumes it directly. Repor
 
 # Exit signals it may emit
 
-You are a CONDUCTOR-DIRECT agent: you hold no `agent_exit` tool, and the drain SOP runs outside a pipeline run (where `agent_exit`/`handoff_write` are refused with `no active run`). Report these as the first line of your final text instead of emitting them:
+You are a conductor-direct agent. Report these as the first line of your final text:
 
 - `complete` {summary} — drain done, queue state reported.
 - `blocked` {reason} — work order unusable (missing ids, truncated history draft).

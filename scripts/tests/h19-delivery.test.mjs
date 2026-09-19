@@ -62,39 +62,11 @@ function article(slug, paths, extra = {}) {
   };
 }
 
-function makeProject({ rung = 'prompt', withRun = false } = {}) {
+function makeProject({ rung = 'prompt' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h19-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: rung } }));
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
-  if (withRun) {
-    const brief = store.create({
-      ...envelope('brief'),
-      slug: 'f',
-      title: 'F',
-      problem: 'p',
-      feature: 'f',
-      user_stated: { criteria: [], constraints: [] },
-      conductor_proposals: [],
-      acceptance_criteria: [{ ac_id: 'AC1', text: 'works', verifiable_at: 'final' }],
-      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
-      blast_radius: { files: [{ path: 'src/a.mjs', owning_articles: [] }], reconcile_list: [] },
-      incidental_scope: [],
-      out_of_scope: [],
-      phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
-      decisions_made: [],
-    });
-    store.createRun({
-      id: 'r-h19',
-      brief_ref: brief.id,
-      branch: 'sterling/run-r-h19',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: NOW,
-    });
-  }
   const cleanup = () => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -270,18 +242,6 @@ test('one-hop pointers: relied_by is DERIVED — a sibling naming this article i
   }
 });
 
-test('pipeline (AC6): active run silences agents (prep staged their pack) but not the conductor', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs', { agent_id: 'a123' }), dir);
-    assert.equal(pendingOf(dir).length, 0);
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1);
-  } finally {
-    cleanup();
-  }
-});
 
 test('per-agent guards (rung read): a subagent gets its own injection even after the conductor was served', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });

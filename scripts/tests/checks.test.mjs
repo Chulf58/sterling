@@ -61,7 +61,7 @@ test('spawn-contract check: required-inputs manifest must be in frontmatter (§7
 });
 
 test('skill linter: flags stale file references, accepts live ones', () => {
-  assert.deepEqual(lintSkill('Run scripts/dispose-run.mjs then check templates/default-config.json.', 's', root), []);
+  assert.deepEqual(lintSkill('Run scripts/init.mjs then check templates/default-config.json.', 's', root), []);
   const stale = lintSkill('See scripts/does-not-exist.mjs for details.', 'debug/SKILL.md', root);
   assert.deepEqual(stale.map((v) => v.kind), ['stale_file_reference']);
   // R2 72807b1f: the grammar covers skills/ + commands/ prefixes (cross-skill
@@ -431,7 +431,7 @@ test('all day-one check scripts pass on the current repo (empty sets pass — in
   // tree invariant). check-projection-fresh stays gate-bound only (direct-merge
   // runs the full battery, R2 2e443375): the projection legitimately lags the
   // store mid-work, so it is a pre-merge duty, not a test invariant.
-  for (const script of ['check-agent-registry.mjs', 'check-totality.mjs', 'check-spawn-contracts.mjs', 'check-agent-prompts.mjs', 'check-skills.mjs', 'check-bundles-fresh.mjs']) {
+  for (const script of ['check-agent-registry.mjs', 'check-spawn-contracts.mjs', 'check-agent-prompts.mjs', 'check-skills.mjs', 'check-bundles-fresh.mjs']) {
     const r = spawnSync(process.execPath, [join(root, 'scripts', script)], { encoding: 'utf8', cwd: root, timeout: 120_000 });
     assert.equal(r.status, 0, `${script}: ${r.stderr}`);
   }

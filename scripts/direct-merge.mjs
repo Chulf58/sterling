@@ -22,8 +22,9 @@ import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
-const { store, config } = openProject(target);
-store.close();
+// Pre-merge preflight: openProject fails loud on a missing store or malformed
+// config BEFORE anything lands (see the post-merge note below).
+openProject(target).store.close();
 
 const into = arg('--into') ?? defaultBranch(target);
 const branch = arg('--branch') ?? currentBranch(target);

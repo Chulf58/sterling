@@ -19,7 +19,7 @@
 // tests (all pipeline-only or deleted), and completeness-check.mjs /
 // subtask-evidence tests (completeness-check.mjs deleted with this slice).
 //
-// Every fixture below is RUN-INDEPENDENT (no store.createRun, no run id) —
+// Every fixture below is independent of retired pipeline state —
 // the old pipeline.test.mjs's own makeGitProjectNoRun/runDirectMerge helpers
 // already avoided the run concept for every one of these tests; they are
 // reproduced here under this file's own name per this project's existing
@@ -27,15 +27,8 @@
 // rather than import it — those files export nothing, test files are not
 // designed as modules).
 //
-// KNOWN CROSS-SLICE DEPENDENCY: as of this write, scripts/direct-merge.mjs:34
-// still calls the now-deleted store.getRun() (an active-run gate the staged
-// pipeline's removal makes meaningless) — that line is group C's territory
-// (scripts/direct-merge.mjs was explicitly excluded from this slice) and its
-// removal is already flagged in this slice's report. Until that lands, every
-// test below that spawns direct-merge.mjs will fail with "store.getRun is
-// not a function", NOT because of anything wrong with branch-manager.mjs or
-// this test file — the branch-manager-only test (the first one) has no such
-// dependency and passes today.
+// direct-merge's preflight closes its project store before merging; its tests
+// below therefore run against the same no-run fixture as the branch helpers.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

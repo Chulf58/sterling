@@ -75,47 +75,11 @@ const CONFIG = {
   context_watch: { warn_pct: 60, block_pct: 95, mode: 'observe', windows: { default: 200000 } },
 };
 
-function makeProject({ withRun = false, config = CONFIG } = {}) {
+function makeProject({ config = CONFIG } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-enf-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   if (config) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
-  let run;
-  let brief;
-  if (withRun) {
-    brief = store.create({
-      ...envelope('brief'),
-      slug: 'feat',
-      title: 'Feature',
-      problem: 'p',
-      feature: 'f',
-      user_stated: { criteria: [], constraints: [] },
-      conductor_proposals: [],
-      acceptance_criteria: [{ ac_id: 'AC1', text: 'works end to end', verifiable_at: 'final' }],
-      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
-      blast_radius: {
-        files: [
-          { path: 'src/feature.ts', owning_articles: [] },
-          { path: 'src/new-file.ts', owning_articles: [] },
-        ],
-        reconcile_list: [],
-      },
-      incidental_scope: ['src/types.ts'],
-      out_of_scope: ['src/legacy/**'],
-      phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
-      decisions_made: [],
-    });
-    run = store.createRun({
-      id: 'r-1',
-      brief_ref: brief.id,
-      branch: 'sterling/run-r-1',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: NOW,
-    });
-  }
   // physical files so edit-vs-creation is distinguishable
   mkdirSync(join(dir, 'src'), { recursive: true });
   writeFileSync(join(dir, 'src', 'feature.ts'), 'export const x = 1;');
@@ -124,7 +88,7 @@ function makeProject({ withRun = false, config = CONFIG } = {}) {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, store, run, brief, cleanup };
+  return { dir, store, cleanup };
 }
 
 function hookInput(dir, over = {}) {
@@ -408,8 +372,8 @@ test('node adapter static_wiring: a same-module caller wires an export even when
     rmSync(dir, { recursive: true, force: true });
   }
 });
-test("H19 delivery-drain: pruneUnhashed targets ONLY the conductor ledger — an AGENT/run ledger's hashless entry survives untouched", () => {
-  const { dir, cleanup } = makeProject({ withRun: true });
+test('H19 delivery-drain: pruneUnhashed targets ONLY the conductor ledger', () => {
+  const { dir, cleanup } = makeProject();
   try {
     const conductorLedger = join(dir, '.sterling', 'transient', 'conductor-reads.json');
     mkdirSync(dirname(conductorLedger), { recursive: true });
@@ -420,11 +384,6 @@ test("H19 delivery-drain: pruneUnhashed targets ONLY the conductor ledger — an
         { agent_id: 'conductor', path: 'src/feature.ts', at: NOW, sha256: 'deadbeef' },
       ])
     );
-    // an AGENT/run ledger with its OWN hashless entry, seeded via the same
-    // helper h13-reads-ledger's tests use for the run-scoped path.
-    const agentLedger = seedLedger(dir, 'r-1', 'a1', ['src/agent-legacy-read.ts']);
-    const agentBefore = readFileSync(agentLedger, 'utf8');
-
     const r = runHook('h19-delivery-drain.mjs', hookInput(dir, { hook_event_name: 'UserPromptSubmit' }), dir);
     assert.equal(r.code, 0, oneLine(r.stderr));
 
@@ -432,16 +391,6 @@ test("H19 delivery-drain: pruneUnhashed targets ONLY the conductor ledger — an
     assert.ok(!conductorAfter.some((e) => e.path === 'src/legacy-read.ts'), 'the hashless CONDUCTOR entry is pruned');
     assert.ok(conductorAfter.some((e) => e.path === 'src/feature.ts'), 'the hashed CONDUCTOR entry survives');
 
-    assert.equal(
-      readFileSync(agentLedger, 'utf8'),
-      agentBefore,
-      "the AGENT/run ledger is byte-identical — untouched by the conductor-scoped prune"
-    );
-    const agentAfter = JSON.parse(readFileSync(agentLedger, 'utf8'));
-    assert.ok(
-      agentAfter.some((e) => e.path === 'src/agent-legacy-read.ts'),
-      "the agent ledger's own hashless entry survives — this hook never targets it"
-    );
   } finally {
     cleanup();
   }

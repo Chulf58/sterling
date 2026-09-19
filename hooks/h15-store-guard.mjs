@@ -4605,75 +4605,6 @@ var AGENT_MODEL_KEY = {
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4690,79 +4621,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -4862,30 +4720,16 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
@@ -4897,11 +4741,7 @@ var configSchema = external_exports.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: external_exports.object({
     min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
+    max_dispatches: external_exports.number().int().nonnegative().default(0)
   }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
@@ -4926,11 +4766,7 @@ var configSchema = external_exports.object({
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
     coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -4939,25 +4775,6 @@ var configSchema = external_exports.object({
     // (P8); debugger is root-cause judgment — high effort.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5052,39 +4869,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5185,25 +4969,7 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 
 // packages/schemas/dist/registry.js

@@ -81,45 +81,16 @@ const CONFIG = {
   context_watch: { windows: { default: 200_000, 'claude-fable-5': 200_000 } },
 };
 
-function makeProject({ withRun = false } = {}) {
+function makeProject() {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h5-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
-  let run;
-  if (withRun) {
-    const brief = store.create({
-      ...envelope('brief'),
-      slug: 'f',
-      title: 'F',
-      problem: 'p',
-      feature: 'f',
-      user_stated: { criteria: [], constraints: [] },
-      conductor_proposals: [],
-      acceptance_criteria: [{ ac_id: 'AC1', text: 'works', verifiable_at: 'final' }],
-      technical_design: { approach: 'a', interfaces: [], shared_structures: [] },
-      blast_radius: { files: [{ path: 'src/a.mjs', owning_articles: [] }], reconcile_list: [] },
-      incidental_scope: [],
-      out_of_scope: [],
-      phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
-      decisions_made: [],
-    });
-    run = store.createRun({
-      id: 'r-h5',
-      brief_ref: brief.id,
-      branch: 'sterling/run-r-h5',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: NOW,
-    });
-  }
   const cleanup = () => {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, store, run, cleanup };
+  return { dir, store, cleanup };
 }
 
 function hookInput(dir, over = {}) {

@@ -162,18 +162,6 @@ export function openMounted(cwd = process.cwd()) {
   return { cwd, store: new MountedStores(dbPath, resolveDomainMounts(config)), config };
 }
 
-export function requireRun(store, runId) {
-  const run = store.getRun(runId);
-  if (!run) fail(runId ? `no run '${runId}'` : 'no active run');
-  return run;
-}
-
-export function requireBrief(store, run) {
-  const brief = store.get(run.brief_ref);
-  if (!brief || brief.type !== 'brief') fail(`brief '${run.brief_ref}' not found for run '${run.id}'`);
-  return brief;
-}
-
 // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
 // helper-one-arg-parser, R5): the shared run-directory path builder — used by
 // dispose-run.mjs (THE gate for deleting runs/<id>/, rmSync'd there) and

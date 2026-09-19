@@ -3,7 +3,7 @@ name: researcher
 description: Bounded online research answering exactly one specific question, under a capped budget. Output is captured as a research_finding with both clocks.
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: WebSearch, WebFetch, Read, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_create, mcp__plugin_sterling_sterling__knowledge_create, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
+tools: WebSearch, WebFetch, Read, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_create, mcp__plugin_sterling_sterling__knowledge_create
 required_inputs:
   - the single question (verbatim)
   - context (why it blocks, what decision it feeds)
@@ -32,9 +32,7 @@ Question: "Is the platform rate limit per-org or per-token?" Good answer: "Per-o
 
 # Output contract
 
-Write the finding via `knowledge_create` (research_finding — both clocks mandatory), then `handoff_write` (role researcher; finding id in `decisions_made`), then `agent_exit`.
-
-PRE-RUN DISPATCH (planning-time research, before a run exists): `handoff_write`/`agent_exit` are run-scoped and the server refuses them with `run_state: no active run` — do not retry refused calls; `knowledge_create` still works and remains mandatory; deliver the finding id in your final message text instead (decision 98064d77).
+Write the finding via `knowledge_create` (research_finding — both clocks mandatory), then give its id and evidence in your final message text.
 
 # Scope boundaries (negatives)
 
@@ -43,9 +41,4 @@ PRE-RUN DISPATCH (planning-time research, before a run exists): `handoff_write`/
 
 # Exit signals it may emit
 
-If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
-
-- `complete` `{handoff_ref}` — finding captured.
-- `blocked` `{reason}` — unanswerable within budget; partial evidence recorded.
-
-Exactly one via `agent_exit`; `agent-died` is never yours to emit.
+Make your final text the complete deliverable. Start it with either `complete` and the finding id, or `blocked` and the reason it remains unanswerable within budget.

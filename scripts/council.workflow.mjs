@@ -13,7 +13,7 @@ export const meta = {
 // Sterling's first Workflow-tool script. Hats are EPHEMERAL prompts riding the
 // registered explorer agent (Read/Grep/Glob + knowledge_query/knowledge_get;
 // no Bash, no Edit/Write — but the grant DOES include the run-scoped
-// handoff_write/agent_exit, decision 4ca6d43f: the hats' prompts forbid them
+// persistent mutation, decision 4ca6d43f: the hats' prompts forbid it
 // and the SOP's no-active-run guard keeps them inert) — never roster members;
 // invariant 3 does not bind them (same category as the platform's unregistered
 // agents).
@@ -126,7 +126,7 @@ function preamble(hat, roundName) {
     `This is the ${roundName} round of three (blind → rebut → converge); a blue synthesis follows. Stay strictly on your own concern — the other hats cover the rest.`,
     '',
     'GROUND RULES:',
-    '- READ-ONLY, TRANSIENT: never create, update, or remove any record or file. Do NOT call handoff_write or agent_exit — no pipeline run is active and they will be refused; your structured output is your only deliverable.',
+    '- READ-ONLY, TRANSIENT: never create, update, or remove any record or file. Your structured output is your only deliverable.',
     '- If answering well would need EXTERNAL/web research: do not guess, do not chase it — surface the question in research_needed.',
     '- LENGTH DISCIPLINE: keep position under 3500 characters — sharpest points only. Long structured outputs fail in transport (verified 2026-07-19, board 99b0c04d); an over-long position risks losing your entire round.',
   ]

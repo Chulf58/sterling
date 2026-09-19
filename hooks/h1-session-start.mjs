@@ -6,10 +6,9 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash as createHash4 } from "node:crypto";
-import { readFileSync as readFileSync4, existsSync as existsSync6, mkdirSync as mkdirSync6, readdirSync as readdirSync3, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync4, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync as readFileSync4, existsSync as existsSync6, mkdirSync as mkdirSync6, readdirSync as readdirSync3, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync4, rmSync as rmSync2 } from "node:fs";
 import { spawnSync as spawnSync3 } from "node:child_process";
-import { tmpdir } from "node:os";
 import { basename as basename3, dirname as dirname6, join as join7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -4775,75 +4774,6 @@ function validateRecord(input2) {
 }
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4860,79 +4790,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -5547,7 +5404,6 @@ var SchemaMigrationRequiredError = class extends Error {
     this.db_path = dbPath;
   }
 };
-var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
   const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
@@ -7098,223 +6954,17 @@ var SterlingStore = class _SterlingStore {
     this.db.close();
   }
   // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
   // -------------------------------------------------------------------------
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input2) {
-    const run = runRecordSchema.parse(input2);
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-      }
-      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-  /** By id, or the single active run when no id is given. */
-  getRun(id) {
-    const row = id ? this.db.prepare("SELECT body FROM runs WHERE id = ?").get(id) : this.db.prepare(`SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).get(...ACTIVE_STATES);
-    return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
-  }
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  static parsePendingQueue(raw) {
-    if (!raw)
-      return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-  static serializePendingQueue(queue) {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed, next) {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-    });
-    return run;
-  }
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed, runId, mutate, attempts = 5) {
-    this.assertWritable("casTransitionMerge");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`casTransitionMerge: no run '${runId}'`);
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      if (row.machine_state !== observed) {
-        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body));
-      const next = runRecordSchema.parse(mutate(current));
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId, exit) {
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = _SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(`recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? "unknown"} on phase '${dup.phase_id ?? "?"}' ('${dup.signal}') \u2014 one exit per dispatched agent; call run_signal (or consume-exit) first`);
-      }
-      this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(_SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId) {
-    const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-    if (!row)
-      throw new Error(`getPendingExit: no run '${runId}'`);
-    return _SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId, input2, at) {
-    this.assertWritable("writeHandoff");
-    const handoff = handoffSchema.parse(input2);
-    if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    this.tx(() => {
-      this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-  readHandoffs(runId, filter = {}) {
-    const rows = filter.phase_id ? this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at").all(runId, filter.phase_id) : this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at").all(runId);
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId, mutate, attempts = 5) {
-    this.assertWritable("updateRunOptimistic");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const current = JSON.parse(row.body);
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
-      }
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId, entry) {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId, articleId) {
-    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
-  }
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId, amendment) {
-    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
-  }
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId, phaseId, items) {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId, agentType) {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
-    }));
-    return next.dispatch_counts[agentType];
-  }
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
    * transactionally — read + delete in one transaction, never a signal file (P4).
@@ -7391,54 +7041,12 @@ var SterlingStore = class _SterlingStore {
     });
     return this.hydrateAll([stored])[0];
   }
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId, summaries) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "completing") {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
-    this.tx(() => {
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
-      if (res.changes === 0)
-        throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-    return next;
-  }
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.assertWritable("recordCheckSkipped");
@@ -9244,32 +8852,6 @@ var dispatchResidueContext = dispatchResidueLines.length ? `
 DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).` + (input.source === "clear" ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear \u2014 cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.` : "") + `
 ` + dispatchResidueLines.join("\n") : "";
 await deleteRegisterUnderLock(input.cwd);
-var PERCALL_TMP_TTL_MS = 60 * 60 * 1e3;
-var PERCALL_TMP_SWEEP_CAP = 500;
-try {
-  let tagRoot = input.cwd;
-  try {
-    tagRoot = realpathSync2(input.cwd);
-  } catch {
-  }
-  const projectTag = createHash4("sha256").update(tagRoot).digest("hex").slice(0, 16);
-  const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
-  const tmp = tmpdir();
-  const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
-  let removed = 0;
-  for (const name of readdirSync3(tmp)) {
-    if (removed >= PERCALL_TMP_SWEEP_CAP) break;
-    if (!percallRe.test(name)) continue;
-    const p = join7(tmp, name);
-    try {
-      if (statSync4(p).mtimeMs >= cutoff) continue;
-      rmSync2(p, { force: true });
-      removed++;
-    } catch {
-    }
-  }
-} catch {
-}
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {

@@ -56,7 +56,6 @@ test('tool-grant linter: the shipped roster is clean, and it catches every failu
 
   // the registered surface is derived from server.ts, not duplicated
   assert.ok(registeredTools.has('knowledge_query'), 'knowledge_query is a registered tool');
-  assert.ok(registeredTools.has('agent_exit'), 'agent_exit is a registered tool');
   assert.ok(!registeredTools.has('knowledge_frobnicate'), 'a made-up name is not registered');
 
   // every shipped template passes
@@ -149,12 +148,8 @@ test('skills ship with live file references and pass the skill linter', () => {
   const skills = collectSkills(join(root, 'skills'));
   assert.deepEqual(skills.map((s) => s.file).sort(), [
     'cleanup/SKILL.md',
-    'council/SKILL.md',
     'debug/SKILL.md',
     'drain/SKILL.md',
-    'grill-intent/SKILL.md',
-    'grill-plan/SKILL.md',
-    'planning/SKILL.md',
   ]);
   for (const s of skills) assert.deepEqual(lintSkill(s.content, s.file, root), []);
   assert.ok(existsSync(join(root, 'skills', 'debug', 'SKILL.md')));
@@ -167,4 +162,3 @@ test('skills ship with live file references and pass the skill linter', () => {
 // tracks the shipped file. The existing linter test above keeps dead-term + prompt
 // -section linters green across all templates.
 // ---------------------------------------------------------------------------
-

@@ -3,7 +3,7 @@ name: explorer
 description: Codebase exploration and blast-radius mapping. Consults articles first, code second. Its map can register as the debug-scope contract (H3).
 model: {{MODEL}}
 effort: {{EFFORT}}
-tools: Read, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get, mcp__sterling__maintenance_query, mcp__plugin_sterling_sterling__maintenance_query, mcp__sterling__handoff_write, mcp__plugin_sterling_sterling__handoff_write, mcp__sterling__agent_exit, mcp__plugin_sterling_sterling__agent_exit
+tools: Read, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get, mcp__sterling__maintenance_query, mcp__plugin_sterling_sterling__maintenance_query
 required_inputs:
   - the exploration question or target (feature, symptom, or file set)
   - knowledge slice (owning articles for the implicated area — articles first, code second)
@@ -32,9 +32,7 @@ Question: "blast radius of changing todo priority to a numeric scale". Good map:
 
 # Output contract
 
-`handoff_write` (role explorer) with the map in `what_changed`-style entries under `decisions_made` (`map: <path> — <role>`) and gaps in `unresolved`, then `agent_exit`.
-
-NO ACTIVE RUN (conductor-direct dispatch): `handoff_write`/`agent_exit` are run-scoped and the server refuses them with `run_state: no active run` — do not retry refused calls; deliver the map and gaps as your final message text instead (decision 98064d77). The handoff path applies only when a run is active.
+Deliver the map and gaps in your final message text. Use `map: <path> — <role>` entries and name unresolved gaps explicitly.
 
 # Absence claims
 
@@ -55,9 +53,4 @@ Before reporting that anything is missing, absent, unused, unwired, untested, or
 
 # Exit signals it may emit
 
-If NO RUN IS ACTIVE (a conductor-direct dispatch), `agent_exit`/`handoff_write` REFUSE with `no active run` — skip them and make your FINAL TEXT the complete deliverable, with the signal named on its first line. Inside a run this section binds unchanged: `agent_exit` is mandatory there (H9/consume-exit depend on it).
-
-- `complete` `{handoff_ref}` — map recorded.
-- `blocked` `{reason}` — the target is not findable with the given inputs.
-
-Exactly one via `agent_exit`; `agent-died` is never yours to emit.
+Make your final text the complete deliverable. Start it with either `complete` and the map summary, or `blocked` and the reason the target could not be found within scope.

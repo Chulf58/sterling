@@ -15,7 +15,7 @@
 //     models.<key>, tdd.enabled, mutation_verification.enabled,
 //     sparring_partner.enabled, sparring_partner.model,
 //     delegation.max_concurrent, maintenance_queue.deep_threshold,
-//     delivery.<key>, dispatch_register.stale_minutes, review_ledger.stale_days
+//     delivery.<key>, dispatch_register.stale_minutes, delivery.payload_char_cap
 //   Everything else is REFUSED naming the path and the allowlist.
 //   Reads/writes the ACTIVE project's canonical .sterling/config.json (NO path
 //   argument — a foreign project is unreachable by construction), refuses a
@@ -97,7 +97,6 @@ function seedDoc(): Record<string, unknown> {
       delegation: { max_concurrent: 5 },
       maintenance_queue: { deep_threshold: 20 },
       delivery: { payload_char_cap: 12000 },
-      review_ledger: { stale_days: 14 },
       generated_projections: ['architecture.md'],
     });
   } catch (e) {
@@ -119,7 +118,6 @@ function seedDoc(): Record<string, unknown> {
     ['delegation', 'max_concurrent'],
     ['maintenance_queue', 'deep_threshold'],
     ['delivery', 'payload_char_cap'],
-    ['review_ledger', 'stale_days'],
   ];
   for (const [parent, leaf] of required) {
     const holder = doc[parent] as Record<string, unknown> | undefined;
@@ -725,34 +723,34 @@ test('CS-14: an omitted / undefined `value` is refused — the addressed key sta
 // only the first assertion.
 
 // ---------------------------------------------------------------------------
-// CS-15 — review_ledger: a MODELED leaf that still validates its value
-// (stale_days is z.number(), so a schema violation is still refused — the
+// CS-15 — delivery: a MODELED leaf that still validates its value
+// (payload_char_cap is z.number(), so a schema violation is still refused — the
 // allowlist is gone, whole-document validation is not) beside a PASSTHROUGH
 // sibling that now lands unconditionally (code_globs has no allowlist gate
 // left, and the schema field is `.passthrough()`, so nothing validates its
 // shape either).
 // ---------------------------------------------------------------------------
-test('CS-15: review_ledger.stale_days still validates its value (30 lands, \'ten\' refused by the schema) while its passthrough sibling review_ledger.code_globs now LANDS', () => {
+test('CS-15: delivery.payload_char_cap still validates its value (30000 lands, \'ten\' refused by the schema) while its passthrough sibling delivery.code_globs now LANDS', () => {
   const h = harness();
   try {
     const call = handler(h.tools);
     const before = h.read();
 
-    const badValue = refusalMessage(call, { path: 'review_ledger.stale_days', value: 'ten' });
-    assert.match(badValue, /stale_days/, 'the refusal names the key');
+    const badValue = refusalMessage(call, { path: 'delivery.payload_char_cap', value: 'ten' });
+    assert.match(badValue, /payload_char_cap/, 'the refusal names the key');
     assert.match(badValue, /number|invalid_type/i, 'and carries the zod issue');
     assert.doesNotMatch(badValue, /allowlist/i, 'the allowlist is gone — the cause is schema validation, never an allowlist');
     assert.equal(h.read(), before, 'nothing written for the invalid value');
 
-    // Same parent, PASSTHROUGH leaf: review_ledger.code_globs is unmodeled in
+    // Same parent, PASSTHROUGH leaf: delivery.code_globs is unmodeled in
     // the schema (`.passthrough()`), and with the allowlist removed nothing
     // else gates it either — it lands like any other unmodeled key.
-    const globsReceipt = call({ path: 'review_ledger.code_globs', value: ['**/*.ts'] });
+    const globsReceipt = call({ path: 'delivery.code_globs', value: ['**/*.ts'] });
     assert.deepEqual(globsReceipt.value, ['**/*.ts'], 'the write succeeds — no allowlist and no shape check refuse it');
     assert.deepEqual(
-      (JSON.parse(h.read()) as { review_ledger: { code_globs: unknown } }).review_ledger.code_globs,
+      (JSON.parse(h.read()) as { delivery: { code_globs: unknown } }).delivery.code_globs,
       ['**/*.ts'],
-      'and it lands on disk under review_ledger'
+      'and it lands on disk under delivery'
     );
     assert.equal(
       globsReceipt.digest,
@@ -760,11 +758,11 @@ test('CS-15: review_ledger.stale_days still validates its value (30 lands, \'ten
       'the receipt digest is sha256 of the bytes actually written'
     );
 
-    const receipt = call({ path: 'review_ledger.stale_days', value: 30 });
-    assert.equal(receipt.previous_value, 14, 'the seed value is reported back');
+    const receipt = call({ path: 'delivery.payload_char_cap', value: 30000 });
+    assert.equal(receipt.previous_value, 12000, 'the seed value is reported back');
     assert.equal(
-      (JSON.parse(h.read()) as { review_ledger: { stale_days: unknown } }).review_ledger.stale_days,
-      30,
+      (JSON.parse(h.read()) as { delivery: { payload_char_cap: unknown } }).delivery.payload_char_cap,
+      30000,
       'a valid numeric value lands'
     );
     assert.equal(receipt.digest, sha256(readFileSync(h.configPath)), 'and the receipt digest tracks the new bytes');
@@ -780,9 +778,9 @@ test('CS-15: review_ledger.stale_days still validates its value (30 lands, \'ten
 // SECOND, INDEPENDENT: drop the whole-document zod validation entirely (write
 // the mutated object straight out with no parse) → 'ten' now lands too, RED
 // on the FIRST arm's missing-exception assertion, while CS-6 (also a
-// primitive on a different key) goes red identically — proving stale_days
+// primitive on a different key) goes red identically — proving payload_char_cap
 // still routes through the same whole-document check as every other leaf.
-// NOT PINNED: `stale_days: -1`. Whether the schema constrains it to a
+// NOT PINNED: `payload_char_cap: -1`. Whether the schema constrains it to a
 // positive integer is unverifiable from behind the H4 read wall; 'ten' is a
 // certain type violation. If -1 should be refused, that is schema hardening
 // and needs its own pin plus a schema change.
