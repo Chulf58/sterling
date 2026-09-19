@@ -20,6 +20,8 @@ Board objective: `sterling-takeover-2026-09` (`board_query objective:"sterling-t
 - 2026-09-19 (rationale, decision `scale-down-enforcement-rules-and-locks-are-friction`): the deleted mechanisms bought certainty "200% secure instead of 99.9 at a heavy price"; read-before-edit "was just friction in the end"; the delegation nag was "symptom treatment and not rootcause fixes" (decision `sterling-claude-code-scale-down-boundary` rationale)
 - 2026-09-19 (OpenCode comparison, decision `sterling-claude-code-scale-down-boundary` alternatives_rejected): OpenCode "was pure delegating and using fable as conductor made the briefs wildly strong"
 - 2026-09-19 (board item slice-8): "move over what we agreed from opensterling project, agents, skills and whatever"
+- 2026-09-19: "Have Astra review and advice on everything regarding the knowledge delivery. It is the core of Sterling" (decision `knowledge-delivery-target-design-no-delayed-delivery`)
+- 2026-09-19: user chose "Checkpoint, then scale down" for the open delivery findings (board `7b4d9f3a`)
 
 ## Boundary: what stays, what goes
 
@@ -77,23 +79,27 @@ DONE for WSL authoring, launcher/init repair and native WSL tooling. `codex logi
 
 ### Slice 2 — THE CUT
 
-DONE except acceptance. Deletions are committed: `31d0638`, `1896065`, `a83f5be`, `cee6797`. The pending close-out includes residue sweep, deleted `grill-plan-flags`/`council.workflow`, rewritten hooks README, and stale-comment repairs. `architecture.md` is regenerated and the dead `signals` set is removed from `scripts/architecture-projection.mjs` (the brain is deleted). Five article gaps remain: board item `f72e5982` covers registry-set record types, hooks, tools, toolchain adapters, `packages/store`, `packages/tui`, and H2/H22/H31.
+DONE except acceptance. Close-out, Slices 3, 4 and 5+8 landed in checkpoint `8df86a6` (127 files) on `takeover/h15-one-rule-and-config-set`; the earlier deletion commits are `31d0638`, `1896065`, `a83f5be`, `cee6797`. The close-out swept residue, deleted `grill-plan-flags`/`council.workflow`, rewrote the hooks README, repaired stale comments, regenerated `architecture.md`, and removed the dead `signals` set from `scripts/architecture-projection.mjs` (the brain is deleted). Five article gaps remain: board item `f72e5982` covers registry-set record types, hooks, tools, toolchain adapters, `packages/store`, `packages/tui`, and H2/H22/H31.
 
 Knowledge base: 11 feature articles (from 7), adding `knowledge-capture-loop`, `session-start-h1`, `project-init` and `sop-commands-and-skills`; reconciled `knowledge-delivery`, `agent-distribution`, `project-configuration`, `conduct-contract-propagation` and `consistency-check-battery`. `87f5f982` is superseded by classless four-agent roster decision `f0893161`; this session also records agent retirement (`39e27cc5`) and Codex dispatch while Claude usage is short (`ff9937f3`).
 
 ### Slice 3 — conductor context diet
 
-REBUILD IN PROGRESS (pending commit). `CLAUDE.md` is 15,359B; `docs/conductor-contract.md` is 10,234B and H1 injects it on every source with a loud fallback; `target-claude-md.md` is rewritten. `board_query`/`maintenance_query` default to `projection:"text"`; tool descriptions fell from 38,377B to 17,326B; the largest governed Read is 2,905B. Default `injection_rung` is `read`; Bash delivers at tool time; prompt-time drain is deduplicated and capped. After four cap-assembler fix rounds, REBUILD-OVER-PATCH replaces it from blank with one invariant: every part is HAZARD (whole and uncapped) or ORDINARY (including headers, capped together), degrading to pointers and then one aggregate line, against frozen pins, plus a single-winner queue-lock reclaim. Then fresh independent Sol review, then commit.
+LANDED in checkpoint `8df86a6`; its delivery residual is replaced by Slice 3b. `CLAUDE.md` is 15,359B; `docs/conductor-contract.md` is 10,234B and H1 injects it on every source with a loud fallback; `target-claude-md.md` is rewritten. `board_query`/`maintenance_query` default to `projection:"text"`; tool descriptions fell from 38,377B to 17,326B; the largest governed Read is 2,905B. The capped assembler rebuild landed with its frozen-pins invariant, but the resulting delayed-delivery design is now being removed.
 
-Pre-commit review: Sol review 1 requested changes (4 CRITICAL, 4 HIGH, 1 MEDIUM); Terra fixed them and the full suite reached 3,013 tests with only four known pre-existing failures. The conductor overruled Sol C1 on unreachable settled SHA after rebase: mint one durable item, emit loudly and advance rather than retain the old snapshot and jam H10 (`c87e6e0d`). Independent Sol review 2 found two new HIGH issues: stale queue-lock reclaim race and pinned ordinary headers bypassing the total cap (12,888B reproduced).
+Pre-commit review: Sol review 1 requested changes (4 CRITICAL, 4 HIGH, 1 MEDIUM); Terra fixed them and the full suite reached 3,013 tests with only four known pre-existing failures. The conductor overruled Sol C1 on unreachable settled SHA after rebase: mint one durable item, emit loudly and advance rather than retain the old snapshot and jam H10 (`c87e6e0d`). Independent Sol review 2 found two new HIGH issues: stale queue-lock reclaim race and pinned ordinary headers bypassing the total cap (12,888B reproduced); the fixes landed in `8df86a6`.
+
+### Slice 3b — knowledge delivery migration
+
+IN PROGRESS. Decision `92088a62` (`knowledge-delivery-target-design-no-delayed-delivery`) adopts Astra's full review: delete delayed delivery—the prompt rung, drain, queue, lock and cached fallback; use explicit emission metadata rather than scanning text for IDs, avoiding a persistent false `delivered` mark; distinguish discovery from substance marks; keep hazards whole with an honest three-per-package limit; charge final context; and give Codex lanes no automatic delivery, so briefs carry records by hand. Step 1 checkpoint is DONE (`8df86a6`). Step 2 removes delayed producers (board `7b4d9f3a`, IN PROGRESS on Terra); step 3 adds the assembler contract and marks (board `4c32af48`); steps 4–5 settle timing/context ownership, run WSL probes, then delete dead machinery (board `8a3948a7`).
 
 ### Slice 4 — touches from git, gauge with the right window
 
-BUILT (pending commit). Git touches use the persisted settled snapshot, seeded by H1. Fable and Opus use 1,000,000-token windows; no default fallback exists, so unmapped-model pressure is explicitly unreliable. Pressure is non-blocking (`systemMessage` + next-prompt queue), and the delegation nag is removed. Decision records: `c87e6e0d`; finding `4f385d7a`.
+DONE — landed in `8df86a6`. Git touches use the persisted settled snapshot, seeded by H1. Fable and Opus use 1,000,000-token windows; no default fallback exists, so unmapped-model pressure is explicitly unreliable. Pressure is non-blocking (`systemMessage` + next-prompt queue), and the delegation nag is removed. Decision records: `c87e6e0d`; finding `4f385d7a`.
 
 ### Slice 5 — roster to OpenSterling's shape
 
-BUILT (pending commit), together with Slice 8. The roster is implementor/researcher/scout/librarian (decision `f0893161` supersedes `87f5f982`); skills now include `delegating-to-subagents`, `design-research`, `decision-records`, `closing-out-tasks` and `review-brief`. Sync retires unregistered Sterling agents only on matching identity and hash (decision `39e27cc5`, Astra-sparred). REMAINING: after commit, run sync on Sterling and Dome Farmer, then restart.
+CLOSED — landed in `8df86a6`, together with Slice 8. The roster is implementor/researcher/scout/librarian (decision `f0893161` supersedes `87f5f982`); skills include `delegating-to-subagents`, `design-research`, `decision-records`, `closing-out-tasks` and `review-brief`. `sync-agents` ran on Sterling-main and Dome Farmer: it retired the nine old roles (coder, debugger, explorer, implementation-architect, test-writer and reviewer-*), installed implementor and scout, and refreshed researcher and librarian. The running session already lists the new agents and skills, so no restart was needed. Sync retires unregistered Sterling agents only on matching identity and hash (decision `39e27cc5`, Astra-sparred).
 
 ### Slice 6 — /sterling:update reaches agent sync on consumers
 
@@ -105,13 +111,15 @@ NOT STARTED. Re-verify post-cut groups, including new item `01fbe880`: `knowledg
 
 ### Slice 8 — port what OpenSterling already settled: agents and skills
 
-BUILT (pending commit); see Slice 5. Agent templates and the five ported skills are in place, and safe retirement during sync is implemented. Consumer sync and restart remain.
+CLOSED — landed in `8df86a6`; see Slice 5. Agent templates and the five ported skills are in place, and safe retirement during sync is implemented and run on both named projects. Codex CLI derived `.codex/agents/*.toml` and root `AGENTS.md` from the Claude files; the latter's `Claude Code`→`Codex` rewrite corrupts slugs. Both derived outputs are gitignored (finding `44f0645d`, inferred).
 
 ## External-model consult log
 
 **Astra round 2 — plan review, 2026-09-19.** Every slice was PARTIAL at review time. Astra's FATAL finding was delivery after action; the conductor downgraded it because all three live project configs already used `read`, while still shipping the corrected default. ADOPTED and built: `read` default, Bash tool-time delivery, drain dedup+cap, non-blocking pressure, snapshot seeding, H1 trim, agent retirement and article coverage.
 
 DISAGREED, conductor call stands: H29 consult-result checking is not rebuilt because Codex `exec -o` makes a missing answer loud; capture/article duties remain blocking once each because they enforce knowledge capture.
+
+**Astra round 3 — knowledge delivery review, 2026-09-19.** ALL ADOPTED in decision `92088a62`: no delayed delivery; explicit emission metadata; separate discovery/substance marks; whole hazards with a three-per-package limit; final-context charge; and no automatic Codex-lane delivery. The conductor verified Astra's load-bearing claims against the board `7b4d9f3a` reproductions; no disagreement remains.
 
 **Sol pre-commit reviews — 2026-09-19.** Review 1: REQUEST_CHANGES (4 CRITICAL, 4 HIGH, 1 MEDIUM), all fixed by Terra; the suite reached 3,013 tests with four known pre-existing failures. Review 2, independently redone on `gpt-5.6-sol`: REQUEST_CHANGES with two HIGH findings—the stale queue-lock reclaim race and pinned ordinary headers bypassing the cap (12,888B reproduced). A fresh Sol review follows the rebuild.
 
@@ -126,4 +134,4 @@ DISAGREED, conductor call stands: H29 consult-result checking is not rebuilt bec
 
 ## Next order
 
-NOT YET COMMITTED: all above is in the working tree on `takeover/h15-one-rule-and-config-set` (~136 paths). Finish the assembler rebuild → fresh Sol review → commit → run sync-agents on Sterling and Dome Farmer (retiring the nine old agents) → restart the session → Slice 6 → Dome Farmer acceptance session → Slice 7, including `01fbe880` and I-01 at `h10-direct-capture.mjs:1761`, alongside the remaining Slice 1 domain-store action.
+Complete knowledge-delivery migration steps 2 → 3 → 4/5; then Slice 6; then the Dome Farmer acceptance session; then Slice 7, including board `01fbe880` and I-01 at `h10-direct-capture.mjs:1761`. Take board `f72e5982` (article coverage) whenever capacity permits. The remaining Slice 1 domain-store action stays open.
