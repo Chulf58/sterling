@@ -1,0 +1,68 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, mrrFromHistogram, parseCaseDirectives, resolveProjects, scoreEventIndexes, scorePull, scorePush } from '../knowledge-eval.mjs';
+const id = '11111111-1111-4111-8111-111111111111';
+const r = { id, title: 'Hazard', trigger: 'exact trigger text', right_way: 'exact right way text', guidance: 'distinctive guidance passage' };
+test('pointer-only is not substance', () => assert.deepEqual(emittedLevel(id, r), { pointer: true, substance: false, whole: false }));
+test('H20 rendered decision pointers remain discovery, not substance', () => {
+  const envelope = readFileSync(new URL('./fixtures/knowledge-eval/h20-decision-pointer-envelope.txt', import.meta.url), 'utf8');
+  const record = { id: '276cd235-2455-4b0c-bb52-9f592138c3a4', slug: 'review-sparsely-before-commit-ledger-kept', title: "Sterling's review posture", statement: 'Sparse review before commit with NO enforcement' };
+  const score = scorePush({ envelopes: [envelope], labels: { required: [{ id: record.id, level: 'pointer' }] }, recordsById: { [record.id]: record } });
+  assert.deepEqual(score.timely.discovery, [1, 1]); assert.deepEqual(score.timely.substance, [0, 0]);
+});
+test('MRR derives from rank histogram, not summed ranks', () => assert.equal(mrrFromHistogram({ 2: 1, 4: 1 }), 0.375));
+test('MRR counts positive misses in its denominator', () => assert.equal(mrrFromHistogram({ 1: 1, miss: 1 }), 0.5));
+test('knowledge get bare record is normalized for pull scoring', () => assert.deepEqual(scorePull({ id }, { required: [{ id }] }).recall.at1, [1, 1]));
+test('Agent input score selects both dispatch hooks, ending at child start', () => assert.deepEqual(scoreEventIndexes([{ tool: 'Read' }, { tool: 'Agent' }], 1), [1, 2]));
+test('metric aggregation preserves numeric pairs and de-duplicates id lists', () => {
+  assert.deepEqual(aggregateMetricValues([[1, 2], [3, 4]]), [4, 6]);
+  assert.deepEqual(aggregateMetricValues([['a', 'b'], ['b', 'c']]), { ids: ['a', 'b', 'c'], count: 3 });
+});
+test('case directives parse config, mutation, and lifecycle', () => {
+  assert.deepEqual(parseCaseDirectives(`ordinary narrative\nconfig: injection_rung=edit\nmutate: ${id} revision\nlifecycle: clear`), [
+    { kind: 'config', key: 'injection_rung', value: 'edit' }, { kind: 'mutate', id }, { kind: 'lifecycle', source: 'clear' },
+  ]);
+  assert.throws(() => parseCaseDirectives('lifecycle: rotate'), /invalid lifecycle directive/);
+  assert.throws(() => parseCaseDirectives('unknown: value'), /unknown case directive/);
+});
+test('project mapping defaults and allows an explicit project root override', () => {
+  assert.deepEqual(resolveProjects(), DEFAULT_PROJECTS);
+  assert.equal(resolveProjects('{"dome-farmer":"/tmp/dome"}')['dome-farmer'], '/tmp/dome');
+  assert.throws(() => resolveProjects('[]'), /JSON object/);
+});
+test('clipped hazard is not whole', () => assert.equal(emittedLevel(`${id} exact trigger text`, r).whole, false));
+test('cross-reference UUID is not substance', () => assert.equal(emittedLevel(`see ${id} for background`, r).substance, false));
+test('late drain is not timely', () => { const s = scorePush({ envelopes: [`${id} exact trigger text exact right way text`], labels: { required: [{ id, level: 'hazard_whole' }] }, recordsById: { [id]: r }, late: true }); assert.deepEqual(s.timely.substance, [0, 1]); assert.equal(s.late, 1); });
+test('a sequence scores only its selected Read event', () => {
+  const bashPointer = `${id}`;
+  const readSubstance = `${id} exact trigger text exact right way text`;
+  const s = scorePush({ envelopes: [readSubstance], labels: { required: [{ id, level: 'hazard_whole' }] }, recordsById: { [id]: r } });
+  assert.deepEqual(emittedLevel(bashPointer, r), { pointer: true, substance: false, whole: false });
+  assert.deepEqual(s.timely.substance, [1, 1]);
+});
+test('late envelopes are counted late and never timely', () => {
+  const s = scorePush({ envelopes: [], lateEnvelopes: [`${id} exact trigger text exact right way text`], labels: { required: [{ id, level: 'hazard_whole' }] }, recordsById: { [id]: r } });
+  assert.deepEqual(s.timely.substance, [0, 1]); assert.equal(s.late, 1); assert.equal(s.lateEnvelopes, 1);
+});
+test('noise counts mentioned records outside the case labels', () => {
+  const noiseId = '22222222-2222-4222-8222-222222222222';
+  const s = scorePush({ envelopes: [`${id} ${noiseId}`], labels: { required: [{ id, level: 'pointer' }], acceptable: [] }, recordsById: { [id]: r, [noiseId]: { id: noiseId } } });
+  assert.equal(s.noise, 1);
+});
+test('a guard mark without emitted content is a false substance mark', () => {
+  const s = scorePush({ envelopes: [id], labels: { required: [{ id, level: 'substance' }] }, recordsById: { [id]: r }, guardBefore: {}, guardAfter: { 'guard.json': JSON.stringify({ delivered: [id] }) } });
+  assert.deepEqual(s.timely.substance, [0, 1]); assert.equal(s.falseSubstanceMarks, 1);
+});
+test('real H19 push-read capture is discovery and substance despite delivery clipping', () => {
+  const record = {
+    id: '6976b7c5-3ac9-4267-92df-d5a31e6c8724', slug: 'store-database-seal-h15',
+    title: 'H15 store database seal — the one rule that survives the scale-down',
+    what_it_does: 'H15 is a PreToolUse hook registered (hooks/hooks.json) on Bash|PowerShell and on Edit|Write|MultiEdit|NotebookEdit. It enforces ONE rule: nothing but the Sterling MCP server touches the store DATABASE — `.sterling/sterling.db` and its siblings (`sterling.db-wal`, `-shm`, `-journal`, `sterling.db.*` backup/migration files). Every other file under `.sterling/` (config.json, transient/*, delivery-audit/*, review-ledger.json) is ordinary project state that any tool may read or write. Structured channel: the destination path (tool_input.file_path, or notebook_path for NotebookEdit) is resolved against cwd; denied (exit 2) when it carries a `.sterling` directory component AND its basename matches the database-file pattern.',
+  };
+  const envelope = readFileSync(new URL('./fixtures/knowledge-eval/v1/push-read-001-h19-envelope.txt', import.meta.url), 'utf8');
+  const score = scorePush({ envelopes: [envelope], labels: { required: [{ id: record.id, level: 'substance' }] }, recordsById: { [record.id]: record }, guardBefore: {}, guardAfter: { 'delivery/guard-conductor.json': JSON.stringify({ records: [record.id] }) } });
+  assert.deepEqual(score.timely.discovery, [0, 0]);
+  assert.deepEqual(score.timely.substance, [1, 1]);
+  assert.equal(score.falseSubstanceMarks, 0);
+});
