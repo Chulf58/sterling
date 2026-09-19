@@ -301,9 +301,14 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   if (toggleFailure !== undefined) {
     notice(toggleFailure);
   } else if (toggleWrote) {
-    notice(
-      'this changed the enforcement (B) surface; run enforcement_reconcile {adopt:true} from the MCP surface before the next agent Bash call (H17 latch).'
-    );
+    // Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's
+    // config-write taint latch and enforcement_reconcile were both removed
+    // per decision sterling-claude-code-scale-down-boundary (2ad87dd1); there
+    // is no latch left to clear. Hooks re-read config.json from disk on
+    // every invocation, so they see this write immediately; the MCP server
+    // is the one long-lived reader that does not — restart the session to
+    // pick the new value up there.
+    notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
   }
   if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || mutationToggles.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {

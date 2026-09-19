@@ -1443,3 +1443,45 @@ test('a superseded article is excluded from derivation on BOTH sides: its relies
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// PIPELINE-INDEPENDENT (decision sterling-claude-code-scale-down-boundary,
+// 2ad87dd1): recordCheckSkipped/listCheckSkipped survive the staged-pipeline
+// removal — a runId is always undefined now (the run concept is gone), so
+// every row is the NULL-run "direct-mode" shape (knowledge_create/board_remove
+// callers). Relocated/rewritten from the deleted
+// packages/store/src/tests/runs.test.ts's 'check_skipped: recorded and
+// listable, run-scoped or global (§16.1.9)', which exercised the runId-bound
+// half through the now-deleted createRun — that half no longer exists to pin.
+test('recordCheckSkipped/listCheckSkipped with runId undefined: recording, listing, and the 50-newest-row NULL-run retention cap', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.recordCheckSkipped('dedup-merge', 'not_built', undefined, NOW);
+    store.recordCheckSkipped('noise-gate', 'not_built', undefined, NOW);
+    const rows = store.listCheckSkipped();
+    assert.equal(rows.length, 2, 'both NULL-run rows are recorded and listable');
+    assert.deepEqual(rows.map((r) => r.check_name), ['dedup-merge', 'noise-gate']);
+    assert.ok(rows.every((r) => r.run_id === null), 'every row carries a NULL run_id — the run concept no longer exists');
+
+    // listCheckSkipped(runId) still works and returns nothing for a runId that
+    // was never recorded (the run-scoped read path survives even though
+    // nothing writes a non-null runId anymore).
+    assert.deepEqual(store.listCheckSkipped('r-none'), [], 'a runId that was never recorded returns empty, not an error');
+
+    // RETENTION CAP: NULL-run rows accrete forever with no disposal event
+    // (dispose-run is gone too), so recordCheckSkipped caps them at the 50
+    // newest on every write (store.ts's own INSERT + prune, wrapped in one
+    // tx()). Push well past 50 and confirm exactly 50 survive, and that the
+    // survivors are the NEWEST 50 (the two seeded above are pruned out).
+    for (let i = 0; i < 60; i++) {
+      store.recordCheckSkipped(`check-${i}`, 'not_built', undefined, NOW);
+    }
+    const after = store.listCheckSkipped();
+    assert.equal(after.length, 50, 'the NULL-run audit tail is capped at the 50 newest rows');
+    const names = after.map((r) => r.check_name);
+    assert.ok(!names.includes('dedup-merge') && !names.includes('noise-gate'), 'the two oldest seed rows were pruned out by the cap');
+    assert.deepEqual(names, Array.from({ length: 50 }, (_, i) => `check-${i + 10}`), 'exactly the 50 newest check names survive, oldest-to-newest by seq');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

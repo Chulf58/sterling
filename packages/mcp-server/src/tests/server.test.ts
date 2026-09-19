@@ -72,23 +72,12 @@ const SERVED_TOOLS = [
   'no_capture',
   'concept_designed',
   'capture_pending',
-  'run_state',
-  'run_escalate',
-  'agent_exit',
-  'run_signal',
-  // enforcement-taint front door: clears the taint latch (or, with the
-  // default adopt:false, reports why there is nothing to discharge). A FRONT
-  // DOOR, not an authority boundary — the MCP server has no authenticated
-  // caller identity (see enforcement-reconcile-tool.test.ts).
-  'enforcement_reconcile',
   // maintenance_enqueue deliberately unregistered — decision 6269b714:
   // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
   // board_remove scoped to the queue, so the librarian can close what it drains
   // (board afeae7d9).
   'maintenance_remove',
-  'handoff_write',
-  'handoff_read',
   // The one sanctioned in-session config write: any dotted key path is
   // accepted (the positive allowlist was REMOVED — decision
   // scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
@@ -415,126 +404,15 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     ) as { priority: string; text: string };
     assert.equal(bumped.priority, 'high', 'projection is split from the patch — a leak would be refused BY NAME');
     assert.match(bumped.text, /…$/, 'a projection-less write defaults to the clipped receipt');
-
-    // protocol loop over the wire
-    store.createRun({
-      id: 'r-0001',
-      brief_ref: randomUUID(),
-      branch: 'sterling/run-r-0001',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: '2026-06-10T12:00:00.000Z',
-    });
-
-    const badExit = await client.callTool({
-      name: 'agent_exit',
-      arguments: { phase_id: 'p1', agent_role: 'coder', signal: 'victory' },
-    });
-    assert.equal(badExit.isError, true, 'invalid signal rejected in-band so the agent can self-correct');
-    assert.match((badExit.content as { text: string }[])[0].text, /enum is closed/);
-
-    await client.callTool({
-      name: 'handoff_write',
-      arguments: {
-        handoff: {
-          phase_id: 'p1',
-          agent_role: 'coder',
-          what_changed: [{ path: 'src/x.ts', change_role: 'implemented' }],
-          wired: [],
-          deferred: [],
-          decisions_made: [],
-          tests_produced: [],
-          exit_signal: 'complete',
-          unresolved: [],
-        },
-      },
-    });
-    await client.callTool({
-      name: 'agent_exit',
-      arguments: { phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } },
-    });
-    const signal = payload(await client.callTool({ name: 'run_signal', arguments: {} })) as {
-      action: { action: string };
-      machine_state: string;
-    };
-    assert.equal(signal.action.action, 'complete_run', 'single-phase run goes straight to the completion sequence');
-    assert.equal(signal.machine_state, 'completing');
-
-    const state = payload(await client.callTool({ name: 'run_state', arguments: {} })) as { machine_state: string };
-    assert.equal(state.machine_state, 'completing');
-
-    const handoffs = payload(
-      await client.callTool({ name: 'handoff_read', arguments: { files: ['src\\x.ts'] } })
-    ) as unknown[];
-    assert.equal(handoffs.length, 1, 'handoff file-key read joins across the path boundary');
   } finally {
     await cleanup();
   }
 });
 
-test('AC2 over the wire: a reviewer handoff without exact review_mandatory coverage is refused in-band (missing id named) with nothing written; exact coverage lands; non-reviewers untouched', async () => {
-  const { client, store, cleanup } = await harness();
-  try {
-    store.createRun({
-      id: 'r-0001',
-      brief_ref: randomUUID(),
-      branch: 'sterling/run-r-0001',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: '2026-06-10T12:00:00.000Z',
-    });
-    const m1 = randomUUID();
-    store.setRunReviewMandatory('r-0001', 'p1', [{ record_id: m1, reason: 'blocking anti-pattern' }]);
-
-    const base = {
-      phase_id: 'p1',
-      what_changed: [],
-      wired: [],
-      deferred: [],
-      decisions_made: [],
-      tests_produced: [],
-      exit_signal: 'complete',
-      unresolved: [],
-    };
-
-    // reviewer with NO dispositions against a non-empty mandatory set → refused in-band
-    const refused = await client.callTool({
-      name: 'handoff_write',
-      arguments: { handoff: { ...base, agent_role: 'reviewer-correctness' } },
-    });
-    assert.equal(refused.isError, true, 'uncovered reviewer handoff refused in-band so the agent can self-correct');
-    assert.match((refused.content as { text: string }[])[0].text, new RegExp(m1), 'the missing mandatory id is named in the refusal');
-
-    let read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
-    assert.equal(read.length, 0, 'the refused reviewer handoff wrote nothing over the wire');
-
-    // reviewer with exact coverage → lands
-    const ok = await client.callTool({
-      name: 'handoff_write',
-      arguments: {
-        handoff: { ...base, agent_role: 'reviewer-correctness', dispositions: [{ record_id: m1, disposition: 'addressed' }] },
-      },
-    });
-    assert.notEqual(ok.isError, true, 'exact-coverage reviewer handoff lands over the wire');
-    read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
-    assert.equal(read.length, 1, 'exact-coverage reviewer handoff persisted');
-
-    // non-reviewer against the same non-empty mandatory set, no dispositions → untouched, lands
-    const coder = await client.callTool({
-      name: 'handoff_write',
-      arguments: { handoff: { ...base, agent_role: 'coder' } },
-    });
-    assert.notEqual(coder.isError, true, 'non-reviewer handoff is unaffected by review_mandatory');
-    read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
-    assert.equal(read.length, 2, 'the non-reviewer handoff landed alongside the reviewer one');
-  } finally {
-    await cleanup();
-  }
-});
+// The AC2-over-the-wire reviewer-handoff-coverage test that lived here was
+// removed with the staged-pipeline run/handoff protocol (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — handoff_write,
+// agent_exit and setRunReviewMandatory no longer exist.
 
 test('§3.2.5 repo-located docs: only a real content change (not an mtime-only bump) → verify_before_use + exactly one refresh_reference item; url-kind inert', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ref-'));

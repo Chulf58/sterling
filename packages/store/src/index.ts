@@ -17,14 +17,9 @@ import {
   validateRecord,
   normalizeRepoPath,
   linkSchema,
-  handoffSchema,
-  runRecordSchema,
   LIFECYCLE_VALUES,
   FRESHNESS_VALUES,
   type DurableRecord,
-  type Handoff,
-  type MachineState,
-  type RunRecord,
   type Lifecycle,
   type Freshness,
 } from '@sterling/schemas';
@@ -271,16 +266,9 @@ export class SchemaMigrationRequiredError extends Error {
   }
 }
 
-/** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
-export interface RecordedExit {
-  signal: string;
-  payload?: Record<string, unknown>;
-  phase_id?: string;
-  agent_role?: string;
-  at: string;
-}
-
-const ACTIVE_STATES = ['running', 'completing', 'awaiting_merge_gate', 'halted'];
+// RecordedExit / ACTIVE_STATES (the staged pipeline's run-protocol exit shape
+// and active-state list) were removed with the run/handoff protocol above
+// (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
 // ---------------------------------------------------------------------------
 // AC8: catalog status + bootstrap + dedup enqueue (run r-ea9e, phase 3)
@@ -477,15 +465,7 @@ export type ToolStore = Pick<
   // existed' through the drain-log trace (board 97d773ef).
   | 'drainLogEntry'
   | 'addLink'
-  | 'getRun'
-  | 'casTransition'
-  | 'casTransitionMerge'
-  | 'recordPendingExit'
-  | 'getPendingExit'
   | 'recordCheckSkipped'
-  | 'appendRunEscalation'
-  | 'writeHandoff'
-  | 'readHandoffs'
   // knowledge_split's multi-record write (children + parent supersession)
   // needs one atomic boundary spanning several store calls (decision
   // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
@@ -3029,352 +3009,17 @@ export class SterlingStore {
   }
 
   // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
   // -------------------------------------------------------------------------
-
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input: unknown): RunRecord {
-    const run = runRecordSchema.parse(input);
-    // The active-run check and the INSERT run inside one BEGIN IMMEDIATE tx
-    // (audit finding 29/43): otherwise two concurrent createRuns both see no
-    // active run and both insert, breaking the one-active-run invariant. The
-    // write lock serializes them; the loser sees the winner's run and throws.
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) — one active run at a time`);
-      }
-      this.db
-        .prepare('INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)')
-        .run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-
-  /** By id, or the single active run when no id is given. */
-  getRun(id?: string): RunRecord | undefined {
-    const row = (
-      id
-        ? this.db.prepare('SELECT body FROM runs WHERE id = ?').get(id)
-        : this.db
-            .prepare(
-              `SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => '?').join(',')}) ORDER BY updated_at DESC LIMIT 1`
-            )
-            .get(...ACTIVE_STATES)
-    ) as { body: string } | undefined;
-    return row ? (runRecordSchema.parse(JSON.parse(row.body)) as RunRecord) : undefined;
-  }
-
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  private static parsePendingQueue(raw: string | null): RecordedExit[] {
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as RecordedExit | RecordedExit[];
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-
-  private static serializePendingQueue(queue: RecordedExit[]): string | null {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed: MachineState, next: unknown): RunRecord {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(run.id) as
-        | { pending_exit: string | null }
-        | undefined;
-      const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db
-        .prepare('UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
-        .run(run.machine_state, tail, JSON.stringify(run), new Date().toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(
-          `CAS rejected: run '${run.id}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
-        );
-      }
-    });
-    return run;
-  }
-
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed: MachineState, runId: string, mutate: (fresh: RunRecord) => RunRecord, attempts = 5): RunRecord {
-    this.assertWritable('casTransitionMerge');
-    for (let i = 0; i < attempts; i++) {
-      // Re-read the live schema version at the TOP of every retry iteration
-      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
-      // each attempt, so a migration by another process landing mid-retry could
-      // otherwise let this stale-schema handle read a newer body, parse it
-      // through the OLD schema, and rewrite it dropping newly-added fields. The
-      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
-      // window spanning the whole loop by throwing the SAME live-drift error.
-      this.assertLiveSchemaVersion('casTransitionMerge');
-      const row = this.db.prepare('SELECT body, machine_state, pending_exit FROM runs WHERE id = ?').get(runId) as
-        | { body: string; machine_state: string; pending_exit: string | null }
-        | undefined;
-      if (!row) throw new Error(`casTransitionMerge: no run '${runId}'`);
-      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
-      // body (board 4c3a0c37): the top-of-loop guard closes the retry-spanning
-      // gap but not the intra-iteration race where a migration commits between
-      // that guard's PRAGMA and this SELECT — the row just read would then be a
-      // NEW-schema body parsed through the OLD schema. This second check catches
-      // a migration before/during the read (and is what pin group D exercises,
-      // where the injector lands a migration on THIS read while no write lock is
-      // held, so it commits and is caught here). The narrower window this guard
-      // did NOT cover — a SCHEMA-ONLY migration landing AFTER this check and
-      // before the UPDATE, which the body-CAS cannot see because it leaves this
-      // row's body unchanged — is now closed by the tx() wrapper on the UPDATE
-      // below (board 4c3a0c37, Codex outside-family review).
-      this.assertLiveSchemaVersion('casTransitionMerge');
-      if (row.machine_state !== observed) {
-        throw new Error(
-          `CAS rejected: run '${runId}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
-        );
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body)) as RunRecord;
-      const next = runRecordSchema.parse(mutate(current)) as RunRecord;
-      const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
-      // review). tx() takes BEGIN IMMEDIATE — serializing against any concurrent
-      // migration — and RE-ASSERTS the live schema version INSIDE that write lock
-      // before the UPDATE runs, so no migration can commit between the check and
-      // the write. This closes the schema-only-migration window a body-CAS alone
-      // cannot: a migration that bumps user_version WITHOUT rewriting this row
-      // would otherwise pass `body = row.body` and land a stale-schema write that
-      // drops newly-added run-schema fields. A drift throws /Live schema version
-      // drift/ from inside tx() and nothing is written; the machine_state
-      // precondition still fires inside the lock via the UPDATE's
-      // `AND machine_state = ?` predicate (a miss retries, and the fresh read on
-      // the next pass throws CAS rejected); a concurrent BODY change still misses
-      // `AND body = ?` and retries. The runs-body SELECT stays OUTSIDE this lock
-      // deliberately — moving it inside would make pin group D's cross-connection
-      // migration injector busy-fail against BEGIN IMMEDIATE instead of drifting.
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(
-          this.db
-            .prepare(
-              'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
-            )
-            .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit).changes
-        );
-      });
-      if (changes === 1) return next;
-      // body or queue changed under us (a concurrent hook write / agent exit) —
-      // retry against the fresh row; a machine_state change is caught above.
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId: string, exit: RecordedExit): void {
-    this.tx(() => {
-      const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
-        | { pending_exit: string | null }
-        | undefined;
-      if (!row) throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(
-          `recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? 'unknown'} on phase '${dup.phase_id ?? '?'}' ` +
-            `('${dup.signal}') — one exit per dispatched agent; call run_signal (or consume-exit) first`
-        );
-      }
-      this.db
-        .prepare('UPDATE runs SET pending_exit = ? WHERE id = ?')
-        .run(SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId: string): RecordedExit | undefined {
-    const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
-      | { pending_exit: string | null }
-      | undefined;
-    if (!row) throw new Error(`getPendingExit: no run '${runId}'`);
-    return SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId: string, input: unknown, at: string): Handoff {
-    this.assertWritable('writeHandoff');
-    const handoff = handoffSchema.parse(input);
-    if (!this.db.prepare('SELECT 1 FROM runs WHERE id = ?').get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
-    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
-    // assertWritable() above stays as a fast fail, tx() is the guarantee.
-    this.tx(() => {
-      this.db
-        .prepare('INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-
-  readHandoffs(runId: string, filter: { phase_id?: string; files?: string[] } = {}): Handoff[] {
-    const rows = (
-      filter.phase_id
-        ? this.db.prepare('SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at').all(runId, filter.phase_id)
-        : this.db.prepare('SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at').all(runId)
-    ) as { body: string }[];
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId: string, mutate: (run: RunRecord) => RunRecord, attempts = 5): RunRecord {
-    this.assertWritable('updateRunOptimistic');
-    for (let i = 0; i < attempts; i++) {
-      // Re-read the live schema version at the TOP of every retry iteration
-      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
-      // each attempt, so a migration by another process landing mid-retry could
-      // otherwise let this stale-schema handle read a newer body, parse it
-      // through the OLD schema, and rewrite it dropping newly-added fields. The
-      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
-      // window spanning the whole loop by throwing the SAME live-drift error.
-      this.assertLiveSchemaVersion('updateRunOptimistic');
-      const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
-      if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
-      // body (board 4c3a0c37): catches a migration landing before/during this
-      // read (pin group D's injector fires here, while no write lock is held).
-      // The narrower window this guard did NOT cover — a SCHEMA-ONLY migration
-      // landing AFTER this check and before the UPDATE, invisible to the body-CAS
-      // because it leaves this row's body unchanged — is now closed by the tx()
-      // wrapper on the UPDATE below (board 4c3a0c37, Codex outside-family review).
-      this.assertLiveSchemaVersion('updateRunOptimistic');
-      const current = JSON.parse(row.body) as RunRecord;
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error('updateRunOptimistic: machine_state changes go through casTransition only (§5.2)');
-      }
-      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
-      // review). tx()'s BEGIN IMMEDIATE serializes against any concurrent
-      // migration and re-asserts the live schema version INSIDE the write lock
-      // before the UPDATE, so a schema-only migration cannot slip between the
-      // check and the write and land a field-dropping stale write past the
-      // body-CAS. A drift throws /Live schema version drift/ and nothing is
-      // written; a concurrent BODY change still misses `AND body = ?` and
-      // retries. The runs-body SELECT stays OUTSIDE this lock deliberately —
-      // moving it inside would make pin group D's cross-connection migration
-      // injector busy-fail against BEGIN IMMEDIATE instead of drifting.
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(
-          this.db
-            .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
-            .run(JSON.stringify(next), new Date().toISOString(), runId, row.body).changes
-        );
-      });
-      if (changes === 1) return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId: string, entry: unknown): void {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId: string, articleId: string): void {
-    this.updateRunOptimistic(runId, (run) =>
-      (run.reconcile_needed ?? []).includes(articleId)
-        ? run
-        : { ...run, reconcile_needed: [...(run.reconcile_needed ?? []), articleId] }
-    );
-  }
-
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId: string, amendment: { path: string; reason: string; at: string }): void {
-    this.updateRunOptimistic(runId, (run) =>
-      (run.scope_amendments ?? []).some((a) => a.path === amendment.path)
-        ? run
-        : { ...run, scope_amendments: [...(run.scope_amendments ?? []), amendment] }
-    );
-  }
-
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId: string, phaseId: string, items: { record_id: string; reason: string }[]): void {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId: string, agentType: string): number {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 },
-    }));
-    return next.dispatch_counts[agentType];
-  }
 
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
@@ -3475,54 +3120,12 @@ export class SterlingStore {
     return this.hydrateAll([stored as DurableRecord])[0];
   }
 
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId: string, summaries: NonNullable<RunRecord['summaries']>): RunRecord {
-    const run = this.getRun(runId);
-    if (!run) throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== 'completing') {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' — disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: 'awaiting_merge_gate', summaries });
-    this.tx(() => {
-      const res = this.db
-        .prepare('UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
-        .run(next.machine_state, JSON.stringify(next), new Date().toISOString(), runId, 'completing');
-      if (res.changes === 0) throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare('DELETE FROM handoffs WHERE run_id = ?').run(runId);
-      this.db.prepare('DELETE FROM check_skipped WHERE run_id = ?').run(runId);
-    });
-    return next;
-  }
-
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId: string): void {
-    const run = this.getRun(runId);
-    if (!run) throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== 'rejected' && run.machine_state !== 'merged') {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal — rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare('DELETE FROM handoffs WHERE run_id = ?').run(runId);
-      this.db.prepare('DELETE FROM check_skipped WHERE run_id = ?').run(runId);
-    });
-  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
 
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
@@ -3536,10 +3139,13 @@ export class SterlingStore {
       this.db
         .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
         .run(runId ?? null, check, reason, at);
-      // Run-scoped rows are disposed with the run (disposeRunRows). NULL-run rows
-      // (direct-mode knowledge_create/board_remove) have no disposal event, so cap
-      // them like queue_drain_log — else they accrete unbounded (audit finding
-      // 30/43, P4). Keep the 50 newest NULL-run rows as the audit tail.
+      // A runId is always undefined now — the run/handoff protocol (and its
+      // disposeRunRows disposal event) was removed per decision
+      // sterling-claude-code-scale-down-boundary (2ad87dd1), so every row is
+      // this NULL-run "direct-mode" shape (knowledge_create/board_remove
+      // callers). These rows have no disposal event, so cap them like
+      // queue_drain_log — else they accrete unbounded (audit finding 30/43,
+      // P4). Keep the 50 newest NULL-run rows as the audit tail.
       if (!runId) {
         this.db
           .prepare(

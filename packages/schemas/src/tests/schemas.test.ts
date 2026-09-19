@@ -12,14 +12,11 @@ import {
   featureArticleSchema,
   todoSchema,
   briefSchema,
-  handoffSchema,
-  runRecordSchema,
   RECORD_TYPES,
   validateRecord,
   knownFieldsFor,
   digestRecord,
   DIGEST_CLIP,
-  SPINE_SIGNALS,
   SYSTEM_REASONS,
   DRAIN_VERBS,
 } from '../index.js';
@@ -217,36 +214,6 @@ test('brief: attribution sections and verifiable_at syntax (§4)', () => {
     () => briefSchema.parse({ ...withInterfaces, phases: [{ ...brief.phases[0], interfaces: ['ghostInterface'] }] }),
     /undeclared interface 'ghostInterface'/
   );
-});
-
-test('handoff/run-record transient shapes', () => {
-  const h = handoffSchema.parse({
-    phase_id: 'p1',
-    agent_role: 'coder',
-    what_changed: [{ path: 'src\\a.ts', change_role: 'implemented serializer' }],
-    wired: [],
-    deferred: [],
-    decisions_made: [],
-    tests_produced: ['tests/a.test.ts'],
-    exit_signal: 'complete',
-    unresolved: [],
-  });
-  assert.equal(h.what_changed[0].path, 'src/a.ts');
-  assert.throws(
-    () => handoffSchema.parse({ ...h, exit_signal: 'victory' }),
-    /invalid/i,
-    'non-enum exit signal must be rejected'
-  );
-  runRecordSchema.parse({
-    id: 'r-0001',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-0001',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: { coder: 1 },
-    escalations: [],
-    started_at: NOW,
-  });
 });
 
 test('full §3.2 record set: anti_pattern, research_finding, reference_material, disconfirmed_hypothesis', () => {
@@ -537,13 +504,6 @@ test("digestRecord: headline only, absent fields omitted, long text clipped — 
   assert.deepEqual(unknown, { id: 'x', type: 'escalation_log', status: 'active', updated_at: NOW });
 });
 
-test('the signal enum is closed at the full nine §5.1 members', () => {
-  assert.deepEqual(
-    [...SPINE_SIGNALS],
-    ['complete', 'research-needed', 'review-unresolved', 'blocked', 'tests-invalid', 'contract-violated', 'bug-found', 'phase-overflow', 'agent-died']
-  );
-});
-
 test('§3.2.5: reference_material fileKeys — repo-located docs only', () => {
   const fk = RECORD_TYPES.reference_material.fileKeys;
   assert.deepEqual(fk({ kind: 'doc', location: 'docs\\spec.md' }), ['docs/spec.md'], 'doc location normalizes and doubles as a file_key');
@@ -719,52 +679,6 @@ test('feature_article.concept_family: optional marker round-trips; legacy articl
 });
 
 // ------------------- mid-run scope amendment (run r-1417) -------------------
-
-test('runRecordSchema: scope_amendments — optional {path,reason,at}[] ; legacy round-trips; paths normalized (interface slice 1)', () => {
-  const base = {
-    id: 'r-1417',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-1417',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  };
-
-  // legacy run record (no scope_amendments) round-trips WITHOUT the field being invented
-  const legacy = runRecordSchema.parse(base) as { scope_amendments?: unknown[] };
-  assert.ok(
-    legacy.scope_amendments === undefined || (Array.isArray(legacy.scope_amendments) && legacy.scope_amendments.length === 0),
-    'a legacy run record without scope_amendments round-trips unchanged'
-  );
-
-  // a run record carrying scope_amendments must PARSE (assertion-red now if the field is
-  // stripped or rejected — never a thrown crash) and each path normalizes at the boundary (repoPath)
-  let parsed: { scope_amendments?: { path: string; reason: string; at: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    parsed = runRecordSchema.parse({
-      ...base,
-      scope_amendments: [
-        { path: 'src\\amended.ts', reason: 'adjudicated mid-run', at: NOW },
-        { path: 'src/two.ts', reason: 'second amendment', at: NOW },
-      ],
-    }) as typeof parsed;
-  }, 'a run record carrying scope_amendments must parse');
-  assert.ok(Array.isArray(parsed!.scope_amendments), 'scope_amendments survives parsing as an array');
-  assert.equal(parsed!.scope_amendments!.length, 2);
-  assert.equal(parsed!.scope_amendments![0].path, 'src/amended.ts', 'repoPath normalizes the amendment path (backslash -> POSIX)');
-  assert.equal(parsed!.scope_amendments![0].reason, 'adjudicated mid-run');
-  assert.equal(parsed!.scope_amendments![0].at, NOW);
-
-  // reason is z.string().min(1); at is z.string().min(1); path is required
-  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ path: 'src/a.ts', reason: '', at: NOW }] }), /invalid|min|reason|empty/i,
-    'empty reason is rejected');
-  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ path: 'src/a.ts', reason: 'r', at: '' }] }), /invalid|min|at|empty/i,
-    'empty at is rejected');
-  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ reason: 'r', at: NOW }] }), /invalid|path|required/i,
-    'path is required on each amendment');
-});
 
 // ------------------- TUI System tab: AGENT_MODEL_KEY + models catalog (run r-ea9e, AC7) -------------------
 
@@ -963,133 +877,6 @@ test('referenceMaterialSchema: optional typed catalog field — legacy round-tri
     /invalid|required/i,
     'a catalog entry missing label/tier/status is rejected'
   );
-});
-
-// ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
-
-test('handoffSchema.dispositions: optional array; not_applicable_because requires a NON-empty reason; addressed reason optional; legacy round-trips (AC1)', () => {
-  const base = {
-    phase_id: 'p1',
-    agent_role: 'reviewer-correctness',
-    what_changed: [{ path: 'src\\a.ts', change_role: 'reviewed' }],
-    wired: [],
-    deferred: [],
-    decisions_made: [],
-    tests_produced: [],
-    exit_signal: 'complete',
-    unresolved: [],
-  };
-
-  // LEGACY handoff (no dispositions field) round-trips WITHOUT the field being invented
-  const legacy = handoffSchema.parse(base) as { dispositions?: unknown[] };
-  assert.ok(
-    legacy.dispositions === undefined || (Array.isArray(legacy.dispositions) && legacy.dispositions.length === 0),
-    'a legacy handoff without dispositions round-trips unchanged (field never invented)'
-  );
-
-  // an EMPTY dispositions array is a well-formed shape (boundary)
-  const empty = handoffSchema.parse({ ...base, dispositions: [] }) as { dispositions?: unknown[] };
-  assert.ok(Array.isArray(empty.dispositions), 'dispositions survives parsing as an array when supplied');
-  assert.equal(empty.dispositions!.length, 0, 'an empty dispositions array parses to an empty array');
-
-  // 'addressed' WITHOUT a reason is allowed (reason optional for addressed) and preserves fields.
-  // Front-load the array assertion so a STRIPPED field yields an AssertionError, not a TypeError.
-  let parsed: { dispositions?: { record_id: string; disposition: string; reason?: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    parsed = handoffSchema.parse({
-      ...base,
-      dispositions: [{ record_id: 'rec-1', disposition: 'addressed' }],
-    }) as typeof parsed;
-  }, "'addressed' without a reason must parse");
-  assert.ok(Array.isArray(parsed!.dispositions), 'dispositions survives parsing as an array (never stripped)');
-  assert.equal(parsed!.dispositions!.length, 1);
-  assert.equal(parsed!.dispositions![0].record_id, 'rec-1');
-  assert.equal(parsed!.dispositions![0].disposition, 'addressed');
-
-  // 'addressed' WITH a reason is also allowed (reason is optional, not forbidden, for addressed)
-  assert.doesNotThrow(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-1', disposition: 'addressed', reason: 'folded into the fix' }] }),
-    "'addressed' with a reason is allowed"
-  );
-
-  // 'not_applicable_because' WITH a non-empty reason parses and preserves the reason.
-  let na: { dispositions?: { record_id: string; disposition: string; reason?: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    na = handoffSchema.parse({
-      ...base,
-      dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because', reason: 'out of this phase scope' }],
-    }) as typeof na;
-  }, 'not_applicable_because with a non-empty reason must parse');
-  assert.ok(Array.isArray(na!.dispositions), 'dispositions survives parsing as an array');
-  assert.equal(na!.dispositions![0].disposition, 'not_applicable_because');
-  assert.equal(na!.dispositions![0].reason, 'out of this phase scope');
-
-  // REFINE: 'not_applicable_because' WITHOUT a reason is rejected loud
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because' }] }),
-    /invalid|reason/i,
-    'not_applicable_because requires a reason'
-  );
-  // REFINE: an EMPTY reason does not satisfy not_applicable_because (must be NON-empty)
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because', reason: '' }] }),
-    /invalid|reason|empty|min/i,
-    'not_applicable_because requires a NON-empty reason'
-  );
-
-  // disposition is a closed enum of exactly the two verbs
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-3', disposition: 'ignored' }] }),
-    /invalid/i,
-    'a disposition outside {addressed, not_applicable_because} is rejected'
-  );
-  // record_id is required on each disposition
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ disposition: 'addressed' }] }),
-    /invalid|record_id|required/i,
-    'record_id is required on each disposition'
-  );
-});
-
-test('runRecordSchema.review_mandatory: optional {phase_id, record_id, reason}[]; legacy round-trips; each field required (AC1)', () => {
-  const base = {
-    id: 'r-d630',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-d630',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  };
-
-  // LEGACY run record (no review_mandatory) round-trips WITHOUT the field being invented
-  const legacy = runRecordSchema.parse(base) as { review_mandatory?: unknown[] };
-  assert.ok(
-    legacy.review_mandatory === undefined || (Array.isArray(legacy.review_mandatory) && legacy.review_mandatory.length === 0),
-    'a legacy run record without review_mandatory round-trips unchanged'
-  );
-
-  // a run record CARRYING review_mandatory must parse (assertion-red if stripped, never a crash)
-  // and survive as an array of the shared mandatory tuple {phase_id, record_id, reason}.
-  let parsed: { review_mandatory?: { phase_id: string; record_id: string; reason: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    parsed = runRecordSchema.parse({
-      ...base,
-      review_mandatory: [
-        { phase_id: 'p1', record_id: 'rec-1', reason: 'governing design decision' },
-        { phase_id: 'p2', record_id: 'rec-2', reason: 'anti-pattern to avoid' },
-      ],
-    }) as typeof parsed;
-  }, 'a run record carrying review_mandatory must parse');
-  assert.ok(Array.isArray(parsed!.review_mandatory), 'review_mandatory survives parsing as an array');
-  assert.equal(parsed!.review_mandatory!.length, 2);
-  assert.deepEqual(parsed!.review_mandatory![0], { phase_id: 'p1', record_id: 'rec-1', reason: 'governing design decision' });
-
-  // each field of the mandatory tuple is required (fail loud on omission — P5)
-  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ record_id: 'rec-1', reason: 'r' }] }), /invalid|phase_id|required/i, 'phase_id is required on each mandatory item');
-  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', reason: 'r' }] }), /invalid|record_id|required/i, 'record_id is required on each mandatory item');
-  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', record_id: 'rec-1' }] }), /invalid|reason|required/i, 'reason is required on each mandatory item');
 });
 
 test('REVIEWER_ROLES: registry-derived set resolving exactly the four reviewer-* names; totality vs AGENT_MODEL_KEY and the roster (AC1)', async () => {

@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, configSchema, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, parseConfig, configSchema, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -19,10 +19,8 @@ import {
   recordCentralityHits,
   classifyClaimPath,
   type QueryOptions,
-  type RecordedExit,
   type ToolStore,
 } from '@sterling/store';
-import { react, type BrainAction, type ResolvedExit } from './brain.js';
 import { AttestationRefusal, collectAttestationEvidence, type AttestationEvidence } from './attestation-proof.js';
 
 export interface SkippedCheck {
@@ -1511,8 +1509,14 @@ export class SterlingTools {
     return skipped;
   }
 
+  /**
+   * The staged pipeline (and its notion of an "active run") was removed per
+   * decision sterling-claude-code-scale-down-boundary (2ad87dd1) — every
+   * check_skipped row is now a direct-mode NULL-run row (capped by the
+   * store's own NULL-run retention, not by run disposal).
+   */
   private activeRunId(): string | undefined {
-    return this.store.getRun()?.id;
+    return undefined;
   }
 
   /**
@@ -8150,72 +8154,10 @@ export class SterlingTools {
     return configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
   }
 
-  // -- enforcement taint clearer front door (board 09f05fca half 2) ------------
-
-  /**
-   * enforcement_reconcile (§10): the MCP front door onto
-   * scripts/enforcement-reconcile.mjs, the only sanctioned removal path for
-   * H17's (B) surface taint latch (article `enforcement-taint-clearer`,
-   * decision `b-baseline-hash-list-concrete-design` D5).
-   *
-   * IT IS A FRONT DOOR, NOT AN AUTHORITY BOUNDARY, and that wording is the
-   * ruling (fe861066's honesty clause; board 09f05fca half 2's non-negotiable
-   * requirement). This server has NO authenticated caller identity — every
-   * tools/call arrives over one stdio transport with no principal attached — an
-   * agent whose frontmatter OMITS `tools:` receives all mounted tools
-   * (h25-dispatch-capability.mjs), and the module itself documents that any
-   * caller able to run Node under this UID can import it and self-assert
-   * `callerRole`. AC-R11 (scripts/tests/enforcement-reconcile.test.mjs) pins
-   * that no agent TEMPLATE grants this tool, which is DISTRIBUTION POLICY and
-   * nothing stronger. So "only the conductor can clear" is never claimed here as
-   * a mechanical property: what this call removes is the measured cost of the
-   * alternative — a raw `node --input-type=module -e "import(...)"`, the exact
-   * shape H15 denies.
-   *
-   * `callerRole`/`callerAgentId` are supplied HERE and are deliberately absent
-   * from the served input schema (article `enforcement-taint-clearer`: "callerRole/
-   * callerAgentId must never appear in a public tool schema") — a caller that
-   * could name its own role would make the module's identity gate a caller-
-   * chosen string on the wire, which is worse than an honest front door.
-   *
-   * THE RESULT IS RETURNED VERBATIM. `{cleared, reason}` is the module's own
-   * discriminated verdict; re-wording it here would put a second, drifting
-   * description of an enforcement outcome in front of the reader.
-   */
-  async enforcementReconcile(adopt = false): Promise<{ cleared: boolean; reason: string }> {
-    if (!this.repoRoot) {
-      throw new Error(
-        'enforcement_reconcile: no project root is known to this server, so the enforcement surface cannot be resolved — the clearer refuses a missing cwd for the same reason.'
-      );
-    }
-    // WHY A DYNAMIC IMPORT WITH A NON-LITERAL SPECIFIER, documented because
-    // there is no existing pattern for this in tools.ts. The clearer is a
-    // standalone `.mjs` in scripts/: it carries no type declarations and sits
-    // OUTSIDE this package's rootDir ("src"), so a static import would fail the
-    // build twice over (no declaration file; a rootDir escape). The only
-    // precedent for reaching scripts/ from here — the ORIGIN_IDS constants
-    // above — DUPLICATES rather than imports, which is not available for a
-    // ~2600-line security module whose single-definition property is the point.
-    // The specifier is relative to THIS module and resolves identically from
-    // src/ and dist/ (both sit exactly three levels below the repo root), and it
-    // is held in a variable so tsc does not attempt to type-resolve it.
-    const specifier = '../../../scripts/enforcement-reconcile.mjs';
-    const mod = (await import(specifier)) as {
-      reconcileEnforcementTaint: (options: {
-        cwd: string;
-        callerRole: string;
-        callerAgentId: undefined;
-        adopt: boolean;
-      }) => Promise<{ cleared: boolean; reason: string }>;
-    };
-    const { cleared, reason } = await mod.reconcileEnforcementTaint({
-      cwd: this.repoRoot,
-      callerRole: 'conductor',
-      callerAgentId: undefined,
-      adopt,
-    });
-    return { cleared, reason };
-  }
+  // enforcement_reconcile (the H17 (B) surface taint-latch front door) was
+  // removed together with H17 itself (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — with the latch
+  // gone, its only sanctioned clearer has nothing left to clear.
 
   // -- board (§3.2.7) ----------------------------------------------------------
 
@@ -10394,201 +10336,9 @@ export class SterlingTools {
     };
   }
 
-  // -- run protocol (§5.2, §10) -------------------------------------------------
-
-  runState(runId?: string): RunRecord {
-    const run = this.store.getRun(runId);
-    if (!run) throw new Error(runId ? `run_state: no run '${runId}'` : 'run_state: no active run');
-    return run;
-  }
-
-  /**
-   * The run wire's precondition, stated in the CALLER's terms (decision 391fae4f).
-   * agent_exit / handoff_write / handoff_read all need a run, and all used to
-   * inherit runState()'s bare 'run_state: no active run' — an error naming a tool
-   * the agent never called, with no direction. Agent templates grant these tools
-   * unconditionally (frontmatter is static, so they cannot be withheld per
-   * session) and the agents' prompts tell them to exit through the wire, so in
-   * conductor-direct mode every dispatched agent discovers this mid-task. A
-   * consuming project measured eight agents doing it in one session, several
-   * retrying with other signals and a fabricated run_id first, each ending with a
-   * paragraph apologising for infrastructure. It stays a loud refusal rather than
-   * a no-op success — a silent success here would let a PIPELINE agent's exit
-   * vanish if a run ended mid-phase — but it now terminates the attempt instead
-   * of starting a diagnosis.
-   *
-   * SOFTENED 2026-08-31 (board 1259802b, adopted Codex+conductor joint): the
-   * REFUSAL SEMANTICS ARE UNCHANGED — still an error, still nothing recorded,
-   * still the loud refusal decision 391fae4f deliberately kept over a silent
-   * no-op. What changed is the TEXT. The measured residual was agents burning a
-   * tool call AND THEN A PARAGRAPH on this in conductor-direct mode (~12
-   * refusals in one consuming session), which is the shape of a message that
-   * reads like a fault report: four sentences, a parenthetical tool inventory,
-   * and a "do not retry" that invites an explanation of why you did. So the
-   * message now opens by naming the outcome as EXPECTED, states the one action
-   * (put the handoff in your final text and proceed), and says explicitly that
-   * one line is enough — the cheapest fix tried first, before the bigger
-   * mode-aware tool-availability surface the board still holds as option (b).
-   */
-  private requireWireRun(tool: string, runId?: string): RunRecord {
-    // Keyed on "is any run active", NOT on "did the caller omit run_id"
-    // (correctness review 2026-07-30). The measured failure includes agents
-    // RETRYING WITH A FABRICATED run_id, and an earlier `!runId &&` conjunct let
-    // exactly that case fall through to runState(runId)'s bare `no run '<made
-    // up>'` — handing the direction-free error to the one behavior this guard
-    // documents. With a run active the condition is false and a wrong run_id
-    // still gets the ordinary `no run '<id>'`, so run-active refusals are
-    // untouched.
-    if (!this.store.getRun()) {
-      throw new Error(
-        `${tool}: no run is active — EXPECTED in CONDUCTOR-DIRECT mode, not a fault to diagnose. Nothing was recorded. ` +
-          `Put the handoff in your final text and proceed: your final message IS your deliverable. ` +
-          `One line about this is enough — do not narrate it, do not retry with another signal, and never invent a run_id.`
-      );
-    }
-    return this.runState(runId);
-  }
-
-  /**
-   * agent_exit — the exit wire, never prose: zod-validated against the signal
-   * registry at the server; invalid signals are rejected in-band so the agent
-   * sees the error and corrects itself (§5.2).
-   */
-  agentExit(args: { run_id?: string; phase_id: string; agent_role: string; signal: string; payload?: Record<string, unknown> }): {
-    recorded: RecordedExit;
-  } {
-    const parsed = signalSchema.safeParse(args.signal);
-    if (!parsed.success) {
-      throw new Error(
-        `agent_exit: '${args.signal}' is not a registered signal — the enum is closed: ${SIGNALS.join(' | ')}. Re-call agent_exit with a valid member.`
-      );
-    }
-    if (parsed.data === 'agent-died') {
-      throw new Error(
-        "agent_exit: 'agent-died' is conductor-reported, never agent-emitted (§5.1) — the conductor maps abnormal Task returns via run_signal's exit parameter."
-      );
-    }
-    const payloadCheck = SIGNAL_PAYLOADS[parsed.data].safeParse(args.payload ?? {});
-    if (!payloadCheck.success) {
-      throw new Error(
-        `agent_exit: payload for '${parsed.data}' does not match its typed schema (§5.1): ${payloadCheck.error.issues
-          .map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`)
-          .join('; ')}. Correct the payload and re-call agent_exit.`
-      );
-    }
-    const run = this.requireWireRun('agent_exit', args.run_id);
-    // Phase validation at the RECORD seam (board 7d051522, incident 2026-07-03):
-    // an exit naming a phase that is not on the run must fail HERE, loudly,
-    // with nothing recorded — an orphan in the pending slot deadlocks the wire
-    // (every later agent_exit refuses on the full slot and consume-exit cannot
-    // resolve the phase). Conductor-direct subagents hit this when a run is
-    // active: their deliverable is their final text, not a run exit.
-    const namedPhase = run.phases.find((p) => p.id === args.phase_id);
-    if (!namedPhase) {
-      throw new Error(
-        `agent_exit: no phase '${args.phase_id}' on run '${run.id}' — nothing was recorded. ` +
-          `The run's phases: ${run.phases.map((p) => p.id).join(', ')}. A pipeline agent must exit against its dispatched phase; ` +
-          `an agent working OUTSIDE the pipeline (conductor-direct) must not call agent_exit while a run is active — its final message is its deliverable.`
-      );
-    }
-    // Phase CURRENCY, not just existence (audit finding 3/43): an exit naming a
-    // real-but-not-current phase (e.g. an earlier already-complete phase) would
-    // otherwise drive the brain to re-spawn that phase's successor and corrupt
-    // phase state (two in_progress phases, or an early run completion). The
-    // dispatched phase is always the in_progress one — refuse loud, nothing
-    // recorded, naming the actual current phase.
-    if (namedPhase.status !== 'in_progress') {
-      const current = run.phases.find((p) => p.status === 'in_progress');
-      throw new Error(
-        `agent_exit: phase '${args.phase_id}' is '${namedPhase.status}', not the current (in_progress) phase — nothing was recorded. ` +
-          `Exit against the dispatched phase${current ? ` '${current.id}'` : ' (none is currently in_progress — the run may be completing)'}. ` +
-          `Naming a stale phase would corrupt phase state.`
-      );
-    }
-    const exit: RecordedExit = {
-      signal: parsed.data,
-      payload: payloadCheck.data as Record<string, unknown>,
-      phase_id: args.phase_id,
-      agent_role: args.agent_role,
-      at: this.now(),
-    };
-    this.store.recordPendingExit(run.id, exit);
-    return { recorded: exit };
-  }
-
-  /**
-   * run_signal — the brain computes the reaction from the stored exit (or the
-   * conductor-reported one, e.g. agent-died{empty_output}) and the transition
-   * is applied as a CAS on machine_state. The conductor executes exactly the
-   * returned action.
-   *
-   * Exit routing (§5.2, run-proven r-0001): ABNORMAL exits arrive here
-   * immediately from any position. Normal `complete` is PHASE-SCOPED — a
-   * non-terminal step's complete (e.g. the test-writer's) is consumed by the
-   * conductor as the next §8.1 step (scripts/consume-exit.mjs: recorded on
-   * the run record via same-state CAS, clearing the pending-exit slot, audit
-   * trail intact); run_signal receives `complete` only at the phase boundary,
-   * where the brain advances the phase or starts the completion sequence.
-   */
-  runSignal(args: { run_id?: string; exit?: ResolvedExit } = {}): { action: BrainAction; machine_state: string; run_id: string } {
-    const run = this.runState(args.run_id);
-    // A conductor-supplied exit must NOT silently shadow-and-destroy a recorded
-    // agent exit (audit finding 2/43): casTransition NULLs the pending slot
-    // unconditionally, so if an agent already recorded (e.g. blocked) via
-    // agent_exit and the conductor then reports agent-died{empty_output}, the
-    // real exit would vanish and the brain react to the wrong signal. Refuse
-    // loud, nothing consumed — the conductor consumes the recorded exit (no
-    // args.exit) or investigates the mismatch (mirrors the 32fa4a05 pattern).
-    if (args.exit) {
-      const recorded = this.store.getPendingExit(run.id);
-      if (recorded) {
-        throw new Error(
-          `run_signal: an explicit exit was supplied but run '${run.id}' already has a recorded agent exit ` +
-            `(signal '${recorded.signal}', phase '${recorded.phase_id}'${recorded.agent_role ? `, role '${recorded.agent_role}'` : ''}) ` +
-            `— refusing to overwrite it (nothing consumed). Call run_signal with NO exit to react to the recorded one, ` +
-            `or resolve the mismatch (consume-exit) before reporting a different signal.`
-        );
-      }
-    }
-    const exit: ResolvedExit | undefined = args.exit ?? this.store.getPendingExit(run.id);
-    if (!exit) {
-      throw new Error(
-        `run_signal: no exit recorded for run '${run.id}' — if the Task returned without an exit, report {signal: 'agent-died', payload: {observed: 'empty_output'}} (§5.2)`
-      );
-    }
-    // The reaction depends only on machine_state + phases + the exit — none of
-    // which hooks touch — so it is computed ONCE from the observed run and stays
-    // valid across merge retries.
-    const { action, nextState } = react(run, exit, {
-      phase_death_cap: this.config.caps.phase_death_cap,
-      research_resume_per_phase: this.config.caps.research_resume_per_phase,
-    });
-    const at = this.now(); // stamp once — the mutate may re-run on a merge retry
-    // Apply the brain reaction onto the FRESH run body (audit findings 1/43, 18/43):
-    // casTransitionMerge re-reads inside its retry loop, so a concurrent hook write
-    // (H7 reconcile marks, H6/H8 escalations) is preserved instead of clobbered by
-    // a stale-body rewrite. The phase/escalation edits are re-derived from `fresh`
-    // (identical to the observed run — hooks change neither phases nor state).
-    this.store.casTransitionMerge(run.machine_state, run.id, (fresh) => {
-      const phases = fresh.phases.map((p) => ({ ...p, signals: [...p.signals] }));
-      const idx = exit.phase_id ? phases.findIndex((p) => p.id === exit.phase_id) : phases.findIndex((p) => p.status === 'in_progress');
-      if (idx !== -1) {
-        phases[idx].signals.push({ signal: exit.signal, payload: exit.payload ?? null, agent_role: exit.agent_role ?? null, at });
-        if (action.action === 'complete_run') phases[idx].status = 'complete';
-        if (action.action === 'spawn' && !('respawn' in action && action.respawn)) {
-          phases[idx].status = 'complete';
-          const nextIdx = phases.findIndex((p) => p.id === (action as { phase_id: string }).phase_id);
-          if (nextIdx !== -1) phases[nextIdx].status = 'in_progress';
-        }
-      }
-      const escalations = [...fresh.escalations];
-      if (action.action === 'judgment_needed' || action.action === 'halt') {
-        escalations.push({ kind: action.action, reason: (action as { reason: string }).reason, at });
-      }
-      return { ...fresh, machine_state: nextState, phases, escalations };
-    });
-    return { action, machine_state: nextState, run_id: run.id };
-  }
+  // The run protocol (§5.2, §10) — runState, requireWireRun, agentExit,
+  // runSignal — was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
   /**
    * knowledge_link (§10): typed graph edge. Both endpoints resolve through the
@@ -10603,13 +10353,8 @@ export class SterlingTools {
     return this.store.addLink(fromRecord.id, rel, toRecord.id);
   }
 
-  /** run_escalate (§10): surface a judgment branch / typed escalation onto the run record. */
-  runEscalate(payload: Record<string, unknown>): { run_id: string; escalations: number } {
-    const run = this.runState();
-    this.store.appendRunEscalation(run.id, { kind: 'escalation', payload, at: this.now() });
-    const after = this.runState(run.id);
-    return { run_id: run.id, escalations: after.escalations.length };
-  }
+  // run_escalate (§10) was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
   /**
    * maintenance_enqueue / maintenance_query (§10): the maintenance queue IS
@@ -10705,58 +10450,7 @@ export class SterlingTools {
     );
   }
 
-  // -- handoff pair (§10): transient, never enters the durable store -------------
-
-  handoffWrite(args: { run_id?: string; handoff: unknown }): { written: true; phase_id: string } {
-    const run = this.requireWireRun('handoff_write', args.run_id);
-    // AC2: reviewer-role disposition coverage check (decision 628c4b7f, run r-d630, phase 2).
-    // Placement mirrors the 32fa4a05 agent_exit off-run-phase guard: validate BEFORE persisting —
-    // a refused write records NOTHING. Non-reviewer roles skip this check entirely.
-    // The handoff is pre-parsed here for the guard only; schema validation still flows through
-    // the store's writeHandoff (so malformed handoffs continue to surface as schema errors).
-    const parsedForCheck = handoffSchema.safeParse(args.handoff);
-    if (parsedForCheck.success && REVIEWER_ROLES.has(parsedForCheck.data.agent_role)) {
-      const phaseId = parsedForCheck.data.phase_id;
-      const mandatoryIds = new Set(
-        (run.review_mandatory ?? []).filter((m) => m.phase_id === phaseId).map((m) => m.record_id)
-      );
-      const dispositionIds = new Set((parsedForCheck.data.dispositions ?? []).map((d) => d.record_id));
-      const missing = [...mandatoryIds].filter((id) => !dispositionIds.has(id));
-      const extra = [...dispositionIds].filter((id) => !mandatoryIds.has(id));
-      if (missing.length > 0 || extra.length > 0) {
-        const parts: string[] = [];
-        if (missing.length > 0) parts.push(`missing mandatory ids: ${missing.join(', ')}`);
-        if (extra.length > 0) parts.push(`extra ids not in review_mandatory: ${extra.join(', ')}`);
-        throw new Error(
-          `handoff_write: reviewer '${parsedForCheck.data.agent_role}' disposition coverage mismatch — ${parts.join('; ')}. Nothing was written.`
-        );
-      }
-    }
-    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 3): store.writeHandoff
-    // re-parses the handoff against handoffSchema and throws the raw ZodError
-    // across the store boundary — caught and re-rendered the same way as
-    // board_update's/knowledge_supersede's own store-validation catch (958df5e),
-    // rather than leaking the raw issue array on this caller-triggerable surface.
-    try {
-      const handoff = this.store.writeHandoff(run.id, args.handoff, this.now());
-      return { written: true, phase_id: handoff.phase_id };
-    } catch (err) {
-      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'handoff', 'handoff_write');
-      throw err;
-    }
-  }
-
-  handoffRead(args: { run_id?: string; phase_id?: string; files?: string[] } = {}): unknown[] {
-    const run = this.requireWireRun('handoff_read', args.run_id);
-    // RAW-ZOD LEAK INVENTORY (board a00689b9, site 4): store.readHandoffs
-    // re-parses each stored handoff body against handoffSchema — a malformed
-    // or legacy row would otherwise leak the raw ZodError across the store
-    // boundary the same way site 3's write path did.
-    try {
-      return this.store.readHandoffs(run.id, { phase_id: args.phase_id, files: args.files });
-    } catch (err) {
-      if (err instanceof ZodError) throw this.renderValidationFailure(err, 'handoff', 'handoff_read');
-      throw err;
-    }
-  }
+  // The handoff pair (§10: handoffWrite/handoffRead) was removed with the
+  // staged pipeline (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1).
 }
