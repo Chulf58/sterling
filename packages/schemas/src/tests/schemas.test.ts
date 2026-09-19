@@ -797,31 +797,17 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
     'AGENT_MODEL_KEY keys are exactly the registered agents — none missing, none orphaned'
   );
 
-  // the exact expected mapping (interface slice 2). reviewers is many-to-one and CORRECT.
+  // the exact expected mapping — scale-down decision
+  // sterling-claude-code-scale-down-boundary (2ad87dd1) cut the roster to the
+  // 3 conductor-direct survivors; the old pipeline agents and the
+  // reviewer-folding shape they carried are gone with them.
   assert.deepEqual(map, {
-    'test-writer': 'test_writer',
-    coder: 'coder',
-    'reviewer-correctness': 'reviewers',
-    'reviewer-security': 'reviewers',
-    'reviewer-skeptic': 'reviewers',
-    'reviewer-performance': 'reviewers',
-    'implementation-architect': 'implementation_architect',
     researcher: 'researcher',
     explorer: 'explorer',
-    // conductor-direct agents (adopted from Comsoft): one key each, no folding
     librarian: 'librarian',
-    debugger: 'debugger',
   });
 
-  // many-to-one asserted head-on: all four reviewer agents resolve to the single 'reviewers' key.
-  // (map re-cast to Record<string,string> at the string-indexed lookup: the preceding deepEqual
-  // unifies `map` to its inferred literal-key shape, which otherwise trips TS7053 on map![r].)
   const lookup = map as Record<string, string>;
-  const reviewerAgents = registeredNames.filter((n) => n.startsWith('reviewer-'));
-  assert.equal(reviewerAgents.length, 4, 'the registry carries four reviewer agents');
-  for (const r of reviewerAgents) {
-    assert.equal(lookup[r], 'reviewers', `reviewer agent '${r}' is governed by the single 'reviewers' config key`);
-  }
 
   // config-only keys have NO installed/registered agent, so they are NOT keys of AGENT_MODEL_KEY.
   assert.ok(!('coder_hard' in lookup), 'coder_hard is a config-only key — never a registered-agent key');
@@ -835,47 +821,11 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
   }
 });
 
-// AGENT_CLASS totality (council wf_0d90ab18-436): the class marking is
-// LOAD-BEARING — H8 derives its slice-guarded/cap-counted set from it — so it
-// must not be allowed to drift from the registry that declares it. Both
-// directions, exactly as AGENT_MODEL_KEY above.
-test('AGENT_CLASS: totality over agent-templates/registry.json, and PIPELINE_AGENT_TYPES is exactly the pipeline class', async () => {
-  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
-  const cls = mod.AGENT_CLASS as Record<string, string> | undefined;
-  const pipeline = mod.PIPELINE_AGENT_TYPES as Set<string> | undefined;
-  assert.ok(cls, 'AGENT_CLASS must be exported from the schemas index (defined once, invariant 1)');
-  assert.ok(pipeline, 'PIPELINE_AGENT_TYPES must be exported from the schemas index');
-
-  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string; class?: string }[];
-  };
-
-  // every registered agent declares a class, and the mirror agrees with it
-  for (const a of registry.agents) {
-    assert.ok(a.class, `registry entry '${a.name}' must declare a class`);
-    assert.equal(cls![a.name], a.class, `AGENT_CLASS['${a.name}'] must match the registry's class`);
-  }
-  // no orphan keys: the mirror's keys are EXACTLY the registered agents
-  assert.deepEqual(
-    Object.keys(cls!).sort(),
-    registry.agents.map((a) => a.name).sort(),
-    'AGENT_CLASS keys are exactly the registered agents — none missing, none orphaned'
-  );
-  // only the two known classes exist (a typo'd class must fail, not silently un-guard an agent)
-  for (const [name, value] of Object.entries(cls!)) {
-    assert.ok(['pipeline', 'conductor_direct'].includes(value), `AGENT_CLASS['${name}'] = '${value}' is not a known class`);
-  }
-  // the derived guard set is exactly the pipeline class...
-  assert.deepEqual(
-    [...pipeline!].sort(),
-    registry.agents.filter((a) => a.class === 'pipeline').map((a) => a.name).sort(),
-    'PIPELINE_AGENT_TYPES is exactly the registry pipeline class'
-  );
-  // ...and the conductor-direct agents are NOT in it (the H8 regression this guards)
-  for (const a of registry.agents.filter((x) => x.class === 'conductor_direct')) {
-    assert.ok(!pipeline!.has(a.name), `conductor-direct '${a.name}' must NOT be H8 slice-guarded/cap-counted`);
-  }
-});
+// AGENT_CLASS / PIPELINE_AGENT_TYPES totality test deleted along with the
+// exports themselves (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — H8, their sole
+// consumer, is gone, and agent-templates/registry.json no longer declares a
+// `class` field.
 
 test('modelsCatalogSchema: {entries:[{id,label,tier,status}]} round-trips; malformed entries fail loud (AC7, interface slice 3)', async () => {
   const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
@@ -1092,38 +1042,8 @@ test('runRecordSchema.review_mandatory: optional {phase_id, record_id, reason}[]
   assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', record_id: 'rec-1' }] }), /invalid|reason|required/i, 'reason is required on each mandatory item');
 });
 
-test('REVIEWER_ROLES: registry-derived set resolving exactly the four reviewer-* names; totality vs AGENT_MODEL_KEY and the roster (AC1)', async () => {
-  // dynamic import + cast: REVIEWER_ROLES does not exist until this phase ships, so a missing
-  // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
-  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
-  const rolesRaw = mod.REVIEWER_ROLES as Set<string> | string[] | undefined;
-  assert.ok(rolesRaw, 'REVIEWER_ROLES must be exported from the schemas index (defined once, invariant 1)');
-
-  // coerce the set (Set or array) to a sorted member list — the oracle tests membership, not the container type
-  const members = (Array.isArray(rolesRaw) ? [...rolesRaw] : [...(rolesRaw as Set<string>)]).slice().sort();
-  const expected = ['reviewer-correctness', 'reviewer-performance', 'reviewer-security', 'reviewer-skeptic'];
-  assert.deepEqual(members, expected, 'REVIEWER_ROLES resolves EXACTLY the four reviewer-* names');
-
-  // the is-a-reviewer predicate: reviewers are members, non-reviewers are not
-  const has = (n: string) =>
-    typeof (rolesRaw as Set<string>).has === 'function' ? (rolesRaw as Set<string>).has(n) : members.includes(n);
-  for (const r of expected) assert.ok(has(r), `${r} is a reviewer role`);
-  assert.ok(!has('coder'), 'coder is not a reviewer role');
-  assert.ok(!has('test-writer'), 'test-writer is not a reviewer role');
-  assert.ok(!has('implementation-architect'), 'implementation-architect is not a reviewer role');
-
-  // DERIVATION (single source of truth): REVIEWER_ROLES is EXACTLY the AGENT_MODEL_KEY keys that
-  // map to 'reviewers' — a hardcoded list was explicitly REJECTED as a second source (decision 628c4b7f).
-  const map = mod.AGENT_MODEL_KEY as Record<string, string> | undefined;
-  assert.ok(map, 'AGENT_MODEL_KEY must be exported — REVIEWER_ROLES derives from it');
-  const derivedFromMap = Object.keys(map!).filter((k) => map![k] === 'reviewers').sort();
-  assert.deepEqual(members, derivedFromMap, "REVIEWER_ROLES is exactly AGENT_MODEL_KEY's 'reviewers' keys — no drift from the map");
-
-  // TOTALITY vs the roster (invariant 3): read agent-templates/registry.json at runtime; its
-  // reviewer-* agents are EXACTLY REVIEWER_ROLES — none missing, none orphaned.
-  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string }[];
-  };
-  const rosterReviewers = registry.agents.map((a) => a.name).filter((n) => n.startsWith('reviewer-')).sort();
-  assert.deepEqual(members, rosterReviewers, 'REVIEWER_ROLES matches the reviewer-* agents in the roster (totality vs registry.json)');
-});
+// REVIEWER_ROLES's four-name totality test deleted along with the four
+// reviewer-* templates it pinned (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — REVIEWER_ROLES itself
+// stays exported (still consumed outside this package) but is now correctly
+// an empty set, since no surviving AGENT_MODEL_KEY entry maps to 'reviewers'.

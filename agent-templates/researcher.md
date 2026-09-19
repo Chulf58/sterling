@@ -8,17 +8,6 @@ required_inputs:
   - the single question (verbatim)
   - context (why it blocks, what decision it feeds)
   - budget cap (max sources / time, stated in the dispatch)
-hooks:
-  PreToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
-  PostToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
 ---
 
 # Role & owned judgment

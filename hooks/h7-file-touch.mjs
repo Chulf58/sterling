@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h7-file-touch.mjs
 import { writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
-import { join as join4, dirname as dirname3 } from "node:path";
+import { join as join3, dirname as dirname3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4613,33 +4613,11 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
   researcher: "researcher",
   explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -7789,7 +7767,6 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/settlement.mjs
 import { readFileSync as readFileSync2, mkdirSync as mkdirSync2, rmSync, statSync as statSync2 } from "node:fs";
-import { join as join3 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -7858,16 +7835,6 @@ function parseTouchesContent(raw) {
   }
   return out;
 }
-function loadGeneratedProjections(root) {
-  try {
-    const raw = readFileSync2(join3(root, ".sterling", "config.json"), "utf8");
-    const parsed = JSON.parse(raw);
-    const list = parsed?.generated_projections;
-    return new Set(Array.isArray(list) ? list : []);
-  } catch {
-    return /* @__PURE__ */ new Set();
-  }
-}
 
 // scripts/hooks/h7-file-touch.mjs
 var input = readStdin();
@@ -7877,29 +7844,18 @@ if (rel === ".git" || rel.startsWith(".git/")) allow();
 var store = openStore(input.cwd);
 if (!store) allow();
 try {
-  const run = store.getRun();
-  if (run) {
-    const exempt = loadGeneratedProjections(input.cwd);
-    if (!exempt.has(rel)) {
-      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
-      for (const article of owners) store.appendRunReconcileNeeded(run.id, article.id);
-    } else {
-      store.updateRunOptimistic(run.id, (current) => current.reconcile_needed ? current : { ...current, reconcile_needed: [] });
-    }
-  } else {
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const touchesPath = join4(input.cwd, ".sterling", "transient", "touches.json");
-    mkdirSync3(dirname3(touchesPath), { recursive: true });
-    withFileLock(
-      touchesPath,
-      () => {
-        const touches = existsSync3(touchesPath) ? parseTouchesContent(readFileSync3(touchesPath, "utf8")) : [];
-        touches.push({ path: rel, at: now });
-        writeFileSync(touchesPath, JSON.stringify(touches));
-      },
-      { onTimeout: () => store.recordCheckSkipped("h7-touches-lock", "lock_timeout", void 0, now) }
-    );
-  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const touchesPath = join3(input.cwd, ".sterling", "transient", "touches.json");
+  mkdirSync3(dirname3(touchesPath), { recursive: true });
+  withFileLock(
+    touchesPath,
+    () => {
+      const touches = existsSync3(touchesPath) ? parseTouchesContent(readFileSync3(touchesPath, "utf8")) : [];
+      touches.push({ path: rel, at: now });
+      writeFileSync(touchesPath, JSON.stringify(touches));
+    },
+    { onTimeout: () => store.recordCheckSkipped("h7-touches-lock", "lock_timeout", void 0, now) }
+  );
   allow();
 } catch (e) {
   warnNonBlocking(`H7: file-touch registration failed for '${rel}': ${e.message}`);

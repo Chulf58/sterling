@@ -8,17 +8,6 @@ required_inputs:
   - the work order — either (a) a drain list of maintenance item ids + their feature_link article ids, or (b) conductor-drafted update bodies keyed by article id
   - for (a): the conductor's per-item co-tenant verdict where it has one
   - for (b): either the history ENTRIES to append (preferred — `knowledge_append` extends the array, so the conductor drafts only what is new), or, if the draft passes `history` through `knowledge_update` instead, the FULL array (update REPLACES, and a truncated draft destroys history)
-hooks:
-  PreToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
-  PostToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
 ---
 
 # Role & owned judgment

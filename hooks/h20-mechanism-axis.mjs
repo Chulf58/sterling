@@ -4599,33 +4599,11 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
   researcher: "researcher",
   explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -5550,9 +5528,6 @@ function rankedAxisTerms(text) {
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
 }
-function extractAxisTermsUncapped(text) {
-  return rankedAxisTerms(text);
-}
 function axisNarrowText(record) {
   if (!record || typeof record !== "object")
     return "";
@@ -5683,10 +5658,6 @@ function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const central = unionCentralTerms(record, topK);
   const covered = coveredCentralTerms(central, outgoingText);
   return covered.length >= Math.min(minTerms, central.length);
-}
-function hasFullNarrowCentralityCoverage(record, outgoingText, opts = {}) {
-  const central = narrowCentralTerms(record, opts.topK ?? AXIS_RECORD_TOP_K);
-  return coveredCentralTerms(central, outgoingText).length >= central.length;
 }
 
 // packages/store/dist/index.js
@@ -8135,9 +8106,6 @@ function writeGuard(path, guard) {
   renameSync(tmp, path);
 }
 var DENY_RULING_TYPES = ["decision", "anti_pattern"];
-var STRICT_MIN_HITS = 3;
-var DELTA_MIN_NEW_TERMS = 5;
-var DELTA_TERMS_VERSION = 2;
 function subQuestionText(q) {
   return [
     q?.question,
@@ -8145,78 +8113,6 @@ function subQuestionText(q) {
     ...Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []
   ].filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
 }
-function denyLedgerPath(cwd, agentId) {
-  return join4(deliveryDir(cwd), agentId ? `deny-ledger-agent-${agentId}.json` : "deny-ledger-conductor.json");
-}
-function emptyDenyLedger() {
-  return { entries: {}, overrides: [] };
-}
-function isWellFormedDenyEntry(entry) {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  if (!Array.isArray(entry.recordIds) || !entry.recordIds.every((id) => typeof id === "string" && id)) return false;
-  if (!Array.isArray(entry.terms) || !entry.terms.every((t) => typeof t === "string")) return false;
-  if (entry.terms_version !== void 0 && !Number.isFinite(entry.terms_version)) return false;
-  return true;
-}
-function readDenyLedger(path) {
-  try {
-    if (!existsSync4(path)) return emptyDenyLedger();
-    const raw = JSON.parse(readFileSync3(path, "utf8"));
-    const ledger = emptyDenyLedger();
-    const rawEntries = raw?.entries;
-    if (rawEntries && typeof rawEntries === "object" && !Array.isArray(rawEntries)) {
-      const dropped = [];
-      for (const [key, entry] of Object.entries(rawEntries)) {
-        if (isWellFormedDenyEntry(entry)) ledger.entries[key] = entry;
-        else dropped.push(key);
-      }
-      if (dropped.length) {
-        process.stderr.write(
-          `H20: dropped ${dropped.length} malformed deny-once ledger entry(ies) at ${path} \u2014 ${dropped.join(", ")}
-`
-        );
-      }
-    } else if (rawEntries !== void 0) {
-      process.stderr.write(`H20: deny-once ledger at ${path} has a non-object 'entries' \u2014 treated as empty
-`);
-    }
-    if (Array.isArray(raw?.overrides)) ledger.overrides = raw.overrides;
-    else if (raw?.overrides !== void 0) {
-      process.stderr.write(`H20: deny-once ledger at ${path} has a non-array 'overrides' \u2014 treated as empty
-`);
-    }
-    return ledger;
-  } catch {
-    process.stderr.write(`H20: corrupt deny-once ledger at ${path} \u2014 reset to empty
-`);
-    return emptyDenyLedger();
-  }
-}
-function writeDenyLedger(path, ledger) {
-  mkdirSync3(dirname3(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(ledger));
-  renameSync(tmp, path);
-}
-function denyIntentKey(recordIds) {
-  return [...new Set(recordIds ?? [])].sort().join("|");
-}
-function escapeForRegex(s2) {
-  return String(s2).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function citationPattern(needle) {
-  return `(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`;
-}
-function idCitedIn(text, id) {
-  if (!id) return false;
-  const hay = String(text ?? "").toLowerCase();
-  const full = String(id).toLowerCase();
-  const boundaried = (needle) => new RegExp(citationPattern(needle), "i").test(hay);
-  if (boundaried(full)) return true;
-  const prefix = full.split("-")[0];
-  return prefix.length >= 8 && boundaried(prefix);
-}
-var FULL_UUID_PATTERN = "(?<![a-z0-9])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![a-z0-9])";
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
   "anti_pattern",
@@ -8232,42 +8128,6 @@ var CITATION_BOILERPLATE_WORDS = [
 ];
 var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
 var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
-function citationStripRegex(needlePattern) {
-  return new RegExp(`${CITATION_BOILERPLATE_RUN}${needlePattern}${CITATION_SEP}${CITATION_BOILERPLATE_RUN}`, "gi");
-}
-function stripCitations(text, recordIds = []) {
-  let out = String(text ?? "");
-  out = out.replace(citationStripRegex(FULL_UUID_PATTERN), " ");
-  for (const id of recordIds ?? []) {
-    if (!id) continue;
-    const prefix = String(id).toLowerCase().split("-")[0];
-    if (prefix.length < 8) continue;
-    out = out.replace(citationStripRegex(citationPattern(prefix)), " ");
-  }
-  return out;
-}
-function substanceFor(d) {
-  if (d.type === "anti_pattern") {
-    const trigger = typeof d.trigger === "string" ? d.trigger.trim() : "";
-    const rightWay = typeof d.right_way === "string" ? d.right_way.trim() : "";
-    if (trigger && rightWay) return { text: `${trigger} \u2014 ${rightWay}`, marker: "" };
-    if (trigger) return { text: trigger, marker: `\u27E8right_way missing \u2014 knowledge_get ${d.id}\u27E9` };
-    if (rightWay) return { text: rightWay, marker: `\u27E8trigger missing \u2014 knowledge_get ${d.id}\u27E9` };
-    return { text: "", marker: `\u27E8no substance recorded \u2014 knowledge_get ${d.id}\u27E9` };
-  }
-  const statement = typeof d.statement === "string" ? d.statement.trim() : "";
-  return statement ? { text: statement, marker: "" } : { text: "", marker: `\u27E8no substance recorded \u2014 knowledge_get ${d.id}\u27E9` };
-}
-function renderOverrideLine(ids) {
-  if (!ids.length) {
-    return "Cite the ruling id + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.";
-  }
-  const EXPLICIT_CAP = 2;
-  const shown = ids.slice(0, EXPLICIT_CAP);
-  const rest = ids.length - shown.length;
-  const idsText = ids.length > 1 ? `one of ${shown.join(", ")}${rest > 0 ? ` +${rest} more` : ""}` : shown.join(", ");
-  return `Cite ${idsText} + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.`;
-}
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
   const scope = record?.scope ?? "unknown";
@@ -8275,38 +8135,6 @@ function statusBracket(record) {
 }
 function statusAnnotation(record) {
   return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
-}
-function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
-  const lines = [
-    "STERLING DENY-ONCE (H20, decision 68332e4b) \u2014 this question was NOT shown to the user; read the settled ruling(s) below, then act on them before resubmitting."
-  ];
-  if (totalQuestions > 1) {
-    const openLabel = open.length ? open.map((o) => `"${clip(normalizeWs(o.label) || `Sub-question ${o.index + 1}`, 40)}"`).join(", ") : "none \u2014 every sub-question is settled";
-    lines.push(
-      `${totalQuestions} sub-question(s) total, ${ruled.length} settled by the store below \u2014 resubmit only the open sub-question(s): ${openLabel}`
-    );
-  }
-  const citedIds = [];
-  for (const r of ruled) {
-    const label = clip(normalizeWs(r.label) || `Sub-question ${r.index + 1}`, 80);
-    for (const d of r.decisions) {
-      citedIds.push(d.id);
-      const kind = d.type === "anti_pattern" ? "anti_pattern" : "decision";
-      const { text, marker } = substanceFor(d);
-      const clippedText = clip(normalizeWs(text), 160);
-      const normalizedMarker = normalizeWs(marker);
-      const substance = normalizedMarker ? `${clippedText}${clippedText ? " " : ""}${normalizedMarker}` : clippedText;
-      lines.push(`\u2014 "${label}" \u2192 ${kind} [${d.id}] [${statusBracket(d)}]: ${substance}`);
-    }
-    if (r.delta && typeof r.delta.new_terms === "number") {
-      lines.push(
-        `  re-ask delta: your re-ask added ${r.delta.new_terms} of the \u2265${DELTA_MIN_NEW_TERMS} new terms required to override \u2014 state what is UNRESOLVED and why, in words the prior attempt did not use; repeating the same question with the id pasted in is denied again.`
-      );
-    }
-  }
-  const idList = [...new Set(citedIds)];
-  lines.push(renderOverrideLine(idList));
-  return lines.join("\n");
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -8318,9 +8146,6 @@ function clip(text, cap) {
     count++;
   }
   return out;
-}
-function normalizeWs(text) {
-  return String(text ?? "").replace(/\s+/g, " ").trim();
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
@@ -8568,91 +8393,6 @@ function main(input2) {
       }
     }
     if (!candidates.length) return finish();
-    if (isQuestion) {
-      const questions = input2.tool_input.questions;
-      const perQuestion = questions.map((q, index) => {
-        const subText = subQuestionText(q);
-        const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
-        const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
-          (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && // FULL coverage of the record's PRE-UNION narrow top-K. NOT
-          // hasRecordCentralityHit: this rung exits 2 and blocks the user's
-          // question, so it must never see the title-union central set (a
-          // bigger set makes full coverage a weaker per-term demand — see
-          // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
-          hasFullNarrowCentralityCoverage(x.record, subText)
-        );
-        return { index, label: q?.header || q?.question, subText, subTerms, strict };
-      });
-      const ledgerPath = denyLedgerPath(input2.cwd, input2.agent_id);
-      const ledger = readDenyLedger(ledgerPath);
-      const unresolved = [];
-      const openIndexes = /* @__PURE__ */ new Set();
-      const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
-      for (const p of perQuestion) {
-        const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
-        let overridden = null;
-        let shortfall = null;
-        let reseeded = false;
-        const citedUnresolvedIds = /* @__PURE__ */ new Set();
-        for (const [key2, entry] of Object.entries(ledger.entries)) {
-          if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
-          if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
-          if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
-            const carried = extractAxisTermsUncapped(
-              stripCitations(Array.isArray(entry.terms) ? entry.terms.join(" ") : "", entry.recordIds)
-            );
-            entry.terms = [.../* @__PURE__ */ new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
-            entry.terms_version = DELTA_TERMS_VERSION;
-            reseeded = true;
-            for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
-            continue;
-          }
-          const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
-          if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
-            overridden = { key: key2, recordIds: entry.recordIds };
-            break;
-          }
-          if (shortfall === null || newTerms.length > shortfall.new_terms) {
-            shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
-          }
-          for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
-        }
-        if ((reseeded || shortfall !== null) && p.strict.length === 0) {
-          const byId = new Map(candidates.map((r) => [r.id, r]));
-          const records = [...citedUnresolvedIds].map((id) => {
-            const pooled = byId.get(id);
-            if (pooled) return pooled;
-            try {
-              return store.get(id) ?? { id };
-            } catch {
-              return { id };
-            }
-          });
-          unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
-          continue;
-        }
-        if (!reseeded && overridden) {
-          ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: (/* @__PURE__ */ new Date()).toISOString() });
-          openIndexes.add(p.index);
-          continue;
-        }
-        if (p.strict.length === 0) {
-          openIndexes.add(p.index);
-          continue;
-        }
-        const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
-        const key = denyIntentKey(recordIds);
-        if (!ledger.entries[key])
-          ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
-        unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
-      }
-      writeDenyLedger(ledgerPath, ledger);
-      if (unresolved.length) {
-        const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
-        recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
-        return deny(renderDenyOnceMessage(unresolved, questions.length, open));
-      }
-    }
     const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
     if (!scored.length) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id);

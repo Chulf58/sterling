@@ -15,7 +15,7 @@ import {
   lintToolGrants,
   readRegisteredToolNames,
 } from '../lib/checks.mjs';
-import { AGENT_MODEL_KEY, REVIEWER_ROLES } from '@sterling/schemas';
+import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TPL = join(root, 'agent-templates');
@@ -33,21 +33,10 @@ const MODELS = Object.fromEntries(
 );
 const CFG = { config: { models: MODELS }, models: MODELS };
 
-const ROSTER = [
-  'test-writer',
-  'coder',
-  'reviewer-correctness',
-  'reviewer-security',
-  'reviewer-skeptic',
-  'reviewer-performance',
-  'implementation-architect',
-  'researcher',
-  'explorer',
-  // Conductor-direct agents (adopted from Comsoft): no agent_exit/handoff_write —
-  // they report their signal as the first line of their final text instead.
-  'librarian',
-  'debugger',
-];
+// The scale-down cut (decision sterling-claude-code-scale-down-boundary,
+// 2ad87dd1) deleted 8 pipeline/debugger templates; librarian, researcher, and
+// explorer are the only surviving agents.
+const ROSTER = ['librarian', 'researcher', 'explorer'];
 
 test('the §7.1 roster is registered, linter-complete, and spawn-contracted', () => {
   const registry = loadRegistry(join(TPL, 'registry.json'));
@@ -113,50 +102,21 @@ test('tool-grant linter: the shipped roster is clean, and it catches every failu
   assert.deepEqual(kinds('Read, Grep, Glob'), [], 'a store-free agent needs no ToolSearch');
 });
 
-test('AGENT_MODEL_KEY covers every registered agent (totality) and folds the reviewers to one key', () => {
-  // Every roster agent must have an AGENT_MODEL_KEY entry, or its {{MODEL}} token
-  // cannot resolve at install (P5: fail loud, never silent).
-  for (const name of ROSTER) {
-    assert.ok(AGENT_MODEL_KEY[name], `AGENT_MODEL_KEY maps '${name}' to a config.models key`);
-  }
-  const reviewerKeys = new Set(ROSTER.filter((n) => n.startsWith('reviewer-')).map((n) => AGENT_MODEL_KEY[n]));
-  assert.equal(reviewerKeys.size, 1, 'all reviewer agents fold to a single config.models key (one key governs four agents)');
-});
 
-test('templates render with install-time vars: hook commands baked forward-slash, quoted (§6); model/effort resolved from config.models', () => {
-  const content = readFileSync(join(TPL, 'coder.md'), 'utf8');
-  const { installedContent } = renderInstalledAgent(content, 'coder.md', { ...OPTS, ...CFG });
-  // The pinned literal tracks agent-templates/coder.md's hook command, which has
-  // carried `--disable-warning=ExperimentalWarning` between the node path and the
-  // hook path since commit 41db69ad (2026-08-22); this assertion was never updated
-  // with it. What is being pinned is unchanged: BOTH substituted paths are
-  // forward-slash and QUOTED (§6), with the space-bearing node path surviving
-  // whole.
-  assert.ok(
-    installedContent.includes(
-      '"C:/tools with space/node.exe" --disable-warning=ExperimentalWarning "C:/plugin/hooks/h3-contract-gate.mjs"'
-    )
-  );
-  assert.ok(!installedContent.includes('{{'), 'no tokens survive install (vars AND model/effort resolved)');
-  assert.ok(!/command:.*\\\\/.test(installedContent), 'no backslashes in any emitted command');
-  // model/effort resolved from config.models[AGENT_MODEL_KEY['coder']]
+test('templates render with install-time vars: model/effort resolved from config.models (§6)', () => {
+  // NODE/HOOKS_DIR/GIT_RO hook-command substitution is untestable against a real
+  // shipped template since the scale-down cut (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1): the 3 surviving templates
+  // (librarian, researcher, explorer) carry NO hooks: block and reference only
+  // {{MODEL}}/{{EFFORT}} — the old coder.md-pinned hook-command literal this test
+  // used to check died with coder.md. What survives to test here is the
+  // model/effort resolution path.
+  const content = readFileSync(join(TPL, 'librarian.md'), 'utf8');
+  const { installedContent } = renderInstalledAgent(content, 'librarian.md', { ...OPTS, ...CFG });
+  assert.ok(!installedContent.includes('{{'), 'no tokens survive install (model/effort resolved)');
   const fm = installedContent.match(/^---\n([\s\S]*?)\n---/)[1];
   assert.match(fm, /^model: claude-opus-4-8$/m, 'MODEL token resolved from config.models');
   assert.match(fm, /^effort: low$/m, 'EFFORT token resolved from config.models');
-});
-
-test('install refuses half-baked substitution and backslash vars (P5/§6)', () => {
-  const content = readFileSync(join(TPL, 'test-writer.md'), 'utf8');
-  // config supplied so MODEL/EFFORT resolve — the ONLY missing substitution is
-  // HOOKS_DIR, so the incomplete-substitution error names it specifically.
-  assert.throws(
-    () => renderInstalledAgent(content, 'test-writer.md', { ...OPTS, ...CFG, vars: { NODE: '"C:/n.exe"' } }),
-    /substitution incomplete.*HOOKS_DIR/s
-  );
-  assert.throws(
-    () => renderInstalledAgent(content, 'test-writer.md', { ...OPTS, ...CFG, vars: { NODE: '"C:\\\\n.exe"', HOOKS_DIR: 'C:/h' } }),
-    /backslash check failed/
-  );
 });
 
 test('full roster installs end-to-end through the CLI with detected vars; model/effort tokens resolve to concrete pinned ids', () => {
@@ -171,22 +131,20 @@ test('full roster installs end-to-end through the CLI with detected vars; model/
     const installed = readdirSync(join(dir, '.claude', 'agents')).sort();
     assert.deepEqual(installed, ROSTER.map((n) => `${n}.md`).sort());
     assert.match(r.stdout, /RESTART REQUIRED/);
-    const coder = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8');
-    assert.match(coder, /sterling-generated v=/);
-    assert.ok(coder.includes(`${root.replace(/\\/g, '/')}/hooks/h14-bash-allowlist.mjs`), 'HOOKS_DIR baked to the plugin hooks dir');
-    assert.ok(coder.includes(process.execPath.replace(/\\/g, '/')), 'NODE baked to the running node');
-    // Phase 2: no {{MODEL}}/{{EFFORT}} token survives a real CLI install — the CLI
-    // resolves them from config.models (falling back to the shipped default config)
-    // to a concrete pinned model id, never a bare alias or a leftover token.
-    assert.ok(!coder.includes('{{'), 'no substitution token survives the CLI install');
-    const fm = coder.match(/^---\n([\s\S]*?)\n---/)[1];
+    const librarian = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8');
+    assert.match(librarian, /sterling-generated v=/);
+    // No hooks: block survives in any of the 3 surviving templates (scale-down
+    // decision sterling-claude-code-scale-down-boundary, 2ad87dd1) — HOOKS_DIR/NODE
+    // baking is no longer exercised by a real shipped template; see the render test
+    // above for what still is (model/effort resolution).
+    assert.ok(!librarian.includes('{{'), 'no substitution token survives the CLI install');
+    const fm = librarian.match(/^---\n([\s\S]*?)\n---/)[1];
     assert.match(fm, /^model: claude-[a-z0-9.\-]+$/m, 'model resolved to a concrete pinned claude- id');
     assert.match(fm, /^effort: [a-z]+$/m, 'effort resolved to a concrete value');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
 test('skills ship with live file references and pass the skill linter', () => {
   const skills = collectSkills(join(root, 'skills'));
   assert.deepEqual(skills.map((s) => s.file).sort(), [
@@ -210,31 +168,3 @@ test('skills ship with live file references and pass the skill linter', () => {
 // -section linters green across all templates.
 // ---------------------------------------------------------------------------
 
-test('AC6: all four reviewer templates carry a worked handoff example (required arrays, empty [] permitted) plus a dispositions example with both verbs', () => {
-  // derive the four reviewer names from the registry-backed predicate — a template
-  // rename or a fifth reviewer fails loudly here, not silently.
-  const reviewers = [...REVIEWER_ROLES].sort();
-  assert.deepEqual(
-    reviewers,
-    ['reviewer-correctness', 'reviewer-performance', 'reviewer-security', 'reviewer-skeptic'],
-    'REVIEWER_ROLES resolves exactly the four reviewer templates the handoff example must reach'
-  );
-
-  for (const role of reviewers) {
-    const content = readFileSync(join(TPL, `${role}.md`), 'utf8');
-    // the worked handoff example shows the exact required arrays
-    for (const key of ['what_changed', 'wired', 'deferred']) {
-      assert.ok(content.includes(key), `${role}.md worked handoff example must show the '${key}' array`);
-    }
-    // and a dispositions example exercising BOTH disposition verbs (+ the reason the
-    // not_applicable_because verb requires) — the recurring first-write schema failure
-    // this example kills.
-    assert.ok(content.includes('dispositions'), `${role}.md must show a dispositions example block`);
-    assert.ok(content.includes('addressed'), `${role}.md dispositions example must show the 'addressed' verb`);
-    assert.ok(
-      content.includes('not_applicable_because'),
-      `${role}.md dispositions example must show the 'not_applicable_because' verb`
-    );
-    assert.ok(content.includes('reason'), `${role}.md dispositions example must show the reason field the not_applicable_because verb requires`);
-  }
-});

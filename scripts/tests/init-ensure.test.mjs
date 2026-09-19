@@ -159,7 +159,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
   try {
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 0, r.stderr);
-    for (const a of [...ARTIFACTS, '.sterling/sterling.db', '.sterling/runs', 'docs/briefs', '.claude/agents/coder.md']) {
+    for (const a of [...ARTIFACTS, '.sterling/sterling.db', '.sterling/runs', 'docs/briefs', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, a)), `created ${a}`);
     }
     // a consuming project gets NO per-project .mcp.json — the plugin declares sterling
@@ -373,7 +373,7 @@ test('ensure outcome 2 — skip matching: a flagless re-run reports matches and 
     for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'sterling-windows\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', 'sterling-update\\.bat', '\\.mcp\\.json', '\\.gitignore']) {
       assert.match(rerun.stdout, new RegExp(`^${item}\\s+matches\\b`, 'm'), `${item} reported as matching`);
     }
-    assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+matches\b/m);
+    assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+matches\b/m);
     assert.match(rerun.stdout, /^\.sterling\/sterling\.db\s+exists\b/m, 'store is data — exists, never compared or recreated');
     assert.match(rerun.stdout, /no agent changes — no restart required/);
     assert.ok(!/RESTART REQUIRED/.test(rerun.stdout), 'no restart demanded when nothing changed');
@@ -393,17 +393,17 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     tuned.caps.inner_loop_n = 7;
     writeFileSync(configPath, JSON.stringify(tuned, null, 2));
     appendFileSync(join(dir, 'CLAUDE.md'), '\n## Local additions\n- the human wrote this\n');
-    appendFileSync(join(dir, '.claude', 'agents', 'coder.md'), '\nlocal tweak\n');
+    appendFileSync(join(dir, '.claude', 'agents', 'librarian.md'), '\nlocal tweak\n');
     const before = snapshot(dir);
-    const agentBefore = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8');
+    const agentBefore = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8');
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+differs\s+left untouched/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
-    assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+differs\s+locally modified/m);
+    assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+differs\s+locally modified/m);
     assert.deepEqual(snapshot(dir), before, 'hand-edited files untouched');
-    assert.equal(readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8'), agentBefore, 'modified agent untouched');
+    assert.equal(readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8'), agentBefore, 'modified agent untouched');
     // tuned declarations still drive the run: caps came from the recorded config
     assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).caps.inner_loop_n, 7);
   } finally {
@@ -708,7 +708,7 @@ test('never-clobber: a pre-existing CLAUDE.md survives the FIRST init byte-for-b
     assert.equal(r.code, 0, `init completes around the existing CLAUDE.md, no refusal: ${r.stderr}`);
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), ownContract, 'NEVER clobbered');
     assert.match(r.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
-    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/coder.md']) {
+    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, a)), `the rest of the manifest still created: ${a}`);
     }
   } finally {
@@ -736,12 +736,12 @@ test('individually regenerable: deleted artifacts are recreated by a flagless re
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
     const launcherBefore = readFileSync(join(dir, 'sterling.bat'), 'utf8');
     unlinkSync(join(dir, 'sterling.bat'));
-    unlinkSync(join(dir, '.claude', 'agents', 'coder.md'));
+    unlinkSync(join(dir, '.claude', 'agents', 'librarian.md'));
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^sterling\.bat\s+created\b/m);
-    assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+created\b/m);
+    assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+created\b/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+matches\b/m, 'untouched items still match');
     assert.match(rerun.stdout, /RESTART REQUIRED/, 'reinstalled agent → restart instruction again');
     assert.equal(readFileSync(join(dir, 'sterling.bat'), 'utf8'), launcherBefore, 'regenerated identically');
@@ -843,9 +843,9 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 
     // config.models is present and pinned in the config init just wrote.
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
-    assert.ok(config.models && config.models.coder, 'init wrote config.models with a coder entry');
+    assert.ok(config.models && config.models.librarian, 'init wrote config.models with a librarian entry');
 
-    for (const name of ['coder.md', 'reviewer-correctness.md']) {
+    for (const name of ['librarian.md', 'explorer.md']) {
       const installed = readFileSync(join(dir, '.claude', 'agents', name), 'utf8');
       const fm = installed.match(/^---\n([\s\S]*?)\n---/)[1];
       assert.ok(!installed.includes('{{'), `${name}: no substitution token survives install`);
@@ -853,10 +853,10 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
       assert.match(fm, /^effort: [a-z]+$/m, `${name}: effort resolved to a concrete value`);
     }
 
-    // coder resolves to the shipped-default coder model — config.models is the
-    // authoritative source at install (matches config.test.ts's shipped default).
-    const coderFm = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8').match(/^---\n([\s\S]*?)\n---/)[1];
-    assert.match(coderFm, /^model: claude-sonnet-5$/m, 'coder installs on the shipped-default coder model (config.models authoritative)');
+    // librarian resolves to the shipped-default librarian model — config.models is
+    // the authoritative source at install (matches config.test.ts's shipped default).
+    const librarianFm = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8').match(/^---\n([\s\S]*?)\n---/)[1];
+    assert.match(librarianFm, /^model: claude-sonnet-5$/m, 'librarian installs on the shipped-default librarian model (config.models authoritative)');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -1762,7 +1762,7 @@ test('ffe7c416 (1): with NO Windows node and NO opt-in, the native launcher and 
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init completed the rest of the manifest');
     assert.ok(existsSync(join(dir, 'sterling.bat')), 'the Linux/WSL launcher is still generated');
     assert.ok(existsSync(join(dir, '.sterling', 'config.json')), 'config still written');
-    assert.ok(existsSync(join(dir, '.claude', 'agents', 'coder.md')), 'agents still installed');
+    assert.ok(existsSync(join(dir, '.claude', 'agents', 'librarian.md')), 'agents still installed');
   } finally {
     rmSync(ctlDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

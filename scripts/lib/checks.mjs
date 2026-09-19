@@ -52,11 +52,11 @@ export function lintAgentPrompt(content, label) {
 // the handoff schema, so it is auditable rather than a sentence — is candidate
 // (b) on the board item and is NOT built.
 //
-// Deliberately scoped to the two roles the item names as reporting absence most
-// often. Widening it is a one-line change here; SIX other templates that also
-// report negatives (researcher, implementation-architect, the four reviewers)
-// remain UNCOVERED — disclosed, not silently included.
-export const ABSENCE_REPORTING_TEMPLATES = ['explorer.md', 'debugger.md'];
+// Deliberately scoped to the roles the item names as reporting absence most
+// often. debugger.md was deleted with the debugger template (scale-down
+// decision sterling-claude-code-scale-down-boundary, 2ad87dd1); researcher
+// remains UNCOVERED — disclosed, not silently included.
+export const ABSENCE_REPORTING_TEMPLATES = ['explorer.md'];
 export const ABSENCE_SECTION_RE = /^#+\s*absence claims\b/im;
 
 export function lintAbsenceDiscipline(content, label) {

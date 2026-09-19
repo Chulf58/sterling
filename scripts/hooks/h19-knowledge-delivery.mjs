@@ -90,8 +90,11 @@ function main(input) {
     // Subagents receive delivery only on the inject rungs, in their own context.
     if (mode === 'enqueue' && input.agent_id) return allow();
 
-    const run = store.getRun();
-    if (run && input.agent_id) return allow(); // pipeline agent: prep staged its pack (AC6)
+    // The staged-pipeline skip (`if (run && input.agent_id) return allow()` —
+    // prep.mjs had already staged the agent's knowledge pack) was removed with
+    // the pipeline itself (scale-down decision
+    // sterling-claude-code-scale-down-boundary, 2ad87dd1): every subagent now
+    // gets ordinary delivery like the conductor.
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })

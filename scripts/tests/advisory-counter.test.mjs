@@ -128,13 +128,14 @@ test('an explicit sessionId argument wins over session.json (concurrent-session 
 // prove textual presence at the right cardinality, not runtime reachability —
 // reachability was mutation-verified by hand (h25 sabotage → red). If a hook
 // below is DELETED at S5, delete its row here in the same commit.
+// h25/h26/h29/h30 rows deleted with those hooks (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1). h20's count drops from
+// 2 to 1: its DENY-ONCE PRE-STEP call site (the only other one) was removed
+// along with the whole pre-ask deny branch — the surviving call is the
+// loose STAGE 2 post-answer audit's.
 const WIRED = [
-  ['h20-mechanism-axis.mjs', 2],
+  ['h20-mechanism-axis.mjs', 1],
   ['h23-output-axis.mjs', 1],
-  ['h25-dispatch-capability.mjs', 1],
-  ['h26-dispatch-overlap.mjs', 1],
-  ['h29-codex-consult-failure.mjs', 1],
-  ['h30-bare-id-legibility.mjs', 1],
 ];
 
 for (const [file, expected] of WIRED) {

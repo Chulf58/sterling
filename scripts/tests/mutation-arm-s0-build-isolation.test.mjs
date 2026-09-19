@@ -91,7 +91,10 @@ const LIVE_HOOKS = join(root, 'hooks');
 // The hook whose COPY carries the deliberate marker. Any shipped hook would do;
 // this one is picked because it is dependency-light and also the routing target
 // in the sibling file (mutation-arm-s0-hooks-dir-routing.test.mjs).
-const MARK_HOOK = 'h24-gate-exit-lint.mjs';
+// h24-gate-exit-lint.mjs was deleted (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — h23-output-axis.mjs is
+// an equally dependency-light survivor, updated here and in the sibling file.
+const MARK_HOOK = 'h23-output-axis.mjs';
 
 const rooms = [];
 

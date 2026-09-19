@@ -7,17 +7,6 @@ tools: Read, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin
 required_inputs:
   - the exploration question or target (feature, symptom, or file set)
   - knowledge slice (owning articles for the implicated area — articles first, code second)
-hooks:
-  PreToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
-  PostToolUse:
-    - matcher: "*"
-      hooks:
-        - type: command
-          command: '{{NODE}} --disable-warning=ExperimentalWarning "{{HOOKS_DIR}}/h6-context-watch.mjs"'
 ---
 
 # Role & owned judgment

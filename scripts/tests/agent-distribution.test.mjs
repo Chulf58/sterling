@@ -58,8 +58,12 @@ const cfgBoth = (models) => ({ config: { models }, models });
 
 // A tokenized template for a REAL registered agent (so AGENT_MODEL_KEY resolves).
 // model:/effort: are substitution tokens per design 98064d77 §a.
+// 'librarian', not 'coder': coder.md was deleted and dropped from
+// AGENT_MODEL_KEY with the scale-down cut (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — librarian is a
+// surviving roster agent, so AGENT_MODEL_KEY['librarian'] still resolves.
 const CODER_TOKEN_TEMPLATE = `---
-name: coder
+name: librarian
 description: Tokenized fixture for model/effort resolution.
 tools: Read
 model: {{MODEL}}
@@ -449,48 +453,41 @@ test('phase-2 floor: a token-free template still renders WITHOUT config — mode
 });
 
 test('renderInstalledAgent resolves {{MODEL}}/{{EFFORT}} per agent from config.models via AGENT_MODEL_KEY; template_hash stays token-form, content_hash includes substituted values', () => {
-  const coderKey = AGENT_MODEL_KEY['coder'];
-  assert.ok(coderKey, 'coder is a registered agent with an AGENT_MODEL_KEY entry');
+  // Uses a LOCAL fixture (not the shared CODER_TOKEN_TEMPLATE) named for a
+  // surviving agent: 'coder' is no longer a registered agent nor an
+  // AGENT_MODEL_KEY entry since the scale-down cut (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) deleted coder.md. The
+  // reviewers-many-to-one sub-case this test used to carry died with it too —
+  // there is no longer a many-to-one AGENT_MODEL_KEY mapping to demonstrate.
+  const LIBRARIAN_TOKEN_TEMPLATE = CODER_TOKEN_TEMPLATE.replace('name: coder', 'name: librarian');
+  const librarianKey = AGENT_MODEL_KEY['librarian'];
+  assert.ok(librarianKey, 'librarian is a registered agent with an AGENT_MODEL_KEY entry');
 
-  const opusModels = { [coderKey]: { model: 'claude-opus-4-8', effort: 'high' } };
-  const { name, installedContent } = renderInstalledAgent(CODER_TOKEN_TEMPLATE, 'coder.md', { ...OPTS, ...cfgBoth(opusModels) });
-  assert.equal(name, 'coder');
+  const opusModels = { [librarianKey]: { model: 'claude-opus-4-8', effort: 'high' } };
+  const { name, installedContent } = renderInstalledAgent(LIBRARIAN_TOKEN_TEMPLATE, 'librarian.md', { ...OPTS, ...cfgBoth(opusModels) });
+  assert.equal(name, 'librarian');
 
-  // tokens resolved from config.models[AGENT_MODEL_KEY['coder']]
+  // tokens resolved from config.models[AGENT_MODEL_KEY['librarian']]
   assert.match(frontmatter(installedContent), /^model: claude-opus-4-8$/m, 'MODEL resolved from config.models');
   assert.match(frontmatter(installedContent), /^effort: high$/m, 'EFFORT resolved from config.models');
   assert.ok(!installedContent.includes('{{'), 'no substitution token survives');
 
   const header = parseInstalledHeader(installedContent);
   // template_hash stays token-form: over the ORIGINAL token template, model-independent.
-  assert.equal(header.templateHash, sha256(CODER_TOKEN_TEMPLATE), 'template_hash is over the token-form template');
+  assert.equal(header.templateHash, sha256(LIBRARIAN_TOKEN_TEMPLATE), 'template_hash is over the token-form template');
   // content_hash includes substituted values: the self-check passes only if the
   // header hash was computed over the SUBSTITUTED body (not the token form).
   assert.equal(isLocallyModified(installedContent, header), false, 'content_hash covers the substituted values (self-consistent)');
 
   // Rendering the SAME template with a DIFFERENT model keeps the token-form
   // template_hash but changes the body — proving content_hash tracks the values.
-  const sonnetModels = { [coderKey]: { model: 'claude-sonnet-4-6', effort: 'low' } };
-  const other = renderInstalledAgent(CODER_TOKEN_TEMPLATE, 'coder.md', { ...OPTS, ...cfgBoth(sonnetModels) }).installedContent;
-  assert.equal(parseInstalledHeader(other).templateHash, sha256(CODER_TOKEN_TEMPLATE), 'template_hash is independent of the model chosen');
+  const sonnetModels = { [librarianKey]: { model: 'claude-sonnet-4-6', effort: 'low' } };
+  const other = renderInstalledAgent(LIBRARIAN_TOKEN_TEMPLATE, 'librarian.md', { ...OPTS, ...cfgBoth(sonnetModels) }).installedContent;
+  assert.equal(parseInstalledHeader(other).templateHash, sha256(LIBRARIAN_TOKEN_TEMPLATE), 'template_hash is independent of the model chosen');
   assert.match(frontmatter(other), /^model: claude-sonnet-4-6$/m);
   assert.notEqual(other, installedContent, 'a different model yields different installed bytes');
   assert.equal(isLocallyModified(other, header), true, 'content_hash is value-sensitive: sonnet body reads as modified against the opus header');
-
-  // reviewers many-to-one: reviewer-correctness resolves via the shared 'reviewers'
-  // config key (AGENT_MODEL_KEY maps four reviewer agents to one key).
-  assert.equal(
-    AGENT_MODEL_KEY['reviewer-correctness'],
-    AGENT_MODEL_KEY['reviewer-security'],
-    'the reviewer agents share one config.models key (AGENT_MODEL_KEY many-to-one)'
-  );
-  const revKey = AGENT_MODEL_KEY['reviewer-correctness'];
-  const revTemplate = CODER_TOKEN_TEMPLATE.replace('name: coder', 'name: reviewer-correctness');
-  const revModels = { [revKey]: { model: 'claude-opus-4-8', effort: 'low' } };
-  const rev = renderInstalledAgent(revTemplate, 'reviewer-correctness.md', { ...OPTS, ...cfgBoth(revModels) }).installedContent;
-  assert.match(frontmatter(rev), /^model: claude-opus-4-8$/m, 'reviewer-correctness resolves via the shared reviewers key');
 });
-
 test('setInstalledModelEffort surgically rewrites ONLY the frontmatter model:/effort: lines, re-stamps content_hash, and leaves machine vars byte-identical', () => {
   // A properly generated installed file (literal model/effort lines; body lines
   // that merely start with model:/effort: are the frontmatter-scoping trap).
@@ -534,10 +531,12 @@ test('setInstalledModelEffort surgically rewrites ONLY the frontmatter model:/ef
 test('AC6: after a TUI swap the installed file is not locally-modified, and a later template update flows through syncAgents WITHOUT tripping the refusal', () => {
   const dir = scratch();
   try {
-    const coderKey = AGENT_MODEL_KEY['coder'];
+    const coderKey = AGENT_MODEL_KEY['librarian'];
     const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
     const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
-    const installedPath = join(targetAgentsDir, 'coder.md');
+    // Installed under the template's internal name (librarian), not its source
+    // filename (coder.md) — installAgents/syncAgents write to `${name}.md`.
+    const installedPath = join(targetAgentsDir, 'librarian.md');
 
     // install with the initial pinned model
     const modelsA = { [coderKey]: { model: 'claude-sonnet-4-6', effort: 'low' } };
@@ -579,10 +578,10 @@ test('a config MODEL divergence is never silently repaired — like the machine-
   // differs and the divergence must REFUSE — never read as a repairable stale header.
   const dir = scratch();
   try {
-    const coderKey = AGENT_MODEL_KEY['coder'];
+    const coderKey = AGENT_MODEL_KEY['librarian'];
     const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
     const targetAgentsDir = join(dir, 'project', '.claude', 'agents');
-    const installedPath = join(targetAgentsDir, 'coder.md');
+    const installedPath = join(targetAgentsDir, 'librarian.md');
 
     const modelsA = { [coderKey]: { model: 'claude-sonnet-4-6', effort: 'low' } };
     syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth(modelsA) });
@@ -679,10 +678,10 @@ test('syncAgents: config-only divergence on an unmodified install stays up_to_da
   try {
     const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
     const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
-    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth({ coder: { model: 'claude-sonnet-4-6', effort: 'high' } }) });
-    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth({ coder: { model: 'claude-opus-4-8', effort: 'high' } }) });
-    assert.deepEqual(report, [{ name: 'coder', status: 'up_to_date' }]);
-    assert.match(frontmatter(readFileSync(join(targetAgentsDir, 'coder.md'), 'utf8')), /^model: claude-sonnet-4-6$/m, 'installed model untouched by sync — config authority realizes at install/refresh/swap');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth({ librarian: { model: 'claude-sonnet-4-6', effort: 'high' } }) });
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth({ librarian: { model: 'claude-opus-4-8', effort: 'high' } }) });
+    assert.deepEqual(report, [{ name: 'librarian', status: 'up_to_date' }]);
+    assert.match(frontmatter(readFileSync(join(targetAgentsDir, 'librarian.md'), 'utf8')), /^model: claude-sonnet-4-6$/m, 'installed model untouched by sync — config authority realizes at install/refresh/swap');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

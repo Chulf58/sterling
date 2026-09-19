@@ -44,7 +44,6 @@ import { hasUnsuppressedMatch, escapeRe } from '../hooks/lib/dispatch-advisory.m
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
-const H26_PATH = join(HOOKS, 'h26-dispatch-overlap.mjs');
 
 /** The one call every path-side consumer makes (h22 claimedFromBlocks, h26). */
 const claimed = (prompt, path) =>
@@ -271,88 +270,12 @@ function readRegister(dir) {
   return JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), 'utf8'));
 }
 
-function writeRegister(dir, entries) {
-  writeFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), JSON.stringify(entries));
-}
-
-function h26Task(dir, { subagent_type = 'coder', prompt, session_id = 's1' }) {
-  return runHook(H26_PATH, { hook_event_name: 'PreToolUse', tool_name: 'Task', session_id, cwd: dir, tool_input: { subagent_type, prompt } }, dir);
-}
-
-function advisoryText(r) {
-  if (!r.stdout || !r.stdout.trim()) return '';
-  let parsed;
-  try {
-    parsed = JSON.parse(r.stdout);
-  } catch {
-    assert.fail(`stdout was not valid JSON: ${JSON.stringify(r.stdout)}`);
-  }
-  return parsed?.hookSpecificOutput?.additionalContext ?? '';
-}
-
-// The live neighbour lane, written DIRECTLY as a fixture: nothing about this
-// entry is produced by the code under test, so the ONLY thing that can change
-// the verdict in Group C is h26's own extraction of the OUTGOING prompt —
-// that is what NAMES THE READ SIDE as the verdict carrier for these two.
-const LIVE_NEIGHBOUR = [
-  {
-    agent_id: 'sub-1',
-    agent_type: 'coder',
-    session_id: 's1',
-    files: ['scripts/hooks/lib/dispatch-advisory.mjs'],
-    claimed_files: ['scripts/hooks/lib/dispatch-advisory.mjs'],
-    claimed_glob_prefixes: [],
-    attribution: 'block',
-    at: new Date().toISOString(),
-  },
-];
-
-// ===========================================================================
-// GROUP C — h26 end-to-end; VERDICT CARRIER: the READ side
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// (C0) CONTROL, PLACED FIRST: the identical fixture with a POSITIVE claim in
-// the outgoing brief DOES warn. Without this arm, (C1)'s silence could just
-// as well mean the fixture never had a live neighbour to collide with.
-// SABOTAGE: make the trailing check unconditional in hasUnsuppressedMatch —
-// this control flips silent.
-// ---------------------------------------------------------------------------
-test('(C0) CONTROL: a POSITIVE claim on the neighbour\'s file still warns (the fixture can collide)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegister(dir, LIVE_NEIGHBOUR);
-    const r = h26Task(dir, { prompt: 'YOUR TERRITORY: scripts/hooks/lib/dispatch-advisory.mjs — add the backward reach.' });
-    const ctx = advisoryText(r);
-    assert.match(ctx, /scripts\/hooks\/lib\/dispatch-advisory\.mjs/);
-    assert.ok(ctx.includes('coder:sub-1'));
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (C1) THE REPRODUCED FALSE POSITIVE (board 59c30a7f, measured 2026-08-27):
-// the outgoing brief is FORBIDDEN to touch the neighbour's file by a TRAILING
-// clause, and was warned about it anyway. Must be silent.
-// SABOTAGE: drop the `|| trailingSuppresses` term in hasUnsuppressedMatch —
-// the warning comes back, reproducing the measured defect.
-// ---------------------------------------------------------------------------
-test('(C1) READ SIDE: a trailing-prohibition brief no longer warns on the forbidden path', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegister(dir, LIVE_NEIGHBOUR);
-    const r = h26Task(dir, {
-      prompt:
-        'YOUR TERRITORY: scripts/domain-doctor.mjs. Other live lanes own scripts/hooks/h3-contract-gate.mjs, scripts/hooks/lib/dispatch-advisory.mjs — do not edit those.',
-    });
-    assert.equal(advisoryText(r), '');
-    assert.notEqual(r.code, 2);
-  } finally {
-    cleanup();
-  }
-});
-
+// writeRegister/h26Task/advisoryText/LIVE_NEIGHBOUR and GROUP C
+// (h26-dispatch-overlap.mjs end-to-end) deleted whole with H26 (scale-down
+// decision sterling-claude-code-scale-down-boundary, 2ad87dd1) — both tests
+// spawned the now-deleted hooks/h26-dispatch-overlap.mjs directly. GROUP A/B
+// (pure dispatch-advisory.mjs functions) above and GROUP D (h22, a KEEP
+// hook) below are unaffected.
 // ===========================================================================
 // GROUP D — h22 register; VERDICT CARRIER: the WRITE side (`claimed_files`)
 // ===========================================================================

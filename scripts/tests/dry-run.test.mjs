@@ -66,7 +66,7 @@ test('§16.2 step 11 — end-to-end dry run: init → conductor-direct capture �
     assert.equal(init.code, 0, init.stderr);
     assert.match(init.stdout, /RESTART REQUIRED/);
     assert.match(init.stdout, /no mutation capability/, 'init warns once per absent optional capability');
-    for (const artifact of ['.sterling/sterling.db', '.sterling/config.json', 'docs/briefs', 'CLAUDE.md', 'sterling.bat', '.claude/agents/coder.md']) {
+    for (const artifact of ['.sterling/sterling.db', '.sterling/config.json', 'docs/briefs', 'CLAUDE.md', 'sterling.bat', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, artifact)), `init created ${artifact}`);
     }
     // consuming project: no per-project .mcp.json — the plugin declares the sterling server

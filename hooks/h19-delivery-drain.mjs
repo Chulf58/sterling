@@ -4595,33 +4595,11 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
   researcher: "researcher",
   explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -8364,14 +8342,14 @@ function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
 }
 
 // scripts/hooks/lib/ledger.mjs
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync as rmSync2, renameSync as renameSync2 } from "node:fs";
-import { join as join4, dirname as dirname4 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, existsSync as existsSync4, rmSync as rmSync2 } from "node:fs";
+import { join as join4 } from "node:path";
 function ledgerPath(cwd, runId, agentId) {
   if (runId && agentId) return join4(cwd, ".sterling", "runs", runId, "reads", `agent-${agentId}.json`);
   if (agentId) return join4(cwd, ".sterling", "transient", "reads", `agent-${agentId}.json`);
   return join4(cwd, ".sterling", "transient", "conductor-reads.json");
 }
-function readLedger(path) {
+function readLedgerEntries(path) {
   if (!existsSync4(path)) return [];
   const raw = readFileSync3(path, "utf8");
   try {
@@ -8388,7 +8366,7 @@ function readLedger(path) {
 }
 function pruneUnhashed(path) {
   if (!existsSync4(path)) return;
-  const kept = readLedger(path).filter((e) => e.sha256);
+  const kept = readLedgerEntries(path).filter((e) => e.sha256);
   if (kept.length) writeFileSync2(path, JSON.stringify(kept));
   else rmSync2(path);
 }

@@ -24,12 +24,9 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 
-const MIGRATED_HOOKS = [
-  'h20-mechanism-axis.mjs',
-  'h19-knowledge-delivery.mjs',
-  'h19-dispatch-staging.mjs',
-  'h25-dispatch-capability.mjs',
-];
+// h25-dispatch-capability.mjs row deleted with the hook (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1).
+const MIGRATED_HOOKS = ['h20-mechanism-axis.mjs', 'h19-knowledge-delivery.mjs', 'h19-dispatch-staging.mjs'];
 
 // ---------------------------------------------------------------------------
 // Source scrubbing.

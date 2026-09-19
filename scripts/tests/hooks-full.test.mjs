@@ -7,8 +7,6 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { buildSeamHook } from './lib/seam-hook.mjs';
-import { selectReviewers } from '../lib/reviewer-selection.mjs';
-import { runWiringCheck } from '../lib/wiring-check.mjs';
 import { renderInstalledAgent } from '../lib/agent-distribution.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -604,110 +602,21 @@ test('H2: selection row consumed one-shot, transactionally, from the store — n
   }
 });
 
-// --------------------------- H4 ---------------------------
-
-test('H4: test-writer read wall — denies implementation, allows tests/docs/outside-repo', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const read = (p) => runHook('h4-read-wall.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: p } }), dir);
-    let r = read(join(dir, 'src', 'impl.mjs'));
-    assert.equal(r.code, 2);
-    assert.match(r.stderr, /never reads code/);
-    assert.equal(read(join(dir, 'tests', 'x.test.mjs')).code, 0);
-    assert.equal(read(join(dir, 'README.md')).code, 0);
-    assert.equal(read(join(dir, 'docs', 'guide.txt')).code, 0);
-    assert.equal(read('C:/elsewhere/platform-notes.ts').code, 0, 'outside the repo is not implementation');
-  } finally {
-    cleanup();
-  }
-  // fail closed on a CORRUPT config (loadConfig JSON.parse throws): the read wall
-  // must DENY, never void itself via a non-blocking exit 1 (the F5 class; found
-  // during the F6 review — audit's F5 scoped only H3/H8).
-  const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h4c-'));
-  mkdirSync(join(corrupt, '.sterling'), { recursive: true });
-  writeFileSync(join(corrupt, '.sterling', 'config.json'), '{ not json');
-  try {
-    const r = runHook('h4-read-wall.mjs', hookInput(corrupt, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: join(corrupt, 'src', 'impl.mjs') } }), corrupt);
-    assert.equal(r.code, 2, 'a corrupt config denies (fail closed), never a voided read wall');
-    assert.match(r.stderr, /failing closed/);
-  } finally {
-    rmSync(corrupt, { recursive: true, force: true });
-  }
-});
-
-test('H4: content-mode Grep hits the same wall — the r-ea9e bypass replay (denied Read, denied content Grep, allowed locate Grep)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const call = (tool, tool_input) => runHook('h4-read-wall.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: tool, tool_input }), dir);
-    const impl = join(dir, 'src', 'records.mjs');
-
-    // the incident, replayed: Read denied → the same file's content re-fetched via Grep -C
-    assert.equal(call('Read', { file_path: impl }).code, 2);
-    const bypass = call('Grep', { pattern: 'schema', path: impl, output_mode: 'content', '-C': 3 });
-    assert.equal(bypass.code, 2, 'content-mode Grep on a Read-denied file is the same read');
-    assert.match(bypass.stderr, /H4/);
-
-    // locating is fine — paths-only and count reveal no content
-    assert.equal(call('Grep', { pattern: 'schema', path: impl, output_mode: 'files_with_matches' }).code, 0);
-    assert.equal(call('Grep', { pattern: 'schema' }).code, 0, 'default output mode locates, repo-wide');
-    assert.equal(call('Grep', { pattern: 'schema', path: impl, output_mode: 'count' }).code, 0);
-
-    // content mode stays available exactly where Read is allowed
-    assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'tests', 'x.test.mjs'), output_mode: 'content' }).code, 0);
-    assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'docs', 'guide.txt'), output_mode: 'content' }).code, 0);
-    assert.equal(call('Grep', { pattern: 'x', path: 'C:/elsewhere/notes.ts', output_mode: 'content' }).code, 0, 'outside the repo is not implementation');
-
-    // unscoped content sweeps fail closed (P5): pathless, repo root, dir-scoped source
-    assert.equal(call('Grep', { pattern: 'x', output_mode: 'content' }).code, 2, 'pathless content grep = repo-wide read');
-    assert.equal(call('Grep', { pattern: 'x', path: dir, output_mode: 'content' }).code, 2, 'repo-root content grep');
-    assert.equal(call('Grep', { pattern: 'x', path: '.', output_mode: 'content' }).code, 2, 'relative-root content grep');
-    assert.equal(call('Grep', { pattern: 'x', path: join(dir, 'src'), output_mode: 'content' }).code, 2, 'dir-scoped content grep over source');
-
-    // An UNRECOGNIZED output_mode fails closed into the content branch — right —
-    // but the denial used to advise 'locate with output_mode files_with_matches',
-    // which is what the caller believes it just did. Name the observed value.
-    const typo = call('Grep', { pattern: 'x', output_mode: 'files_with_match' });
-    assert.equal(typo.code, 2, 'an unrecognized mode still fails closed');
-    assert.match(typo.stderr, /output_mode 'files_with_match' is NOT a value this gate recognizes/);
-    assert.match(typo.stderr, /fail CLOSED into the content path/, 'and says WHY that routed it here');
-    // The recognized-mode denials must NOT claim an unrecognized mode.
-    const pathless = call('Grep', { pattern: 'x', output_mode: 'content' });
-    assert.match(pathless.stderr, /output_mode was 'content'/);
-    assert.match(pathless.stderr, /No path was given/, 'and which unscoping applied');
-    assert.doesNotMatch(pathless.stderr, /NOT a value this gate recognizes/);
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- H7 ---------------------------
-
 // board c198866d: direct-mode Arm 1 stops minting reconcile_needed at TOUCH
 // time — it only registers the candidate path in touches.json (Arm 2,
 // unchanged). Minting moves to SETTLEMENT (H10's Stop), hashing final touched
 // content against the owning record's file_baselines (sha256 of the owned
 // file's bytes, decision 57d9a52d). Pipeline-mode minting-on-touch is
 // UNCHANGED (untouched below).
+// Restored here (its original position sat between the deleted H4 test and
+// this one — swept away with that test's segment by my line-range deletion,
+// same class of gap as H16_REGISTER above).
 function sha256hex(content) {
   return createHash('sha256').update(content, 'utf8').digest('hex');
 }
 
 const reconcileQueue = (store) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.system_reason === 'reconcile_needed');
 const settleStop = (dir) => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-
-test('H7 [pipeline]: owning articles land on run.reconcile_needed, idempotently', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    const a = article(store, 'feat-a', ['src/a.mjs']);
-    const edit = () =>
-      runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'src', 'a.mjs') } }), dir);
-    assert.equal(edit().code, 0);
-    assert.equal(edit().code, 0);
-    assert.deepEqual(store.getRun('r-h5').reconcile_needed, [a.id], 'marked once, not duplicated');
-  } finally {
-    cleanup();
-  }
-});
 
 test('H7 [direct]: touch registers as a settlement candidate (NO immediate mint); settlement at Stop mints exactly once, deduped per article (board c198866d)', () => {
   const { dir, store, cleanup } = makeProject();
@@ -872,72 +781,6 @@ test('H7 [§3.2.5 direct]: touch registers as a settlement candidate (NO immedia
     cleanup();
   }
 });
-
-test('H7 [§3.2.5 pipeline]: a Sterling-governed touch lands the reference doc on run.reconcile_needed', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    const doc = referenceDoc(store, 'Build Spec', 'doc', 'docs/spec.md');
-    const r = runHook('h7-file-touch.mjs', hookInput(dir, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'docs', 'spec.md') } }), dir);
-    assert.equal(r.code, 0);
-    assert.deepEqual(store.getRun('r-h5').reconcile_needed, [doc.id]);
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- H8 ---------------------------
-
-test('H8: dispatch cap — probe-verified blocking PreToolUse on the Agent tool', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    // SLICE-WAIVED first line so the AC4 slice-presence guard lets this dispatch
-    // reach the cap-increment path (conductor-authorized, intent-preserving fixture
-    // adaptation — the coder is fail-closed on test globs per H5). Assertions below
-    // are unchanged: this test still pins the cap semantics only.
-    const spawn = () =>
-      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'SLICE-WAIVED: cap-path fixture (pre-existing test, adapted for AC4)\ngo' } }), dir);
-    store.updateRunOptimistic('r-h5', (run) => ({ ...run, dispatch_counts: { coder: 24 } }));
-    assert.equal(spawn().code, 0, '25th dispatch is within the cap');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 25);
-    const denied = spawn();
-    assert.equal(denied.code, 2);
-    assert.match(denied.stderr, /dispatch cap exceeded/);
-    assert.ok(store.getRun('r-h5').escalations.some((e) => e.kind === 'dispatch_cap_exceeded'), 'deny + escalate (§6 H8)');
-  } finally {
-    cleanup();
-  }
-  const noRun = makeProject();
-  try {
-    const r = runHook('h8-dispatch-cap.mjs', hookInput(noRun.dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder' } }), noRun.dir);
-    assert.equal(r.code, 0, 'the cap is per-run');
-  } finally {
-    noRun.cleanup();
-  }
-});
-
-// --------------------------- H9 ---------------------------
-
-test('H9: Stop blocked only while completing, naming outstanding promotion conditions; loop-guarded', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    const stop = (over = {}) => runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', ...over }), dir);
-    assert.equal(stop().code, 0, 'running: stopping is not H9 business');
-
-    store.casTransition('running', { ...store.getRun('r-h5'), machine_state: 'completing' });
-    const blocked = stop();
-    assert.equal(blocked.code, 2);
-    assert.match(blocked.stderr, /mid-completion/);
-    assert.match(blocked.stderr, /feature_article_missing/, 'outstanding conditions are named from the shared promotion definition');
-    assert.equal(stop({ stop_hook_active: true }).code, 0, 'loop guard');
-
-    store.casTransition('completing', { ...store.getRun('r-h5'), machine_state: 'awaiting_merge_gate' });
-    assert.equal(stop().code, 0, 'awaiting_merge_gate: stopping is legitimate (the human decides at leisure)');
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- H10 ---------------------------
 
 test('H10: capture nag once (no reviewer-selection block — board cac61a95, that is H2s job), then capture_owed and release; capture clears it', () => {
   const { dir, store, cleanup } = makeProject();
@@ -1173,17 +1016,9 @@ test('hook cwd: a SUBDIRECTORY resolves to the project root; a bare .sterling di
       sub
     );
     assert.equal(guarded.code, 2, 'H15 gates store access from a subdirectory cwd, not just from the root');
-
-    // H3 must resolve the store from below it. Targeting a NEW file exercises the
-    // creation exemption, so a correctly-resolved H3 ALLOWS — the pre-fix failure
-    // was a deny naming 'no Sterling store', which must not reappear.
-    const creation = runHook(
-      'h3-contract-gate.mjs',
-      hookInput(sub, { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(dir, 'brand-new.mjs') } }),
-      sub
-    );
-    assert.doesNotMatch(creation.stderr, /no Sterling store/, 'H3 found the store from a subdirectory cwd');
-    assert.equal(creation.code, 0, 'creation is exempt once the contract can actually be evaluated');
+    // The H3 half of this test (h3-contract-gate.mjs resolving the store from a
+    // subdirectory cwd) was deleted with H3 — scale-down decision
+    // sterling-claude-code-scale-down-boundary, 2ad87dd1.
   } finally {
     cleanup();
   }
@@ -1210,280 +1045,6 @@ test('hook cwd: a SUBDIRECTORY resolves to the project root; a bare .sterling di
 // H3/H8 fail-closed (audit finding 5/43, board ea2742e0): a BLOCKING gate whose
 // store access throws must DENY (exit 2), never void itself via an uncaught
 // exit 1 (decision 2422e76a's rule, previously applied only to H17/H15).
-test('H3/H8: an unreadable store denies (fail closed) instead of voiding the blocking gate', () => {
-  // Built by hand (no real store ever opened on the db path, so no WAL sidecar
-  // holds a valid schema): the garbage file genuinely fails to open, forcing the
-  // gate's store access to throw — which must surface as a deny, not a void.
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-failclosed-'));
-  const cleanup = () => rmSync(dir, { recursive: true, force: true });
-  try {
-    mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
-    writeFileSync(join(dir, 'src.mjs'), 'export {};');
-    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'not a sqlite database — corrupt on purpose. '.repeat(100));
-
-    const h3 = runHook(
-      'h3-contract-gate.mjs',
-      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Edit', tool_input: { file_path: join(dir, 'src.mjs') } }),
-      dir
-    );
-    assert.equal(h3.code, 2, 'H3 denies when it cannot evaluate the contract');
-    assert.match(h3.stderr, /failing closed/);
-
-    const h8 = runHook(
-      'h8-dispatch-cap.mjs',
-      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'coder', prompt: 'SLICE-WAIVED: test' } }),
-      dir
-    );
-    assert.equal(h8.code, 2, 'H8 denies when it cannot evaluate the cap');
-    assert.match(h8.stderr, /failing closed/);
-  } finally {
-    cleanup();
-  }
-});
-
-// H9 fail-closed (anti_pattern af5382e4, the F5 class): H9 was the last BLOCKING
-// gate whose store/config access sat in a try/FINALLY with no catch — an
-// unreadable store threw past it and exited 1 (non-blocking), silently voiding
-// the completion backstop. Probed live 2026-07-27: exit 1, uncaught
-// 'file is not a database' from openStore. Absent store vs UNEVALUABLE store
-// must stay distinct: the first is 'not a Sterling project' (allow, P1), only
-// the second is a voided gate (deny, P5).
-test('H9: an unreadable store denies (fail closed); an ABSENT store still allows', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-h9fc-'));
-  try {
-    mkdirSync(join(dir, '.sterling'), { recursive: true });
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
-
-    // no sterling.db at all — not an initialized project, nothing to gate (P1)
-    const absent = runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: false }), dir);
-    assert.equal(absent.code, 0, 'an absent store is not a Sterling project — allow, never a spurious block');
-
-    // present but unreadable — the gate cannot evaluate, so it must DENY
-    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'not a sqlite database — corrupt on purpose. '.repeat(100));
-    const corrupt = runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: false }), dir);
-    assert.equal(corrupt.code, 2, 'a corrupt store denies (fail closed), never a non-blocking exit 1');
-    assert.match(corrupt.stderr, /failing closed/);
-
-    // the loop guard still wins, so a fail-closed H9 can never trap the conductor
-    const looped = runHook('h9-stop-backstop.mjs', hookInput(dir, { hook_event_name: 'Stop', stop_hook_active: true }), dir);
-    assert.equal(looped.code, 0, 'stop_hook_active short-circuits before any store access — one denial per stop, never a trap');
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// --------------------------- H18 (test-writer write wall, audit finding 6/43) ---------------------------
-
-test('H18 test-write wall: the test-writer writes ONLY test files; source / enforcement-surface / outside-repo denied; fails closed with no toolchains', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const w = (file_path, tool = 'Write') =>
-      runHook('h18-test-write-wall.mjs', hookInput(dir, { agent_id: 'tw-1', hook_event_name: 'PreToolUse', tool_name: tool, tool_input: { file_path } }), dir);
-
-    // ALLOWED — test files, per config test_globs (tests/**, **/*.test.mjs)
-    assert.equal(w(join(dir, 'tests', 'export.test.mjs')).code, 0, 'a test under tests/ is allowed');
-    assert.equal(w(join(dir, 'packages', 'store', 'src', 'foo.test.mjs')).code, 0, '**/*.test.mjs anywhere is allowed');
-
-    // DENIED — implementation source (the core gap: the test-writer could write ANY file)
-    const src = w(join(dir, 'src', 'index.mjs'));
-    assert.equal(src.code, 2, 'a source file is denied');
-    assert.match(src.stderr, /matches NO declared test glob/i);
-    // NAME THE GLOBS. Two causes reach this deny — genuine source, or a test file
-    // at a path no declared glob matches — and the old message asserted the file
-    // "is not a test file" while withholding the one fact that discriminates them.
-    // Its sibling H5 denial already named its matched glob.
-    assert.match(src.stderr, /Compared against:/);
-    assert.match(src.stderr, /tests\/\*\*|\*\*\/\*\.test\.mjs/, 'the actual configured globs appear');
-    assert.match(src.stderr, /\(node\)/, 'attributed to the declaring toolchain');
-    assert.match(src.stderr, /If this IS meant to be a test/, 'and the misnamed-test case is addressed, not just the source case');
-
-    // DENIED — enforcement surface (self-protection, unconditional)
-    assert.equal(w(join(dir, '.claude', 'agents', 'coder.md')).code, 2, 'installed agents (enforcement surface) denied');
-    assert.equal(w(join(dir, '.sterling', 'config.json')).code, 2, 'config (enforcement surface) denied');
-
-    // DENIED — outside the repository
-    assert.equal(w('/etc/passwd').code, 2, 'a path outside the repo is denied');
-
-    // MultiEdit and Edit are gated identically (Edit joined the grant + matcher
-    // 2026-08-11 so incremental test additions don't force wholesale rewrites)
-    assert.equal(w(join(dir, 'src', 'x.mjs'), 'MultiEdit').code, 2, 'MultiEdit to source is denied too');
-    assert.equal(w(join(dir, 'src', 'x.mjs'), 'Edit').code, 2, 'Edit to source is denied too');
-    assert.equal(w(join(dir, 'tests', 'export.test.mjs'), 'Edit').code, 0, 'Edit within a test glob is allowed');
-  } finally {
-    cleanup();
-  }
-
-  // fail closed: no toolchains → cannot resolve test globs → deny (P5)
-  const bare = mkdtempSync(join(tmpdir(), 'sterling-h18-'));
-  mkdirSync(join(bare, '.sterling'), { recursive: true });
-  writeFileSync(join(bare, '.sterling', 'config.json'), JSON.stringify({}));
-  try {
-    const r = runHook(
-      'h18-test-write-wall.mjs',
-      hookInput(bare, { agent_id: 'tw-1', hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(bare, 'tests', 'a.test.mjs') } }),
-      bare
-    );
-    assert.equal(r.code, 2, 'no toolchains → fail closed, even for a would-be test path');
-    assert.match(r.stderr, /failing closed|toolchains/);
-  } finally {
-    rmSync(bare, { recursive: true, force: true });
-  }
-
-  // fail closed on a CORRUPT config (loadConfig JSON.parse throws) — a voided
-  // gate would let the write through (the F5 fail-open class)
-  const corrupt = mkdtempSync(join(tmpdir(), 'sterling-h18c-'));
-  mkdirSync(join(corrupt, '.sterling'), { recursive: true });
-  writeFileSync(join(corrupt, '.sterling', 'config.json'), '{ not json');
-  try {
-    const r = runHook(
-      'h18-test-write-wall.mjs',
-      hookInput(corrupt, { agent_id: 'tw-1', hook_event_name: 'PreToolUse', tool_name: 'Write', tool_input: { file_path: join(corrupt, 'src', 'x.mjs') } }),
-      corrupt
-    );
-    assert.equal(r.code, 2, 'a corrupt config denies (fail closed), never a non-blocking exit 1');
-    assert.match(r.stderr, /failing closed/);
-  } finally {
-    rmSync(corrupt, { recursive: true, force: true });
-  }
-});
-
-// --------------------------- reviewer selection + H12 units ---------------------------
-
-test('reviewer-selection: deterministic, logs why dispatched AND why skipped (§7.1)', () => {
-  const config = parseConfig({});
-  const sel = (diff, brief) => selectReviewers({ config, diff, brief });
-  const base = sel([{ path: 'src/util.mjs', added_lines: ['export const x = 1;'] }]);
-  assert.deepEqual(base.dispatch.map((d) => d.reviewer), ['correctness'], 'correctness is the floor');
-  assert.equal(base.skipped.length, 3, 'every non-dispatch is explained');
-  assert.ok(base.skipped.every((s) => s.why.length > 0));
-
-  assert.ok(sel([{ path: 'src/auth/login.mjs', added_lines: [] }]).dispatch.some((d) => d.reviewer === 'security'), 'path signal');
-  assert.ok(sel([{ path: 'src/x.mjs', added_lines: ['const q = "SELECT * FROM t WHERE id=" + id;'] }]).dispatch.some((d) => d.reviewer === 'security'), 'content signal');
-  assert.ok(sel([{ path: 'package.json', added_lines: [] }]).dispatch.some((d) => d.reviewer === 'security'), 'dependency manifest');
-  assert.ok(sel([{ path: 'src/x.mjs', added_lines: [] }], { risk_flags: ['perf_sensitive'] }).dispatch.some((d) => d.reviewer === 'performance'), 'brief risk flag');
-  const bigDiff = [{ path: 'src/big.mjs', added_lines: Array.from({ length: 400 }, (_, i) => `const v${i} = ${i};`) }];
-  assert.ok(sel(bigDiff).dispatch.some((d) => d.reviewer === 'skeptic'), 'size threshold');
-  assert.deepEqual(sel([]).dispatch, [], 'no diff, no reviewers');
-});
-
-test('H12 wiring check: capability-absent skips loudly; offenders block; dormancy routes to wire_in_dormant', () => {
-  const { store, cleanup } = makeProject();
-  try {
-    const absent = runWiringCheck({ adapterModule: { name: 'node', capabilities: { static_wiring: false } }, cwd: '.', scope: [], store, now: NOW });
-    assert.deepEqual(absent.skipped, { check: 'wiring-zero-consumer', reason: 'capability_absent:node' });
-
-    const capable = {
-      name: 'fake',
-      capabilities: { static_wiring: true },
-      staticWiring: () => ({ test_only_exports: [{ file: 'src/a.mjs', name: 'exportedButUnwired' }] }),
-    };
-    const blocked = runWiringCheck({ adapterModule: capable, cwd: '.', scope: [], article: undefined, store, now: NOW });
-    assert.equal(blocked.violations.length, 1);
-    assert.match(blocked.violations[0], /built-but-not-wired/);
-
-    const dormant = store.create({
-      ...envelope('feature_article'),
-      slug: 'dormant-feat',
-      title: 'd',
-      what_it_does: 'x',
-      intended_behavior: 'x',
-      files: [{ path: 'src/a.mjs', role: 'impl' }],
-      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
-      dependencies: { relies_on: [], relied_by: [] },
-      state: 'dormant',
-      state_reason: 'wired next phase',
-      wiring_todo_id: randomUUID(),
-      version: 1,
-      history: [{ date: NOW, event: 'originating brief' }],
-      live_test_refs: [],
-    });
-    const declared = runWiringCheck({ adapterModule: capable, cwd: '.', scope: [], article: dormant, store, now: NOW });
-    assert.deepEqual(declared.violations, []);
-    assert.equal(declared.dormant, true);
-    const todo = store.get(declared.wire_in_dormant_todo);
-    assert.equal(todo.system_reason, 'wire_in_dormant', 'declared dormancy is tracked, never silent');
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- dispose-run union (H7 → promotion) ---------------------------
-
-test('dispose-run verifies the union: H7-accumulated reconcile_needed blocks disposal until reconciled', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    writeFileSync(
-      join(dir, '.sterling', 'config.json'),
-      JSON.stringify({ ...CONFIG, backup_path: join(dir, 'backups').replace(/\\/g, '/') })
-    );
-    // article created BEFORE the run, marked by H7 mid-run, never reconciled
-    const stale = store.create({
-      ...envelope('feature_article', '2026-06-09T12:00:00.000Z'),
-      slug: 'stale-feat',
-      title: 's',
-      what_it_does: 'x',
-      intended_behavior: 'x',
-      files: [{ path: 'src/a.mjs', role: 'impl' }],
-      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
-      dependencies: { relies_on: [], relied_by: [] },
-      state: 'active',
-      version: 1,
-      history: [{ date: '2026-06-09T12:00:00.000Z', event: 'originating brief' }],
-      live_test_refs: [],
-    });
-    store.updateRunOptimistic('r-h5', (run) => ({ ...run, reconcile_needed: [stale.id] }));
-    // every other condition passes
-    const brief = store.get(store.getRun('r-h5').brief_ref);
-    store.create({
-      ...envelope('feature_article', '2026-06-10T13:00:00.000Z'),
-      slug: 'f',
-      title: 'F',
-      what_it_does: 'x',
-      intended_behavior: 'x',
-      files: [{ path: 'src/a.mjs', role: 'impl' }],
-      current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
-      dependencies: { relies_on: [], relied_by: [] },
-      state: 'active',
-      version: 1,
-      history: [{ date: NOW, event: 'originating brief', target_id: brief.id }],
-      live_test_refs: [{ ac_id: 'AC1', test_paths: ['tests/x.test.mjs'] }],
-    });
-    store.casTransition('running', { ...store.getRun('r-h5'), machine_state: 'completing' });
-
-    const dispose = () =>
-      spawnSync(process.execPath, [join(root, 'scripts', 'dispose-run.mjs'), '--run', 'r-h5', '--target', dir], { encoding: 'utf8', cwd: dir, timeout: 60_000 });
-    const refused = dispose();
-    assert.equal(refused.status, 1, refused.stdout + refused.stderr);
-    assert.match(refused.stderr ?? '', new RegExp(`article_unreconciled.*${stale.id}`));
-
-    // reconciling the H7-marked article clears the refusal
-    store.supersede(stale.id, {
-      ...stale,
-      id: randomUUID(),
-      version: 2,
-      what_it_does: 'reconciled',
-      created_at: '2026-06-10T14:00:00.000Z',
-      updated_at: '2026-06-10T14:00:00.000Z',
-      status: 'active',
-      superseded_by: null,
-      links: [],
-    });
-    const ok = dispose();
-    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- H16 (session-event register, run r-0501) ---------------------------
-
-const H16_REGISTER = ['.sterling', 'transient', 'session-events.json'];
-function readSessionEvents(dir) {
-  const p = join(dir, ...H16_REGISTER);
-  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
-}
-
 test('H16 hooks.json matcher covers WebSearch, WebFetch, Task, Agent on PostToolUse (H11 lesson: direct-invocation tests bypass the platform matcher, so assert the registration itself)', () => {
   const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
   const entry = (hooksJson.hooks.PostToolUse ?? []).find((e) =>
@@ -1541,26 +1102,6 @@ test('AC3: two identical dispatches both land (append log never dedups)', () => 
   }
 });
 
-test('AC6: H16 records in direct mode but is silent (allow, NO write) while a run is active', () => {
-  assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
-  const active = makeProject({ withRun: true });
-  try {
-    const r = runHook('h16-event-register.mjs', hookInput(active.dir, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), active.dir);
-    assert.equal(r.code, 0, 'an active run never blocks the tool');
-    assert.equal(readSessionEvents(active.dir).length, 0, 'with a run active the pipeline owns capture — H16 records nothing');
-  } finally {
-    active.cleanup();
-  }
-  const direct = makeProject();
-  try {
-    const r = runHook('h16-event-register.mjs', hookInput(direct.dir, { hook_event_name: 'PostToolUse', tool_name: 'WebSearch', tool_input: { query: 'x' } }), direct.dir);
-    assert.equal(r.code, 0);
-    assert.equal(readSessionEvents(direct.dir).length, 1, 'direct mode (no active run) records');
-  } finally {
-    direct.cleanup();
-  }
-});
-
 test('H16: missing store → allow with no recording, never blocks (fail-open, mirrors H7)', () => {
   assert.ok(existsSync(join(HOOKS, 'h16-event-register.mjs')), 'h16-event-register.mjs must exist for this behavior to be tested');
   const bare = mkdtempSync(join(tmpdir(), 'sterling-h16-bare-'));
@@ -1572,6 +1113,20 @@ test('H16: missing store → allow with no recording, never blocks (fail-open, m
     rmSync(bare, { recursive: true, force: true });
   }
 });
+
+// H16_REGISTER / readSessionEvents: restored here (their original position
+// sat between the deleted 'dispose-run verifies the union' test and this one
+// — a shared top-level const+function my line-range test deletion swept away
+// along with that test's body since it happened to fall in the gap between
+// them). Referenced above (the AC3/H16 tests) and below (H10/H16 tests
+// further down this file) — function declarations hoist, so the earlier
+// references resolve fine at call time (tests run after the module fully
+// loads), but the definition lives here to mirror base's original grouping.
+const H16_REGISTER = ['.sterling', 'transient', 'session-events.json'];
+function readSessionEvents(dir) {
+  const p = join(dir, ...H16_REGISTER);
+  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
+}
 
 test('debug-scope.mjs register appends a debug_scope event to the register (third writer, interface slice 1)', () => {
   const { dir, cleanup } = makeProject();
@@ -2018,7 +1573,7 @@ test('H10 capture-pending: a pending declaration never mutes the article demand 
   }
 });
 
-test('H10 AC6: every terminal path clears touches.json + session-events.json + the nag marker together; allow-only while a run is active', () => {
+test('H10 AC6: every terminal path clears touches.json + session-events.json + the nag marker together', () => {
   // (a) satisfied path clears both registers AND the nag marker (proven by a fresh nag afterward)
   const sat = makeProject();
   try {
@@ -2050,18 +1605,11 @@ test('H10 AC6: every terminal path clears touches.json + session-events.json + t
   } finally {
     rel.cleanup();
   }
-  // (c) allow-only while a run is active — the pipeline owns capture, H10 does not act
-  const active = makeProject({ withRun: true });
-  try {
-    touchRegister(active.dir, ['src/a.mjs']);
-    writeSessionEvents(active.dir, [rEvent('a query'), dEvent('src/a.mjs')]);
-    const r = runHook('h10-direct-capture.mjs', hookInput(active.dir, { hook_event_name: 'Stop' }), active.dir);
-    assert.equal(r.code, 0, 'a live run: H10 is allow-only');
-    assert.equal(owed(active.store, 'capture_owed').length + owed(active.store, 'research_owed').length, 0, 'no items enqueued while a run is active');
-    assert.equal(existsSync(eventsPath(active.dir)), true, 'allow-only means the register is left untouched, not cleared');
-  } finally {
-    active.cleanup();
-  }
+  // (c) "allow-only while a run is active" sub-case deleted — the pipeline
+  // arm it pinned (H10 deferring to the run) is gone with the staged
+  // pipeline (scale-down decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1); a consumer store's orphaned `runs` row must never suppress
+  // capture, so H10 no longer branches on it at all.
 });
 
 test('H10 boundary: research + debug + touches in ONE session compose into a single nag, then enqueue both capture_owed and research_owed on release', () => {
@@ -2411,314 +1959,6 @@ test("H10 concept duty (session-window fix) malformed-`at` guard: a session-regi
 });
 
 // --------------------------- H17 (bash write sweep — coder-frontmatter registration + bundled) ---------------------------
-test('H17 is registered on the coder frontmatter Pre AND Post ToolUse Bash matchers (matcher-coverage; H11 silent-dead lesson)', () => {
-  const coder = readFileSync(join(root, 'agent-templates', 'coder.md'), 'utf8');
-  const fm = (coder.match(/^---\n([\s\S]*?)\n---\n/) ?? [])[1];
-  assert.ok(fm, 'coder template has a frontmatter block');
-  const postIdx = fm.indexOf('PostToolUse:');
-  assert.ok(postIdx > 0, 'coder frontmatter declares PostToolUse');
-  const pre = fm.slice(0, postIdx);
-  const post = fm.slice(postIdx);
-  // Pre: H17 rides the Bash matcher beside H14 to snapshot the baseline BEFORE the command.
-  assert.match(pre, /matcher:\s*"Bash"[\s\S]*?h17-bash-write-sweep\.mjs/, 'H17 must be on the PreToolUse Bash matcher');
-  // Post: H17 rides a Bash matcher to sweep AFTER the command — else the guard silently never fires.
-  assert.match(post, /matcher:\s*"Bash"[\s\S]*?h17-bash-write-sweep\.mjs/, 'H17 must be on a PostToolUse Bash matcher — else the sweep silently never runs');
-});
-
-test('H17 bundle runs standalone (no runtime workspace resolution); conductor (no agent_id) short-circuits to allow', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-h17-bundle-'));
-  try {
-    const r = spawnSync(process.execPath, [join(root, 'hooks', 'h17-bash-write-sweep.mjs')], {
-      input: JSON.stringify({ cwd: dir, hook_event_name: 'PostToolUse', tool_input: { command: 'echo hi' } }),
-      encoding: 'utf8',
-      cwd: dir,
-      timeout: 60_000,
-    });
-    assert.doesNotMatch(r.stderr ?? '', /Cannot find module|ERR_MODULE_NOT_FOUND/, 'H17 must be esbuild-bundled — no workspace import at runtime');
-    assert.equal(r.status, 0, `conductor (no agent_id) must short-circuit to allow (exit 0); stderr: ${r.stderr}`);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-// --------------------------- H8 slice-presence guard (run r-d630 phase 3, AC4) ---------------------------
-//
-// The NEW check H8 gains: during an active run, a guarded pipeline-agent dispatch
-// whose prompt carries neither the STERLING-SLICE marker nor a SLICE-WAIVED: <reason>
-// line is DENIED (teaching both formats) BEFORE the cap increment. 'coder' is a proven
-// guarded pipeline type (the cap test above increments dispatch_counts.coder). Marker,
-// waiver, non-pipeline, and no-run paths behave exactly as today; the cap is untouched.
-
-const SLICE = (role = 'coder') => `STERLING-SLICE run=r-h5 phase=p1 role=${role} staged=2026-06-10T12:00:00.000Z`;
-
-test('H8 AC4: a guarded pipeline dispatch with neither marker nor waiver is DENIED, teaching both formats, and consumes NO cap slot', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    const dispatch = (over = {}) =>
-      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', ...over } }), dir);
-
-    const denied = dispatch({ prompt: 'Implement the export feature end to end.' });
-    assert.equal(denied.code, 2, 'a markerless/waiverless guarded pipeline dispatch during an active run is denied');
-    assert.match(denied.stderr, /STERLING-SLICE/, 'the deny message teaches the marker format');
-    assert.match(denied.stderr, /SLICE-WAIVED/, 'the deny message teaches the waiver format');
-    // the slice guard is ordered BEFORE the cap increment — no slot consumed
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a slice-denied dispatch consumes no cap slot');
-    // and it is NOT a cap escalation — this is the slice deny, not the cap deny
-    assert.ok(!(store.getRun('r-h5').escalations ?? []).some((e) => e.kind === 'dispatch_cap_exceeded'), 'the slice deny is not a cap-exceeded escalation');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC4: a dispatch carrying the STERLING-SLICE marker (any line) passes and consumes its slot; a SLICE-WAIVED: <reason> line passes; a reasonless SLICE-WAIVED: is denied', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    const dispatch = (over = {}) =>
-      runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', ...over } }), dir);
-
-    // marker on a line other than the first — the check is line-anchored, not string-start
-    const passed = dispatch({ prompt: `Here is your dispatch.\n${SLICE()}\n- decision …` });
-    assert.equal(passed.code, 0, 'a dispatch whose prompt contains the STERLING-SLICE marker line passes');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'a passing dispatch consumes its cap slot exactly as today');
-
-    const waived = dispatch({ prompt: 'SLICE-WAIVED: fixer-mode targeted one-line patch\napply it' });
-    assert.equal(waived.code, 0, 'a SLICE-WAIVED: <reason> line passes (fixer-mode waiver)');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 2, 'the waived dispatch also consumes its slot');
-
-    const emptyWaiver = dispatch({ prompt: 'SLICE-WAIVED:' });
-    assert.equal(emptyWaiver.code, 2, 'a reasonless SLICE-WAIVED: does not satisfy the waiver (^SLICE-WAIVED: .+)');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 2, 'the denied empty-waiver dispatch consumed no slot');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC4: non-pipeline and no-run dispatches behave exactly as today (no slice guard)', () => {
-  const withRun = makeProject({ withRun: true });
-  try {
-    // a NON-pipeline subagent_type (the platform default, not a Sterling pipeline
-    // agent) is not slice-guarded even markerless during an active run
-    const nonPipe = runHook(
-      'h8-dispatch-cap.mjs',
-      hookInput(withRun.dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'general-purpose', prompt: 'markerless direct dispatch' } }),
-      withRun.dir
-    );
-    assert.equal(nonPipe.code, 0, 'a non-pipeline subagent_type is not slice-guarded (behaves exactly as today)');
-  } finally {
-    withRun.cleanup();
-  }
-  const noRun = makeProject();
-  try {
-    // no active run → the slice guard does not apply, markerless is fine
-    const r = runHook(
-      'h8-dispatch-cap.mjs',
-      hookInput(noRun.dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: 'markerless' } }),
-      noRun.dir
-    );
-    assert.equal(r.code, 0, 'no active run → no slice guard (behaves exactly as today)');
-  } finally {
-    noRun.cleanup();
-  }
-});
-
-test('H8 AC4: existing cap semantics are unchanged — at the limit the cap still denies even with a valid marker (the slice guard never shadows the cap)', () => {
-  const { dir, store, cleanup } = makeProject({ withRun: true });
-  try {
-    store.updateRunOptimistic('r-h5', (run) => ({ ...run, dispatch_counts: { coder: 25 } }));
-    const capped = runHook(
-      'h8-dispatch-cap.mjs',
-      hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt: `${SLICE()}\nbody` } }),
-      dir
-    );
-    assert.equal(capped.code, 2, 'a marker-carrying dispatch at the cap limit is still denied by the cap');
-    assert.match(capped.stderr, /dispatch cap exceeded/, 'it is the cap deny, not the slice deny — cap semantics unchanged');
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- H8 breadth backstop (run r-68eb phase 2, AC2) ---------------------------
-//
-// The NEW check H8 gains for two-axis phase discipline: breadthDenial. During an
-// active run, a guarded pipeline dispatch whose STERLING-SLICE marker names a phase
-// whose interface count STRICTLY EXCEEDS config.difficulty.split_interface_threshold
-// (default 3) is DENIED, naming phase/count/threshold. breadthDenial is ordered AFTER
-// sliceDenial (so the marker is already present) and BEFORE the cap increment (a
-// breadth-denied dispatch consumes NO cap slot). Markerless / SLICE-WAIVED /
-// unknown-phase / within-threshold prompts pass breadth unchecked. The same config
-// field governs (a custom threshold widens/tightens the gate). Probe interface counts
-// are chosen distinct (5, 3, 2) so an off-by-one (>= vs >) mutant is caught by the
-// exactly-at-threshold case.
-//
-// These tests build their own over-wide brief + run r-h5 inline (makeProject's default
-// brief is within-threshold), mirroring makeProject's withRun block.
-
-const breadthMarker = (phase, role = 'coder') => `STERLING-SLICE run=r-h5 phase=${phase} role=${role} staged=2026-06-10T12:00:00.000Z`;
-
-// Builds a project with run r-h5 whose brief's single phase p1 declares `interfaceCount`
-// interfaces (all also in technical_design.interfaces, per the briefSchema superRefine).
-// splitThreshold, when set, is written onto config.difficulty.split_interface_threshold —
-// the SAME field prep and the gate flag read; omitted → the schema default (3) governs.
-function makeBreadthRun({ interfaceCount = 5, splitThreshold = null } = {}) {
-  const { dir, store, cleanup } = makeProject();
-  if (splitThreshold != null) {
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, difficulty: { split_interface_threshold: splitThreshold } }));
-  }
-  const names = Array.from({ length: interfaceCount }, (_, i) => `iface_${i}`);
-  const brief = store.create({
-    ...envelope('brief'),
-    slug: 'f',
-    title: 'F',
-    problem: 'p',
-    feature: 'f',
-    user_stated: { criteria: [], constraints: [] },
-    conductor_proposals: [],
-    acceptance_criteria: [{ ac_id: 'AC1', text: 'works', verifiable_at: 'final' }],
-    technical_design: { approach: 'a', interfaces: names.map((n) => ({ name: n, contract: `${n}() -> void` })), shared_structures: [] },
-    blast_radius: { files: [{ path: 'src/a.mjs', owning_articles: [] }], reconcile_list: [] },
-    incidental_scope: [],
-    out_of_scope: [],
-    phases: [{ phase_id: 'p1', goal: 'g', subtasks: [], ac_ids: ['AC1'], interfaces: names, difficulty: { level: 'normal', reasons: [] }, model_hint: 'sonnet' }],
-    decisions_made: [],
-  });
-  const run = store.createRun({
-    id: 'r-h5',
-    brief_ref: brief.id,
-    branch: 'sterling/run-r-h5',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  });
-  return { dir, store, brief, run, names, cleanup };
-}
-
-const breadthDispatch = (dir, prompt) =>
-  runHook('h8-dispatch-cap.mjs', hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_input: { subagent_type: 'coder', prompt } }), dir);
-
-test('H8 AC2: a dispatch whose STERLING-SLICE marker names an OVER-WIDE phase is breadth-DENIED (naming phase/count/threshold) and consumes NO cap slot', () => {
-  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 }); // 5 > default 3 → over-wide
-  try {
-    const denied = breadthDispatch(dir, `${breadthMarker('p1')}\nImplement it.`);
-    assert.equal(denied.code, 2, 'an over-wide-phase marker is breadth-denied');
-    assert.match(denied.stderr, /p1/, 'the deny names the over-wide phase');
-    assert.match(denied.stderr, /\b5\b/, 'the deny names the interface count (5)');
-    assert.match(denied.stderr, /\b3\b/, 'the deny names the threshold in effect (default 3)');
-    assert.doesNotMatch(denied.stderr, /dispatch cap exceeded/, 'it is the breadth deny, not the cap deny');
-    // ordered AFTER sliceDenial (marker present → slice guard satisfied) and BEFORE the cap increment
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a breadth-denied dispatch consumes no cap slot');
-    assert.ok(!(store.getRun('r-h5').escalations ?? []).some((e) => e.kind === 'dispatch_cap_exceeded'), 'the breadth deny is not a cap-exceeded escalation');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 slice guard: a marker that is PRESENT but not line-anchored says so, instead of "neither was present"', () => {
-  const { dir, cleanup } = makeBreadthRun({ interfaceCount: 3 });
-  try {
-    // Both slice regexes are /^…/m, so an indented or bulleted marker does not
-    // match. The caller is looking straight at the token in the prompt it just
-    // sent, so "Neither token appears" reads as a falsehood and gets resolved by
-    // trial-and-error re-indenting — the H14 quoting failure shape.
-    const indented = breadthDispatch(dir, `  ${breadthMarker('p1')}\nbody`);
-    assert.equal(indented.code, 2, 'an indented marker still fails the line-anchored match');
-    assert.match(indented.stderr, /IS present but did not match/, 'the presence is acknowledged');
-    assert.match(indented.stderr, /must start its own line/, 'and the actual discriminator is named');
-    assert.match(indented.stderr, /not indented/);
-    assert.doesNotMatch(indented.stderr, /Neither token appears/, 'the false claim is gone');
-
-    // A waiver with an EMPTY reason fails the `.+` — same acknowledgement path.
-    const emptyWaiver = breadthDispatch(dir, 'SLICE-WAIVED:\nbody');
-    assert.equal(emptyWaiver.code, 2);
-    assert.match(emptyWaiver.stderr, /non-empty reason after the colon/);
-
-    // Genuinely absent keeps the plain wording — the new branch must not fire here.
-    const absent = breadthDispatch(dir, 'Implement it, no marker at all.');
-    assert.equal(absent.code, 2);
-    assert.match(absent.stderr, /Neither token appears anywhere in the prompt/);
-    assert.doesNotMatch(absent.stderr, /IS present but did not match/);
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC2: a marker naming a WITHIN-threshold phase passes breadth and consumes its slot (strictly-greater: interfaces exactly AT the threshold are allowed)', () => {
-  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 3 }); // 3 === default threshold → NOT over-wide
-  try {
-    const passed = breadthDispatch(dir, `${breadthMarker('p1')}\nbody`);
-    assert.equal(passed.code, 0, 'a phase with interfaces exactly at the threshold is within bounds — breadth passes');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'a breadth-passing dispatch consumes its cap slot exactly as today');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC2: a SLICE-WAIVED prompt passes breadth unchecked even when the run brief has an over-wide phase (the waiver stays the fixer-mode escape)', () => {
-  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 });
-  try {
-    const waived = breadthDispatch(dir, 'SLICE-WAIVED: fixer-mode targeted one-line patch\ngo');
-    assert.equal(waived.code, 0, 'the waiver bypasses the breadth backstop as it bypasses the slice guard');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'the waived dispatch consumes its slot');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC2: a marker naming a phase NOT in the brief passes breadth unchecked (unknown phase ⇒ null, never a deny)', () => {
-  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 }); // brief has only the over-wide p1; the marker names p9
-  try {
-    const r = breadthDispatch(dir, `${breadthMarker('p9')}\nbody`);
-    assert.equal(r.code, 0, 'a marker phase absent from the brief is not breadth-judged');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder, 1, 'and it consumes its slot like any passing dispatch');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC2: a markerless prompt in an over-wide-phase run is denied by the slice guard, not the breadth backstop (breadth passes markerless prompts unchecked)', () => {
-  const { dir, store, cleanup } = makeBreadthRun({ interfaceCount: 5 });
-  try {
-    const denied = breadthDispatch(dir, 'implement it, no marker');
-    assert.equal(denied.code, 2, 'markerless is still denied — by the slice-presence guard');
-    assert.match(denied.stderr, /STERLING-SLICE/, 'it is the slice deny (teaches the marker format), not a breadth deny');
-    assert.match(denied.stderr, /SLICE-WAIVED/, 'and the waiver format');
-    assert.equal(store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'a slice-denied dispatch consumes no cap slot');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H8 AC2: the SAME config field governs the breadth backstop — a custom difficulty.split_interface_threshold widens and tightens it', () => {
-  // 5 interfaces would be over-wide at the default 3, but a custom threshold of 10 lets it pass
-  const wide = makeBreadthRun({ interfaceCount: 5, splitThreshold: 10 });
-  try {
-    const r = breadthDispatch(wide.dir, `${breadthMarker('p1')}\nbody`);
-    assert.equal(r.code, 0, '5 interfaces is within a custom threshold of 10 — H8 reads difficulty.split_interface_threshold');
-    assert.equal(wide.store.getRun('r-h5').dispatch_counts.coder, 1, 'the breadth-passing dispatch consumes its slot');
-  } finally {
-    wide.cleanup();
-  }
-  // 3 interfaces exceeds a custom threshold of 2 → breadth-denied (proves the field, not a hardcoded 3)
-  const tight = makeBreadthRun({ interfaceCount: 3, splitThreshold: 2 });
-  try {
-    const r = breadthDispatch(tight.dir, `${breadthMarker('p1')}\nbody`);
-    assert.equal(r.code, 2, '3 interfaces exceeds a custom threshold of 2 — breadth-denied');
-    assert.doesNotMatch(r.stderr, /dispatch cap exceeded/, 'it is the breadth deny, not the cap deny');
-    assert.equal(tight.store.getRun('r-h5').dispatch_counts.coder ?? 0, 0, 'no slot consumed on the breadth deny');
-  } finally {
-    tight.cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// RECONCILE RELEVANCE (board b7269100 / feedback §2.9+§2.10). An item said only
-// that a file changed, so on a 2717-line file it fired against every article
-// owning the path — 27 items audited, FOUR needed a prose change. The material
-// for a better item was always in hand and always discarded: PostToolUse carries
-// the tool_input of the very call that fired the hook.
-// ---------------------------------------------------------------------------
-
 test('changedLineRanges: locates an Edit, merges adjacent MultiEdit hunks, and refuses to guess', async () => {
   const { changedLineRanges, formatLineRanges } = await import(pathToFileURL(join(HOOKS, 'lib', 'common.mjs')).href);
   const content = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'].join('\n');
@@ -2922,18 +2162,6 @@ test('H10 conductor pressure: hard + open capture duty ride ONE deny (pressure a
     assert.match(nag.stderr, /conductor context pressure/i, 'pressure part rides the same deny');
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'second Stop releases (queue path) with no separate pressure deny');
-  } finally {
-    cleanup();
-  }
-});
-
-test('H10 conductor pressure: pipeline runs are untouched — no pressure file, no deny (H9 territory)', () => {
-  const { dir, cleanup } = makeProject({ withRun: true });
-  try {
-    writeConductorTranscript(dir, 170_000);
-    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(r.code, 0, 'active run releases to H9');
-    assert.equal(readPressureFile(dir), null, 'no conductor pressure accounting during a run');
   } finally {
     cleanup();
   }

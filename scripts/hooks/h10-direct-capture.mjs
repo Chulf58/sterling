@@ -183,7 +183,13 @@ const nagMarker = join(input.cwd, '.sterling', 'transient', 'capture-nagged.json
 // site inside the try.
 
 try {
-  if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers
+  // The staged-pipeline run branch (`if (store.getRun()) allow()`) is
+  // removed with the pipeline itself (scale-down decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — direct mode is the
+  // only mode now. A surviving branch here would suppress capture on a
+  // consumer store's orphaned `runs` row (Dome Farmer may still hold one):
+  // obsolete run state must never suppress capture, so this hook no longer
+  // branches on it at all.
 
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = new Date().toISOString();
