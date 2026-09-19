@@ -2,20 +2,25 @@
 // Governing decision: knowledge_get 8f137474-3ba0-4040-bb7d-28e4e608060c
 // (slug review-territory-structured-receipt-files, board 0770ca72).
 //
-// R1 PIN RE-CUT: this file's contracts are KEPT WHOLE — the rebuild keeps
-// lib/dispatch-prompt.mjs as the declaration parser and keeps every outcome
-// pinned here (marker wins over prose, explicit [] is a declaration, malformed
-// falls back loudly, no existence filtering, path-shape validation, the
-// reviewer-class Stop-bind fail-closed). The only change is A6: the loud
-// warning is now RENDERED through the shared errors module, so every arm below
-// additionally requires a [snake_code] token on the emitted line.
+// R1 PIN RE-CUT: this file's Start-time declaration-parsing contracts are
+// KEPT WHOLE — lib/dispatch-prompt.mjs stays the declaration parser and every
+// Start-side outcome pinned here still holds (marker wins over prose, explicit
+// [] is a declaration, malformed falls back loudly, no existence filtering,
+// path-shape validation). The only change is A6: the loud warning is now
+// RENDERED through the shared errors module, so every arm below additionally
+// requires a [snake_code] token on the emitted line.
 //   A11 NAMES THE CODE: a declaration that is PRESENT but unparseable /
 //   non-POSIX / non-array is `territory_declaration_malformed` (facts.line),
 //   distinct from `territory_declaration_missing` (no line at all, pinned in
 //   scripts/tests/h22-observed-territory.test.mjs). Both arms below assert the
 //   exact token alongside the required FACT — the rejected declaration's own
 //   text, echoed verbatim.
-//   RETIRED: nothing in this file.
+//   RETIRED (decision `sterling-claude-code-scale-down-boundary`, 2ad87dd1):
+//   the SubagentStop reviewer-class ledger-promotion contracts (T5, T5b, T6a,
+//   T6b) and their helpers (registerEntry/writeRegisterRaw/ledgerPath/
+//   ledgerExists/readLedger) — the review-ledger receipt mechanism they pinned
+//   is deleted. T5c (register-layer files_source, no ledger involved) and T7/
+//   T7b (Start-side sibling isolation) are unaffected and survive.
 //
 // Spec under test (pinned from the decision record + the launching agent's
 // contract, NOT inferred from scripts/hooks/h22-dispatch-register.mjs — that
@@ -41,8 +46,6 @@
 //      extraction, files_source: "free-prose-fallback", PLUS a loud stderr
 //      line naming the malformed declaration (H22 never denies).
 //   6. No filesystem-existence filtering of declared paths.
-//   7. SubagentStop reviewer-* ledger promotion copies files_source into the
-//      receipt unchanged.
 //
 // TODAY (pre-fix): h22-dispatch-register.mjs has no notion of
 // REVIEW-TERRITORY at all. It extracts path-like tokens from the raw prompt
@@ -135,10 +138,6 @@ function registerPath(dir) {
 function readRegister(dir) {
   return JSON.parse(readFileSync(registerPath(dir), 'utf8'));
 }
-function writeRegisterRaw(dir, content) {
-  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
-  writeFileSync(registerPath(dir), typeof content === 'string' ? content : JSON.stringify(content));
-}
 
 function writeParentTranscript(dir, lines, name = 'parent.jsonl') {
   const p = join(dir, 't', name);
@@ -208,21 +207,6 @@ function stagePost(dir, args) {
   const r = runHook(postInput(dir, args), dir);
   assert.notEqual(r.code, 2, `PostToolUse must never deny: ${r.stderr}`);
   return r;
-}
-
-// Store-root ledger — deliberately NOT under .sterling/transient/ (mirrors
-// scripts/tests/h22-review-ledger.test.mjs).
-function ledgerPath(dir) {
-  return join(dir, '.sterling', 'review-ledger.json');
-}
-function ledgerExists(dir) {
-  return existsSync(ledgerPath(dir));
-}
-function readLedger(dir) {
-  return JSON.parse(readFileSync(ledgerPath(dir), 'utf8'));
-}
-function registerEntry(agentId, agentType, files, filesSource, at = new Date().toISOString()) {
-  return { agent_id: agentId, agent_type: agentType, session_id: 's1', files, files_source: filesSource, at };
 }
 
 // Signature preserved from the transcript era (see the RE-CUT note above):
@@ -488,126 +472,6 @@ test('(T4) a declared path that does not exist on disk survives into files[] unc
 });
 
 // ===========================================================================
-// (T5) SubagentStop reviewer-* ledger promotion.
-//
-// RULING SUPERSEDED 2026-09-06 by decision edbaa38d
-// (reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
-// user-decided) — recorded on 8f137474 (review-territory-structured-receipt-files)
-// under "NARROWED FOR REVIEWER CLASSES". This test's ORIGINAL expectation was
-// that files_source travels UNCHANGED from the Start-time register entry to
-// the promoted receipt. That still holds for NON-REVIEWER classes, but for a
-// REVIEWER-class agent_type (this fixture uses 'reviewer-correctness') the
-// register's Start-time value is now merely PROVISIONAL: territory binds at
-// Stop from the child transcript's delivered brief, corroborated by the
-// .meta.json sidecar's toolUseId. This fixture supplies NEITHER
-// (h22Input here carries no `agent_transcript_path` at all) — the first
-// named fail-closed shape in edbaa38d ("missing child transcript") — so the
-// correct receipt now records territory.source: 'unattributable', never a
-// copy of the register's guess.
-//
-// EXPECTED RED today (pre-fix): the current promotion path still copies the
-// register entry's files_source straight through, so the promoted receipt
-// reads 'review-territory' (or the pre-(D) files_source field does), not
-// 'unattributable'. Fails at
-// `assert.equal(entry.territory?.source ?? entry.files_source, 'unattributable')`.
-// SABOTAGE: keep copying the register's files_source into the Stop-promoted
-// receipt for reviewer classes instead of deriving territory.source from the
-// child-transcript+sidecar Stop-bind (i.e. do not add the missing-child-
-// transcript fail-closed check at all) — this pin goes red (the receipt
-// would read 'review-territory', the register's Start-time guess).
-// ===========================================================================
-
-test('(T5) SubagentStop promotion for a reviewer-class agent with no child transcript fails closed to unattributable (edbaa38d supersedes the old "copies unchanged" expectation)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [
-      registerEntry('rev-rt-1', 'reviewer-correctness', ['packages/mcp-server/src/auth.ts'], 'review-territory', '2026-08-28T00:00:00.000Z'),
-    ]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-rt-1', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.ok(ledgerExists(dir), 'a review ledger receipt was promoted');
-    const ledger = readLedger(dir);
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): a v2-promoted entry carries files/files_source at territory.files/territory.source. Dual-shape
-    // lookup preserves this test's substance (decision 8f137474's structured-territory extraction, unchanged) for
-    // either shape.
-    const entry = ledger.find((e) => {
-      const files = e.territory?.files ?? e.files;
-      return Array.isArray(files) && files.includes('packages/mcp-server/src/auth.ts');
-    });
-    assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.territory?.source ?? entry.files_source, 'unattributable', 'a reviewer-class Stop with no child transcript fails closed — the register\'s Start-time files_source is provisional only and must never be promoted as though it were bound evidence (decision edbaa38d)');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (T5b) COMPANION ARM to T5.
-//
-// RULING SUPERSEDED 2026-09-06 by decision edbaa38d
-// (reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
-// user-decided), recorded on 8f137474 under "NARROWED FOR REVIEWER CLASSES"
-// — same supersession as T5 immediately above. This fixture's agent_type
-// ('reviewer-security') is a reviewer class, and its h22Input carries no
-// `agent_transcript_path` at all — the "missing child transcript" fail-closed
-// shape — so the correct receipt now records territory.source:
-// 'unattributable', regardless of what files_source value the register entry
-// was seeded with. The register's seeded 'free-prose-fallback' no longer
-// travels to the receipt for a reviewer class any more than T5's seeded
-// 'review-territory' does — both are now equally provisional-only.
-//
-// T5b's ORIGINAL SUBSTANCE — proving the receipt's value is COPIED from
-// computed evidence rather than HARDCODED to one fixed literal — can no
-// longer be pinned on the LEDGER PROMOTION step for a NON-reviewer
-// agent_type: ledger promotion never executes for a non-reviewer Stop at
-// all (confirmed by the existing, unmodified regression pin "H22 ledger: a
-// non-reviewer SubagentStop (agent_type \"coder\") is delete-only — no
-// ledger file is created at all", scripts/tests/h22-review-ledger.test.mjs)
-// — there is no promotion object literal for a non-reviewer type in which a
-// literal could even be hardcoded, so the requested substitution ("prove it
-// on a non-reviewer path instead") cannot be constructed at the PROMOTION
-// layer. Reported here plainly rather than silently dropped. The coverage
-// is instead re-homed to (T5c) immediately below, at the one place a
-// non-reviewer files_source value IS genuinely computed — the SubagentStart
-// register write itself, which this Stop-only, reviewer-only mechanism never
-// touches.
-//
-// EXPECTED RED today (pre-fix): the current promotion path still copies the
-// register entry's files_source straight through, so the promoted receipt
-// reads 'free-prose-fallback' (or the pre-(D) files_source field does), not
-// 'unattributable'. Fails at
-// `assert.equal(entry.territory?.source ?? entry.files_source, 'unattributable')`.
-// SABOTAGE: keep copying the register's files_source into the Stop-promoted
-// receipt for reviewer classes instead of deriving territory.source from the
-// child-transcript+sidecar Stop-bind — this pin goes red (the receipt would
-// read 'free-prose-fallback', the register's Start-time guess).
-// ===========================================================================
-
-test('(T5b) SubagentStop promotion for a reviewer-class agent with no child transcript fails closed to unattributable, regardless of the register\'s seeded files_source (edbaa38d supersedes the old "copies unchanged" expectation)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [
-      registerEntry('rev-rt-2', 'reviewer-security', ['scripts/decoy-analysis.mjs'], 'free-prose-fallback', '2026-08-28T00:01:00.000Z'),
-    ]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-rt-2', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.ok(ledgerExists(dir), 'a review ledger receipt was promoted');
-    const ledger = readLedger(dir);
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): a v2-promoted entry carries files/files_source at territory.files/territory.source. Dual-shape
-    // lookup preserves this test's substance for either shape.
-    const entry = ledger.find((e) => {
-      const files = e.territory?.files ?? e.files;
-      return Array.isArray(files) && files.includes('scripts/decoy-analysis.mjs');
-    });
-    assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.territory?.source ?? entry.files_source, 'unattributable', 'a reviewer-class Stop with no child transcript fails closed regardless of the register\'s seeded files_source — that value is provisional only and must never be promoted as bound evidence (decision edbaa38d)');
-  } finally {
-    cleanup();
-  }
-});
-
 // ===========================================================================
 // (T5c) COMPANION ARM, re-homed from T5b (see T5b's comment above for why):
 // T5b's proof that a promoted receipt's source value is COPIED from
@@ -649,88 +513,6 @@ test('(T5c) companion to T5/T5b, re-homed to the register layer: a non-reviewer 
     assert.equal(noMarkerEntry.files_source, 'free-prose-fallback', 'the absence of a marker yields free-prose-fallback');
 
     assert.notEqual(markerEntry.files_source, noMarkerEntry.files_source, 'the two sibling dispatches must differ — a hardcoded single literal could not produce this');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (T6b) CONTROL, PLACED FIRST for the attribution-copy pair: a LEGACY
-// register entry with NO `attribution` key at all must promote to a ledger
-// entry that ALSO has no `attribution` key — never fabricated. This is
-// GREEN both today (today's promotion never writes an `attribution` key for
-// ANY input, so absence trivially holds) and after the fix (a correct
-// implementation only copies the key when the source has it).
-//
-// EXPECTED STATE: GREEN today and after the fix.
-// SABOTAGE: after landing the fix, always write `attribution: entry.attribution ?? 'none'`
-// (fabricate a default when absent) — flips this control red, while leaving
-// (T6a) below unaffected (it always supplies a real attribution value).
-// (Literal updated from 'union' to 'none' by the 7c515e52 re-cut; the
-// fabricate-a-default defect it names is unchanged.)
-// ===========================================================================
-
-test('(T6b) CONTROL: a legacy register entry with no `attribution` key promotes to a ledger entry with no `attribution` key either — never fabricated', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [
-      { agent_id: 'rev-legacy', agent_type: 'reviewer-correctness', session_id: 's1', files: ['src/legacy.mjs'], at: '2026-08-28T00:02:00.000Z' },
-    ]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-legacy', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ledger = readLedger(dir);
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): a v2-promoted entry carries files/attribution at territory.files/territory.attribution. Dual-shape
-    // lookup preserves this CONTROL's substance (no fabricated attribution) for either shape.
-    const entry = ledger.find((e) => {
-      const files = e.territory?.files ?? e.files;
-      return Array.isArray(files) && files.includes('src/legacy.mjs');
-    });
-    assert.ok(entry, 'the promoted receipt is present in the ledger');
-    const attributionHome = entry.territory ?? entry;
-    assert.ok(!('attribution' in attributionHome), 'a legacy source entry lacking attribution must never gain a fabricated attribution key on promotion');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (T6a) NEW PIN: the ledger receipt also carries the register entry's
-// `attribution` value — RED until the parallel coder lands it.
-//
-// EXPECTED RED today: today's promotion writes a fixed six-key object
-// (agent_type/files/at/base_sha/branch/session_id per decision 0408b295)
-// that never includes `attribution` for any input. Fails at
-// `assert.equal(entry.attribution, 'none')` (undefined today).
-// SABOTAGE: drop the `attribution: entry.attribution` copy from the
-// promotion object literal (leave everything else) — flips this back red
-// without touching (T6b)'s legacy-absence guarantee.
-// ===========================================================================
-
-// RE-CUT LITERAL (7c515e52 §3): the imprecise attribution value is now
-// 'none', not 'union' — the union mechanism is deleted. The PROPERTY pinned
-// here is unchanged and is the point of the test: whatever value the register
-// entry carries is COPIED VERBATIM into the receipt, never normalized,
-// re-derived or upgraded at promotion time. 'none' is chosen deliberately over
-// 'block' because a copier that hardcodes the precise value would still pass a
-// 'block' fixture.
-test('(T6a) SubagentStop promotion copies the register entry\'s attribution value ("none") into the ledger receipt', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [
-      { agent_id: 'rev-attr', agent_type: 'reviewer-performance', session_id: 's1', files: ['src/attr.mjs'], files_source: 'free-prose-fallback', attribution: 'none', at: '2026-08-28T00:03:00.000Z' },
-    ]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-attr', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ledger = readLedger(dir);
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): a v2-promoted entry carries files/attribution at territory.files/territory.attribution.
-    const entry = ledger.find((e) => {
-      const files = e.territory?.files ?? e.files;
-      return Array.isArray(files) && files.includes('src/attr.mjs');
-    });
-    assert.ok(entry, 'the promoted receipt is present in the ledger');
-    assert.equal(entry.territory?.attribution ?? entry.attribution, 'none', 'the register entry\'s attribution value is copied unchanged into the ledger receipt');
   } finally {
     cleanup();
   }

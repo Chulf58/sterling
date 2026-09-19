@@ -33,7 +33,6 @@ import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launche
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
-import { appendMissingSanctioned } from './lib/store-remediation.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
@@ -211,34 +210,6 @@ if (!recorded) {
   if (!recorded.stack_tags.includes(UNIVERSAL_DOMAIN)) {
     mutated = { ...mutated, stack_tags: eff.stackTags };
     mutationNotes.push(`added the universal '${UNIVERSAL_DOMAIN}' domain to stack tags (now [${eff.stackTags.join(', ')}])`);
-  }
-
-  // Sanctioned-script reach (board 52c1d504; original trap: decision bc0f81e3,
-  // board 1b3c7bf3): a config frozen with an EXPLICIT store_guard.allow_scripts
-  // before the schema default grew never gains newly-sanctioned scripts,
-  // because an explicit array REPLACES the zod default rather than extending
-  // it — measured for the mandated migration scripts (the one thing an
-  // H15-denied consumer could never run to escape a read-only store) and again
-  // for the TUI launcher. The merge carries exactly what config.ts SHIPS as
-  // sanctioned, so it changes which projects that list reaches, never what is
-  // on it. Additive-only, disclosed below (never silent — anti_pattern
-  // 94f16632); a wrong-shaped store_guard/allow_scripts is warned about and
-  // left alone, never replaced.
-  const rawGuard = mutated.store_guard;
-  if (rawGuard !== undefined) {
-    if (rawGuard === null || typeof rawGuard !== 'object' || Array.isArray(rawGuard)) {
-      warns.push('warn: .sterling/config.json store_guard is not an object — skipping the sanctioned-script reach merge (board 52c1d504); its shape was not written by init and will not be replaced');
-    } else if (rawGuard.allow_scripts !== undefined && !Array.isArray(rawGuard.allow_scripts)) {
-      warns.push('warn: .sterling/config.json store_guard.allow_scripts is not an array — skipping the sanctioned-script reach merge (board 52c1d504); its shape was not written by init and will not be replaced');
-    } else if (Array.isArray(rawGuard.allow_scripts)) {
-      const { next, added } = appendMissingSanctioned(rawGuard.allow_scripts);
-      if (added.length) {
-        mutated = { ...mutated, store_guard: { ...rawGuard, allow_scripts: next } };
-        mutationNotes.push(`store_guard.allow_scripts gained script(s) Sterling ships as sanctioned that this explicit array was missing: ${added.join(', ')}`);
-      }
-    }
-    // allow_scripts absent on an explicit store_guard object: the schema
-    // default already supplies the grown list — nothing to merge.
   }
 
   if (mutationNotes.length) {

@@ -65,7 +65,6 @@ import { fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
-const H26_PATH = join(HOOKS, 'h26-dispatch-overlap.mjs');
 
 // ---------------------------------------------------------------------------
 // Shared plumbing
@@ -154,33 +153,10 @@ function readRegister(dir) {
   return JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), 'utf8'));
 }
 
-function writeRegister(dir, entries) {
-  writeFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), JSON.stringify(entries));
-}
-
-function h26Task(dir, { subagent_type = 'coder', prompt, session_id = 's1' }) {
-  return runHook(
-    H26_PATH,
-    { hook_event_name: 'PreToolUse', tool_name: 'Task', session_id, cwd: dir, tool_input: { subagent_type, prompt } },
-    dir
-  );
-}
-
-function advisoryText(r) {
-  if (!r.stdout || !r.stdout.trim()) return '';
-  let parsed;
-  try {
-    parsed = JSON.parse(r.stdout);
-  } catch {
-    assert.fail(`stdout was not valid JSON: ${JSON.stringify(r.stdout)}`);
-  }
-  return parsed?.hookSpecificOutput?.additionalContext ?? '';
-}
-
-function pathRe(p) {
-  const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  return new RegExp(esc.replace(/\//g, '\\/'), 'i');
-}
+// writeRegister/h26Task/advisoryText/pathRe REMOVED — their only callers were
+// the BACK-COMPAT/END-TO-END/POSTURE H26 assertions removed above (H26 is
+// deleted under decision `sterling-claude-code-scale-down-boundary`,
+// 2ad87dd1) — grep confirms zero remaining callers in this file.
 
 function assertNeverDenies(r, label) {
   assert.notEqual(r.code, 2, `must never deny (exit 2) for ${label}; got ${r.code}, stderr: ${r.stderr}`);
@@ -196,7 +172,12 @@ function assertNeverDenies(r, label) {
 // `claimed_files` (the field does not exist yet).
 // ===========================================================================
 
-test('H22 claimed-territory CONTROL: a positively-claimed path lands in BOTH files[] and claimed_files[], and still warns downstream', () => {
+// NOTE: the downstream-warning half of this control (an H26 overlap check via
+// h26Task) was REMOVED — h26-dispatch-overlap.mjs is deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1). The register-side
+// assertions (files[]/claimed_files[] on a positive claim) are unrelated to
+// H26 and stay as the control arm for the REGISTER corpus below.
+test('H22 claimed-territory CONTROL: a positively-claimed path lands in BOTH files[] and claimed_files[]', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeTranscript(dir, [['coder', 'Modify src/shared/util.mjs for the fix.']]);
@@ -208,11 +189,6 @@ test('H22 claimed-territory CONTROL: a positively-claimed path lands in BOTH fil
     assert.ok(entry.files.includes('src/shared/util.mjs'), `files must record the claim: ${JSON.stringify(entry.files)}`);
     assert.ok(Array.isArray(entry.claimed_files), 'claimed_files must be an array on every new entry');
     assert.ok(entry.claimed_files.includes('src/shared/util.mjs'), `claimed_files must record the claim: ${JSON.stringify(entry.claimed_files)}`);
-
-    const w = h26Task(dir, { subagent_type: 'coder', prompt: 'please modify src/shared/util.mjs today' });
-    assertNeverDenies(w, 'control overlap');
-    assert.match(advisoryText(w), pathRe('src/shared/util.mjs'), 'a genuine overlap must still warn');
-    assert.ok(advisoryText(w).includes('coder:sub-1'), `advisory must name the live dispatch; got: ${advisoryText(w)}`);
   } finally {
     cleanup();
   }
@@ -298,122 +274,28 @@ for (const [label, prompt, owned, prohibited] of CORPUS) {
 }
 
 // ===========================================================================
-// SECTION 3 — END TO END: the false positive itself. A later dispatch that
-// LEGITIMATELY owns a path an earlier brief forbade must not be warned off it,
-// while a genuine overlap on the earlier brief's OWN territory must still fire
-// in the very same fixture (the paired control).
-// TODAY (pre-fix): the first half is RED (the warning fires), the second GREEN.
-// SABOTAGE: either the h22 filter above, or `const entryFiles = e.files;` in
-// scripts/hooks/h26-dispatch-overlap.mjs -> the first half flips red.
+// SECTION 3 (END-TO-END) and SECTION 4 (BACK-COMPAT) REMOVED — both were
+// wholly about h26-dispatch-overlap.mjs's overlap-suppression behavior
+// (invoked via h26Task), which is deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1); no H22-only
+// assertion remained once the H26 invocation was stripped, so the tests were
+// removed outright rather than trimmed.
+// ===========================================================================
+// SECTION 5 (RECEIPT SAFETY) REMOVED — asserted that a reviewer Stop promotes
+// a .sterling/review-ledger.json receipt naming its examined territory. That
+// whole promotion mechanism (promoteAtStop and its owner module
+// scripts/hooks/lib/review-ledger-entry.mjs) was deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1) — h22-dispatch-
+// register.mjs's SubagentStop no longer writes a ledger at all, so there is
+// nothing left for this test to assert.
+// ===========================================================================
+// SECTION 6 — POSTURE INVARIANT. H22 is advisory: no input may make it deny a
+// tool call. The H26 half of this posture check (an overlap probe via
+// h26Task) was REMOVED — h26-dispatch-overlap.mjs is deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1).
 // ===========================================================================
 
-test('H22/H26 claimed-territory END-TO-END: a later dispatch legitimately owning a forbidden-in-another-brief path is NOT warned, while a real overlap still warns', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [
-      ['coder', 'You own scripts/hooks/h17-bash-write-sweep.mjs. DO NOT TOUCH: scripts/lib/codex-mcp.mjs (another lane owns it).'],
-    ]);
-    subagentStart(dir, { agent_id: 'sub-live', agent_type: 'coder' });
-
-    // (a) THE FALSE POSITIVE: the legitimate owner of the forbidden path.
-    const quiet = h26Task(dir, { subagent_type: 'coder', prompt: 'You now own scripts/lib/codex-mcp.mjs; implement the change there.' });
-    assertNeverDenies(quiet, 'legitimate owner of a path another brief forbade');
-    assert.equal(quiet.code, 0, `must exit 0; stderr: ${quiet.stderr}`);
-    assert.equal(
-      advisoryText(quiet),
-      '',
-      `a path the live dispatch was told NOT to touch is not its lane — no advisory expected; got: ${advisoryText(quiet)}`
-    );
-
-    // (b) PAIRED CONTROL, same fixture: the live dispatch's REAL territory.
-    const loud = h26Task(dir, { subagent_type: 'coder', prompt: 'Please also edit scripts/hooks/h17-bash-write-sweep.mjs in this lane.' });
-    assert.match(advisoryText(loud), pathRe('scripts/hooks/h17-bash-write-sweep.mjs'), 'a genuine overlap must still warn');
-    assert.ok(advisoryText(loud).includes('coder:sub-live'), `advisory must name the live dispatch; got: ${advisoryText(loud)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// SECTION 4 — BACK-COMPAT. A register entry written before claimed_files
-// existed (H1 wipes the register each SessionStart, but a mid-session bundle
-// swap can leave one) has no claimed_files and must fall back to files —
-// today's behavior exactly, never a silently empty lane.
-// TODAY (pre-fix): GREEN (regression net).
-// SABOTAGE: `const entryFiles = e.claimed_files ?? [];` in
-// scripts/hooks/h26-dispatch-overlap.mjs -> red here (and in ~10 pre-existing
-// H26 tests, which is the layer that actually carries this verdict).
-// ===========================================================================
-
-test('H26 claimed-territory BACK-COMPAT: a legacy entry with no claimed_files falls back to files[] and still warns', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegister(dir, [
-      {
-        agent_id: 'legacy-1',
-        agent_type: 'coder',
-        session_id: 's1',
-        files: ['src/legacy.mjs'],
-        at: new Date().toISOString(),
-        attribution: 'block',
-      },
-    ]);
-    const w = h26Task(dir, { subagent_type: 'coder', prompt: 'please modify src/legacy.mjs' });
-    assertNeverDenies(w, 'legacy entry');
-    assert.match(advisoryText(w), pathRe('src/legacy.mjs'), 'a legacy entry must keep warning exactly as before the field existed');
-    assert.ok(advisoryText(w).includes('coder:legacy-1'), `advisory must name the legacy dispatch; got: ${advisoryText(w)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// SECTION 5 — THE DANGER CASE the field split exists to prevent
-// (research_finding 289cd172: "the cheap fix is dangerous"). A reviewer brief
-// that names its subject ONLY inside a prohibition must still promote a review
-// receipt that NAMES that territory: scripts/commit-reviewed.mjs treats an
-// EMPTY files[] as the STRONGEST form of unverifiable territory, so filtering
-// `files` in place would silently degrade merge-gate review evidence.
-// TODAY (pre-fix): GREEN (regression net) — it is the pin that must stay green
-// while Sections 2/3 turn green.
-// SABOTAGE: write `files: claimedFiles` on the entry in
-// scripts/hooks/h22-dispatch-register.mjs -> RED here while Sections 2 and 3
-// stay green. That asymmetry IS the reason for two fields.
-// ===========================================================================
-
-test('H22 claimed-territory RECEIPT SAFETY: a reviewer brief naming its subject only inside a prohibition still promotes a receipt naming that territory', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['reviewer-correctness', 'Review the auth change. Do not modify src/auth.mjs — you are read-only.']]);
-    subagentStart(dir, { agent_id: 'rev-1', agent_type: 'reviewer-correctness' });
-
-    const entry = readRegister(dir).find((e) => e.agent_id === 'rev-1');
-    assert.ok(entry, 'the reviewer entry was appended');
-    assert.ok(entry.files.includes('src/auth.mjs'), `files must record examined territory: ${JSON.stringify(entry.files)}`);
-    assert.deepEqual(entry.claimed_files, [], `a read-only brief claims no write territory: ${JSON.stringify(entry.claimed_files)}`);
-
-    const stopped = subagentStop(dir, { agent_id: 'rev-1', agent_type: 'reviewer-correctness', last_assistant_message: 'review complete' });
-    assertNeverDenies(stopped, 'reviewer stop');
-    assert.equal(stopped.code, 0, `SubagentStop must exit 0; stderr: ${stopped.stderr}`);
-
-    const ledger = JSON.parse(readFileSync(join(dir, '.sterling', 'review-ledger.json'), 'utf8'));
-    assert.equal(ledger.length, 1, 'exactly one receipt was promoted');
-    // A promotion writes ONE shape (§1.2): territory.files.
-    assert.ok(
-      ledger[0].territory.files.includes('src/auth.mjs'),
-      `the promoted receipt must NAME the reviewed territory — an empty declared set is the strongest unverifiable-territory signal at spend time; got: ${JSON.stringify(ledger[0])}`
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// SECTION 6 — POSTURE INVARIANT. Both hooks are advisory: no input may make
-// either deny a tool call.
-// ===========================================================================
-
-test('H22/H26 claimed-territory POSTURE: neither hook ever exits 2, including on an all-prohibition brief', () => {
+test('H22 claimed-territory POSTURE: SubagentStart never exits 2, including on an all-prohibition brief', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeTranscript(dir, [['coder', 'DO NOT TOUCH: scripts/lib/codex-mcp.mjs, scripts/hooks/h15-store-guard.mjs']]);
@@ -423,10 +305,6 @@ test('H22/H26 claimed-territory POSTURE: neither hook ever exits 2, including on
     const entry = readRegister(dir).find((e) => e.agent_id === 'sub-p');
     assert.deepEqual(entry.claimed_files, [], 'an all-prohibition brief claims nothing at all');
     assert.ok(entry.files.length >= 2, `files must still record what the brief examined: ${JSON.stringify(entry.files)}`);
-
-    const w = h26Task(dir, { subagent_type: 'coder', prompt: 'edit scripts/lib/codex-mcp.mjs now' });
-    assertNeverDenies(w, 'overlap check against an all-prohibition entry');
-    assert.equal(w.code, 0, `must exit 0; stderr: ${w.stderr}`);
   } finally {
     cleanup();
   }

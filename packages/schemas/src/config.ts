@@ -131,33 +131,17 @@ export const configSchema = z.object({
   project_name: z.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: z.number().positive().max(1).default(0.35),
-  prep_cap: z.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: z.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: z
-    .object({
-      inner_loop_n: z.number().int().positive().default(3),
-      outer_loop_m: z.number().int().positive().default(2),
-      research_resume_per_phase: z.number().int().positive().default(2),
-      dispatch_per_agent_type: z.number().int().positive().default(25),
-      phase_death_cap: z.number().int().positive().default(1),
-    })
-    .default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: z
     .object({
-      warn_pct: z.number().positive().default(60),
-      block_pct: z.number().positive().default(95),
-      mode: z.enum(['observe', 'enforce']).default('observe'),
       windows: z.record(z.string(), z.number().int().positive()).default({ default: 200_000 }),
       // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
       // "finish before opening new areas"; hard = once-per-session soft-block naming the
-      // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-      // different consequences (run escalation / dispatch deny in enforce mode).
+      // delegation remedy.
       conductor: z
         .object({
           soft_pct: z.number().positive().default(35),
@@ -174,10 +158,6 @@ export const configSchema = z.object({
     .object({
       min_hand_work: z.number().int().positive().default(15),
       max_dispatches: z.number().int().nonnegative().default(0),
-      // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-      // paths + searches since the last Task/Agent dispatch crossing this
-      // threshold injects ONE moment-3 advisory per streak episode.
-      streak_threshold: z.number().int().positive().default(10),
     })
     .default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
@@ -208,11 +188,7 @@ export const configSchema = z.object({
   // small-scoped hard phases (coder hard override); max never appears.
   models: z
     .object({
-      test_writer: modelEffort.default({ model: 'claude-opus-5', effort: 'high' }),
-      reviewers: modelEffort.default({ model: 'claude-opus-5', effort: 'low' }),
-      implementation_architect: modelEffort.default({ model: 'claude-opus-5', effort: 'high' }),
       coder: modelEffort.default({ model: 'claude-sonnet-5', effort: 'high' }),
-      coder_hard: modelEffort.default({ model: 'claude-opus-5', effort: 'xhigh' }),
       researcher: modelEffort.default({ model: 'claude-sonnet-5', effort: 'medium' }),
       explorer: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
       classifiers: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
@@ -221,31 +197,6 @@ export const configSchema = z.object({
       // (P8); debugger is root-cause judgment — high effort.
       librarian: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
       debugger: modelEffort.default({ model: 'claude-sonnet-5', effort: 'high' }),
-    })
-    .default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: z
-    .object({
-      security_path_patterns: z.array(z.string()).default(['(^|/)auth/', 'token', 'secret', 'credential']),
-      security_content_patterns: z
-        .array(z.string())
-        .default(["SELECT .*\\+", 'exec\\(', 'spawn\\(', 'process\\.env', '(^|\\W)eval\\(', 'router\\.(get|post|put|delete)']),
-      perf_path_patterns: z.array(z.string()).default([]),
-      perf_content_patterns: z.array(z.string()).default(['for\\s*\\(.*\\bawait\\b', '\\.map\\(.*await', 'SELECT \\*']),
-      dependency_manifests: z.array(z.string()).default(['package.json', 'requirements.txt', 'pom.xml', '*.csproj']),
-      skeptic_diff_size_threshold: z.number().int().positive().default(400),
-      skeptic_new_export_threshold: z.number().int().positive().default(5),
-    })
-    .default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: z
-    .object({
-      split_interface_threshold: z.number().int().positive().default(3),
-      thin_knowledge_retrieval_threshold: z.number().int().nonnegative().default(2),
     })
     .default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
@@ -345,43 +296,6 @@ export const configSchema = z.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: z.enum(['authoring', 'consumer']).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: z
-    .object({
-      allow_scripts: z
-        .array(z.string())
-        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'scripts/commit-reviewed.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs', 'packages/tui/bundle/sterling-tui.mjs', 'scripts/review-ledger.mjs', 'scripts/rotation-note.mjs', 'scripts/no-capture.mjs', 'scripts/test-repair.mjs', 'scripts/delivery-oracle.mjs', 'scripts/plan-lock.mjs']),
-    })
-    .default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -499,27 +413,6 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: z
-    .object({
-      stale_days: z.number().int().positive().max(3650).optional(),
-    })
-    .passthrough()
-    .optional(),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;

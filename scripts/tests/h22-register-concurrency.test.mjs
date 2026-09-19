@@ -238,10 +238,10 @@ function writeRegisterRaw(dir, content) {
 function ledgerPath(dir) {
   return join(dir, '.sterling', 'review-ledger.json');
 }
-function readLedger(dir) {
-  if (!existsSync(ledgerPath(dir))) return [];
-  return JSON.parse(readFileSync(ledgerPath(dir), 'utf8'));
-}
+// readLedger() REMOVED — its only callers were the ledger-promotion
+// assertions removed above (SubagentStop's ledger promotion is deleted under
+// decision `sterling-claude-code-scale-down-boundary`, 2ad87dd1); ledgerPath
+// itself stays, still used by D3's byte-identical-absence check.
 
 // Sequential (blocking) runner.
 function runHookSync(script, input, cwd) {
@@ -394,68 +394,27 @@ test('C1: N concurrent SubagentStart events for N distinct agent_ids — no lost
   }
 });
 
-// ===========================================================================
-// C2 — concurrent SubagentStop for N distinct reviewer-class entries, no
-// lost promotion into review-ledger.json.
-// EXPECTED TODAY: FLAKY-RED.
-// SABOTAGE: remove/bypass the future lock on the SubagentStop path only
-// (the ledger write's OWN lock is different and must stay intact for this
-// sabotage to isolate the register-side race).
-// ===========================================================================
-
-test('C2: concurrent SubagentStop for N distinct reviewer-class entries — no lost ledger promotion (probabilistic, 3 rounds)', async () => {
-  for (let round = 0; round < ROUNDS; round++) {
-    const dir = makeProject();
-    try {
-      const entries = Array.from({ length: N }, (_, i) => ({
-        agent_id: `rev-r${round}-${i}`,
-        agent_type: `reviewer-r${round}-${i}`, // strictly prefixed 'reviewer-' => reviewer-class
-        session_id: 's1',
-        files: [`src/r${round}-${i}.mjs`],
-        at: new Date(Date.UTC(2026, 7, 28, 0, round, i)).toISOString(),
-      }));
-      writeRegisterRaw(dir, entries);
-
-      const promises = entries.map((e) =>
-        runHookAsync(HOOK_SCRIPT, h22Input(dir, { agent_id: e.agent_id, agent_type: e.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }), dir)
-      );
-      const results = await Promise.all(promises);
-
-      for (const r of results) {
-        assert.equal(r.code, 0, `round ${round}: the hook must never exit non-zero under concurrent Stops — stderr: ${r.stderr}`);
-      }
-
-      const ledger = readLedger(dir);
-      // RE-CUT (R1): the join between the seeded register entries and the
-      // promoted receipts is now DISPATCH IDENTITY (identity.agent_id), not the
-      // agent_type+at composite — that composite was the retired consume key,
-      // and reusing it here would keep a retired notion alive inside a test.
-      const key = (e) => e.identity?.agent_id ?? e.agent_id;
-      const expectedKeys = new Set(entries.map(key));
-      const actualKeys = new Set(ledger.map(key));
-
-      assert.equal(
-        ledger.length,
-        N,
-        `round ${round}: expected all ${N} reviewer-class Stops to promote a receipt, found ${ledger.length} — a lost register entry means the matching Stop found nothing and silently no-op'd (the measured harm in board 673ca3f6)`
-      );
-      assert.deepEqual(
-        [...actualKeys].sort(),
-        [...expectedKeys].sort(),
-        `round ${round}: promoted receipt identity set does not match the full seeded set — some reviewer-class entry's review evidence never reached the ledger`
-      );
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-});
+// C2 REMOVED — its entire subject was "no lost ledger promotion" under
+// concurrent SubagentStop. SubagentStop's reviewer-class ledger promotion
+// (promoteAtStop and its owner module scripts/hooks/lib/review-ledger-
+// entry.mjs) was deleted under decision `sterling-claude-code-scale-down-
+// boundary` (2ad87dd1) — nothing is ever promoted to .sterling/review-
+// ledger.json anymore, so there is no register-only content left to keep;
+// the seeded entries and every assertion here exist solely to observe the
+// now-deleted promotion.
 
 // ===========================================================================
 // C3 — control: sequential single-event behavior is unchanged.
 // EXPECTED TODAY AND AFTER ANY FUTURE LOCK: GREEN, deterministically.
 // ===========================================================================
 
-test('C3 (control, re-cut A1): sequential single Start + matching reviewer Stop — one entry appended, exactly one receipt promoted, the entry MARKED ended and kept', () => {
+// NOTE: the ledger-promotion half of this control ("exactly one receipt
+// promoted") was REMOVED — SubagentStop's ledger promotion is deleted under
+// decision `sterling-claude-code-scale-down-boundary` (2ad87dd1). The
+// register-side assertions (append-once, A1 mark-ended-not-deleted) are
+// unrelated to the ledger and stay as the control arm for the register's own
+// concurrency pins above.
+test('C3 (control, re-cut A1): sequential single Start + matching reviewer Stop — one entry appended, the entry MARKED ended and kept', () => {
   const dir = makeProject();
   try {
     const tPath = writeParentTranscript(dir, [taskBlock('Task', 'solo dispatch touching src/solo.mjs')]);
@@ -473,12 +432,6 @@ test('C3 (control, re-cut A1): sequential single Start + matching reviewer Stop 
     reg = readRegister(dir);
     assert.equal(reg.length, 1, 'A1: promotion does not delete the entry');
     assert.equal(reg[0].ended?.event, 'subagent-stop', 'the promoted entry is MARKED ended, so inactive-confirmed has evidence on disk');
-
-    const ledger = readLedger(dir);
-    assert.equal(ledger.length, 1, 'exactly one receipt is promoted for the sole sequential reviewer Stop');
-    // SUPERSEDED 2026-08-31 by decision 57984926 (review-ledger-v2-lifecycle-refuse-flip-and-external-review-design,
-    // standing): agent_type now lives at reviewer.agent_type on a v2-promoted entry (dual-shape, mirrors C2 above).
-    assert.equal(ledger[0].reviewer?.agent_type ?? ledger[0].agent_type, 'reviewer-solo');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -669,10 +622,14 @@ test('D3: under a HELD register lock a reviewer-class SubagentStop writes NOTHIN
 
 // D3-CONTROL, and it carries the verdict's other half: without this arm the
 // byte-identical assertions above are satisfied just as well by a Stop that
-// never promotes at all.
-// SABOTAGE: gate promotion on something other than the lock (e.g. never promote
-// on Stop) -> this goes red while D3 stays green.
-test('D3-CONTROL: the SAME fixture with NO lock held promotes exactly one receipt and marks the round ended', async () => {
+// never marks the round at all.
+// NOTE: the ledger-promotion half ("promotes exactly one receipt") was
+// REMOVED — SubagentStop's ledger promotion is deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1); the register-side
+// mark-ended assertion is unrelated to the ledger and stays.
+// SABOTAGE: gate the ended-mark on something other than the lock (e.g. never
+// mark on Stop) -> this goes red while D3 stays green.
+test('D3-CONTROL: the SAME fixture with NO lock held marks the round ended', async () => {
   if (!lockLib) {
     assert.fail(missingLockLibMessage());
     return;
@@ -690,10 +647,7 @@ test('D3-CONTROL: the SAME fixture with NO lock held promotes exactly one receip
     assert.equal(r.code, 0, r.stderr);
     assert.doesNotMatch(`${r.stdout}\n${r.stderr}`, CODE_LOCK_HELD, 'nothing was contended, so nothing is disclosed');
 
-    const ledger = readLedger(dir);
-    assert.equal(ledger.length, 1, 'the uncontended Stop promotes exactly one receipt');
-    assert.equal((ledger[0].identity?.agent_id ?? ledger[0].agent_id), entry.agent_id, 'joined on dispatch identity, mirroring C2');
-    assert.equal(readRegister(dir)[0].ended?.event, 'subagent-stop', 'and the round is settled, so no later Stop can promote it again');
+    assert.equal(readRegister(dir)[0].ended?.event, 'subagent-stop', 'and the round is settled, so no later Stop can mark it again');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -803,46 +757,11 @@ test('H10-TIMEOUT: while the register lock is held, an H10 Stop that would stamp
   }
 });
 
-// ===========================================================================
-// DISPATCH-IDENTITY DISCRIMINATION — CONTROL, placed FIRST (Codex outside-
-// family review, thread 01a0586b + decision 57984926, cited 2026-08-31): the
-// LEDGER-IDEMPOTENCY pin below only ever re-seeds the SAME agent_id, so it
-// cannot distinguish "dedupe keys on dispatch identity" from "dedupe keys on
-// agent_type+at" — both readings produce the same green there. This CONTROL
-// varies agent_id while holding agent_type AND started_at (`at`) fixed: two
-// genuinely DISTINCT reviewer dispatches that collide on agent_type+at must
-// BOTH promote. A dedupe keyed on agent_type+at (instead of dispatch
-// identity) would silently discard the second receipt — real data loss, not
-// idempotency.
-// EXPECTED RED until dedupe keys on dispatch identity (agent_id), not on
-// agent_type+at.
-// SABOTAGE: key the ledger-append idempotency check on `${agent_type}::${at}`
-// instead of the dispatch identity — `ledger.length` stays 1 instead of 2.
-// ===========================================================================
-
-test('DISPATCH-IDENTITY (control): two DISTINCT reviewer dispatches sharing agent_type AND started_at (`at`) both promote — dedupe must key on dispatch identity, not on agent_type+at', () => {
-  const dir = makeProject();
-  try {
-    const sharedAt = '2026-08-29T00:00:00.000Z';
-    const entryA = { agent_id: 'rev-collide-a', agent_type: 'reviewer-collide', session_id: 's1', files: ['src/collide-a.mjs'], at: sharedAt };
-    const entryB = { agent_id: 'rev-collide-b', agent_type: 'reviewer-collide', session_id: 's1', files: ['src/collide-b.mjs'], at: sharedAt };
-    writeRegisterRaw(dir, [entryA, entryB]);
-
-    const stopA = runHookSync(HOOK_SCRIPT, h22Input(dir, { agent_id: entryA.agent_id, agent_type: entryA.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(stopA.code, 0, stopA.stderr);
-    const stopB = runHookSync(HOOK_SCRIPT, h22Input(dir, { agent_id: entryB.agent_id, agent_type: entryB.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
-    assert.equal(stopB.code, 0, stopB.stderr);
-
-    const ledger = readLedger(dir);
-    assert.equal(ledger.length, 2, 'two DISTINCT dispatches sharing agent_type+at must both promote — neither is a duplicate of the other');
-    const entryIds = ledger.map((e) => e.entry_id).filter(Boolean);
-    if (entryIds.length === ledger.length) {
-      assert.notEqual(entryIds[0], entryIds[1], 'two genuinely distinct promotions mint distinct entry_ids');
-    }
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+// DISPATCH-IDENTITY (control) REMOVED — its entire subject was ledger-append
+// dedupe keying (dispatch identity vs. agent_type+at) on receipt promotion.
+// SubagentStop's ledger promotion is deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1); there is no ledger
+// append left to key, so no register-only content survives.
 
 // ===========================================================================
 // LEDGER-IDEMPOTENCY — two Stops for the SAME reviewer agent_id (simulating
@@ -866,13 +785,19 @@ test('DISPATCH-IDENTITY (control): two DISTINCT reviewer dispatches sharing agen
 // R1-A97 (re-cut of LEDGER-IDEMPOTENCY): idempotency is now STRUCTURAL, not a
 // dedupe key. A Stop binds the single UNENDED (session_id, agent_id) round; once
 // that round is marked ended there is nothing left to bind, so a repeated Stop
-// promotes nothing and refreshes nothing. The old fixture re-seeded an UNENDED
-// entry between the two Stops, which under A4 is a NEW round and must mint a
-// second receipt — R1-A98 pins exactly that, so the two arms cannot both be
-// satisfied by a blanket "never promote twice for one agent_id".
-// SABOTAGE: make Stop promote whenever a matching agent_id exists, ignoring the
-// ended marker -> A97 goes red (two receipts) while A98 stays green.
-test('R1-A97: a repeated Stop against an already-ENDED round promotes nothing — the register holds one receipt and one ended entry', () => {
+// touches nothing further. The old fixture re-seeded an UNENDED entry between
+// the two Stops, which under A4 is a NEW round — R1-A98 pins that arm, so the
+// two cannot both be satisfied by a blanket "never mark twice for one
+// agent_id".
+// NOTE: the ledger-promotion assertions ("promotes exactly one receipt" /
+// "promotes nothing — no second receipt") were REMOVED — SubagentStop's
+// ledger promotion is deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1); the register-side
+// mark-ended-once / no-phantom-append assertions are unrelated to the ledger
+// and stay.
+// SABOTAGE: mark the entry ended again (or append a phantom entry) on a
+// repeated Stop against an already-ended round -> this goes red.
+test('R1-A97: a repeated Stop against an already-ENDED round touches nothing further — the register holds one ended entry', () => {
   const dir = makeProject();
   try {
     const entry = { agent_id: 'rev-idem-1', agent_type: 'reviewer-idem', session_id: 's1', files: ['src/idem.mjs'], at: '2026-08-28T00:00:00.000Z', attribution: 'block' };
@@ -881,24 +806,29 @@ test('R1-A97: a repeated Stop against an already-ENDED round promotes nothing �
     const stopInput = h22Input(dir, { agent_id: entry.agent_id, agent_type: entry.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' });
     const first = runHookSync(HOOK_SCRIPT, stopInput, dir);
     assert.equal(first.code, 0, first.stderr);
-    assert.equal(readLedger(dir).length, 1, 'the first Stop promotes exactly one receipt');
-    assert.equal(readRegister(dir)[0].ended?.event, 'subagent-stop', 'and marks the round ended');
+    assert.equal(readRegister(dir)[0].ended?.event, 'subagent-stop', 'marks the round ended');
 
     const second = runHookSync(HOOK_SCRIPT, stopInput, dir);
     assert.equal(second.code, 0, second.stderr);
-    assert.equal(readLedger(dir).length, 1, 'a Stop with no unended round to bind promotes nothing — no second receipt');
-    assert.equal(readRegister(dir).length, 1, 'and appends no phantom entry');
+    assert.equal(readRegister(dir).length, 1, 'a Stop with no unended round to bind appends no phantom entry');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-// R1-A98 CONTROL (A4, measured): a resumed round has its OWN Start and its OWN
-// receipt. This is the arm that stops A97 from being satisfied by "one receipt
-// per agent_id, ever", which would silently lose every corrective review round.
-// SABOTAGE: dedupe the ledger append on agent_id -> A98 goes red (one receipt
-// instead of two) while A97 stays green.
-test('R1-A98 CONTROL: a SECOND round for the same agent_id (its own Start, its own Stop) mints its OWN receipt', () => {
+// R1-A98 CONTROL (A4, measured): a resumed round has its OWN Start, and its OWN
+// Stop marks ONLY its own entry — round 1's already-ended entry is never
+// refreshed. This is the arm that stops A97 from being satisfied by "the
+// register can never distinguish two rounds for one agent_id".
+// NOTE: the ledger-promotion assertions ("mints its OWN receipt" /
+// started_at binding) were REMOVED — SubagentStop's ledger promotion is
+// deleted under decision `sterling-claude-code-scale-down-boundary`
+// (2ad87dd1); the register-side assertions (both rounds survive, round 1's
+// ended timestamp is untouched, round 2 is the one marked) are unrelated to
+// the ledger and stay.
+// SABOTAGE: mark BOTH entries ended, or refresh round 1's ended timestamp,
+// when round 2's Stop fires -> this goes red while A97 stays green.
+test('R1-A98 CONTROL: a SECOND round for the same agent_id (its own Start, its own Stop) marks only its OWN entry', () => {
   const dir = makeProject();
   try {
     const base = { agent_id: 'rev-idem-2', agent_type: 'reviewer-idem', session_id: 's1', files: ['src/idem.mjs'], attribution: 'block' };
@@ -909,10 +839,6 @@ test('R1-A98 CONTROL: a SECOND round for the same agent_id (its own Start, its o
 
     const r = runHookSync(HOOK_SCRIPT, h22Input(dir, { agent_id: base.agent_id, agent_type: base.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }), dir);
     assert.equal(r.code, 0, r.stderr);
-
-    const ledger = readLedger(dir);
-    assert.equal(ledger.length, 1, 'round 2 mints its own receipt');
-    assert.equal(ledger[0].started_at ?? ledger[0].at, '2026-08-28T01:00:00.000Z', "the receipt binds round 2's Start, not round 1's");
 
     const reg = readRegister(dir);
     assert.equal(reg.length, 2, 'both rounds survive on disk');

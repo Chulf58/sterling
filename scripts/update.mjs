@@ -4,8 +4,8 @@
 // Every machine but the authoring one is a pure consumer: the update is a
 // fast-forward or a loud refusal, never a hand reconciliation against GitHub.
 // The logic (refusal matrix + step order) lives in lib/update.mjs so it is
-// testable without a network; this file is the CLI — target resolution, the
-// active-run guard, and the project fan-out list.
+// testable without a network; this file is the CLI — target resolution and
+// the project fan-out list.
 //
 // BOOTSTRAP INDEPENDENCE, learned the hard way: this script must run on a clone
 // where NOTHING is built. packages/*/dist is gitignored and building it is one of
@@ -53,28 +53,6 @@ async function loadStoreModule() {
     return await import('@sterling/store');
   } catch {
     return null;
-  }
-}
-
-// A run owns the whole working tree (§8.1) — fast-forwarding and rebuilding
-// under it would pull the ground out from the phase in flight.
-const dbPath = join(target, '.sterling', 'sterling.db');
-if (!opts.check && existsSync(dbPath)) {
-  const store = await loadStoreModule();
-  if (!store) {
-    console.error(
-      'update: the workspace packages are not built, so the active-run guard could not run — proceeding, because an unbuilt clone cannot be mid-run. If this machine DID have a run in flight, stop now and finish or reject it first.'
-    );
-  } else {
-    const db = new store.SterlingStore(dbPath);
-    const active = db.getRun();
-    db.close();
-    if (active) {
-      console.error(
-        `update: run '${active.id}' is active (${active.machine_state}) — a run owns the working tree. Finish or reject it before updating.`
-      );
-      process.exit(2);
-    }
   }
 }
 
