@@ -6,11 +6,11 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash as createHash5 } from "node:crypto";
-import { readFileSync as readFileSync5, existsSync as existsSync7, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync4, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
+import { randomUUID as randomUUID3, createHash as createHash4 } from "node:crypto";
+import { readFileSync as readFileSync4, existsSync as existsSync6, mkdirSync as mkdirSync6, readdirSync as readdirSync3, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync4, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { tmpdir } from "node:os";
-import { basename as basename3, dirname as dirname6, join as join8 } from "node:path";
+import { basename as basename3, dirname as dirname6, join as join7 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -5054,30 +5054,16 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
@@ -5089,11 +5075,7 @@ var configSchema = external_exports.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: external_exports.object({
     min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
+    max_dispatches: external_exports.number().int().nonnegative().default(0)
   }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
@@ -5118,11 +5100,7 @@ var configSchema = external_exports.object({
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
     coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -5131,25 +5109,6 @@ var configSchema = external_exports.object({
     // (P8); debugger is root-cause judgment — high effort.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5244,39 +5203,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5377,25 +5303,7 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 
 // packages/schemas/dist/registry.js
@@ -8533,305 +8441,6 @@ function sessionBoundarySweep(root, opts = {}) {
   return { terminated, pruned, ...refused ? { refused } : {} };
 }
 
-// scripts/hooks/lib/review-ledger-entry.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, renameSync as renameSync3 } from "node:fs";
-import { join as join7, extname } from "node:path";
-import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
-function isEvidenceObject(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function normalizeReceiptPath(p) {
-  const s2 = String(p).replace(/\\/g, "/").replace(/^\.\//, "");
-  if (/^[A-Za-z]:/.test(s2)) return null;
-  if (s2.startsWith("/")) return null;
-  if (s2.split("/").includes("..")) return null;
-  return s2;
-}
-function isUsableBlobSha(v) {
-  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
-}
-function parseDisposition(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.class !== "string" || raw.class === "") return { ok: false };
-  if (typeof raw.reason !== "string" || raw.reason === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (typeof raw.head_sha !== "string" || raw.head_sha === "") return { ok: false };
-  if (typeof raw.classifier_version !== "number") return { ok: false };
-  const facts = isEvidenceObject(raw.facts) ? raw.facts : {};
-  return {
-    ok: true,
-    value: { class: raw.class, reason: raw.reason, at: raw.at, head_sha: raw.head_sha, classifier_version: raw.classifier_version, facts }
-  };
-}
-function parseReservation(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
-  if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
-  const value = { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation };
-  if (raw.waived !== void 0) {
-    if (typeof raw.waived !== "boolean") return { ok: false };
-    value.waived = raw.waived;
-  }
-  return { ok: true, value };
-}
-function parseConsumption(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
-  if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  const value = { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce };
-  if (raw.paths !== void 0) {
-    if (!Array.isArray(raw.paths) || !raw.paths.every((p) => typeof p === "string")) return { ok: false };
-    value.paths = raw.paths.slice();
-  }
-  return { ok: true, value };
-}
-function parseContentEvidence(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (raw.status !== "complete" && raw.status !== "partial" && raw.status !== "unavailable") return { ok: false };
-  const basis = typeof raw.basis === "string" && raw.basis ? raw.basis : "stop-time-worktree-snapshot";
-  let blobs;
-  if (raw.blobs === void 0) {
-    blobs = {};
-  } else if (isEvidenceObject(raw.blobs)) {
-    blobs = { ...raw.blobs };
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.blobs" } };
-  }
-  let absentPaths;
-  if (raw.absent_paths === void 0) {
-    absentPaths = [];
-  } else if (Array.isArray(raw.absent_paths)) {
-    absentPaths = raw.absent_paths.filter((p) => typeof p === "string");
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.absent_paths" } };
-  }
-  const value = { basis, status: raw.status, blobs, absent_paths: absentPaths };
-  if (raw.index_blobs !== void 0) {
-    if (!isEvidenceObject(raw.index_blobs)) {
-      return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.index_blobs" } };
-    }
-    value.index_blobs = { ...raw.index_blobs };
-  }
-  if (raw.truncated === true) value.truncated = true;
-  if (Number.isInteger(raw.truncated_of)) value.truncated_of = raw.truncated_of;
-  if (typeof raw.failure_reason === "string" && raw.failure_reason) value.failure_reason = raw.failure_reason;
-  return { ok: true, value };
-}
-function parseObservedEvidence(raw) {
-  const value = {};
-  if (Array.isArray(raw?.observed_files)) value.observed_files = raw.observed_files.filter((p) => typeof p === "string");
-  if (Array.isArray(raw?.observed_reads)) value.observed_reads = raw.observed_reads.filter((p) => typeof p === "string");
-  if (typeof raw?.observed_source === "string" && raw.observed_source) value.observed_source = raw.observed_source;
-  if (raw?.observed_truncated === true) value.observed_truncated = true;
-  return { ok: true, value };
-}
-var RECEIPT_STATUSES = /* @__PURE__ */ new Set(["active", "reserved", "consumed", "discharged"]);
-var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var AGENT_TYPE_PATTERN = /^[A-Za-z0-9_-]+$/;
-var TERRITORY_SOURCES = /* @__PURE__ */ new Set(["review-territory", "free-prose-fallback", "unattributable"]);
-function parseReceipt(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.schema_version !== 2) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.kind !== void 0 && raw.kind !== "roster_receipt") return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.entry_id !== "string" || !UUID_PATTERN.test(raw.entry_id)) return { ok: false, code: "ledger_entry_malformed" };
-  if (!RECEIPT_STATUSES.has(raw.status)) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.started_at !== "string" || !raw.started_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.finished_at !== "string" || !raw.finished_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (!isEvidenceObject(raw.reviewer)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer" } };
-  if (typeof raw.reviewer.agent_type !== "string" || !AGENT_TYPE_PATTERN.test(raw.reviewer.agent_type)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer.agent_type" } };
-  }
-  if (!isEvidenceObject(raw.identity)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity" } };
-  if (typeof raw.identity.agent_id !== "string" || !raw.identity.agent_id) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity.agent_id" } };
-  }
-  if (!isEvidenceObject(raw.territory) || !Array.isArray(raw.territory.files)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory" } };
-  }
-  if (!TERRITORY_SOURCES.has(raw.territory.source)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
-  }
-  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "none" && raw.territory.attribution !== "union") {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
-  }
-  const contentParsed = parseContentEvidence(raw.content_evidence);
-  if (!contentParsed.ok) {
-    return { ok: false, code: "ledger_entry_malformed", facts: contentParsed.facts ?? { field: "content_evidence" } };
-  }
-  let reservation;
-  let consumption;
-  let disposition = null;
-  if (raw.status === "reserved") {
-    const r = parseReservation(raw.reservation);
-    if (!r.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-    reservation = r.value;
-  } else if (raw.reservation !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-  }
-  if (raw.status === "consumed") {
-    const c = parseConsumption(raw.consumption);
-    if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-    if (Array.isArray(c.value.paths) && c.value.paths.length > 0) {
-      const partialReceipt = {
-        territory: { files: raw.territory.files.filter((f) => typeof f === "string") },
-        content_evidence: contentParsed.value
-      };
-      const covered = new Set(receiptCoveredPaths(partialReceipt));
-      const seen = /* @__PURE__ */ new Set();
-      for (const p of c.value.paths) {
-        const n = normalizeReceiptPath(p);
-        if (n === null || !covered.has(n) || seen.has(n)) {
-          return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption.paths", entry_id: raw.entry_id } };
-        }
-        seen.add(n);
-      }
-    }
-    consumption = c.value;
-  } else if (raw.consumption !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-  }
-  if (raw.status === "discharged") {
-    const d = parseDisposition(raw.disposition);
-    if (!d.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-    disposition = d.value;
-  } else if (raw.disposition !== void 0 && raw.disposition !== null) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-  }
-  const identity = {
-    session_id: typeof raw.identity.session_id === "string" ? raw.identity.session_id : null,
-    branch: typeof raw.identity.branch === "string" ? raw.identity.branch : null,
-    base_sha: typeof raw.identity.base_sha === "string" ? raw.identity.base_sha : null,
-    agent_id: raw.identity.agent_id
-  };
-  const observed = parseObservedEvidence(raw).value;
-  const receipt = {
-    schema_version: 2,
-    entry_id: raw.entry_id,
-    kind: "roster_receipt",
-    status: raw.status,
-    started_at: raw.started_at,
-    finished_at: raw.finished_at,
-    reviewer: {
-      agent_type: raw.reviewer.agent_type,
-      model: raw.reviewer.model ?? null,
-      model_family: raw.reviewer.model_family ?? null,
-      model_source: raw.reviewer.model_source ?? null
-    },
-    identity,
-    territory: {
-      files: raw.territory.files.filter((f) => typeof f === "string"),
-      source: raw.territory.source,
-      attribution: raw.territory.attribution,
-      ...typeof raw.territory.attribution_case === "string" ? { attribution_case: raw.territory.attribution_case } : {}
-    },
-    content_evidence: contentParsed.value,
-    disposition,
-    ...observed
-  };
-  if (reservation) receipt.reservation = reservation;
-  if (consumption) receipt.consumption = consumption;
-  return { ok: true, receipt };
-}
-function legacyFingerprint(raw) {
-  const files = Array.isArray(raw?.files) ? raw.files.filter((f) => typeof f === "string").map(normalizeReceiptPath).sort() : [];
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? raw.reviewed_state.blobs : {};
-  const blobs = Object.entries(blobsObj).map(([p, s2]) => [normalizeReceiptPath(p), s2]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  let canonical;
-  try {
-    canonical = JSON.stringify([raw?.agent_type ?? null, raw?.at ?? null, files, blobs]);
-    if (typeof canonical !== "string") canonical = "<unserializable>";
-  } catch {
-    canonical = "<unserializable>";
-  }
-  return createHash3("sha256").update(canonical).digest("hex").slice(0, 32);
-}
-function legacyReceiptHandle(raw) {
-  return `receipt-${legacyFingerprint(raw)}`;
-}
-function adaptLegacyEntry(raw) {
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? { ...raw.reviewed_state.blobs } : {};
-  return {
-    kind: "legacy",
-    handle: legacyReceiptHandle(raw),
-    agent_type: typeof raw?.agent_type === "string" ? raw.agent_type : null,
-    files: Array.isArray(raw?.files) ? raw.files.slice() : [],
-    at: typeof raw?.at === "string" ? raw.at : null,
-    session_id: typeof raw?.session_id === "string" ? raw.session_id : null,
-    branch: typeof raw?.branch === "string" ? raw.branch : null,
-    base_sha: typeof raw?.base_sha === "string" ? raw.base_sha : null,
-    blobs: blobsObj,
-    status: raw?.status === "discharged" ? "discharged" : "active"
-  };
-}
-function looksLikeLegacyV1(raw) {
-  return typeof raw?.agent_type === "string" && raw.agent_type !== "" && Array.isArray(raw?.files) && typeof raw?.at === "string" && raw.at !== "";
-}
-function classifyLedgerEntry(raw) {
-  if (!isEvidenceObject(raw)) {
-    return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (raw.schema_version === 2) {
-    if (raw.kind === "external_review") {
-      if (typeof raw.entry_id !== "string" || !raw.entry_id || typeof raw.thread_id !== "string" || !Array.isArray(raw.files)) {
-        return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "external_review" } };
-      }
-      return { kind: "external_review", entry: raw };
-    }
-    const parsed = parseReceipt(raw);
-    if (!parsed.ok) return { kind: "malformed", code: "ledger_entry_malformed", facts: parsed.facts ?? { reason: "receipt" } };
-    return { kind: "receipt", receipt: parsed.receipt };
-  }
-  if (looksLikeLegacyV1(raw)) {
-    return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
-  }
-  return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
-}
-function receiptCoveredPaths(receipt) {
-  const files = Array.isArray(receipt?.territory?.files) ? receipt.territory.files : [];
-  const blobs = isEvidenceObject(receipt?.content_evidence?.blobs) ? receipt.content_evidence.blobs : {};
-  const absentPaths = new Set(
-    (Array.isArray(receipt?.content_evidence?.absent_paths) ? receipt.content_evidence.absent_paths : []).filter((p) => typeof p === "string").map(normalizeReceiptPath).filter((n) => n !== null)
-  );
-  const covered = [];
-  for (const f of files) {
-    if (typeof f !== "string") continue;
-    const n = normalizeReceiptPath(f);
-    if (n === null) continue;
-    const sha = blobs[f] ?? blobs[n];
-    if (isUsableBlobSha(sha) || absentPaths.has(n)) covered.push(n);
-  }
-  return covered;
-}
-function ledgerPath(root) {
-  return join7(root, ".sterling", "review-ledger.json");
-}
-function readLedger(root) {
-  const p = ledgerPath(root);
-  if (!existsSync5(p)) return { availability: "absent", entries: [], rawEntries: [], raw: "" };
-  let raw;
-  try {
-    raw = readFileSync3(p, "utf8");
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  return {
-    availability: "ok",
-    entries: parsed.map((e, index) => ({ ...classifyLedgerEntry(e), index })),
-    rawEntries: parsed,
-    raw
-  };
-}
-
 // scripts/hooks/lib/undeclared-source.mjs
 var SOURCE_EXTENSIONS = /* @__PURE__ */ new Set([
   "ts",
@@ -9075,11 +8684,11 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash4 } from "node:crypto";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync as mkdirSync6, statSync as statSync3 } from "node:fs";
+import { createHash as createHash3 } from "node:crypto";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync3 } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
-  return createHash4("sha256").update(normalize(text), "utf8").digest("hex");
+  return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 function parseInstalledHeader(content) {
@@ -9105,7 +8714,7 @@ function extractBakedCommandPaths(content) {
   return [...paths];
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync4(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync3(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
@@ -9123,9 +8732,9 @@ var RESTART_INSTRUCTION = [
 
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join8(cwd, ".sterling", "transient");
+  const transientDir = join7(cwd, ".sterling", "transient");
   try {
-    mkdirSync7(transientDir, { recursive: true });
+    mkdirSync6(transientDir, { recursive: true });
     await withRegisterLock(
       cwd,
       () => {
@@ -9137,7 +8746,7 @@ async function deleteRegisterUnderLock(cwd) {
         rmSync2(registerPath(cwd), { force: true });
         const registerBasename = basename3(registerPath(cwd));
         for (const f of readdirSync3(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync2(join8(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync2(join7(transientDir, f), { force: true });
         }
       },
       { retryMs: 1e3, timeoutMs: 1e4 }
@@ -9240,7 +8849,7 @@ function pluginRoot() {
 function walkUpPluginRoot() {
   let dir = dirname6(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync7(join8(dir, ".claude-plugin", "plugin.json"))) return dir;
+    if (existsSync6(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
     dir = dirname6(dir);
   }
   return null;
@@ -9253,7 +8862,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot();
     if (!root) return null;
-    const v = JSON.parse(readFileSync5(join8(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync4(join7(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -9274,88 +8883,17 @@ function computeH1DeadDispatchResidue(cwd, source) {
   }
   return lines;
 }
-var RECEIPT_FIELD_CLAMP = 120;
-function safeReceiptField(v) {
-  if (typeof v !== "string") return "";
-  const cleaned = [...v].map((ch) => {
-    const c = ch.codePointAt(0);
-    return c < 32 || c === 127 || c >= 128 && c <= 159 ? " " : ch;
-  }).join("").trim();
-  return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}\u2026(truncated)` : cleaned;
-}
-function renderSurvivorLine(survivor) {
-  const isLegacy = survivor.kind === "legacy";
-  const legacy = isLegacy ? survivor.legacy : null;
-  const receipt = isLegacy ? null : survivor.receipt;
-  const startStr = isLegacy ? legacy.at : receipt.started_at;
-  const finishedStr = isLegacy ? null : receipt.finished_at;
-  const startMs = typeof startStr === "string" ? Date.parse(startStr) : NaN;
-  const rawCompletedMs = typeof finishedStr === "string" ? Date.parse(finishedStr) : NaN;
-  const nowMs = Date.now();
-  const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
-  const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
-  const useCompleted = !Number.isNaN(completedMs);
-  const recordedAt = useCompleted ? completedMs : startMs;
-  const age = Number.isNaN(recordedAt) ? "age unknown (no usable timestamp)" : `${((nowMs - recordedAt) / 36e5).toFixed(1)}h old`;
-  const e = isLegacy ? { agent_type: legacy.agent_type, session_id: legacy.session_id, branch: legacy.branch, files: legacy.files } : { agent_type: receipt.reviewer?.agent_type, session_id: receipt.identity?.session_id, branch: receipt.identity?.branch, files: receipt.territory?.files };
-  const type = safeReceiptField(e.agent_type) || "unknown reviewer";
-  const session = safeReceiptField(e.session_id);
-  const branch = safeReceiptField(e.branch);
-  const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(", ");
-  const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
-  const label = isLegacy ? "LEGACY " : "";
-  const handleSuffix = isLegacy ? `; discharge handle: ${legacy.handle}` : "";
-  const reservedSuffix = !isLegacy && receipt.status === "reserved" ? " [RESERVED \u2014 mid-spend, see reconcile below]" : "";
-  return `- ${label}${type} \u2014 ${age}${origin ? ` (earned in ${origin})` : " (no recorded session/branch \u2014 a pre-expiry receipt)"}${files.length ? `; files: ${files.slice(0, 5).join(", ")}` : ""}${handleSuffix}${reservedSuffix}`;
-}
-function renderMalformedLine(row, rawEntries) {
-  const raw = rawEntries[row.index];
-  const rawId = typeof raw?.entry_id === "string" ? safeReceiptField(raw.entry_id) : "";
-  const id = rawId || `index ${row.index}`;
-  const field = safeReceiptField(row.facts?.field ?? row.facts?.reason ?? "") || "unknown";
-  return render(
-    disclosure(
-      "ledger_entry_malformed",
-      row.facts ?? {},
-      `H1: ledger entry ${id} is unreadable \u2014 the shape owner refuses it (offending field: ${field}); no automated command can address it. Open .sterling/review-ledger.json and inspect this entry yourself.`
-    )
-  );
-}
-function reviewReceiptLines(cwd) {
-  const { availability, entries, rawEntries } = readLedger(cwd);
-  if (availability !== "ok") return { survivors: [], hasReserved: false, malformed: [] };
-  const survivors = [];
-  const malformed = [];
-  let hasReserved = false;
-  for (const row of entries) {
-    if (row.kind === "external_review") continue;
-    if (row.kind === "malformed") {
-      malformed.push(renderMalformedLine(row, rawEntries));
-      continue;
-    }
-    if (row.kind === "legacy") {
-      if (row.legacy.status === "discharged") continue;
-      survivors.push({ kind: "legacy", legacy: row.legacy });
-      continue;
-    }
-    const receipt = row.receipt;
-    if (receipt.status === "discharged" || receipt.status === "consumed") continue;
-    if (receipt.status === "reserved") hasReserved = true;
-    survivors.push({ kind: "receipt", receipt });
-  }
-  return { survivors: survivors.map(renderSurvivorLine), hasReserved, malformed };
-}
 var input = readStdin();
-var sessionMarkerPath = join8(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join8(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+var sessionMarkerPath = join7(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join7(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync7(join8(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync7(join8(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync5(
+  if (existsSync6(join7(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync6(join7(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync4(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync4(sessionMarkerTmp, sessionMarkerPath);
+    renameSync3(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
@@ -9371,44 +8909,6 @@ var dispatchResidueLines = (() => {
     return [];
   }
 })();
-var receiptLines = (() => {
-  try {
-    return reviewReceiptLines(input.cwd);
-  } catch {
-    return { survivors: [], hasReserved: false, malformed: [] };
-  }
-})();
-var REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
-var remedyClone = (() => {
-  try {
-    const r = walkUpPluginRoot();
-    if (!r) return null;
-    const posix = String(r).split("\\").join("/").replace(/\/+$/, "");
-    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
-  } catch {
-    return null;
-  }
-})();
-var receiptContext = receiptLines.survivors.length ? `
-
-SURVIVING REVIEW RECEIPTS (H1): ${receiptLines.survivors.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json \u2014 earned by a reviewer dispatch that ended, but never stamped into a commit.
-` + receiptLines.survivors.join("\n") + `
-A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.
-Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):
-  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"
-A LEGACY v1 receipt (no schema_version) has no entry_id \u2014 select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` + // R1-C82: a RESERVED entry (a crashed/interrupted commit-reviewed spend)
-// is NEVER offered the discharge remedy — discharge refuses a reserved
-// entry outright ([entry_not_active]), so printing it here would send the
-// operator at a guaranteed refusal. `reconcile` either finalizes it
-// against the commit that actually landed or releases it back to active.
-(receiptLines.hasReserved ? `
-One or more of the receipts above are RESERVED (mid-spend, marked above): discharge refuses a reserved entry outright \u2014 the remedy is
-  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs reconcile
-` : "") : "";
-var malformedContext = receiptLines.malformed.length ? `
-
-MALFORMED REVIEW LEDGER ENTRIES (H1): ${receiptLines.malformed.length} entry(ies) in .sterling/review-ledger.json do not parse as any recognized shape (receipt, external review, or legacy). Neither the discharge nor the reconcile command above can address one of these \u2014 both need parsed facts a malformed entry does not have \u2014 so open the file and inspect each one named below directly:
-` + receiptLines.malformed.join("\n") : "";
 var planLockContext = "";
 var planLock = null;
 var planLockMalformed = false;
@@ -9421,12 +8921,12 @@ try {
 }
 var store = openStore(input.cwd);
 if (!store) {
-  if (planLockContext || dispatchResidueLines.length || receiptContext || malformedContext) {
+  if (planLockContext || dispatchResidueLines.length) {
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: "SessionStart",
-          additionalContext: planLockContext + dispatchResidueLines.join("\n\n") + receiptContext + malformedContext
+          additionalContext: planLockContext + dispatchResidueLines.join("\n\n")
         }
       })
     );
@@ -9479,11 +8979,11 @@ var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
-  const gitDir = root ? join8(root, ".git") : null;
-  if (gitDir && existsSync7(gitDir) && statSync4(gitDir).isDirectory()) {
+  const gitDir = root ? join7(root, ".git") : null;
+  if (gitDir && existsSync6(gitDir) && statSync4(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync5(join8(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync4(join7(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
@@ -9495,17 +8995,17 @@ try {
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join8(gitDir, "sterling-update-check.json");
+        const cachePath = join7(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync5(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync4(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
           spawnSync3("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync5(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync4(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -9528,8 +9028,8 @@ function planLockSection(ctx) {
   const STALE_DAYS = 14;
   const DAY_MS = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
-  const sterlingDir = join8(ctx.cwd, ".sterling");
-  const transientDir = join8(sterlingDir, "transient");
+  const sterlingDir = join7(ctx.cwd, ".sterling");
+  const transientDir = join7(sterlingDir, "transient");
   const blocks = [];
   const MARKERS = [
     {
@@ -9549,7 +9049,7 @@ function planLockSection(ctx) {
   for (const marker of MARKERS) {
     let raw = null;
     try {
-      raw = claimMarker(join8(transientDir, marker.file));
+      raw = claimMarker(join7(transientDir, marker.file));
     } catch {
       raw = null;
     }
@@ -9640,9 +9140,9 @@ var NOTE_FIELD_MAX = {
 var rotationContext = "";
 try {
   if (input.source === "clear") {
-    const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync7(notePath)) {
-      const note = JSON.parse(readFileSync5(notePath, "utf8"));
+    const notePath = join7(input.cwd, ".sterling", "transient", "rotation-note.json");
+    if (existsSync6(notePath)) {
+      const note = JSON.parse(readFileSync4(notePath, "utf8"));
       rmSync2(notePath, { force: true });
       const head = (() => {
         try {
@@ -9756,7 +9256,7 @@ Resume from next_slice. The board and knowledge store remain the authorities for
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join8(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    const conductorLedger = join7(input.cwd, ".sterling", "transient", "conductor-reads.json");
     rmSync2(conductorLedger, { force: true });
   }
 } catch {
@@ -9774,7 +9274,7 @@ try {
     tagRoot = realpathSync2(input.cwd);
   } catch {
   }
-  const projectTag = createHash5("sha256").update(tagRoot).digest("hex").slice(0, 16);
+  const projectTag = createHash4("sha256").update(tagRoot).digest("hex").slice(0, 16);
   const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
   const tmp = tmpdir();
   const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
@@ -9782,7 +9282,7 @@ try {
   for (const name of readdirSync3(tmp)) {
     if (removed >= PERCALL_TMP_SWEEP_CAP) break;
     if (!percallRe.test(name)) continue;
-    const p = join8(tmp, name);
+    const p = join7(tmp, name);
     try {
       if (statSync4(p).mtimeMs >= cutoff) continue;
       rmSync2(p, { force: true });
@@ -9795,16 +9295,16 @@ try {
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join8(input.cwd, ".sterling", "transient");
-    const regPaths = [join8(transient, "touches.json"), join8(transient, "session-events.json"), join8(transient, "capture-nagged.json")];
+    const transient = join7(input.cwd, ".sterling", "transient");
+    const regPaths = [join7(transient, "touches.json"), join7(transient, "session-events.json"), join7(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync7(p))) {
+    if (regPaths.some((p) => existsSync6(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync7(touchesPath)) {
-          const raw = JSON.parse(readFileSync5(touchesPath, "utf8"));
+        if (existsSync6(touchesPath)) {
+          const raw = JSON.parse(readFileSync4(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -9812,8 +9312,8 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync7(eventsPath)) {
-          const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
+        if (existsSync6(eventsPath)) {
+          const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -9913,12 +9413,12 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
   queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
 }
 var registryContext = "";
-if (existsSync7(registryPath())) {
+if (existsSync6(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   const registry = new ProjectRegistry(registryPath());
   try {
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync7(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync6(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -9936,7 +9436,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync5(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync4(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -9946,12 +9446,12 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join8(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync7(buildIdPath(serverDist)) ? readFileSync5(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join7(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync6(buildIdPath(serverDist)) ? readFileSync4(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join8(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync7(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync5(markerPath, "utf8")));
+  const markerPath = runtimeMarkerPath(join7(input.cwd, ".sterling", "sterling.db"));
+  if (existsSync6(markerPath)) {
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync4(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -9963,7 +9463,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join8(input.cwd, ".claude", "agents");
+  const agentsDir = join7(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -9979,7 +9479,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync5(join8(agentsDir, f), "utf8");
+      content = readFileSync4(join7(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -9992,7 +9492,7 @@ try {
       }
       continue;
     }
-    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync7(p));
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync6(p));
     if (unresolved) dead.push({ agent: f, node: unresolved });
   }
   if (dead.length || unknown.length) {
@@ -10008,7 +9508,7 @@ MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.le
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join8(input.cwd, ".claude", "agents");
+  const agentsDir = join7(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -10024,7 +9524,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync5(join8(agentsDir, n), "utf8");
+      content = readFileSync4(join7(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -10043,11 +9543,11 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot();
-    const templatesDir = root ? join8(root, "agent-templates") : null;
+    const templatesDir = root ? join7(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join8(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join7(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
@@ -10073,7 +9573,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync5(join8(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync4(join7(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -10139,6 +9639,6 @@ var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before the conventions, not after them.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + malformedContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

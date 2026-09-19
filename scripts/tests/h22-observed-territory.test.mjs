@@ -817,265 +817,23 @@ test('(P2-boundary-no-hyphen) agent_type "reviewer" (no trailing hyphen) is not 
 });
 
 // ===========================================================================
-// PART 3 — H22 SubagentStop observed evidence on reviewer-class promotion
+// PART 3 — H22 SubagentStop observed-evidence-on-ledger-promotion REMOVED
+// (P3-null-vs-empty, P3-agent-transcript-file-missing, P3-decoy-isolation,
+// P3-main, P3-union-dedup, and P3-truncated further below). All six asserted
+// that a reviewer-class SubagentStop promotes a .sterling/review-ledger.json
+// receipt carrying observed_files/observed_source/observed_truncated. That
+// whole promotion mechanism (promoteAtStop and its owner module
+// scripts/hooks/lib/review-ledger-entry.mjs) was deleted under decision
+// `sterling-claude-code-scale-down-boundary` (2ad87dd1) — SubagentStop no
+// longer writes a ledger at all, so there is nothing left for these to
+// assert. The fixture helpers that existed only to serve them
+// (writeToolBlockTranscript/writeDecoyParentTranscript/registerEntry/
+// writeRegisterRaw/readLedger/declaredFiles/declaredSource/
+// findEntryByDeclaredFile) were removed with them — grep confirms zero
+// remaining callers in this file. PART 1 (the surviving observedToolPaths lib
+// primitive, including P1-truncated/P1-not-truncated immediately below) and
+// PART 2/PART 4/PART 5 are untouched.
 // ===========================================================================
-
-// Generic tool_use-block-flavored transcript writer (per Part 1's fixture
-// shape), reused here to exercise the SAME lib function end-to-end through
-// the hook rather than directly. Used for BOTH the real (agent) transcript
-// and the decoy parent transcript below — the two are the same JSONL shape,
-// only which stdin field points at them differs.
-function writeToolBlockTranscript(dir, name, blocks) {
-  const p = join(dir, 't', name);
-  mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, blocks.map((l) => JSON.stringify(l)).join('\n') + '\n');
-  return p;
-}
-
-// A PARENT-shaped transcript carrying a DECOY tool_use path — stands in for
-// stdin.transcript_path at Stop (the CONDUCTOR's transcript, per the SPEC
-// CORRECTION). Every P3 test below asserts this decoy path never surfaces in
-// observed_files, which is exactly how a "reads the wrong stdin field" bug
-// gets caught by construction rather than by inspection.
-function writeDecoyParentTranscript(dir, name, decoyPath) {
-  return writeToolBlockTranscript(dir, name, [{ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, decoyPath) } }] } }]);
-}
-
-// ---------------------------------------------------------------------------
-// (P3-null-vs-empty) the distinguishing control pair for the whole section,
-// placed FIRST: a departing (agent_transcript_path) transcript with ZERO
-// tool_use blocks promotes observed_files: [] (present, empty), while an
-// ABSENT agent_transcript_path promotes with the field ABSENT entirely and
-// NEVER falls back to the parent (transcript_path) transcript's content —
-// Half B's parent transcript deliberately carries a decoy path, so a
-// fallback bug would surface it. A stub that can't tell the two apart fails
-// one half of this pair no matter which way it collapses.
-// EXPECTED RED today: if PART 3 wiring does not exist at all yet,
-// `entry.observed_files` is undefined in both halves — fails
-// `assert.ok('observed_files' in entry)` in Half A. If a landed
-// implementation instead reads the WRONG field (stdin.transcript_path, the
-// exact bug this amendment corrects) — Half A's own transcript_path fixture
-// also carries a decoy ('decoy/half-a.mjs'), so that bug would surface as an
-// unexpectedly NON-EMPTY observed_files in Half A (failing the `deepEqual(
-// entry.observed_files, [])` assertion); Half B's transcript_path decoy
-// ('decoy/half-b.mjs') would then surface as a wrongly-PRESENT
-// observed_files (failing the `!('observed_files' in entry)` assertion).
-// SABOTAGE: always omit observed_files when the union is empty (conflate
-// "found nothing" with "couldn't observe") — the zero-blocks half goes red
-// while the missing-transcript half (which correctly wants absence) stays
-// green, proving the two are independently pinned.
-// ===========================================================================
-
-test('(P3-null-vs-empty) zero-tool-use AGENT transcript -> observed_files:[] present; ABSENT agent_transcript_path -> observed_files absent (no parent fallback)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    // Half A: agent_transcript_path readable, zero tool_use blocks; a decoy
-    // parent transcript sits at transcript_path and must never contribute.
-    writeRegisterRaw(dir, [registerEntry({ agent_id: 'rev-zero', agent_type: 'reviewer-correctness', files: ['src/declared.mjs'], files_source: 'review-territory' })]);
-    const agentZero = writeToolBlockTranscript(dir, 'agent-zero.jsonl', [{ type: 'assistant', message: { content: [{ type: 'text', text: 'no tools used' }] } }]);
-    const parentDecoyA = writeDecoyParentTranscript(dir, 'parent-decoy-a.jsonl', 'decoy/half-a.mjs');
-    let r = runHook(h22Input(dir, { agent_id: 'rev-zero', hook_event_name: 'SubagentStop', transcript_path: parentDecoyA, agent_transcript_path: agentZero }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    let ledger = readLedger(dir);
-    let entry = findEntryByDeclaredFile(ledger, 'src/declared.mjs');
-    assert.ok(entry, 'the zero-blocks promotion is present');
-    assert.ok('observed_files' in entry, 'observed_files is present (even if empty) when agent_transcript_path was genuinely readable');
-    assert.deepEqual(entry.observed_files, [], 'the parent decoy at transcript_path never contributes — only agent_transcript_path is read');
-    assert.equal(entry.observed_source, 'subagent-transcript');
-
-    // Half B: agent_transcript_path field is entirely ABSENT from stdin; a
-    // real, non-empty decoy parent transcript sits at transcript_path — a
-    // fallback bug would pick up 'decoy/half-b.mjs' here.
-    writeRegisterRaw(dir, [registerEntry({ agent_id: 'rev-missing', agent_type: 'reviewer-security', files: ['src/declared2.mjs'], files_source: 'review-territory' })]);
-    const parentDecoyB = writeDecoyParentTranscript(dir, 'parent-decoy-b.jsonl', 'decoy/half-b.mjs');
-    r = runHook(h22Input(dir, { agent_id: 'rev-missing', hook_event_name: 'SubagentStop', transcript_path: parentDecoyB }), dir); // no agent_transcript_path key at all
-    assert.equal(r.code, 0, r.stderr);
-    ledger = readLedger(dir);
-    entry = findEntryByDeclaredFile(ledger, 'src/declared2.mjs');
-    assert.ok(entry, 'promotion still succeeds despite a missing agent_transcript_path');
-    assert.ok(!('observed_files' in entry), 'observed_files is ABSENT (not []) when agent_transcript_path is missing — never falls back to the parent transcript');
-    assert.ok(!('observed_source' in entry), 'observed_source is likewise absent when nothing was observed');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (P3-agent-transcript-file-missing) companion to Half B above, covering the
-// OTHER "missing" shape named by the spec: the field is PRESENT on stdin but
-// points at a file that does not exist (as opposed to the key being entirely
-// absent). Same no-parent-fallback guarantee.
-// EXPECTED RED today: same root cause as P3-null-vs-empty Half B.
-// SABOTAGE: fall back to reading transcript_path whenever
-// observedToolPaths(agent_transcript_path, cwd) returns null — this test's
-// parent decoy would then surface in observed_files, and the field would be
-// wrongly PRESENT instead of absent.
-// ===========================================================================
-
-test('(P3-agent-transcript-file-missing) agent_transcript_path present but pointing at a nonexistent file behaves identically to absence — no parent fallback', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry({ agent_id: 'rev-nofile', agent_type: 'reviewer-skeptic', files: ['src/declared3.mjs'], files_source: 'review-territory' })]);
-    const parentDecoy = writeDecoyParentTranscript(dir, 'parent-decoy-nofile.jsonl', 'decoy/nofile.mjs');
-    const r = runHook(
-      h22Input(dir, {
-        agent_id: 'rev-nofile',
-        hook_event_name: 'SubagentStop',
-        transcript_path: parentDecoy,
-        agent_transcript_path: join(dir, 't', 'does-not-exist-agent.jsonl'),
-      }),
-      dir
-    );
-    assert.equal(r.code, 0, r.stderr);
-    const entry = findEntryByDeclaredFile(readLedger(dir), 'src/declared3.mjs');
-    assert.ok(entry, 'promotion still succeeds despite an unreadable agent_transcript_path');
-    assert.ok(!('observed_files' in entry), 'observed_files is absent — a nonexistent agent_transcript_path never falls back to the parent');
-    assert.ok(!('observed_source' in entry), 'observed_source is likewise absent');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (P3-decoy-isolation) the NEW discriminating pin requested by the
-// amendment: with BOTH fields present, observed_files reflects ONLY the
-// agent_transcript_path content — the parent's decoy path never leaks in
-// even when both transcripts are simultaneously real and non-empty. This is
-// the single most direct test of the field-correction itself.
-// EXPECTED RED today: if PART 3 wiring does not exist yet,
-// `entry.observed_files` is undefined — fails the first assertion. If a
-// landed implementation reads the WRONG field (the exact bug this amendment
-// targets), observed_files would equal ['decoy/should-not-appear.mjs']
-// instead of ['real/should-appear.mjs'] — fails the deepEqual with the
-// decoy path present where the real one should be.
-// SABOTAGE: read stdin.transcript_path instead of stdin.agent_transcript_path
-// in the SubagentStop handler — flips this test's result to the decoy path.
-// ===========================================================================
-
-test('(P3-decoy-isolation) with both transcripts present, observed_files reflects ONLY agent_transcript_path — the parent decoy never appears', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry({ agent_id: 'rev-iso', agent_type: 'reviewer-correctness', files: ['src/declared.mjs'], files_source: 'review-territory' })]);
-    const parentDecoy = writeDecoyParentTranscript(dir, 'parent-decoy-iso.jsonl', 'decoy/should-not-appear.mjs');
-    const agentReal = writeToolBlockTranscript(dir, 'agent-real-iso.jsonl', [
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, 'real/should-appear.mjs') } }] } },
-    ]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-iso', hook_event_name: 'SubagentStop', transcript_path: parentDecoy, agent_transcript_path: agentReal }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry = findEntryByDeclaredFile(readLedger(dir), 'src/declared.mjs');
-    assert.ok(entry, 'the promoted receipt is found by its declared file');
-    assert.deepEqual(entry.observed_files, ['real/should-appear.mjs'], 'observed_files reflects only agent_transcript_path');
-    assert.ok(!entry.observed_files.includes('decoy/should-not-appear.mjs'), 'the parent conductor transcript never contributes a path');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (P3-main) the main end-to-end pin: a realistic mixed departing
-// (agent_transcript_path) transcript yields the exact expected observed_files
-// union, a co-present decoy PARENT (transcript_path) transcript never
-// contributes, the DECLARED territory (files/files_source, Start-time) is
-// left completely unchanged, and observed_truncated is never fabricated for
-// a normal-sized transcript.
-// EXPECTED RED today: `entry.observed_files` is undefined — fails the first
-// assertion. If a landed implementation reads stdin.transcript_path instead
-// (the corrected bug), the union would contain 'decoy/parent-only.mjs'
-// instead of/alongside the real set — fails the deepEqual.
-// SABOTAGE: merge observed paths into the declared territory.files/files
-// array instead of writing them to a separate observed_files field — the
-// declared-files assertion (still exactly ['src/declared.mjs']) goes red
-// while observed_files could coincidentally look plausible.
-// ===========================================================================
-
-test('(P3-main) a mixed departing transcript promotes the exact observed_files union; a co-present parent decoy never contributes; declared files/files_source and observed_truncated are untouched', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [
-      registerEntry({ agent_id: 'rev-main', agent_type: 'reviewer-performance', files: ['src/declared.mjs'], files_source: 'review-territory' }),
-    ]);
-    const parentDecoy = writeDecoyParentTranscript(dir, 'parent-decoy-main.jsonl', 'decoy/parent-only.mjs');
-    const agentMain = writeToolBlockTranscript(dir, 'agent-main.jsonl', [
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, 'src/read-me.mjs') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'text', text: 'noise' }, { type: 'tool_use', name: 'Grep', input: { pattern: 'foo', path: join(dir, 'src/grep-file.mjs') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Grep', input: { pattern: 'foo', path: join(dir, 'src') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Glob', input: { path: join(dir, 'src') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: join(dir, 'src/edit-me.mjs') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write', input: { file_path: join(dir, 'src/write-me.mjs') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'NotebookEdit', input: { notebook_path: join(dir, 'notebooks/nb.ipynb') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Bash', input: { command: 'ls' } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, 'src/read-me.mjs') } }] } }, // dup
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, '.git/HEAD') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, '.sterling/config.json') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: '/etc/hostname' } }] } },
-      'not valid json at all {',
-    ]);
-
-    const r = runHook(h22Input(dir, { agent_id: 'rev-main', hook_event_name: 'SubagentStop', transcript_path: parentDecoy, agent_transcript_path: agentMain }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ledger = readLedger(dir);
-    const entry = findEntryByDeclaredFile(ledger, 'src/declared.mjs');
-    assert.ok(entry, 'the promoted receipt is found by its declared file');
-
-    assert.deepEqual(
-      [...entry.observed_files].sort(),
-      ['notebooks/nb.ipynb', 'src', 'src/edit-me.mjs', 'src/grep-file.mjs', 'src/read-me.mjs', 'src/write-me.mjs'],
-      'observed_files is the exact normalized, deduped, .git/.sterling-filtered, outside-cwd-dropped union of reads+writes from agent_transcript_path ONLY'
-    );
-    assert.ok(!entry.observed_files.includes('decoy/parent-only.mjs'), 'the co-present parent decoy never contributes');
-    assert.equal(entry.observed_source, 'subagent-transcript');
-    assert.ok(!('observed_truncated' in entry), 'a normal-sized transcript never fabricates observed_truncated');
-
-    assert.deepEqual(declaredFiles(entry), ['src/declared.mjs'], 'the Start-time declared territory is untouched by observed evidence');
-    // RULING SUPERSEDED 2026-09-06 by decision edbaa38d
-    // (reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar,
-    // user-decided), recorded on 8f137474 under "NARROWED FOR REVIEWER
-    // CLASSES": for a reviewer-* agent_type, declaredSource() no longer
-    // travels unchanged from the register entry's seeded files_source — it
-    // binds at Stop from the child transcript's delivered brief, corroborated
-    // by the .meta.json sidecar's toolUseId. This fixture's `agentMain` child
-    // transcript (agent_transcript_path) is a tool-use-block transcript, not
-    // the required {parentUuid:null, isSidechain:true, type:'user',
-    // message:{content:<string>}} first record, AND carries no .meta.json
-    // sidecar at all — both are named fail-closed shapes in edbaa38d
-    // ("first record not a type:'user' record with string content"; "missing
-    // or malformed sidecar"), so the correct value is 'unattributable', never
-    // the register's seeded 'review-territory' guess. declaredFiles(entry)
-    // above is untouched by this change (per the launching brief) and stays
-    // pinned as-is.
-    assert.equal(declaredSource(entry), 'unattributable', "a reviewer-class Stop whose agent_transcript_path is not a valid Stop-bind child transcript (and carries no sidecar) fails closed — the register's seeded files_source is provisional only (decision edbaa38d)");
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// (P3-union-dedup) a path that is BOTH read and written by the departing
-// subagent appears exactly once in observed_files — the union step itself
-// must dedup across the two categories, not just within each.
-// SABOTAGE: concatenate reads and writes without deduping
-// (`[...reads, ...writes]`) — this test alone catches the duplicate; P1's
-// within-category dedup test is unaffected either way.
-// ===========================================================================
-
-test('(P3-union-dedup) a path both read and edited by the departing subagent appears once in observed_files', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry({ agent_id: 'rev-union', agent_type: 'reviewer-correctness', files: ['src/declared.mjs'], files_source: 'review-territory' })]);
-    const parentDecoy = writeDecoyParentTranscript(dir, 'parent-decoy-union.jsonl', 'decoy/union.mjs');
-    const agentUnion = writeToolBlockTranscript(dir, 'agent-union.jsonl', [
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: join(dir, 'src/both.mjs') } }] } },
-      { type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit', input: { file_path: join(dir, 'src/both.mjs') } }] } },
-    ]);
-    const r = runHook(h22Input(dir, { agent_id: 'rev-union', hook_event_name: 'SubagentStop', transcript_path: parentDecoy, agent_transcript_path: agentUnion }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry = findEntryByDeclaredFile(readLedger(dir), 'src/declared.mjs');
-    assert.deepEqual(entry.observed_files, ['src/both.mjs'], 'the read+write union dedups a path appearing in both categories');
-    assert.ok(!entry.observed_files.includes('decoy/union.mjs'), 'the co-present parent decoy never contributes');
-  } finally {
-    cleanup();
-  }
-});
 
 // ===========================================================================
 // (P1-truncated / P1-not-truncated) the lib-level truncation indicator, per
@@ -1122,40 +880,8 @@ test('(P1-not-truncated) a transcript well under the 1MB tail window carries no 
   }
 });
 
-// ===========================================================================
-// (P3-truncated) the H22 write-side pin, item 4 of the amendment: a departing
-// transcript larger than the 1MB tail window promotes observed_truncated:true
-// on the ledger entry, top-level, sibling of observed_files. Paired against
-// P3-main's `!('observed_truncated' in entry)` assertion on a normal-sized
-// transcript.
-// EXPECTED RED today: `entry.observed_truncated` is undefined — the wiring
-// does not exist yet regardless of the lib's own truncation return (which
-// P1-truncated pins independently).
-// SABOTAGE: read the lib's `truncated` property but never copy it onto the
-// promoted ledger entry (or hardcode `observed_truncated: false`) — this
-// test alone goes red while P3-main's negative assertion is unaffected.
-// ===========================================================================
-
-test('(P3-truncated) a departing transcript larger than the 1MB tail window promotes observed_truncated:true (sibling of observed_files)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegisterRaw(dir, [registerEntry({ agent_id: 'rev-trunc', agent_type: 'reviewer-correctness', files: ['src/declared.mjs'], files_source: 'review-territory' })]);
-    const parentDecoy = writeDecoyParentTranscript(dir, 'parent-decoy-trunc.jsonl', 'decoy/trunc.mjs');
-    const bigChild = join(dir, 't', 'agent-big.jsonl');
-    mkdirSync(dirname(bigChild), { recursive: true });
-    const bigLine = JSON.stringify(toolLine([textBlock('x'.repeat(1_100_000))]));
-    const readLine = JSON.stringify(toolLine([toolUse('Read', { file_path: join(dir, 'src/after-big.mjs') })]));
-    writeFileSync(bigChild, bigLine + '\n' + readLine + '\n');
-
-    const r = runHook(h22Input(dir, { agent_id: 'rev-trunc', hook_event_name: 'SubagentStop', transcript_path: parentDecoy, agent_transcript_path: bigChild }), dir);
-    assert.equal(r.code, 0, r.stderr);
-    const entry = findEntryByDeclaredFile(readLedger(dir), 'src/declared.mjs');
-    assert.ok(entry, 'the promoted receipt is found by its declared file');
-    assert.equal(entry.observed_truncated, true, 'a departing transcript exceeding the 1MB tail window promotes observed_truncated:true');
-  } finally {
-    cleanup();
-  }
-});
+// (P3-truncated) REMOVED with the rest of PART 3 above — see that removal
+// note.
 
 // ===========================================================================
 // PART 4 — observedToolPathsSince(transcriptPath, cwd, sinceIso) : round-

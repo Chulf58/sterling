@@ -25,7 +25,6 @@ import {
 } from './lib/plan-lock.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } from '../lib/dispatch-register.mjs';
-import { classifyLedgerEntry, readLedger } from './lib/review-ledger-entry.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
@@ -294,195 +293,25 @@ function computeH1DeadDispatchResidue(cwd, source) {
   return lines;
 }
 
-/**
- * SURVIVING REVIEW RECEIPTS (decision review-ledger-receipt-expiry, 0408b295;
- * board 09e03d76). A receipt still sitting in .sterling/review-ledger.json at
- * SessionStart is one that OUTLIVED the session that earned it — the exact
- * shape scripts/commit-reviewed.mjs now refuses to stamp (foreign session_id
- * or branch: disclosed, never silently spent). Withholding the stamp without
- * this report would just move the leak: the receipt would sit there unspendable
- * and invisible. This is the surface that names it.
- *
- * READ-ONLY, deliberately: H1 wipes the transient registers but NEVER the
- * ledger. A receipt is real reviewer evidence, and deciding it is worthless is
- * a human judgement — the ledger's survival across the session boundary is the
- * whole point of it living at the store root (decision review-receipt-ledger).
- * Age-independent for the same reason the dead-dispatch residue above is: at a
- * session boundary EVERY receipt present is by construction from an earlier
- * session, so there is no TTL to wait out. Pure filesystem, fail-open.
- */
-/** Sanitize ONE receipt-derived value before it is interpolated into
- *  additionalContext (Codex review, MEDIUM). A ledger entry is JSON on disk and
- *  every field in it is arbitrary: a newline-bearing agent_type, session_id,
- *  branch or file path would inject VERBATIM LINES into a block the model reads
- *  as H1's own prose — a value forging the surface that reports it. Control
- *  characters (newlines included) collapse to a space and the result is clamped,
- *  so one hostile or corrupt field can neither counterfeit a line nor flood the
- *  injection. Callers have already narrowed to a non-empty string, so this never
- *  calls String() on an arbitrary value (the {toString:null} throw class). */
-const RECEIPT_FIELD_CLAMP = 120;
-function safeReceiptField(v) {
-  if (typeof v !== 'string') return '';
-  // Code-point filter rather than a control-character regex class: it states
-  // the ranges as numbers (no escape sequence to get subtly wrong, and no
-  // literal control character in the source), and it covers C0 — LF and CR
-  // included, which is the whole point, a newline is what fabricates a line — plus
-  // DEL and the C1 block some terminals still act on.
-  const cleaned = [...v]
-    .map((ch) => {
-      const c = ch.codePointAt(0);
-      return c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f) ? ' ' : ch;
-    })
-    .join('')
-    .trim();
-  return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}…(truncated)` : cleaned;
-}
-
-// R1 REBUILD: reads through the shape owner's classifyLedgerEntry/readLedger
-// (scripts/hooks/lib/review-ledger-entry.mjs) instead of re-parsing the
-// ledger by hand. A survivor is a receipt/legacy entry that is neither
-// discharged (already adjudicated — reporting it forever would re-open a
-// settled decision) nor consumed (already spent, working as designed) nor an
-// external_review entry (never spendable, never un-consumed). RESERVED
-// entries ARE survivors — a crashed/interrupted commit-reviewed run leaves
-// exactly this shape, and saying nothing at the one session boundary a human
-// could act on is the state nobody recovers from — but they carry the
-// `reconcile` remedy, never `discharge` (which refuses a reserved entry
-// outright). MALFORMED entries are NEVER silently dropped either (RW-6): an
-// entry classifyLedgerEntry refuses is unspendable AND undischargeable
-// (discharge/reconcile both need parsed facts this entry does not have), so
-// silence would leave it in the ledger forever while H1 reports nothing
-// survives — and the ledger is agent-writable, so a corrupted key becomes the
-// cheapest way to hide a receipt from the one surface that reports them. It
-// gets its own disclosure line (renderMalformedLine below), never the ordinary
-// receipt line, and never either remedy.
-function renderSurvivorLine(survivor) {
-  const isLegacy = survivor.kind === 'legacy';
-  const legacy = isLegacy ? survivor.legacy : null;
-  const receipt = isLegacy ? null : survivor.receipt;
-  const startStr = isLegacy ? legacy.at : receipt.started_at;
-  const finishedStr = isLegacy ? null : receipt.finished_at;
-  const startMs = typeof startStr === 'string' ? Date.parse(startStr) : NaN;
-  // PREFER THE COMPLETION INSTANT, same bounded logic as commit-reviewed's
-  // staleness advisory (useCompleted): the dispatch instant reads
-  // artificially fresh for a long review. finished_at is the honest
-  // review-END moment when present — but only trusted inside [at, now]: an
-  // out-of-range value (ending before it started, or in the future) is
-  // untrusted and this silently falls back to the start instant, exactly
-  // like commit-reviewed's clamp. Fail-open: a missing/unparseable value on
-  // either side degrades toward whichever side still parses, never throws.
-  const rawCompletedMs = typeof finishedStr === 'string' ? Date.parse(finishedStr) : NaN;
-  const nowMs = Date.now();
-  const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
-  const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
-  const useCompleted = !Number.isNaN(completedMs);
-  const recordedAt = useCompleted ? completedMs : startMs;
-  // Same 'X.Xh' convention as commit-reviewed's staleness advisory, so one
-  // receipt reads identically on both surfaces.
-  const age = Number.isNaN(recordedAt) ? 'age unknown (no usable timestamp)' : `${((nowMs - recordedAt) / 3_600_000).toFixed(1)}h old`;
-  const e = isLegacy
-    ? { agent_type: legacy.agent_type, session_id: legacy.session_id, branch: legacy.branch, files: legacy.files }
-    : { agent_type: receipt.reviewer?.agent_type, session_id: receipt.identity?.session_id, branch: receipt.identity?.branch, files: receipt.territory?.files };
-  // EVERY receipt-derived string below goes through safeReceiptField before it
-  // reaches the injected block — agent_type, session_id, branch and file paths
-  // alike. A field that sanitizes down to empty is treated as absent, so a
-  // control-character-only value cannot smuggle in a blank label either.
-  const type = safeReceiptField(e.agent_type) || 'unknown reviewer';
-  const session = safeReceiptField(e.session_id);
-  const branch = safeReceiptField(e.branch);
-  const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(', ');
-  const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
-  // R1-C81: a LEGACY (v1) entry is NAMED as such and carries the exact
-  // discharge handle — a v1 entry has no entry_id, so --entry-id cannot
-  // address it and the handle exists nowhere else on disk.
-  const label = isLegacy ? 'LEGACY ' : '';
-  const handleSuffix = isLegacy ? `; discharge handle: ${legacy.handle}` : '';
-  // R1-C82: a RESERVED entry is flagged distinctly so its paragraph (below)
-  // reads as "this one needs reconcile, not discharge" rather than a generic
-  // survivor line.
-  const reservedSuffix = !isLegacy && receipt.status === 'reserved' ? ' [RESERVED — mid-spend, see reconcile below]' : '';
-  return `- ${label}${type} — ${age}${origin ? ` (earned in ${origin})` : ' (no recorded session/branch — a pre-expiry receipt)'}${files.length ? `; files: ${files.slice(0, 5).join(', ')}` : ''}${handleSuffix}${reservedSuffix}`;
-}
-
-// RW-6: an entry classifyLedgerEntry refuses (row.kind === 'malformed') gets
-// its OWN line — never the ordinary survivor line, which would offer a
-// discharge/reconcile remedy the entry cannot actually take (both address an
-// entry through PARSED facts this one does not have; printing either sends
-// the operator at a guaranteed refusal, the same defect RW-1 exists for in
-// its other spelling). The entry_id names the row when the raw JSON still
-// carries one as a string (the common case: one field failed validation,
-// the rest of the shape is intact) — otherwise (not-an-object, or a shape so
-// broken entry_id itself never parsed) the row's own index into rawEntries is
-// the only stable locator left. facts.field/reason is the owner's own,
-// code-controlled label for which key failed — never ledger content, so no
-// sanitization gap, but it is routed through safeReceiptField anyway for the
-// same defense-in-depth the rest of this file applies.
-function renderMalformedLine(row, rawEntries) {
-  const raw = rawEntries[row.index];
-  const rawId = typeof raw?.entry_id === 'string' ? safeReceiptField(raw.entry_id) : '';
-  const id = rawId || `index ${row.index}`;
-  const field = safeReceiptField(row.facts?.field ?? row.facts?.reason ?? '') || 'unknown';
-  return render(
-    disclosure(
-      'ledger_entry_malformed',
-      row.facts ?? {},
-      `H1: ledger entry ${id} is unreadable — the shape owner refuses it (offending field: ${field}); no automated command can address it. Open .sterling/review-ledger.json and inspect this entry yourself.`
-    )
-  );
-}
-
-function reviewReceiptLines(cwd) {
-  const { availability, entries, rawEntries } = readLedger(cwd);
-  if (availability !== 'ok') return { survivors: [], hasReserved: false, malformed: [] };
-  const survivors = [];
-  const malformed = [];
-  let hasReserved = false;
-  for (const row of entries) {
-    // DISCHARGED RECEIPTS ARE NOT SURVIVORS (decision 57984926 §3): already
-    // adjudicated, with an accountable reason recorded IN the entry.
-    // EXTERNAL REVIEW ENTRIES ARE NOT SURVIVING RECEIPTS (decision 57984926
-    // §4): never spendable, so never un-consumed either. A CONSUMED receipt
-    // has already been spent successfully — working as designed, not debt.
-    if (row.kind === 'external_review') continue;
-    if (row.kind === 'malformed') {
-      malformed.push(renderMalformedLine(row, rawEntries));
-      continue;
-    }
-    if (row.kind === 'legacy') {
-      if (row.legacy.status === 'discharged') continue;
-      survivors.push({ kind: 'legacy', legacy: row.legacy });
-      continue;
-    }
-    const receipt = row.receipt;
-    if (receipt.status === 'discharged' || receipt.status === 'consumed') continue;
-    if (receipt.status === 'reserved') hasReserved = true;
-    survivors.push({ kind: 'receipt', receipt });
-  }
-  return { survivors: survivors.map(renderSurvivorLine), hasReserved, malformed };
-}
-
 const input = readStdin();
 
-// CURRENT-SESSION MARKER (decision review-ledger-receipt-expiry, 0408b295).
-// SessionStart is the ONE moment the platform hands Sterling a session_id at a
-// known point in a session's life. scripts/commit-reviewed.mjs is a bare CLI —
-// no hook stdin, no injected env — so without this cell it cannot tell whether
-// a review receipt was earned in THIS session or an earlier one, and receipt
-// expiry has nothing to compare against. A latest-value cell keyed by session
-// and superseded by the next SessionStart (the shape H10's pressure/gauge/
-// delegation markers already use): P4 by supersession, never by a remembered
-// cleanup step. Gated on .sterling/config.json's EXISTENCE, the same gate H22
-// uses, so H1 never creates a store directory in a non-Sterling project (P1).
-// Fail-open: a failed write costs only expiry precision — commit-reviewed then
-// reads no marker, cannot judge session identity, and treats every receipt as
-// unjudgeable-hence-eligible, i.e. exactly the pre-expiry behavior.
+// CURRENT-SESSION MARKER. SessionStart is the ONE moment the platform hands
+// Sterling a session_id at a known point in a session's life. This latest-
+// value cell is read by scripts/lib/dispatch-register.mjs's readSessionId
+// (the shape H10's pressure/gauge/delegation markers already use): P4 by
+// supersession, never by a remembered cleanup step. Originally written for
+// scripts/commit-reviewed.mjs's now-deleted receipt-expiry check; it survives
+// because dispatch-register.mjs's inFlightAdvisory (consumed by the surviving
+// build-hooks.mjs / check-projection-fresh.mjs) still reads it as the
+// session_id for its own in-flight-dispatch filtering when the caller has no
+// session of its own — removing the writer would silently widen those two
+// scripts from session-scoped to NO-SESSION-JOIN mode. Gated on
+// .sterling/config.json's EXISTENCE, the same gate H22 uses, so H1 never
+// creates a store directory in a non-Sterling project (P1). Fail-open: a
+// failed write costs only that advisory's session precision.
 //
-// PUBLISHED ATOMICALLY (tmp + rename, the primitive both ledger writers already
-// use — Codex review, MEDIUM). A bare writeFileSync can be read TORN by a
-// concurrent scripts/commit-reviewed.mjs; its JSON.parse then fails, the
-// identity channel goes dark, and a PRESENT-FOREIGN receipt stamps — the exact
-// outcome receipt expiry exists to prevent, reached through a race rather than
-// through a missing field. rename() on the same filesystem is atomic, so a
+// PUBLISHED ATOMICALLY (tmp + rename). A bare writeFileSync can be read TORN
+// by a concurrent reader; rename() on the same filesystem is atomic, so a
 // reader sees either the previous marker or this one, never half of one. The
 // pid in the staging name keeps two concurrent SessionStarts from clobbering
 // each other's tmp file.
@@ -498,11 +327,9 @@ try {
     renameSync(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
-  // fail-open — never break SessionStart for a marker (P1). But a PREVIOUS
-  // session's marker surviving a failed write is stale positive evidence: it
-  // would make every receipt promoted THIS session read as foreign and hard-
-  // refuse the commit gate on a false premise. Absence is the honest state —
-  // commit-reviewed then cannot judge session identity and stays eligible.
+  // fail-open — never break SessionStart for a marker (P1). A PREVIOUS
+  // session's marker surviving a failed write is stale positive evidence, so
+  // absence is the honest state on any failure.
   // recursive AS WELL AS force: `force` suppresses ENOENT only, so a marker
   // path occupied by a non-empty DIRECTORY (a corrupted tree, a botched manual
   // fix) would survive every cleanup AND block every future write — permanently
@@ -527,85 +354,7 @@ const dispatchResidueLines = (() => {
     return [];
   }
 })();
-const receiptLines = (() => {
-  try {
-    return reviewReceiptLines(input.cwd);
-  } catch {
-    return { survivors: [], hasReserved: false, malformed: [] };
-  }
-})();
-// THE REMEDY PRINTS THE RESOLVED CLONE PATH, NOT A PLACEHOLDER (decision
-// 95c2c109, MEDIUM a): `<clone>` is outside H15's sanctionable word syntax, so
-// a conductor pasting the line as printed was DENIED — the sanctioned route was
-// on the allowlist while the displayed command still could not run (the other
-// half of anti_pattern 43bebe5c). H1 knows its own clone: pluginRoot() is the
-// same walk-up the rest of this hook trusts. Forward slashes keep the word
-// inside H15's syntax on WSL/Linux; on native Windows the drive colon still
-// falls outside it — the disclosed parity item in sanctioned-provenance.mjs,
-// not solved here. Unresolvable root → a placeholder that SAYS it is one,
-// never a fabricated path. TWO FENCES (security review + Codex, 2026-09-05):
-// the root comes from walkUpPluginRoot(), never pluginRoot() — which prefers
-// the same walk-up but still falls back to the seam when no plugin tree sits
-// above this hook, and STERLING_PLUGIN_ROOT is agent-influenceable under the
-// threat model F2 closed in H15; a remedy pointing at a foreign tree is one
-// H15 then refuses,
-// which recreates the very "printed remedy cannot run" defect this fixes; and
-// a root outside H15's own sanctionable word syntax (no `;`, newline, backtick,
-// `$` or space) is never echoed into a paste-ready command — the placeholder
-// prints instead.
-const REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
-const remedyClone = (() => {
-  try {
-    const r = walkUpPluginRoot();
-    if (!r) return null;
-    const posix = String(r).split('\\').join('/').replace(/\/+$/, '');
-    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
-  } catch {
-    return null;
-  }
-})();
-const receiptContext = receiptLines.survivors.length
-  ? `\n\nSURVIVING REVIEW RECEIPTS (H1): ${receiptLines.survivors.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json — earned by a reviewer dispatch that ended, but never stamped into a commit.\n` +
-    receiptLines.survivors.join('\n') +
-    `\nA receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) — its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.\n` +
-    // THE REMEDY MUST BE THE SANCTIONED ONE. This used to say "remove it by
-    // hand", which is (a) DENIED — H15 seals .sterling/ from the shell, so the
-    // conductor cannot take that route, the same "sanctioned recovery route
-    // unreachable by its operator" shape decision 1434cd54 Ruling 2 records —
-    // and (b) destructive: a hand-edit destroys the evidence decision 57984926
-    // promises to preserve, records no disposition, and races the discharge
-    // verb's atomic locked replace. A hook that prints a denied remedy
-    // manufactures a workaround. `scripts/review-ledger.mjs` is a
-    // SANCTIONED_SCRIPTS entry as of the same slice, so the route below actually
-    // runs. ONE TEXT FOR BOTH LEDGER SHAPES (v1 and v2 share this report path):
-    // a wording fix applied to one shape would leave the other — the v1
-    // receipts, which decision 57984926 keeps alive on purpose — still printing
-    // the denied remedy.
-    `Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):\n` +
-    `  node ${remedyClone ?? '<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>'}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"\n` +
-    `A LEGACY v1 receipt (no schema_version) has no entry_id — select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` +
-    // R1-C82: a RESERVED entry (a crashed/interrupted commit-reviewed spend)
-    // is NEVER offered the discharge remedy — discharge refuses a reserved
-    // entry outright ([entry_not_active]), so printing it here would send the
-    // operator at a guaranteed refusal. `reconcile` either finalizes it
-    // against the commit that actually landed or releases it back to active.
-    (receiptLines.hasReserved
-      ? `\nOne or more of the receipts above are RESERVED (mid-spend, marked above): discharge refuses a reserved entry outright — the remedy is\n` +
-        `  node ${remedyClone ?? '<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>'}/scripts/review-ledger.mjs reconcile\n`
-      : '')
-  : '';
-// RW-6: an entry the shape owner REFUSES is NEVER silently dropped from this
-// report — it is unspendable AND undischargeable (both remedies above need
-// parsed facts this entry does not have), so silence would leave it in the
-// ledger forever while this surface says nothing survives, and the ledger is
-// agent-writable — a single corrupted key is otherwise the cheapest way to
-// hide a receipt from the one place that reports them. INDEPENDENT of the
-// survivors block above: a ledger can hold zero survivors and one malformed
-// row, or both at once.
-const malformedContext = receiptLines.malformed.length
-  ? `\n\nMALFORMED REVIEW LEDGER ENTRIES (H1): ${receiptLines.malformed.length} entry(ies) in .sterling/review-ledger.json do not parse as any recognized shape (receipt, external review, or legacy). Neither the discharge nor the reconcile command above can address one of these — both need parsed facts a malformed entry does not have — so open the file and inspect each one named below directly:\n` +
-    receiptLines.malformed.join('\n')
-  : '';
+
 // PLAN LOCK — RUN BEFORE EVERY EARLY RETURN, and this position is the whole
 // point (review F2). The section is the authority over what this session may
 // take on, and it CONSUMES three one-shot markers; running it after the
@@ -630,18 +379,16 @@ const store = openStore(input.cwd);
 if (!store) {
   // The receipt report rides this early exit too: H22's ledger gate is
   // .sterling/config.json (not sterling.db), so a project with a config but no
-  // initialized store CAN accumulate receipts — reporting them only on the
-  // store-present path below would leave exactly those projects silent.
   // The PLAN LOCK section rides this early exit too, leading as it does on the
   // main path: a project can hold an approved plan before its store exists, and
   // a section computed but never emitted would consume its one-shot markers
   // silently — disclosing nothing while spending the disclosure.
-  if (planLockContext || dispatchResidueLines.length || receiptContext || malformedContext) {
+  if (planLockContext || dispatchResidueLines.length) {
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + receiptContext + malformedContext,
+          additionalContext: planLockContext + dispatchResidueLines.join('\n\n'),
         },
       })
     );
@@ -2049,7 +1796,7 @@ const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before the conventions, not after them.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + malformedContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

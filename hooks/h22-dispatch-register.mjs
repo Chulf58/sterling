@@ -6,10 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync4, statSync as statSync4, mkdirSync as mkdirSync3 } from "node:fs";
-import { join as join4 } from "node:path";
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -4901,30 +4899,16 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
@@ -4936,11 +4920,7 @@ var configSchema = external_exports.object({
   // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
   delegation_watch: external_exports.object({
     min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
+    max_dispatches: external_exports.number().int().nonnegative().default(0)
   }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
@@ -4965,11 +4945,7 @@ var configSchema = external_exports.object({
   // Hard rule encoded here as data: no xhigh/max for subagents except
   // small-scoped hard phases (coder hard override); max never appears.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
     coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -4978,25 +4954,6 @@ var configSchema = external_exports.object({
     // (P8); debugger is root-cause judgment — high effort.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5091,39 +5048,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5224,25 +5148,7 @@ var configSchema = external_exports.object({
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 
 // packages/schemas/dist/registry.js
@@ -5619,49 +5525,8 @@ function claimedResources(promptText, configuredNames) {
   return claimed;
 }
 
-// scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync2, statSync, readdirSync } from "node:fs";
-function readFromStart(path, bytes) {
-  if (!existsSync2(path)) return null;
-  try {
-    const fd = openSync(path, "r");
-    try {
-      const stat = fstatSync(fd);
-      if (!stat.isFile()) return null;
-      const size = stat.size;
-      const want = Math.min(size, bytes);
-      const buf = Buffer.alloc(want);
-      let readTotal = 0;
-      while (readTotal < want) {
-        const n = readSync(fd, buf, readTotal, want - readTotal, readTotal);
-        if (n === 0) break;
-        readTotal += n;
-      }
-      return { text: buf.toString("utf8", 0, readTotal), complete: readTotal === size };
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
-}
-var TAIL_BYTES = 1024 * 1024;
-function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync2(path)) return null;
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const len = Math.min(size, bytes);
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, size - len);
-    return buf.toString("utf8");
-  } finally {
-    closeSync(fd);
-  }
-}
-
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync as readdirSync2 } from "node:fs";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync2, statSync, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { join as join2, basename, dirname as dirname2 } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
@@ -5788,9 +5653,6 @@ function registerPath(root) {
 function registerLockDir(root) {
   return join2(root, ".sterling", "transient", "dispatch-register.lock");
 }
-function ledgerLockDir(root) {
-  return join2(root, ".sterling", "review-ledger.lock");
-}
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
@@ -5811,7 +5673,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  if (!existsSync2(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync2(p, "utf8");
@@ -5874,7 +5736,7 @@ function looksDeadOwner(o) {
 }
 function statIno(p) {
   try {
-    return statSync2(p).ino;
+    return statSync(p).ino;
   } catch {
     return null;
   }
@@ -5955,9 +5817,6 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 }
 function withRegisterLock(root, fn, opts = {}) {
   return withOwnerMkdirLock(registerLockDir(root), fn, opts);
-}
-function withLedgerLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(ledgerLockDir(root), fn, opts);
 }
 function registerStartLocked(root, entry) {
   const { availability, arr } = readRawArray(root);
@@ -6132,7 +5991,7 @@ function readDispatchState(root) {
   if (containment.availability === "absent") return { availability: "absent", records: [], poisoned: [] };
   let names;
   try {
-    names = readdirSync2(dir);
+    names = readdirSync(dir);
   } catch {
     return { availability: "unavailable", records: [], poisoned: [] };
   }
@@ -6583,382 +6442,6 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
   });
 }
 
-// scripts/hooks/lib/review-ledger-entry.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, renameSync as renameSync2 } from "node:fs";
-import { join as join3, extname } from "node:path";
-import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
-function isEvidenceObject(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function normalizeReceiptPath(p) {
-  const s = String(p).replace(/\\/g, "/").replace(/^\.\//, "");
-  if (/^[A-Za-z]:/.test(s)) return null;
-  if (s.startsWith("/")) return null;
-  if (s.split("/").includes("..")) return null;
-  return s;
-}
-function isUsableBlobSha(v) {
-  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
-}
-function parseDisposition(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.class !== "string" || raw.class === "") return { ok: false };
-  if (typeof raw.reason !== "string" || raw.reason === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (typeof raw.head_sha !== "string" || raw.head_sha === "") return { ok: false };
-  if (typeof raw.classifier_version !== "number") return { ok: false };
-  const facts = isEvidenceObject(raw.facts) ? raw.facts : {};
-  return {
-    ok: true,
-    value: { class: raw.class, reason: raw.reason, at: raw.at, head_sha: raw.head_sha, classifier_version: raw.classifier_version, facts }
-  };
-}
-function parseReservation(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
-  if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
-  const value = { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation };
-  if (raw.waived !== void 0) {
-    if (typeof raw.waived !== "boolean") return { ok: false };
-    value.waived = raw.waived;
-  }
-  return { ok: true, value };
-}
-function parseConsumption(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
-  if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  const value = { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce };
-  if (raw.paths !== void 0) {
-    if (!Array.isArray(raw.paths) || !raw.paths.every((p) => typeof p === "string")) return { ok: false };
-    value.paths = raw.paths.slice();
-  }
-  return { ok: true, value };
-}
-function parseContentEvidence(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (raw.status !== "complete" && raw.status !== "partial" && raw.status !== "unavailable") return { ok: false };
-  const basis = typeof raw.basis === "string" && raw.basis ? raw.basis : "stop-time-worktree-snapshot";
-  let blobs;
-  if (raw.blobs === void 0) {
-    blobs = {};
-  } else if (isEvidenceObject(raw.blobs)) {
-    blobs = { ...raw.blobs };
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.blobs" } };
-  }
-  let absentPaths;
-  if (raw.absent_paths === void 0) {
-    absentPaths = [];
-  } else if (Array.isArray(raw.absent_paths)) {
-    absentPaths = raw.absent_paths.filter((p) => typeof p === "string");
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.absent_paths" } };
-  }
-  const value = { basis, status: raw.status, blobs, absent_paths: absentPaths };
-  if (raw.index_blobs !== void 0) {
-    if (!isEvidenceObject(raw.index_blobs)) {
-      return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.index_blobs" } };
-    }
-    value.index_blobs = { ...raw.index_blobs };
-  }
-  if (raw.truncated === true) value.truncated = true;
-  if (Number.isInteger(raw.truncated_of)) value.truncated_of = raw.truncated_of;
-  if (typeof raw.failure_reason === "string" && raw.failure_reason) value.failure_reason = raw.failure_reason;
-  return { ok: true, value };
-}
-function parseObservedEvidence(raw) {
-  const value = {};
-  if (Array.isArray(raw?.observed_files)) value.observed_files = raw.observed_files.filter((p) => typeof p === "string");
-  if (Array.isArray(raw?.observed_reads)) value.observed_reads = raw.observed_reads.filter((p) => typeof p === "string");
-  if (typeof raw?.observed_source === "string" && raw.observed_source) value.observed_source = raw.observed_source;
-  if (raw?.observed_truncated === true) value.observed_truncated = true;
-  return { ok: true, value };
-}
-var RECEIPT_STATUSES = /* @__PURE__ */ new Set(["active", "reserved", "consumed", "discharged"]);
-var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var AGENT_TYPE_PATTERN = /^[A-Za-z0-9_-]+$/;
-var TERRITORY_SOURCES = /* @__PURE__ */ new Set(["review-territory", "free-prose-fallback", "unattributable"]);
-function parseReceipt(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.schema_version !== 2) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.kind !== void 0 && raw.kind !== "roster_receipt") return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.entry_id !== "string" || !UUID_PATTERN.test(raw.entry_id)) return { ok: false, code: "ledger_entry_malformed" };
-  if (!RECEIPT_STATUSES.has(raw.status)) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.started_at !== "string" || !raw.started_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.finished_at !== "string" || !raw.finished_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (!isEvidenceObject(raw.reviewer)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer" } };
-  if (typeof raw.reviewer.agent_type !== "string" || !AGENT_TYPE_PATTERN.test(raw.reviewer.agent_type)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer.agent_type" } };
-  }
-  if (!isEvidenceObject(raw.identity)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity" } };
-  if (typeof raw.identity.agent_id !== "string" || !raw.identity.agent_id) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity.agent_id" } };
-  }
-  if (!isEvidenceObject(raw.territory) || !Array.isArray(raw.territory.files)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory" } };
-  }
-  if (!TERRITORY_SOURCES.has(raw.territory.source)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
-  }
-  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "none" && raw.territory.attribution !== "union") {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
-  }
-  const contentParsed = parseContentEvidence(raw.content_evidence);
-  if (!contentParsed.ok) {
-    return { ok: false, code: "ledger_entry_malformed", facts: contentParsed.facts ?? { field: "content_evidence" } };
-  }
-  let reservation;
-  let consumption;
-  let disposition = null;
-  if (raw.status === "reserved") {
-    const r = parseReservation(raw.reservation);
-    if (!r.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-    reservation = r.value;
-  } else if (raw.reservation !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-  }
-  if (raw.status === "consumed") {
-    const c = parseConsumption(raw.consumption);
-    if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-    if (Array.isArray(c.value.paths) && c.value.paths.length > 0) {
-      const partialReceipt = {
-        territory: { files: raw.territory.files.filter((f) => typeof f === "string") },
-        content_evidence: contentParsed.value
-      };
-      const covered = new Set(receiptCoveredPaths(partialReceipt));
-      const seen = /* @__PURE__ */ new Set();
-      for (const p of c.value.paths) {
-        const n = normalizeReceiptPath(p);
-        if (n === null || !covered.has(n) || seen.has(n)) {
-          return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption.paths", entry_id: raw.entry_id } };
-        }
-        seen.add(n);
-      }
-    }
-    consumption = c.value;
-  } else if (raw.consumption !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-  }
-  if (raw.status === "discharged") {
-    const d = parseDisposition(raw.disposition);
-    if (!d.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-    disposition = d.value;
-  } else if (raw.disposition !== void 0 && raw.disposition !== null) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-  }
-  const identity = {
-    session_id: typeof raw.identity.session_id === "string" ? raw.identity.session_id : null,
-    branch: typeof raw.identity.branch === "string" ? raw.identity.branch : null,
-    base_sha: typeof raw.identity.base_sha === "string" ? raw.identity.base_sha : null,
-    agent_id: raw.identity.agent_id
-  };
-  const observed = parseObservedEvidence(raw).value;
-  const receipt = {
-    schema_version: 2,
-    entry_id: raw.entry_id,
-    kind: "roster_receipt",
-    status: raw.status,
-    started_at: raw.started_at,
-    finished_at: raw.finished_at,
-    reviewer: {
-      agent_type: raw.reviewer.agent_type,
-      model: raw.reviewer.model ?? null,
-      model_family: raw.reviewer.model_family ?? null,
-      model_source: raw.reviewer.model_source ?? null
-    },
-    identity,
-    territory: {
-      files: raw.territory.files.filter((f) => typeof f === "string"),
-      source: raw.territory.source,
-      attribution: raw.territory.attribution,
-      ...typeof raw.territory.attribution_case === "string" ? { attribution_case: raw.territory.attribution_case } : {}
-    },
-    content_evidence: contentParsed.value,
-    disposition,
-    ...observed
-  };
-  if (reservation) receipt.reservation = reservation;
-  if (consumption) receipt.consumption = consumption;
-  return { ok: true, receipt };
-}
-function legacyFingerprint(raw) {
-  const files = Array.isArray(raw?.files) ? raw.files.filter((f) => typeof f === "string").map(normalizeReceiptPath).sort() : [];
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? raw.reviewed_state.blobs : {};
-  const blobs = Object.entries(blobsObj).map(([p, s]) => [normalizeReceiptPath(p), s]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  let canonical;
-  try {
-    canonical = JSON.stringify([raw?.agent_type ?? null, raw?.at ?? null, files, blobs]);
-    if (typeof canonical !== "string") canonical = "<unserializable>";
-  } catch {
-    canonical = "<unserializable>";
-  }
-  return createHash2("sha256").update(canonical).digest("hex").slice(0, 32);
-}
-function legacyReceiptHandle(raw) {
-  return `receipt-${legacyFingerprint(raw)}`;
-}
-function adaptLegacyEntry(raw) {
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? { ...raw.reviewed_state.blobs } : {};
-  return {
-    kind: "legacy",
-    handle: legacyReceiptHandle(raw),
-    agent_type: typeof raw?.agent_type === "string" ? raw.agent_type : null,
-    files: Array.isArray(raw?.files) ? raw.files.slice() : [],
-    at: typeof raw?.at === "string" ? raw.at : null,
-    session_id: typeof raw?.session_id === "string" ? raw.session_id : null,
-    branch: typeof raw?.branch === "string" ? raw.branch : null,
-    base_sha: typeof raw?.base_sha === "string" ? raw.base_sha : null,
-    blobs: blobsObj,
-    status: raw?.status === "discharged" ? "discharged" : "active"
-  };
-}
-function looksLikeLegacyV1(raw) {
-  return typeof raw?.agent_type === "string" && raw.agent_type !== "" && Array.isArray(raw?.files) && typeof raw?.at === "string" && raw.at !== "";
-}
-function classifyLedgerEntry(raw) {
-  if (!isEvidenceObject(raw)) {
-    return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (raw.schema_version === 2) {
-    if (raw.kind === "external_review") {
-      if (typeof raw.entry_id !== "string" || !raw.entry_id || typeof raw.thread_id !== "string" || !Array.isArray(raw.files)) {
-        return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "external_review" } };
-      }
-      return { kind: "external_review", entry: raw };
-    }
-    const parsed = parseReceipt(raw);
-    if (!parsed.ok) return { kind: "malformed", code: "ledger_entry_malformed", facts: parsed.facts ?? { reason: "receipt" } };
-    return { kind: "receipt", receipt: parsed.receipt };
-  }
-  if (looksLikeLegacyV1(raw)) {
-    return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
-  }
-  return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
-}
-function receiptCoveredPaths(receipt) {
-  const files = Array.isArray(receipt?.territory?.files) ? receipt.territory.files : [];
-  const blobs = isEvidenceObject(receipt?.content_evidence?.blobs) ? receipt.content_evidence.blobs : {};
-  const absentPaths = new Set(
-    (Array.isArray(receipt?.content_evidence?.absent_paths) ? receipt.content_evidence.absent_paths : []).filter((p) => typeof p === "string").map(normalizeReceiptPath).filter((n) => n !== null)
-  );
-  const covered = [];
-  for (const f of files) {
-    if (typeof f !== "string") continue;
-    const n = normalizeReceiptPath(f);
-    if (n === null) continue;
-    const sha = blobs[f] ?? blobs[n];
-    if (isUsableBlobSha(sha) || absentPaths.has(n)) covered.push(n);
-  }
-  return covered;
-}
-function ledgerPath(root) {
-  return join3(root, ".sterling", "review-ledger.json");
-}
-function readLedger(root) {
-  const p = ledgerPath(root);
-  if (!existsSync4(p)) return { availability: "absent", entries: [], rawEntries: [], raw: "" };
-  let raw;
-  try {
-    raw = readFileSync3(p, "utf8");
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  return {
-    availability: "ok",
-    entries: parsed.map((e, index) => ({ ...classifyLedgerEntry(e), index })),
-    rawEntries: parsed,
-    raw
-  };
-}
-function writeLedger(root, entries) {
-  const dir = join3(root, ".sterling");
-  mkdirSync2(dir, { recursive: true });
-  const p = ledgerPath(root);
-  const tmp = `${p}.tmp-${randomBytes2(4).toString("hex")}`;
-  writeFileSync2(tmp, JSON.stringify(entries));
-  renameSync2(tmp, p);
-}
-
-// scripts/hooks/lib/observed-territory.mjs
-import { existsSync as existsSync5, statSync as statSync3 } from "node:fs";
-var WRITE_TOOLS_FILE_PATH = /* @__PURE__ */ new Set(["Edit", "Write"]);
-var TAIL_BYTES2 = 1024 * 1024;
-function hasFileExtension(p) {
-  const idx = p.lastIndexOf("/");
-  const base2 = idx === -1 ? p : p.slice(idx + 1);
-  return base2.includes(".");
-}
-function observedToolPaths(transcriptPath, cwd) {
-  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  if (!existsSync5(transcriptPath)) return null;
-  let tail;
-  try {
-    tail = readTail(transcriptPath);
-  } catch {
-    return null;
-  }
-  if (tail === null || tail === "") return null;
-  let truncated = false;
-  try {
-    truncated = statSync3(transcriptPath).size > TAIL_BYTES2;
-  } catch {
-  }
-  const reads = /* @__PURE__ */ new Set();
-  const writes = /* @__PURE__ */ new Set();
-  const add = (set, rawPath) => {
-    if (typeof rawPath !== "string" || rawPath === "") return;
-    const rel = repoRel(rawPath, cwd);
-    if (!rel) return;
-    const lower = rel.toLowerCase();
-    if (lower === ".git" || lower.startsWith(".git/") || lower === ".sterling" || lower.startsWith(".sterling/")) return;
-    set.add(rel);
-  };
-  for (const line of tail.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (entry?.type !== "assistant") continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || block.type !== "tool_use") continue;
-      const name = block.name;
-      const input2 = block.input;
-      if (WRITE_TOOLS_FILE_PATH.has(name)) {
-        add(writes, input2?.file_path);
-      } else if (name === "NotebookEdit") {
-        add(writes, input2?.notebook_path);
-      } else if (name === "Read") {
-        add(reads, input2?.file_path);
-      } else if (name === "Grep") {
-        const p = input2?.path;
-        if (typeof p === "string" && p !== "" && hasFileExtension(p)) add(reads, p);
-      } else if (name === "Glob") {
-        add(reads, input2?.path);
-      }
-    }
-  }
-  const result = { reads: [...reads], writes: [...writes] };
-  if (truncated) result.truncated = true;
-  return result;
-}
-
 // scripts/hooks/h22-dispatch-register.mjs
 function loadExclusiveResourceNames(cwd) {
   try {
@@ -6967,143 +6450,6 @@ function loadExclusiveResourceNames(cwd) {
   } catch {
     return [];
   }
-}
-function configuredReviewerModel(cwd) {
-  try {
-    const model = loadConfig(cwd)?.models?.reviewers?.model;
-    return typeof model === "string" && model !== "" ? model : null;
-  } catch {
-    return null;
-  }
-}
-function normIdentity(v) {
-  if (typeof v === "string") return v.trim() === "" ? null : v.trim();
-  return null;
-}
-function gitReceiptIdentity(cwd) {
-  const git = (args) => {
-    try {
-      const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
-      return r.status === 0 ? normIdentity(r.stdout) : null;
-    } catch {
-      return null;
-    }
-  };
-  return { branch: git(["symbolic-ref", "--quiet", "--short", "HEAD"]), base_sha: git(["rev-parse", "HEAD"]) };
-}
-function familyFromModel(model) {
-  if (typeof model !== "string" || model === "") return "unknown";
-  if (/^claude-/.test(model)) return "anthropic";
-  if (/^gpt-/.test(model) || /^codex/.test(model)) return "openai";
-  return "unknown";
-}
-function observedModelFromTranscript(transcriptPath) {
-  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  let tail;
-  try {
-    tail = readFromStart(transcriptPath, 1024 * 1024);
-  } catch {
-    return null;
-  }
-  if (tail === null) return null;
-  const lines = tail.text.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (parsed.type !== "assistant") continue;
-    const model = parsed.message?.model;
-    if (typeof model === "string" && model !== "") return model;
-  }
-  return null;
-}
-function resolveReviewerModel(departing, transcriptPath, agentTranscriptPath) {
-  const preferred = typeof agentTranscriptPath === "string" && agentTranscriptPath !== "" ? agentTranscriptPath : transcriptPath;
-  const observed = observedModelFromTranscript(preferred);
-  if (observed) return { model: observed, model_source: "observed" };
-  const configured = typeof departing?.configured_model === "string" && departing.configured_model !== "" ? departing.configured_model : null;
-  if (configured) return { model: configured, model_source: "configured" };
-  return { model: null, model_source: "unknown" };
-}
-var REVIEWED_BLOBS_CAP = 64;
-function buildContentEvidence(cwd, files) {
-  const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : [];
-  if (uniqueFiles.length === 0) return { basis: "stop-time-worktree-snapshot", status: "complete", blobs: {}, absent_paths: [] };
-  const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
-  const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
-  const present = [];
-  const absent = [];
-  for (const p of paths) {
-    try {
-      if (statSync4(`${cwd}/${p}`).isFile()) present.push(p);
-      else absent.push(p);
-    } catch {
-      absent.push(p);
-    }
-  }
-  let blobs = {};
-  let failureReason;
-  let presentUnhashed = [...present];
-  if (present.length > 0) {
-    try {
-      const r = spawnSync2("git", ["hash-object", "--", ...present], { cwd, encoding: "utf8", timeout: 1e4 });
-      if (r && !r.error && r.status === 0) {
-        const shas = (r.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/i.test(l));
-        if (shas.length === present.length) {
-          present.forEach((p, i) => {
-            blobs[p] = shas[i];
-          });
-          presentUnhashed = [];
-        } else {
-          failureReason = "git hash-object output did not align 1:1 with the reviewed paths";
-        }
-      } else {
-        failureReason = "git hash-object failed or git is unavailable";
-      }
-    } catch {
-      failureReason = "git hash-object threw";
-    }
-  }
-  let indexBlobs;
-  if (Object.keys(blobs).length > 0) {
-    try {
-      const r = spawnSync2("git", ["ls-files", "-s", "--", ...Object.keys(blobs)], { cwd, encoding: "utf8", timeout: 1e4 });
-      if (r && !r.error && r.status === 0) {
-        for (const line of (r.stdout ?? "").split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const tab = trimmed.indexOf("	");
-          if (tab === -1) continue;
-          const meta = trimmed.slice(0, tab).split(/\s+/);
-          const path = trimmed.slice(tab + 1);
-          const sha = meta[1];
-          if (isUsableIndexSha(sha) && blobs[path] && blobs[path] !== sha) {
-            if (!indexBlobs) indexBlobs = {};
-            indexBlobs[path] = sha;
-          }
-        }
-      }
-    } catch {
-    }
-  }
-  const noEvidenceCount = absent.length + presentUnhashed.length;
-  const status = noEvidenceCount === 0 ? "complete" : noEvidenceCount === paths.length ? "unavailable" : "partial";
-  const result = { basis: "stop-time-worktree-snapshot", status, blobs, absent_paths: absent };
-  if (indexBlobs) result.index_blobs = indexBlobs;
-  if (truncated) {
-    result.truncated = true;
-    result.truncated_of = uniqueFiles.length;
-  }
-  if (failureReason) result.failure_reason = failureReason;
-  return result;
-}
-function isUsableIndexSha(v) {
-  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
 }
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
@@ -7141,195 +6487,24 @@ function globPrefixesFromBlocks(blocks) {
     )
   ];
 }
-var CHILD_SCAN_BYTES = 64 * 1024 * 1024;
-var PARENT_SCAN_BYTES = 64 * 1024 * 1024;
-function childBriefFromTranscript(childPath) {
-  const read = readFromStart(childPath, CHILD_SCAN_BYTES);
-  if (read === null) return { ok: false, reason: "child-transcript-missing", detail: `no file at '${childPath}'` };
-  const nl = read.text.indexOf("\n");
-  if (nl === -1 && !read.complete) {
-    return { ok: false, reason: "child-first-record-truncated", detail: `the child transcript's first line exceeds the ${CHILD_SCAN_BYTES}-byte read window` };
-  }
-  const firstLine = (nl === -1 ? read.text : read.text.slice(0, nl)).trim();
-  if (firstLine === "") return { ok: false, reason: "child-transcript-empty", detail: `'${childPath}' has no first record` };
-  let record;
-  try {
-    record = JSON.parse(firstLine);
-  } catch {
-    return { ok: false, reason: "child-first-record-unparseable", detail: "the first line of the child transcript is not JSON" };
-  }
-  if (!record || record.type !== "user") {
-    return { ok: false, reason: "child-first-record-not-user", detail: `first record type is ${JSON.stringify(record?.type)}, not 'user'` };
-  }
-  const content = record.message?.content;
-  if (typeof content !== "string") {
-    return { ok: false, reason: "child-first-record-content-not-string", detail: `first record message.content is ${typeof content}` };
-  }
-  let userStringRecords = 0;
-  let unparseableLines = 0;
-  for (const line of read.text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      unparseableLines++;
-      continue;
-    }
-    if (entry?.type === "user" && typeof entry?.message?.content === "string") userStringRecords++;
-  }
-  return { ok: true, brief: content, agentId: record.agentId, userStringRecords, unparseableLines, complete: read.complete };
-}
 function sidecarForChildTranscript(childPath) {
-  if (!childPath.endsWith(".jsonl")) {
-    return { ok: false, reason: "sidecar-path-underivable", detail: `agent_transcript_path '${childPath}' does not end in .jsonl` };
-  }
+  if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync6(sidecarPath)) return { ok: false, reason: "sidecar-missing", detail: `no file at '${sidecarPath}'` };
+  if (!existsSync3(sidecarPath)) return { ok: false };
   let meta;
   try {
-    meta = JSON.parse(readFileSync4(sidecarPath, "utf8"));
+    meta = JSON.parse(readFileSync3(sidecarPath, "utf8"));
   } catch {
-    return { ok: false, reason: "sidecar-unparseable", detail: `'${sidecarPath}' is not readable JSON` };
+    return { ok: false };
   }
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
-    return { ok: false, reason: "sidecar-malformed", detail: `'${sidecarPath}' does not hold a JSON object` };
-  }
-  if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") {
-    return { ok: false, reason: "sidecar-tool-use-id-missing", detail: `sidecar toolUseId is ${JSON.stringify(meta.toolUseId)}` };
-  }
-  if (meta.spawnDepth !== 1) {
-    return { ok: false, reason: "sidecar-spawn-depth", detail: `sidecar spawnDepth is ${JSON.stringify(meta.spawnDepth)}, not 1` };
-  }
-  return { ok: true, meta, sidecarPath };
-}
-function findParentToolUseBlock(parentPath, toolUseId) {
-  if (typeof parentPath !== "string" || parentPath === "") {
-    return { ok: false, reason: "parent-transcript-path-absent", detail: "stdin carried no transcript_path" };
-  }
-  const read = readFromStart(parentPath, PARENT_SCAN_BYTES);
-  if (read === null) return { ok: false, reason: "parent-transcript-missing", detail: `no file at '${parentPath}'` };
-  for (const line of read.text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    const content = entry?.message?.content;
-    if (!Array.isArray(content)) continue;
-    const block = content.find((b) => b?.type === "tool_use" && b.id === toolUseId);
-    if (block) return { ok: true, block };
-  }
-  if (!read.complete) {
-    return { ok: false, reason: "parent-scan-truncated", detail: `the parent transcript exceeds the ${PARENT_SCAN_BYTES}-byte scan window` };
-  }
-  return { ok: false, reason: "tool-use-id-absent-from-parent", detail: `no tool_use block with id '${toolUseId}' anywhere in the parent transcript` };
-}
-function bindReviewerTerritoryAtStop(input2) {
-  const childPath = input2.agent_transcript_path;
-  const brief = childBriefFromTranscript(childPath);
-  if (!brief.ok) return { bound: false, reason: brief.reason, detail: brief.detail };
-  if (typeof input2.agent_id !== "string" || input2.agent_id === "" || typeof brief.agentId !== "string" || brief.agentId !== input2.agent_id) {
-    return {
-      bound: false,
-      reason: "child-transcript-agent-mismatch",
-      detail: `the child transcript's first record carries agentId ${JSON.stringify(brief.agentId)}, which is not the stopping agent's stdin agent_id ${JSON.stringify(input2.agent_id)}`
-    };
-  }
-  const sidecar = sidecarForChildTranscript(childPath);
-  if (!sidecar.ok) return { bound: false, reason: sidecar.reason, detail: sidecar.detail };
-  if (sidecar.meta.agentType !== input2.agent_type) {
-    return { bound: false, reason: "agent-type-mismatch", detail: `sidecar agentType ${JSON.stringify(sidecar.meta.agentType)} does not equal stdin agent_type ${JSON.stringify(input2.agent_type)}` };
-  }
-  const located = findParentToolUseBlock(input2.transcript_path, sidecar.meta.toolUseId);
-  if (!located.ok) return { bound: false, reason: located.reason, detail: located.detail };
-  if (located.block.input?.prompt !== brief.brief) {
-    return { bound: false, reason: "prompt-mismatch", detail: `the parent block '${sidecar.meta.toolUseId}' prompt is not byte-identical to the child's first record` };
-  }
-  const { candidates, files_source, malformed } = resolveTerritory([{ subagent_type: sidecar.meta.agentType, prompt: brief.brief }]);
-  return { bound: true, files: normalizeRegisterPaths(candidates, input2.cwd), files_source, malformed };
-}
-function promoteAtStop(departing, input2) {
-  const lines = [];
-  let territoryFiles = Array.isArray(departing.files) ? departing.files : [];
-  let territorySource = departing.files_source ?? "free-prose-fallback";
-  if (typeof input2.agent_transcript_path !== "string" || input2.agent_transcript_path === "") {
-    territorySource = "unattributable";
-  } else {
-    const bind = bindReviewerTerritoryAtStop(input2);
-    if (bind.bound) {
-      territoryFiles = bind.files;
-      territorySource = bind.files_source;
-    } else {
-      territorySource = "unattributable";
-      lines.push(
-        render(
-          disclosure(
-            "receipt_unattributable",
-            { reason: bind.reason },
-            `H22: reviewer-class Stop for '${input2.agent_id}' bound closed to unattributable (${bind.reason}): ${bind.detail}`
-          )
-        )
-      );
-    }
-  }
-  const contentEvidence = buildContentEvidence(input2.cwd, territoryFiles);
-  const observed = observedToolPaths(input2.agent_transcript_path, input2.cwd);
-  const { branch, base_sha } = gitReceiptIdentity(input2.cwd);
-  const { model, model_source } = resolveReviewerModel(departing, input2.transcript_path, input2.agent_transcript_path);
-  const AGENT_TYPE_PATTERN2 = /^[A-Za-z0-9_-]+$/;
-  const reviewerAgentType = departing.agent_type ?? input2.agent_type ?? null;
-  if (typeof reviewerAgentType !== "string" || !AGENT_TYPE_PATTERN2.test(reviewerAgentType)) {
-    return {
-      receipt: null,
-      lines: [
-        ...lines,
-        render(
-          disclosure(
-            "ledger_entry_malformed",
-            { field: "reviewer.agent_type", agent_id: input2.agent_id },
-            `H22: refused to promote a receipt for '${input2.agent_id}' \u2014 reviewer.agent_type is ${JSON.stringify(reviewerAgentType)}, not a trailer-safe token; the entry would parse as ledger_entry_malformed on the very next read`
-          )
-        )
-      ]
-    };
-  }
-  const receipt = {
-    schema_version: 2,
-    entry_id: randomUUID(),
-    kind: "roster_receipt",
-    status: "active",
-    started_at: typeof departing.at === "string" ? departing.at : (/* @__PURE__ */ new Date()).toISOString(),
-    finished_at: (/* @__PURE__ */ new Date()).toISOString(),
-    reviewer: { agent_type: reviewerAgentType, model, model_family: familyFromModel(model), model_source },
-    identity: { session_id: normIdentity(input2.session_id), branch, base_sha, agent_id: input2.agent_id },
-    // A legacy register entry with NO attribution key promotes to a receipt
-    // with NO attribution key either — the field is copied, never fabricated
-    // (scripts/tests/h22-review-territory.test.mjs T6a/T6b CONTROL pair).
-    territory: {
-      files: territoryFiles,
-      source: territorySource,
-      ...typeof departing.attribution === "string" ? { attribution: departing.attribution } : {}
-    },
-    content_evidence: contentEvidence,
-    disposition: null
-  };
-  if (observed) {
-    receipt.observed_files = [.../* @__PURE__ */ new Set([...observed.reads ?? [], ...observed.writes ?? []])];
-    receipt.observed_reads = observed.reads ?? [];
-    receipt.observed_source = "subagent-transcript";
-    if (observed.truncated) receipt.observed_truncated = true;
-  }
-  return { receipt, lines };
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return { ok: false };
+  if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") return { ok: false };
+  return { ok: true, meta };
 }
 var input = readStdin();
 try {
-  if (!existsSync6(`${input.cwd}/.sterling/config.json`)) allow();
-  mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
+  if (!existsSync3(`${input.cwd}/.sterling/config.json`)) allow();
+  mkdirSync2(join3(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
   const KNOWN_EVENTS = /* @__PURE__ */ new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop"]);
@@ -7417,7 +6592,6 @@ try {
         at: (/* @__PURE__ */ new Date()).toISOString()
       };
       if (claimed.length) entry.exclusive_resources = claimed;
-      if (reviewerStart) entry.configured_model = configuredReviewerModel(input.cwd);
       return entry;
     });
     if (startRefusal) {
@@ -7474,27 +6648,6 @@ try {
         const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
         if (!(probe.verified && dirty.length === 0)) {
           lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason }))));
-        }
-      }
-    }
-    if (departing && typeof departing.agent_type === "string" && isReviewerClass(departing.agent_type)) {
-      const { receipt, lines: promotionLines } = promoteAtStop(departing, input);
-      lines.push(...promotionLines);
-      if (receipt) {
-        try {
-          await withLedgerLock(input.cwd, () => {
-            const ledgerState = readLedger(input.cwd);
-            if (ledgerState.availability === "corrupt") {
-              lines.push(render(disclosure("ledger_corrupt", {}, "H22: a corrupt review ledger stops this promotion \u2014 no write, bytes left untouched")));
-              return;
-            }
-            const rawArr = ledgerState.rawEntries;
-            rawArr.push(receipt);
-            writeLedger(input.cwd, rawArr);
-          });
-        } catch (e) {
-          if (e?.code === "ledger_lock_held") lines.push(render(e));
-          else throw e;
         }
       }
     }
