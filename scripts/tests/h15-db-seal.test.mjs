@@ -192,3 +192,125 @@ test('Bash: a Sterling script invoked after cd && is allowed', () => {
   const r = run('Bash', { command: 'cd /mnt/c/x && node scripts/init.mjs --store .sterling/sterling.db' });
   assert.equal(r.code, 0, r.stderr);
 });
+
+// ── shell channel: clobber/concatenated redirects, wrapped invocations,
+//    recursive directory deletion, and heredoc opacity ──────────────────────
+test('Bash: clobber and concatenated redirects into the database are denied', () => {
+  for (const command of [
+    'cat x >| .sterling/sterling.db',
+    'cat x >"$PWD"/.sterling/sterling.db',
+    'cat x > "./.sterling/sterling.db"',
+    'printf x &> .sterling/sterling.db',
+    'cat x 2>> .sterling/sterling.db-wal',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: newline-separated and wrapper-prefixed invocations naming the database are denied', () => {
+  for (const command of [
+    'echo hi\nrm -f .sterling/sterling.db',
+    'command rm .sterling/sterling.db',
+    'sudo -n rm .sterling/sterling.db',
+    'env FOO=1 rm .sterling/sterling.db',
+    'exec rm .sterling/sterling.db',
+    'ls | xargs rm .sterling/sterling.db',
+    '(rm .sterling/sterling.db)',
+    'true && $(rm .sterling/sterling.db)',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash/PowerShell: recursive deletion or cleaning of the store directory is denied', () => {
+  const cases = [
+    ['Bash', 'rm -rf .sterling'],
+    ['Bash', 'rm -rf .sterling/'],
+    ['Bash', 'rm -r ./.sterling'],
+    ['Bash', 'cd packages && rm -rf ../.sterling'],
+    ['Bash', 'rmdir .sterling'],
+    ['Bash', 'find .sterling -delete'],
+    ['Bash', 'find . -name .sterling -exec rm -rf {} +'],
+    ['Bash', 'git clean -fdx'],
+    ['Bash', 'git clean -fdX'],
+    ['Bash', 'git clean -xdf'],
+    ['PowerShell', 'Remove-Item -Recurse .sterling'],
+    ['PowerShell', 'ri -r -Force .sterling'],
+    ['PowerShell', 'rd /s /q .sterling'],
+  ];
+  for (const [tool_name, command] of cases) {
+    const r = run(tool_name, { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: same-named files outside the store, reads, and mentions are allowed', () => {
+  for (const command of [
+    'rm /tmp/sterling.db',
+    'sqlite3 fixtures/sterling.db "select 1"',
+    'git log -- .sterling/sterling.db',
+    'cp .sterling/config.json /tmp/',
+    'rm -rf node_modules && npm ci',
+    'git clean -fd',
+    'tee out.log',
+    'ls .sterling',
+    'du -sh .sterling/',
+    'echo "backup of .sterling/sterling.db done"',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: heredoc bodies quoting destructive-looking text are opaque and allowed', () => {
+  for (const command of [
+    "git commit -F - <<'EOF'\nrm -rf .sterling\n(rm /tmp/sterling.db is denied)\n.sterling/sterling.db\nEOF",
+    "cat > notes.md <<'EOF'\nsqlite3 .sterling/sterling.db \".tables\"\nEOF",
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+  }
+});
+
+// ── shell channel: Sol round-4 tokenizer findings ────────────────────────────
+test('Bash: command substitution inside double quotes or backticks is denied', () => {
+  for (const command of [
+    'echo "$(rm .sterling/sterling.db)"',
+    'echo "`rm .sterling/sterling.db`"',
+    'x="$(cat y > .sterling/sterling.db)"',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: wrappers that take an option argument still expose the destructive verb', () => {
+  for (const command of [
+    'sudo -u root rm .sterling/sterling.db',
+    'nice -n 5 rm .sterling/sterling.db',
+    'env -i FOO=1 rm .sterling/sterling.db',
+    'sudo -u root -- rm -rf .sterling',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash/PowerShell: the store directory match is case-insensitive', () => {
+  const cases = [
+    ['PowerShell', 'Remove-Item -Recurse .STERLING'],
+    ['Bash', 'rm -rf .Sterling'],
+    ['Bash', 'rm -f .STERLING/sterling.db'],
+    ['Bash', 'echo x > .Sterling/STERLING.DB'],
+  ];
+  for (const [tool_name, command] of cases) {
+    const r = run(tool_name, { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: non-string command shapes fail closed without throwing', () => {
+  for (const tool_input of [{ command: { toString: null } }, { command: 12 }]) {
+    const r = runRaw(JSON.stringify({ tool_name: 'Bash', tool_input, cwd: project }), project);
+    assert.equal(r.code, 2, `${JSON.stringify(tool_input)}\n${r.stderr}`);
+  }
+  for (const tool_input of [{}, { command: '' }]) {
+    const r = runRaw(JSON.stringify({ tool_name: 'Bash', tool_input, cwd: project }), project);
+    assert.equal(r.code, 0, `${JSON.stringify(tool_input)}\n${r.stderr}`);
+  }
+});

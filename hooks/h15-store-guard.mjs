@@ -5392,9 +5392,6 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
 
 // scripts/hooks/h15-store-guard.mjs
 var DB_FILE_RE = /^sterling\.db(?:-wal|-shm|-journal|\..+)?$/i;
-var DB_REDIRECT_RE = /\d?>{1,2}\s*["']?[^\s"'|;&<>]*sterling\.db/i;
-var DB_DESTRUCTIVE_VERB_RE = /(?:^|[;&|(]\s*)(?:sudo\s+)?(?:rm|rmdir|unlink|mv|cp|dd|truncate|shred|sqlite3|tee|del|erase|move|copy|ri|rd|Remove-Item|Move-Item|Copy-Item|Rename-Item|Set-Content|Add-Content|Out-File|Clear-Content|New-Item)\b[^;&|]*sterling\.db/i;
-var DB_INPLACE_RE = /(?:^|[;&|(]\s*)(?:sudo\s+)?(?:sed|perl)\s+(?:-\S*\s+)*-\S*i\S*\s+[^;&|]*sterling\.db/i;
 var input;
 try {
   input = readStdin();
@@ -5405,13 +5402,434 @@ function namesStoreComponent(absPath) {
   const win32 = sep === "\\";
   return absPath.split(win32 ? /[\\/]+/ : /\/+/).some((c) => (win32 ? c.replace(/[. ]+$/, "") : c).toLowerCase() === ".sterling");
 }
+function skipQuoted(s, i) {
+  if (s[i] === "'") {
+    const j2 = s.indexOf("'", i + 1);
+    return j2 === -1 ? s.length : j2 + 1;
+  }
+  let j = i + 1;
+  while (j < s.length && s[j] !== '"') j += s[j] === "\\" ? 2 : 1;
+  return Math.min(j + 1, s.length);
+}
+var escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function stripHeredocBodies(cmd) {
+  let out = "", i = 0;
+  const n = cmd.length;
+  while (i < n) {
+    const c = cmd[i];
+    if (c === "'" || c === '"') {
+      const end = skipQuoted(cmd, i);
+      out += cmd.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (c === "\\" && !PS) {
+      out += cmd.slice(i, Math.min(i + 2, n));
+      i += 2;
+      continue;
+    }
+    if (c === "<" && cmd[i + 1] === "<") {
+      let j = i + 2;
+      if (cmd[j] === "-") j++;
+      while (cmd[j] === " " || cmd[j] === "	") j++;
+      let tag = "", k = j;
+      if (cmd[j] === "'" || cmd[j] === '"') {
+        const q = cmd[j];
+        k = j + 1;
+        while (k < n && cmd[k] !== q) k++;
+        tag = cmd.slice(j + 1, k);
+        k++;
+      } else {
+        while (k < n && /[A-Za-z0-9_]/.test(cmd[k])) k++;
+        tag = cmd.slice(j, k);
+      }
+      j = k;
+      if (tag) {
+        const lineEnd = cmd.indexOf("\n", j);
+        if (lineEnd === -1) {
+          out += cmd.slice(i, j);
+          i = n;
+          continue;
+        }
+        out += cmd.slice(i, j) + "\n";
+        const m = new RegExp("^\\t*" + escapeRe(tag) + "$", "m").exec(cmd.slice(lineEnd + 1));
+        i = m ? lineEnd + 1 + m.index + m[0].length : n;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+function extractBalanced(str, start, openCh, closeCh) {
+  let depth = 1, i = start;
+  const n = str.length;
+  while (i < n && depth > 0) {
+    const c = str[i];
+    if (c === "'" || c === '"') {
+      i = skipQuoted(str, i);
+      continue;
+    }
+    if (c === "\\") {
+      i += 2;
+      continue;
+    }
+    if (c === openCh) depth++;
+    else if (c === closeCh) depth--;
+    i++;
+  }
+  return { inner: str.slice(start, i - 1), end: i };
+}
+function scanDoubleQuoted(str, i) {
+  let j = i + 1;
+  const n = str.length;
+  const subs = [];
+  while (j < n && str[j] !== '"') {
+    if (str[j] === "\\" && j + 1 < n && !PS) {
+      j += 2;
+      continue;
+    }
+    if (str[j] === "$" && str[j + 1] === "(") {
+      const { inner, end } = extractBalanced(str, j + 2, "(", ")");
+      subs.push(...splitTopLevel(inner));
+      j = end;
+      continue;
+    }
+    if (str[j] === "`") {
+      let k = j + 1;
+      while (k < n && str[k] !== "`") k += str[k] === "\\" ? 2 : 1;
+      subs.push(...splitTopLevel(str.slice(j + 1, k)));
+      j = k + 1;
+      continue;
+    }
+    j++;
+  }
+  return { end: Math.min(j + 1, n), subs };
+}
+function splitTopLevel(str) {
+  const fragments = [];
+  let buf = "", i = 0;
+  const n = str.length;
+  const flush = () => {
+    const t = buf.trim();
+    if (t) fragments.push(t);
+    buf = "";
+  };
+  while (i < n) {
+    const c = str[i];
+    if (c === "'") {
+      const end = skipQuoted(str, i);
+      buf += str.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '"') {
+      const { end, subs } = scanDoubleQuoted(str, i);
+      buf += str.slice(i, end);
+      fragments.push(...subs);
+      i = end;
+      continue;
+    }
+    if (c === "\\" && !PS) {
+      buf += str.slice(i, Math.min(i + 2, n));
+      i += 2;
+      continue;
+    }
+    if (c === "$" && str[i + 1] === "(") {
+      const { inner, end } = extractBalanced(str, i + 2, "(", ")");
+      fragments.push(...splitTopLevel(inner));
+      buf += " ";
+      i = end;
+      continue;
+    }
+    if (c === "`") {
+      let j = i + 1;
+      while (j < n && str[j] !== "`") j += str[j] === "\\" ? 2 : 1;
+      fragments.push(...splitTopLevel(str.slice(i + 1, j)));
+      buf += " ";
+      i = j + 1;
+      continue;
+    }
+    if (c === "(") {
+      const { inner, end } = extractBalanced(str, i + 1, "(", ")");
+      fragments.push(...splitTopLevel(inner));
+      buf += " ";
+      i = end;
+      continue;
+    }
+    if (c === "\n" || c === ";") {
+      flush();
+      i++;
+      continue;
+    }
+    if (c === "&" && str[i + 1] === "&") {
+      flush();
+      i += 2;
+      continue;
+    }
+    if (c === "|" && str[i + 1] === "|") {
+      flush();
+      i += 2;
+      continue;
+    }
+    if (c === "|") {
+      if (str[i - 1] === ">") {
+        buf += c;
+        i++;
+        continue;
+      }
+      flush();
+      i++;
+      continue;
+    }
+    if (c === "&") {
+      if (str[i + 1] === ">") {
+        buf += c;
+        i++;
+        continue;
+      }
+      flush();
+      i++;
+      continue;
+    }
+    buf += c;
+    i++;
+  }
+  flush();
+  return fragments;
+}
+function tokenizeFragment(fragment) {
+  const tokens = [];
+  let word = "", i = 0;
+  const n = fragment.length;
+  const flushWord = () => {
+    if (word !== "") {
+      tokens.push({ type: "word", value: word });
+      word = "";
+    }
+  };
+  const takeFd = () => {
+    if (/^\d+$/.test(word)) {
+      const fd = word;
+      word = "";
+      return fd;
+    }
+    flushWord();
+    return "";
+  };
+  while (i < n) {
+    const c = fragment[i];
+    if (c === " " || c === "	") {
+      flushWord();
+      i++;
+      continue;
+    }
+    if (c === "'") {
+      const j = fragment.indexOf("'", i + 1);
+      const end = j === -1 ? n : j;
+      word += fragment.slice(i + 1, end);
+      i = j === -1 ? n : j + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && fragment[j] !== '"') {
+        if (fragment[j] === "\\" && j + 1 < n && !PS) {
+          word += fragment[j + 1];
+          j += 2;
+        } else {
+          word += fragment[j];
+          j++;
+        }
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < n && !PS) {
+      word += fragment[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === ">" || c === "<") {
+      const fd = takeFd();
+      let op = fd + c;
+      i++;
+      if (fragment[i] === c) {
+        op += c;
+        i++;
+      } else if (c === ">" && fragment[i] === "|") {
+        op += "|";
+        i++;
+      }
+      tokens.push({ type: "op", value: op });
+      continue;
+    }
+    if (c === "&" && fragment[i + 1] === ">") {
+      const fd = takeFd();
+      tokens.push({ type: "op", value: fd + "&>" });
+      i += 2;
+      continue;
+    }
+    if (c === "&" || c === "|") {
+      flushWord();
+      tokens.push({ type: "op", value: c });
+      i++;
+      continue;
+    }
+    word += c;
+    i++;
+  }
+  flushWord();
+  return tokens;
+}
+function isDbPath(token) {
+  const value = token.includes("=") ? token.slice(token.lastIndexOf("=") + 1) : token;
+  const parts = value.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  const base3 = parts[parts.length - 1];
+  return parts.slice(0, -1).some((p) => p.toLowerCase() === ".sterling") && DB_FILE_RE.test(base3);
+}
+function isDotSterlingDir(token) {
+  const parts = token.replace(/[\\/]+$/, "").split(/[\\/]+/).filter(Boolean);
+  return parts.length > 0 && parts[parts.length - 1].toLowerCase() === ".sterling";
+}
+var WRAPPERS_PLAIN = /* @__PURE__ */ new Set(["command", "time", "exec", "xargs", "builtin"]);
+var SUDO_ARG_OPTS = /* @__PURE__ */ new Set(["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"]);
+var NICE_ARG_OPTS = /* @__PURE__ */ new Set(["-n"]);
+var ENV_ARG_OPTS = /* @__PURE__ */ new Set(["-u", "-C", "-S"]);
+function skipOptsWithArgs(tokens, i, argOpts) {
+  while (i < tokens.length && tokens[i].type === "word" && tokens[i].value.startsWith("-") && tokens[i].value !== "--") {
+    const opt = tokens[i].value;
+    i++;
+    if (opt.length === 2 && argOpts.has(opt) && i < tokens.length && tokens[i].type === "word") i++;
+  }
+  if (i < tokens.length && tokens[i].type === "word" && tokens[i].value === "--") i++;
+  return i;
+}
+function skipEnvOptions(tokens, i) {
+  while (i < tokens.length && tokens[i].type === "word") {
+    const v = tokens[i].value;
+    if (v === "--") {
+      i++;
+      break;
+    }
+    if (/^[A-Za-z_]\w*=/.test(v)) {
+      i++;
+      continue;
+    }
+    if (v.startsWith("-")) {
+      i++;
+      if (v.length === 2 && ENV_ARG_OPTS.has(v) && i < tokens.length && tokens[i].type === "word") i++;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+function skipWrappers(tokens) {
+  let i = 0;
+  if (tokens[i] && tokens[i].type === "op" && tokens[i].value === "&") i++;
+  while (i < tokens.length && tokens[i].type === "word") {
+    const lv = tokens[i].value.toLowerCase();
+    if (lv === "sudo") {
+      i = skipOptsWithArgs(tokens, i + 1, SUDO_ARG_OPTS);
+      continue;
+    }
+    if (lv === "nice") {
+      i = skipOptsWithArgs(tokens, i + 1, NICE_ARG_OPTS);
+      continue;
+    }
+    if (lv === "env") {
+      i = skipEnvOptions(tokens, i + 1);
+      continue;
+    }
+    if (WRAPPERS_PLAIN.has(lv)) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+var DESTRUCTIVE_VERBS = /* @__PURE__ */ new Set([
+  "rm",
+  "rmdir",
+  "unlink",
+  "mv",
+  "cp",
+  "dd",
+  "truncate",
+  "shred",
+  "sqlite3",
+  "tee",
+  "del",
+  "erase",
+  "move",
+  "copy",
+  "remove-item",
+  "ri",
+  "rd",
+  "move-item",
+  "copy-item",
+  "rename-item",
+  "set-content",
+  "add-content",
+  "out-file",
+  "clear-content",
+  "new-item"
+]);
+function isDestructiveFragment(tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.type === "op" && /^\d*(>>|>\||&>|>)$/.test(t.value)) {
+      const next = tokens[i + 1];
+      if (next && next.type === "word" && isDbPath(next.value)) return true;
+    }
+  }
+  const idx0 = skipWrappers(tokens);
+  const verb = tokens[idx0];
+  if (!verb || verb.type !== "word") return false;
+  const lv = verb.value.toLowerCase();
+  const rest = tokens.slice(idx0 + 1);
+  const restWords = rest.filter((t) => t.type === "word").map((t) => t.value);
+  if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
+  if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
+  if (lv === "rm") {
+    const recursive = restWords.some((w) => w === "--recursive" || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(w));
+    if (recursive && restWords.some(isDotSterlingDir)) return true;
+  }
+  if (lv === "rmdir" && restWords.some(isDotSterlingDir)) return true;
+  if (lv === "find") {
+    const namesStore = restWords.some((w) => isDotSterlingDir(w) || /(^|[\\/])\.sterling([\\/]|$)/i.test(w));
+    const deletes = restWords.includes("-delete") || restWords.includes("-exec") && restWords.some((w) => /^rm$/i.test(w));
+    if (namesStore && deletes) return true;
+  }
+  if (lv === "git" && restWords[0] && restWords[0].toLowerCase() === "clean") {
+    const flagChars = rest.filter((t) => t.type === "word" && /^-[^-]/.test(t.value)).map((t) => t.value.slice(1)).join("") + (restWords.includes("--force") ? "f" : "");
+    if (/[xX]/.test(flagChars) && /[df]/.test(flagChars)) return true;
+  }
+  if (lv === "remove-item" || lv === "ri" || lv === "rd") {
+    const recursive = restWords.some((w) => /^-r(ecurse)?$/i.test(w) || w.toLowerCase() === "/s");
+    if (recursive && restWords.some(isDotSterlingDir)) return true;
+  }
+  return false;
+}
 var tool = input.tool_name;
+var PS = tool === "PowerShell";
 if (tool === "Bash" || tool === "PowerShell") {
-  const command = String(input.tool_input?.command ?? "");
-  if (DB_REDIRECT_RE.test(command) || DB_DESTRUCTIVE_VERB_RE.test(command) || DB_INPLACE_RE.test(command)) {
-    deny(
-      "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db), which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
-    );
+  const rawCommand = input.tool_input?.command;
+  let command;
+  if (rawCommand === void 0 || rawCommand === null) command = "";
+  else if (typeof rawCommand === "string") command = rawCommand;
+  else deny(`H15: this ${tool} call carries a non-string command (${typeof rawCommand}), which cannot be safely inspected for a destructive shape \u2014 re-issue with a string command.`);
+  const fragments = splitTopLevel(stripHeredocBodies(command));
+  for (const fragment of fragments) {
+    if (isDestructiveFragment(tokenizeFragment(fragment))) {
+      deny(
+        "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
+      );
+    }
   }
   allow();
 }
