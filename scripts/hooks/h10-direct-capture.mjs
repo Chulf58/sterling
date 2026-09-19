@@ -41,7 +41,7 @@ import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
-import { enqueuePending, pendingPath } from './lib/delivery.mjs';
+import { publishNotice } from './lib/delivery.mjs';
 
 /**
  * DEAD-DISPATCH RESIDUE (SPEC A, boards 03ed9d35/31565253; shared lib
@@ -433,10 +433,10 @@ try {
     }
     if (advisoryText) {
       try {
-        if (!enqueuePending(pendingPath(input.cwd), { kind: 'h10_context_advisory', rel: 'Stop', payload: advisoryText, agent_id: 'conductor' })) throw new Error('delivery queue lock timeout');
+        publishNotice(input.cwd, advisoryText);
         for (const spend of advisorySpends) spend();
       } catch (e) {
-        disclose(`H10: context advisory queue failed — ${String((e && e.message) || e)}; it will retry on the next Stop\n`);
+        disclose(`H10: context advisory publish failed — ${String((e && e.message) || e)}; it will retry on the next Stop\n`);
       }
     }
     // R0: the payload and the exit are ONE state machine — a bare

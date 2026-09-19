@@ -171,9 +171,10 @@ function makeH19Project({ rung = 'prompt' } = {}) {
   return { dir, store, cleanup };
 }
 
-const pendingOf = (dir) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', 'pending.json');
-  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
+const assertNoDelayedDeliveryArtifacts = (dir) => {
+  for (const name of ['pending.json', 'pending.lock', 'recipes.json']) {
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'delivery', name)), false, `${name} must not return`);
+  }
 };
 
 const postRead = (dir, file, extra = {}) => ({
@@ -196,13 +197,16 @@ test('AC1a: a gitignored, unowned file stays fully silent at rung read — no ad
   }
 });
 
-test('AC1b: a gitignored, unowned file enqueues nothing at rung prompt (the frontier signal never reaches the pending queue either)', () => {
+test('AC1b: a gitignored, unowned file emits no direct context and leaves no delayed-delivery artifact', () => {
   const { dir, cleanup } = makeH19Project(); // default rung: prompt
   try {
     initGit(dir, ['ignored.mjs']);
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'ignored.mjs'), dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0, 'no frontier entry, no delivery entry — a gitignored unowned touch is a pure no-op');
+    const context = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(context, /injection_rung 'prompt'.*obsolete/i, 'legacy prompt config is directly migrated');
+    assert.doesNotMatch(context, /FRONTIER SIGNAL/, 'a gitignored unowned touch still has no frontier delivery');
+    assertNoDelayedDeliveryArtifacts(dir);
   } finally {
     cleanup();
   }
@@ -227,15 +231,15 @@ test('AC2: a gitignored, unowned file WITH a fresh anti_pattern still delivers t
 });
 
 test('AC3 (regression): an unowned file that git does NOT ignore still fires the frontier signal, once per file per session', () => {
-  const { dir, cleanup } = makeH19Project(); // default rung: prompt
+  const { dir, cleanup } = makeH19Project({ rung: 'read' });
   try {
     initGit(dir, ['some-other-file.mjs']); // present but irrelevant to the touched path
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/new.mjs'), dir);
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/new.mjs'), dir);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'the frontier signal fires once, exactly as it did before gitignore-awareness');
-    assert.match(pending[0].payload, /FRONTIER SIGNAL/);
-    assert.match(pending[0].payload, /src\/new\.mjs/);
+    const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/new.mjs'), dir);
+    const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/new.mjs'), dir);
+    const payload = JSON.parse(first.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct read transport.
+    assert.equal(second.stdout, '', 'the frontier signal fires once, exactly as it did before gitignore-awareness');
+    assert.match(payload, /FRONTIER SIGNAL/);
+    assert.match(payload, /src\/new\.mjs/);
   } finally {
     cleanup();
   }

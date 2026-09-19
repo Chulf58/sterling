@@ -6,9 +6,9 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID4, createHash as createHash3 } from "node:crypto";
+import { randomUUID as randomUUID3, createHash as createHash3 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
-import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, writeSync, rmSync as rmSync4, existsSync as existsSync6, mkdirSync as mkdirSync5, renameSync as renameSync4 } from "node:fs";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, writeSync, rmSync as rmSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, renameSync as renameSync4 } from "node:fs";
 import { join as join6, basename as basename3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5080,7 +5080,9 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -8035,14 +8037,20 @@ function gitTestIntegrity({ cwd, testGlobs }) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, rmSync as rmSync3, renameSync as renameSync3, statSync as statSync5, readdirSync as readdirSync3 } from "node:fs";
-import { randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { join as join5, dirname as dirname5 } from "node:path";
-function deliveryDir(cwd) {
-  return join5(cwd, ".sterling", "transient", "delivery");
+function noticesDir(cwd) {
+  return join5(cwd, ".sterling", "transient", "notices");
 }
-function pendingPath(cwd) {
-  return join5(deliveryDir(cwd), "pending.json");
+function publishNotice(cwd, text) {
+  const dir = noticesDir(cwd);
+  mkdirSync4(dir, { recursive: true });
+  const name = `h10-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+  const target = join5(dir, name);
+  const tmp = `${target}.tmp`;
+  writeFileSync3(tmp, JSON.stringify({ text: String(text) }), { flag: "wx" });
+  renameSync3(tmp, target);
+  return target;
 }
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
@@ -8059,101 +8067,6 @@ var CITATION_BOILERPLATE_WORDS = [
 ];
 var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
 var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
-var LOCK_DEADLINE_MS2 = 2e3;
-var LOCK_STALE_MS2 = 5e3;
-var LOCK_POLL_MS2 = 5;
-var LOCK_OWNER_FILE = "owner";
-var lockTestHooks = {};
-function lockOwnerPath(lockPath) {
-  return join5(lockPath, LOCK_OWNER_FILE);
-}
-function ownsLock(lockPath, token) {
-  try {
-    return readFileSync4(lockOwnerPath(lockPath), "utf8") === token;
-  } catch {
-    return false;
-  }
-}
-function readLockOwner(lockPath) {
-  try {
-    return readFileSync4(lockOwnerPath(lockPath), "utf8");
-  } catch {
-    return null;
-  }
-}
-function sameLockObject(a, b) {
-  return a.dev === b.dev && a.ino === b.ino;
-}
-function acquireLock(lockPath) {
-  const deadline = Date.now() + LOCK_DEADLINE_MS2;
-  while (Date.now() < deadline) {
-    const token = `${process.pid}-${randomUUID3()}`;
-    try {
-      mkdirSync4(lockPath);
-      writeFileSync3(lockOwnerPath(lockPath), token, { flag: "wx" });
-      return token;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        const observed = statSync5(lockPath);
-        const observedOwner = readLockOwner(lockPath);
-        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS2) {
-          lockTestHooks.afterStaleInspect?.(lockPath);
-          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID3()}`;
-          try {
-            renameSync3(lockPath, tombstone);
-          } catch (renameError) {
-            if (renameError.code !== "ENOENT") throw renameError;
-            continue;
-          }
-          if (sameLockObject(observed, statSync5(tombstone)) && readLockOwner(tombstone) === observedOwner) {
-            rmSync3(tombstone, { recursive: true, force: true });
-          } else if (!existsSync5(lockPath)) {
-            renameSync3(tombstone, lockPath);
-          }
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS2);
-    }
-  }
-  return null;
-}
-function releaseLock(lockPath, token) {
-  try {
-    if (ownsLock(lockPath, token)) rmSync3(lockPath, { recursive: true, force: true });
-  } catch {
-  }
-}
-function withFileLock2(targetPath, fn) {
-  mkdirSync4(dirname5(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
-  const token = acquireLock(lockPath);
-  if (!token) return { acquired: false, value: void 0 };
-  try {
-    return { acquired: true, value: fn({ lockPath, token }) };
-  } finally {
-    releaseLock(lockPath, token);
-  }
-}
-function enqueuePending(path, entry) {
-  const result = withFileLock2(path, ({ lockPath, token }) => {
-    const entries = existsSync5(path) ? JSON.parse(readFileSync4(path, "utf8")) : [];
-    entries.push(entry);
-    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync3(tmp, JSON.stringify(entries));
-    lockTestHooks.beforePendingRename?.({ lockPath, token });
-    if (!ownsLock(lockPath, token)) {
-      rmSync3(tmp, { force: true });
-      return false;
-    }
-    renameSync3(tmp, path);
-    return true;
-  });
-  return result.acquired && result.value === true;
-}
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 var PORCH_BYTE_COUNT_RESERVE = "000000";
@@ -8393,10 +8306,10 @@ try {
     }
     if (advisoryText) {
       try {
-        if (!enqueuePending(pendingPath(input.cwd), { kind: "h10_context_advisory", rel: "Stop", payload: advisoryText, agent_id: "conductor" })) throw new Error("delivery queue lock timeout");
+        publishNotice(input.cwd, advisoryText);
         for (const spend of advisorySpends) spend();
       } catch (e) {
-        disclose(`H10: context advisory queue failed \u2014 ${String(e && e.message || e)}; it will retry on the next Stop
+        disclose(`H10: context advisory publish failed \u2014 ${String(e && e.message || e)}; it will retry on the next Stop
 `);
       }
     }
@@ -8451,7 +8364,7 @@ try {
   const discardTouchesClaim = () => {
     withFileLock(
       touchesPath,
-      () => rmSync4(touchesClaimPath, { force: true }),
+      () => rmSync3(touchesClaimPath, { force: true }),
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
   };
@@ -8572,9 +8485,9 @@ try {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync4(eventsPath, { force: true });
+      rmSync3(eventsPath, { force: true });
     }
-    rmSync4(nagMarker, { force: true });
+    rmSync3(nagMarker, { force: true });
   };
   const runSettlement = () => {
     try {
@@ -8582,7 +8495,7 @@ try {
       if (git.ok && git.base_lost) {
         const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
         const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
-        if (!exists) store.enqueueSystemTodo({ id: randomUUID4(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID3(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
       }
       if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
     } catch (e) {
@@ -8843,7 +8756,7 @@ try {
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8984,7 +8897,7 @@ ${parts.join("\n\n")}`;
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9013,7 +8926,7 @@ ${parts.join("\n\n")}`;
     }
     if (demandKeys.length) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9033,7 +8946,7 @@ ${parts.join("\n\n")}`;
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -9054,7 +8967,7 @@ ${parts.join("\n\n")}`;
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID4(),
+        id: randomUUID3(),
         type: "todo",
         created_at: now,
         updated_at: now,

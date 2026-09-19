@@ -344,7 +344,9 @@ export const configSchema = z.object({
   // that merely READS the file.
   delivery: z
     .object({
-      injection_rung: z.enum(['prompt', 'read', 'edit']).default('read'),
+      // `prompt` and `edit` are accepted only to migrate existing project
+      // configs. Parsed configuration exposes only the surviving read rung.
+      injection_rung: z.enum(['prompt', 'edit', 'read']).default('read').transform(() => 'read' as const),
       payload_char_cap: z.number().int().positive().default(2400),
       // SubagentStart "porch" budget (H19 front-porch, decision
       // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,

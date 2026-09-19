@@ -201,31 +201,32 @@ const postBash = (dir, response) => ({
   cwd: dir,
 });
 
-const pendingOf = (dir) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', 'pending.json');
-  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
+const assertNoDelayedDeliveryArtifacts = (dir) => {
+  for (const name of ['pending.json', 'pending.lock', 'recipes.json']) {
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'delivery', name)), false, `${name} must not return`);
+  }
 };
 
-test('H23 CONTROL: tool output naming a specific record subject still enqueues a pointer', () => {
+test('H23 CONTROL: tool output naming a specific record subject still delivers a direct pointer', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const d = store.create(decisionRecord(SPECIFIC_TITLE, SPECIFIC_STATEMENT));
-    runHook('h23-output-axis.mjs', postBash(dir, SPECIFIC_PROMPT), dir);
-    const q = pendingOf(dir);
-    assert.equal(q.length, 1);
-    assert.ok(q[0].payload.includes(d.id));
-    assert.ok(bytes(q[0].payload) <= DELIVERY_TOTAL_CAP_DEFAULT);
+    const r = runHook('h23-output-axis.mjs', postBash(dir, SPECIFIC_PROMPT), dir);
+    const payload = JSON.parse(r.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct PostToolUse transport.
+    assert.ok(payload.includes(d.id));
+    assert.ok(bytes(payload) <= DELIVERY_TOTAL_CAP_DEFAULT);
   } finally {
     cleanup();
   }
 });
 
-test('H23: generic output vocabulary does NOT enqueue a pointer', () => {
+test('H23: generic output vocabulary emits no direct pointer and leaves no delayed-delivery artifact', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(decisionRecord(GENERIC_TITLE, GENERIC_STATEMENT));
-    runHook('h23-output-axis.mjs', postBash(dir, GENERIC_PROMPT), dir);
-    assert.equal(pendingOf(dir).length, 0, 'generic vocabulary must not enqueue');
+    const r = runHook('h23-output-axis.mjs', postBash(dir, GENERIC_PROMPT), dir);
+    assert.equal(r.stdout, '', 'generic vocabulary must emit no direct context');
+    assertNoDelayedDeliveryArtifacts(dir);
   } finally {
     cleanup();
   }

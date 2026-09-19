@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h19-knowledge-delivery.mjs
-import { statSync as statSync3 } from "node:fs";
+import { statSync as statSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5065,7 +5065,9 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -7307,17 +7309,28 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, renameSync, openSync, closeSync } from "node:fs";
 import { join as join3, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join3(cwd, ".sterling", "transient", "delivery");
 }
+function claimLegacyInjectionRungNotice(cwd, rawRung) {
+  if (rawRung === "read") return null;
+  const transient = join3(cwd, ".sterling", "transient");
+  const marker = join3(transient, "legacy-injection-rung-noticed");
+  mkdirSync2(transient, { recursive: true });
+  try {
+    const fd = openSync(marker, "wx");
+    closeSync(fd);
+  } catch (error) {
+    if (error?.code === "EEXIST") return null;
+    throw error;
+  }
+  const configured = rawRung == null ? "missing" : `'${rawRung}'`;
+  return `\u24D8 STERLING: delivery.injection_rung ${configured} is obsolete and now behaves as 'read'.`;
+}
 function guardPath(cwd, agentId) {
   return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
-}
-function pendingPath(cwd) {
-  return join3(deliveryDir(cwd), "pending.json");
 }
 function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
@@ -7373,101 +7386,6 @@ function statusBracket(record) {
 }
 function statusAnnotation(record) {
   return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
-}
-var LOCK_DEADLINE_MS = 2e3;
-var LOCK_STALE_MS = 5e3;
-var LOCK_POLL_MS = 5;
-var LOCK_OWNER_FILE = "owner";
-var lockTestHooks = {};
-function lockOwnerPath(lockPath) {
-  return join3(lockPath, LOCK_OWNER_FILE);
-}
-function ownsLock(lockPath, token) {
-  try {
-    return readFileSync2(lockOwnerPath(lockPath), "utf8") === token;
-  } catch {
-    return false;
-  }
-}
-function readLockOwner(lockPath) {
-  try {
-    return readFileSync2(lockOwnerPath(lockPath), "utf8");
-  } catch {
-    return null;
-  }
-}
-function sameLockObject(a, b) {
-  return a.dev === b.dev && a.ino === b.ino;
-}
-function acquireLock(lockPath) {
-  const deadline = Date.now() + LOCK_DEADLINE_MS;
-  while (Date.now() < deadline) {
-    const token = `${process.pid}-${randomUUID2()}`;
-    try {
-      mkdirSync2(lockPath);
-      writeFileSync(lockOwnerPath(lockPath), token, { flag: "wx" });
-      return token;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        const observed = statSync2(lockPath);
-        const observedOwner = readLockOwner(lockPath);
-        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
-          lockTestHooks.afterStaleInspect?.(lockPath);
-          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
-          try {
-            renameSync(lockPath, tombstone);
-          } catch (renameError) {
-            if (renameError.code !== "ENOENT") throw renameError;
-            continue;
-          }
-          if (sameLockObject(observed, statSync2(tombstone)) && readLockOwner(tombstone) === observedOwner) {
-            rmSync(tombstone, { recursive: true, force: true });
-          } else if (!existsSync3(lockPath)) {
-            renameSync(tombstone, lockPath);
-          }
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
-    }
-  }
-  return null;
-}
-function releaseLock(lockPath, token) {
-  try {
-    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
-  } catch {
-  }
-}
-function withFileLock(targetPath, fn) {
-  mkdirSync2(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
-  const token = acquireLock(lockPath);
-  if (!token) return { acquired: false, value: void 0 };
-  try {
-    return { acquired: true, value: fn({ lockPath, token }) };
-  } finally {
-    releaseLock(lockPath, token);
-  }
-}
-function enqueuePending(path, entry) {
-  const result = withFileLock(path, ({ lockPath, token }) => {
-    const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
-    entries.push(entry);
-    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(entries));
-    lockTestHooks.beforePendingRename?.({ lockPath, token });
-    if (!ownsLock(lockPath, token)) {
-      rmSync(tmp, { force: true });
-      return false;
-    }
-    renameSync(tmp, path);
-    return true;
-  });
-  return result.acquired && result.value === true;
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -8083,42 +8001,6 @@ function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) 
     "\n\n"
   );
 }
-var DELIVERY_RECIPE_VERSION = 2;
-function rerenderRecipe({
-  rel,
-  unowned,
-  charCap,
-  hazardIds,
-  ownerIds,
-  decisionIds,
-  hazardTail,
-  decisionTail,
-  cachedHazardBlocks,
-  suspects,
-  trailingBlocks
-}) {
-  return {
-    version: DELIVERY_RECIPE_VERSION,
-    mode: "rerender",
-    rel,
-    unowned: !!unowned,
-    char_cap: charCap,
-    hazard_ids: hazardIds ?? [],
-    owner_ids: ownerIds ?? [],
-    decision_ids: decisionIds ?? [],
-    // A drain can lose store access after enqueue. Keep the exact hazard
-    // substance separately so that arm never turns trigger/right-way text into
-    // an ordinary cappable cached payload.
-    cached_hazard_blocks: cachedHazardBlocks ?? [],
-    tails: { hazards: hazardTail ?? 0, decisions: decisionTail ?? 0 },
-    suspects: suspects ? {
-      header: suspects.header ?? "",
-      entries: (suspects.lines ?? []).map((l) => ({ id: l?.id, line: l?.line })),
-      footer: suspects.footer ?? ""
-    } : null,
-    trailing_blocks: trailingBlocks ?? []
-  };
-}
 function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
   return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
 }
@@ -8134,18 +8016,10 @@ function main(input2) {
   if (!store) return allow();
   try {
     const rawRung = loadConfig(input2.cwd)?.delivery?.injection_rung;
-    const rung = ["prompt", "read", "edit"].includes(rawRung) ? rawRung : "prompt";
     const event = input2.hook_event_name;
-    let mode;
-    if (event === "PreToolUse") {
-      mode = rung === "edit" ? "inject" : null;
-    } else {
-      if (rung === "read") mode = "inject";
-      else if (rung === "prompt") mode = "enqueue";
-      else mode = input2.tool_name === "Read" ? "enqueue" : null;
-    }
-    if (!mode) return allow();
-    if (mode === "enqueue" && input2.agent_id) return allow();
+    if (event !== "PostToolUse") return allow();
+    const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
+    const mode = "inject";
     const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
     const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
@@ -8157,15 +8031,25 @@ function main(input2) {
     const bare = owners.length === 0;
     const unowned = bare && !(gitIgnored([rel], input2.cwd)?.has(rel) ?? false);
     const frontierFresh = unowned && !guard.frontier_files.includes(rel);
-    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) return allow();
+    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) {
+      if (migrationNotice) {
+        return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: migrationNotice } }), 0);
+      }
+      return allow();
+    }
     const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
     const shownHazards = cappedHazards(freshHazards);
     const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
     const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
     const gapsByOwner = budgetKnownGaps(freshOwners);
     let suspectBlock = null;
+    let mtimeMs = null;
     try {
-      const mtimeMs = statSync3(join4(input2.cwd, rel)).mtimeMs;
+      mtimeMs = statSync2(join4(input2.cwd, rel)).mtimeMs;
+    } catch (e) {
+      if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e;
+    }
+    if (mtimeMs !== null) {
       const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const lineTokenRe = new RegExp(`(?:(?<=\\\\[nt])|(?<![\\w./-]))${escapedRel}:\\d+(?:-\\d+)?`, "g");
       const suspects = [];
@@ -8178,7 +8062,6 @@ function main(input2) {
         suspects.push({ record, tokens });
       }
       if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
-    } catch {
     }
     const blocks = [
       ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
@@ -8261,42 +8144,14 @@ function main(input2) {
       injectPayload = built.text;
     }
     const recordDelivered = () => {
-      markDelivered(guard, mode === "inject" ? recordsShownIn(injectPayload, fresh) : fresh);
+      markDelivered(guard, recordsShownIn(injectPayload, fresh));
       if (frontierFresh) guard.frontier_files.push(rel);
       writeGuard(gPath, guard);
     };
-    if (mode === "enqueue") {
-      if (!enqueuePending(pendingPath(input2.cwd), {
-        kind: unowned ? "frontier" : "delivery",
-        rel,
-        payload,
-        recipe: rerenderRecipe({
-          rel,
-          unowned,
-          charCap,
-          hazardIds: shownHazards.map((r) => r.id),
-          ownerIds: freshOwners.map((r) => r.id),
-          decisionIds: shownDecisions.map((r) => r.id),
-          hazardTail: freshHazards.length - shownHazards.length,
-          cachedHazardBlocks: renderHazards(shownHazards, charCap, { fileKeys: [rel] }),
-          decisionTail: freshDecisions.length - shownDecisions.length,
-          // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
-          // It reads as a note about the FILE's line positions, but every one of its
-          // lines is labelled with the CITING RECORD's own title/slug/id, so
-          // replaying it verbatim at drain would serve cached per-record text for a
-          // record that may have been superseded or deleted meanwhile — the same leak
-          // the pointer channel was rebuilt to close. It therefore rides `suspects`
-          // as {id, line} entries and is re-resolved there; `trailing_blocks` is
-          // reserved for text with no record id in it at all.
-          suspects: suspectBlock
-        }),
-        agent_id: input2.agent_id ?? "conductor"
-      })) throw new Error("delivery queue lock timeout");
-      recordDelivered();
-      return allow();
-    }
     return exitAfterWrite(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: injectPayload } }),
+      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: `${migrationNotice ? `${migrationNotice}
+
+` : ""}${injectPayload}` } }),
       0,
       { onWritten: recordDelivered }
     );

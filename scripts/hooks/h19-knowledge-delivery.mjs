@@ -5,27 +5,15 @@
 // carries the path's HAZARDS (anti_pattern, as substance) and its RATIONALE
 // (decision, as capped pointers) — articles alone answer neither "what must I
 // not do here" nor "why is it this way". Registered at PostToolUse
-// Read|Edit|Write|MultiEdit and PreToolUse Edit|Write|MultiEdit; which
-// registration acts is decided by config.delivery.injection_rung — the rung is
-// PROBE-SET (verify-at-build 0956a464, research_finding on the build's CC
-// version), defaulting to the platform-proven 'prompt' path:
-//   'prompt' (default): PostToolUse enqueues; h19-delivery-drain injects at the
-//     next UserPromptSubmit (H2's proven additionalContext surface, one-turn lag).
-//   'read':  PostToolUse injects additionalContext directly at the touch.
-//   'edit':  only PreToolUse injection works on this platform — the PreToolUse
-//     registration injects on Edit/Write; Read touches fall back to the queue.
-// Pipeline: during an active run, agents with an agent_id got prep's
-// knowledge_pack — H19 stays silent for them (AC6, no double-delivery); the
-// conductor's own inline touches still deliver.
+// Read|Edit|Write|MultiEdit. Delivery is direct at PostToolUse; legacy
+// injection_rung values receive one migration notice and otherwise behave as read.
 import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel, gitIgnored } from './lib/common.mjs';
 import {
   guardPath,
-  pendingPath,
   readGuard,
   writeGuard,
-  enqueuePending,
   renderArticle,
   renderReference,
   renderHazards,
@@ -40,7 +28,6 @@ import {
   porchHeaderLine,
   renderPorch,
   resolvePorchBudget,
-  rerenderRecipe,
   isDelivered,
   markDelivered,
   budgetKnownGaps,
@@ -51,6 +38,7 @@ import {
   ownerPointer,
   ownerSuffix,
   decisionBlockPointer,
+  claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -70,33 +58,13 @@ function main(input) {
   if (!store) return allow(); // not a Sterling project — no ceremony (P1)
 
   try {
-    // Unknown/typo'd rung falls back to the platform-proven default, never to a
-    // silently different behavior (the MCP write path zod-validates, but config
-    // can be hand-edited).
+    // Step 2 accepts old config values only to issue a one-time migration notice.
     const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
-    const rung = ['prompt', 'read', 'edit'].includes(rawRung) ? rawRung : 'prompt';
     const event = input.hook_event_name;
 
-    // Route by event × rung: exactly one registration acts per touch.
-    //  PreToolUse acts only on rung 'edit' (the PostToolUse surface is broken there).
-    //  PostToolUse acts on 'read' (direct) and 'prompt' (enqueue); on rung 'edit'
-    //  it still handles Read touches (no PreToolUse Read registration exists) by
-    //  falling back to the queue.
-    let mode; // 'inject' | 'enqueue' | null
-    if (event === 'PreToolUse') {
-      mode = rung === 'edit' ? 'inject' : null;
-    } else {
-      if (rung === 'read') mode = 'inject';
-      else if (rung === 'prompt') mode = 'enqueue';
-      else mode = input.tool_name === 'Read' ? 'enqueue' : null; // rung 'edit'
-    }
-    if (!mode) return allow();
-
-    // The pending queue serves the CONDUCTOR's next prompt — a subagent never
-    // sees a UserPromptSubmit, so enqueueing its touches would mis-route its
-    // articles into the conductor's context (correctness review 2026-07-19).
-    // Subagents receive delivery only on the inject rungs, in their own context.
-    if (mode === 'enqueue' && input.agent_id) return allow();
+    if (event !== 'PostToolUse') return allow();
+    const migrationNotice = claimLegacyInjectionRungNotice(input.cwd, rawRung);
+    const mode = 'inject';
 
     // The staged-pipeline skip (`if (run && input.agent_id) return allow()` —
     // prep.mjs had already staged the agent's knowledge pack) was removed with
@@ -153,7 +121,12 @@ function main(input) {
     const bare = owners.length === 0;
     const unowned = bare && !(gitIgnored([rel], input.cwd)?.has(rel) ?? false);
     const frontierFresh = unowned && !guard.frontier_files.includes(rel);
-    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) return allow();
+    if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !frontierFresh) {
+      if (migrationNotice) {
+        return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: migrationNotice } }), 0);
+      }
+      return allow();
+    }
 
     const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
     // GUARD ONLY WHAT WAS ACTUALLY RENDERED (correctness review 2026-07-30). The
@@ -183,23 +156,22 @@ function main(input) {
     // not a separate ledger).
     const gapsByOwner = budgetKnownGaps(freshOwners);
 
-    // LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce, warn-only
-    // P1 advisory). `fresh` above already holds exactly the records this touch is
-    // about to render (owners uncapped, hazards/decisions the rendered slice), so
-    // the scan runs over that same set: for each record whose body text cites a
-    // line position in `rel` (`<rel>:42` / `<rel>:10-20`) while the record's own
-    // updated_at PREDATES rel's current mtime, the citation may have rotted under
-    // it. Wrapped so ANY internal failure here (a bad stat — including the file
-    // having moved/vanished since the touch — a malformed record, a regex
-    // surprise) degrades to NO advisory rather than a broken delivery: this can
-    // never be the reason a delivery fails (P5 / AC7 floor is the hook's own,
-    // untouched by this addition).
+    // LINE-SUSPECT ADVISORY (board 04ccecb1-a338-4b4e-91f0-c99588c1cdce). `fresh`
+    // is exactly the set this touch renders. A path can disappear between the
+    // tool call and this scan, in which case the advisory has no mtime to compare;
+    // other failures are hook failures and reach the loud outer boundary.
     // Kept as the DECOMPOSED {header, lines:[{id,line}], footer} block, not a
     // pre-joined string, so the recipe can carry each line keyed by the record it
     // names and the drain can re-resolve them (fixer M1).
     let suspectBlock = null;
+    let mtimeMs = null;
     try {
-      const mtimeMs = statSync(join(input.cwd, rel)).mtimeMs;
+      mtimeMs = statSync(join(input.cwd, rel)).mtimeMs;
+    } catch (e) {
+      // The file may have been removed or an ancestor replaced after PostToolUse.
+      if (e?.code !== 'ENOENT' && e?.code !== 'ENOTDIR') throw e;
+    }
+    if (mtimeMs !== null) {
       const escapedRel = rel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       // Negative lookbehind on a path/word character keeps a citation of a
       // DIFFERENT file that merely ENDS with `rel` (e.g. 'other/src/a.mjs:7'
@@ -222,8 +194,6 @@ function main(input) {
         suspects.push({ record, tokens });
       }
       if (suspects.length) suspectBlock = lineSuspectBlock(suspects, charCap);
-    } catch {
-      // stat failure or any scan error: skip the advisory silently (warn-only).
     }
 
     // Hazards LEAD: "do not do this here" outranks the description of what the
@@ -244,16 +214,8 @@ function main(input) {
 
     // FRONT PORCH — DIRECT-INJECT PATH ONLY (decision 0050a536 §5 amendment,
     // 2026-09-08, evidence 5d2a527f; Codex thread 01a07f97). `payload` above is
-    // built ONCE, ahead of the mode branch, and stays exactly what it always
-    // was: it is what ENQUEUE stores in the pending queue (so the drain's later
-    // output is byte-identical to before this change — the porch must never
-    // leak into what gets queued), and it is also the INJECT fallback whenever
-    // the porch itself has nothing to add (budget 0, MISCONFIGURED, or the
-    // hazards-and-owners-both-empty case renderPorch itself declines). Building
-    // a SEPARATE `injectPayload`, computed only for `mode === 'inject'`, is what
-    // keeps those two shapes from ever being the same assembly step — porching
-    // the shared builder unconditionally would have changed the enqueued
-    // payload too, exactly the mistake this restructuring exists to avoid.
+    // built ONCE ahead of the mode branch and is the fallback whenever the porch
+    // has nothing to add (budget 0, misconfiguration, or no porchable content).
     //
     // Gated on `!unowned`: the porch's header claims 'owning knowledge for
     // <rel>' (porchHeaderLine), which is the wrong claim over unowned
@@ -381,61 +343,13 @@ function main(input) {
     // residue-on-inject, which would double-deliver every healthy payload to hedge it.
     const recordDelivered = () => {
       // Inject path: guard only what the capped payload actually names by id.
-      markDelivered(guard, mode === 'inject' ? recordsShownIn(injectPayload, fresh) : fresh);
+      markDelivered(guard, recordsShownIn(injectPayload, fresh));
       if (frontierFresh) guard.frontier_files.push(rel);
       writeGuard(gPath, guard);
     };
 
-    if (mode === 'enqueue') {
-      // RENDER RECIPE beside the payload (decision db3392db part 2): the queue
-      // injects one turn later, so the drain re-reads these ids and rebuilds the
-      // payload from CURRENT records — the pre-rendered `payload` above survives
-      // only as the fallback for a drain that cannot reach the store.
-      //
-      // THE ID LISTS ARE THE SHOWN (POST-CAP) SLICES, with what the caps SUPPRESSED
-      // carried alongside as counts (fixer F3). The earlier shape stored the
-      // UNCAPPED fresh sets and let the drain re-apply the caps, which silently
-      // PROMOTES: a hazard capped out of this payload, whose more-severe sibling is
-      // superseded by drain time, would surface in the drained text as though it
-      // had been delivered here — and the guard never marked it delivered, so the
-      // reader gets it twice, once as a record they were never shown. The counts
-      // are what let the drain replay the original '… N more NOT shown' tail
-      // without holding the ids it must not render.
-      if (!enqueuePending(pendingPath(input.cwd), {
-        kind: unowned ? 'frontier' : 'delivery',
-        rel,
-        payload,
-        recipe: rerenderRecipe({
-          rel,
-          unowned,
-          charCap,
-          hazardIds: shownHazards.map((r) => r.id),
-          ownerIds: freshOwners.map((r) => r.id),
-          decisionIds: shownDecisions.map((r) => r.id),
-          hazardTail: freshHazards.length - shownHazards.length,
-          cachedHazardBlocks: renderHazards(shownHazards, charCap, { fileKeys: [rel] }),
-          decisionTail: freshDecisions.length - shownDecisions.length,
-          // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
-          // It reads as a note about the FILE's line positions, but every one of its
-          // lines is labelled with the CITING RECORD's own title/slug/id, so
-          // replaying it verbatim at drain would serve cached per-record text for a
-          // record that may have been superseded or deleted meanwhile — the same leak
-          // the pointer channel was rebuilt to close. It therefore rides `suspects`
-          // as {id, line} entries and is re-resolved there; `trailing_blocks` is
-          // reserved for text with no record id in it at all.
-          suspects: suspectBlock,
-        }),
-        agent_id: input.agent_id ?? 'conductor',
-      })) throw new Error('delivery queue lock timeout');
-      // ENQUEUE'S BOOKKEEPING STAYS POSITIONAL — immediately after a successful
-      // enqueuePending, exactly as before: there is no stream callback on this
-      // path, and a throw above leaves the guard untouched for the next touch.
-      recordDelivered();
-      return allow();
-    }
-
     return exitAfterWrite(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: injectPayload } }),
+      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: `${migrationNotice ? `${migrationNotice}\n\n` : ''}${injectPayload}` } }),
       0,
       { onWritten: recordDelivered }
     );

@@ -222,9 +222,8 @@ test('AC3: a record superseded by knowledge_update (new id, same slug) does not 
     const alpha = store.create(article('alpha', ['src/a.mjs']));
     const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
     assert.equal(first.code, 0, first.stderr);
-    let pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'fixture sanity: alpha delivered once');
-    assert.match(pending[0].payload, /alpha does the alpha thing/);
+    let payload = JSON.parse(first.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct read transport.
+    assert.match(payload, /alpha does the alpha thing/);
 
     // Simulate a knowledge_update: the store's supersede path mints a NEW id for
     // the SAME lineage/slug — this is the exact shape a fix-it-forward correction
@@ -247,17 +246,15 @@ test('AC3: a record superseded by knowledge_update (new id, same slug) does not 
     // (reconciled) knowledge the reader already saw.
     const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
     assert.equal(second.code, 0, second.stderr);
-    pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'an edited version of already-delivered knowledge must not re-deliver');
+    assert.equal(second.stdout, '', '2026-09-19: an edited version of already-delivered knowledge must not re-deliver directly');
 
     // Scope growth must still re-arm: a genuinely NEW article (different lineage)
     // added to the SAME path is new knowledge, not a re-delivery of old knowledge.
     store.create(article('gamma', ['src/a.mjs']));
     const third = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
     assert.equal(third.code, 0, third.stderr);
-    pending = pendingOf(dir);
-    assert.equal(pending.length, 2, 'a genuinely new record on the same path still delivers');
-    assert.match(pending[1].payload, /gamma does the gamma thing/);
+    payload = JSON.parse(third.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct read transport.
+    assert.match(payload, /gamma does the gamma thing/);
   } finally {
     cleanup();
   }
@@ -274,10 +271,10 @@ test('AC4 (smoke): an unchanged record does not re-deliver on a repeat touch of 
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1);
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1, 'no repeat delivery for an unchanged record (regression against h19-delivery.test.mjs)');
+    const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, /alpha does the alpha thing/); // 2026-09-19: direct read transport.
+    const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(second.stdout, '', '2026-09-19: no repeat direct delivery for an unchanged record');
   } finally {
     cleanup();
   }

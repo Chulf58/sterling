@@ -5060,7 +5060,9 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -8215,7 +8217,7 @@ async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, 
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, rmSync as rmSync2, renameSync as renameSync3, statSync as statSync3, readdirSync as readdirSync2 } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
 import { join as join5, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
   return join5(cwd, ".sterling", "transient", "delivery");

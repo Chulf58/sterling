@@ -4912,7 +4912,9 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5147,9 +5149,6 @@ import { join as join2, dirname as dirname2 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
-function pendingPath(cwd) {
-  return join2(deliveryDir(cwd), "pending.json");
-}
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
   "anti_pattern",
@@ -5201,10 +5200,7 @@ function payloadHeaderLine(rel) {
 var input = readStdin();
 var dir = deliveryDir(input.cwd);
 var rotationNotePath = join3(input.cwd, ".sterling", "transient", "rotation-note.json");
-if (existsSync2(rotationNotePath)) {
-  const p = pendingPath(input.cwd);
-  if (existsSync2(p)) rmSync(p, { force: true });
-} else if (existsSync2(dir)) {
+if (!existsSync2(rotationNotePath) && existsSync2(dir)) {
   rmSync(dir, { recursive: true, force: true });
 }
 allow();

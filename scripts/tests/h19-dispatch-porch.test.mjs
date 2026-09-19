@@ -1868,35 +1868,24 @@ test('F1f: on the tool-time block clause (5)\'s subject clause is absent or read
 // path-channel label — the pathDecisions assertion goes red first, which is
 // why the parse controls are placed AHEAD of the negative.
 
-test('F2a: SCOPE — the porch is NOT applied at ENQUEUE time: no file the queue writes under .sterling/transient/delivery/ contains a porch-end line, in any decoding', () => {
+test('F2a: SCOPE — Read emits the porch directly and creates no delayed-delivery artifact', () => {
   const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: 'prompt', preview_budget_bytes: DEFAULT_BUDGET } });
   try {
     seedOwners(store, 4);
     seedHazards(store, 3);
     seedRulings(store, 2);
-    const enqueue = runHook(
+    const direct = runHook(
       'h19-knowledge-delivery.mjs',
       { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: join(dir, 'src/a.mjs') }, cwd: dir },
       dir
     );
-    assert.equal(enqueue.code, 0, enqueue.stderr);
-    const cands = queuedTexts(dir);
-    // CONTROL FIRST: something really was enqueued, and the search actually
-    // reaches its content. Either shape counts — a rendered payload (the
-    // owner slug / the H19 header) or an id-referencing entry.
-    const evidence = cands.filter(({ text }) => text.includes('own-0') || text.includes(OWNER_IDS[0]) || /STERLING KNOWLEDGE DELIVERY/.test(text));
-    assert.ok(
-      evidence.length > 0,
-      `CONTROL FAILED: nothing under .sterling/transient/delivery/ references the delivery, so "no porch in the queued payload" would be vacuous. files=${JSON.stringify(walkFiles(join(dir, '.sterling', 'transient', 'delivery')))}`
-    );
-    const withPorch = cands.filter(({ text }) => porchEndLine(text) !== null);
-    assert.deepEqual(
-      withPorch.map(({ file }) => file),
-      [],
-      `clause (5): the porch is not applied at enqueue time, so the queue payload is unchanged. Found a porch-end line in: ${JSON.stringify(
-        withPorch.map(({ file, text }) => ({ file, line: porchEndLine(text) }))
-      )}`
-    );
+    assert.equal(direct.code, 0, direct.stderr);
+    const context = JSON.parse(direct.stdout).hookSpecificOutput.additionalContext;
+    assert.match(context, /own-0|STERLING KNOWLEDGE DELIVERY/, 'control: direct stdout carries delivery content');
+    assert.ok(porchEndLine(context), 'the direct payload carries the porch contract');
+    for (const name of ['pending.json', 'pending.lock', 'recipes.json']) {
+      assert.equal(existsSync(join(dir, '.sterling', 'transient', 'delivery', name)), false, `${name} must not return`);
+    }
   } finally {
     cleanup();
   }
@@ -1909,33 +1898,6 @@ test('F2a: SCOPE — the porch is NOT applied at ENQUEUE time: no file the queue
 // arm is trivially satisfied and F2b below is what holds the line. Stated
 // here rather than assumed, because a pin whose load-bearing guard is unknown
 // is a pin that can go hollow without anyone noticing.
-
-test('F2b: SCOPE — the drain (h19-delivery-drain.mjs) injects the queued payload with NO porch-end line', () => {
-  const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: 'prompt', preview_budget_bytes: DEFAULT_BUDGET } });
-  try {
-    seedOwners(store, 4);
-    seedHazards(store, 3);
-    seedRulings(store, 2);
-    const enqueue = runHook(
-      'h19-knowledge-delivery.mjs',
-      { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: join(dir, 'src/a.mjs') }, cwd: dir },
-      dir
-    );
-    assert.equal(enqueue.code, 0, enqueue.stderr);
-    const drain = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(drain.code, 0, drain.stderr);
-    const ctx = JSON.parse(drain.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /own-0/, 'positive control: the drain really did inject the queued payload');
-    assert.equal(porchEndLine(ctx), null, `the drain must emit no porch until that surface is measured separately (clause (5): one porch per batch is only the LIKELY shape); found: ${porchEndLine(ctx)}`);
-  } finally {
-    cleanup();
-  }
-});
-// SABOTAGE: render the porch inside the queued payload at enqueue time (so
-// the drain carries it), or add a porch to the drain's own output — this pin
-// goes red. Second sabotage, the one this arm alone catches: enqueue WITH a
-// porch and strip it at drain time — F2a goes red while this stays green, so
-// the two arms are not redundant.
 
 // ===========================================================================
 // (g) renderArticle's header, on every surface (decision §6).

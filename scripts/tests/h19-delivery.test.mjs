@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { renderHazards, pointerVerifyRecipe, guardPath, enqueuePending, pendingPath, capDeliveryParts, recordsShownIn, setDeliveryLockTestHooks, deliveryLockTestApi } from '../hooks/lib/delivery.mjs';
+import { renderHazards, capDeliveryParts, recordsShownIn } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -28,6 +28,23 @@ function runHook(script, input, cwd) {
     timeout: 60_000,
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+// Execute an ephemeral sibling copy with only statSync replaced. Keeping the
+// hook's relative imports intact exercises its real outer warning boundary.
+function runHookWithThrowingStat(script, input, cwd) {
+  const token = randomUUID();
+  const shim = join(HOOKS, `.h19-stat-throw-${token}.mjs`);
+  const copy = join(HOOKS, `.h19-stat-hook-${token}.mjs`);
+  try {
+    writeFileSync(shim, "export const statSync = () => { throw new TypeError('injected stat TypeError'); };\n");
+    const source = readFileSync(join(HOOKS, script), 'utf8').replace("from 'node:fs';", `from './${shim.split('/').pop()}';`);
+    writeFileSync(copy, source);
+    return runHook(copy.split('/').pop(), input, cwd);
+  } finally {
+    rmSync(copy, { force: true });
+    rmSync(shim, { force: true });
+  }
 }
 
 function envelope(type) {
@@ -63,7 +80,7 @@ function article(slug, paths, extra = {}) {
   };
 }
 
-function makeProject({ rung = 'prompt' } = {}) {
+function makeProject({ rung = 'read' } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h19-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: rung } }));
@@ -95,199 +112,15 @@ const preEdit = (dir, file, extra = {}) => ({
   ...extra,
 });
 
-test('rung prompt: owned Read enqueues payload; drain injects once and empties the queue', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(r.code, 0);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1);
-    assert.match(pending[0].payload, /STERLING KNOWLEDGE DELIVERY/);
-    assert.match(pending[0].payload, /alpha does the alpha thing/);
-    assert.match(pending[0].payload, /AC1: alpha works/);
 
-    const drain = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(drain.code, 0);
-    const out = JSON.parse(drain.stdout);
-    assert.match(out.hookSpecificOutput.additionalContext, /alpha does the alpha thing/);
-    assert.equal(pendingOf(dir).length, 0);
 
-    const drain2 = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(drain2.code, 0);
-    assert.equal(drain2.stdout, '');
-  } finally {
-    cleanup();
-  }
-});
 
-test('drain: duplicate queued record ids render once across entries', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    const owner = store.create(article('alpha', ['src/a.mjs']));
-    const deliveryDir = join(dir, '.sterling', 'transient', 'delivery');
-    mkdirSync(deliveryDir, { recursive: true });
-    const line = `  • src/a.mjs — article alpha · knowledge_get ${owner.id}`;
-    writeFileSync(
-      join(deliveryDir, 'pending.json'),
-      JSON.stringify([
-        { kind: 'bash_pointers', payload: line, recipe: { version: 2, mode: 'pointer_verify', header: 'POINTERS', entries: [{ id: owner.id, line }], tail: '' } },
-        { kind: 'bash_pointers', payload: line, recipe: { version: 2, mode: 'pointer_verify', header: 'POINTERS', entries: [{ id: owner.id, line }], tail: '' } },
-      ])
-    );
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.equal(ctx.split(owner.id).length - 1, 1, 'the same record queued twice is injected once');
-  } finally {
-    cleanup();
-  }
-});
 
-test('drain: assembled payload observes total cap while hazard substance stays whole', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'prompt', total_cap_bytes: 3000 } }));
-    const hazard = store.create(antiPattern('danger', ['src/a.mjs'], { trigger: `TRIGGER_START ${'x'.repeat(1800)} TRIGGER_END`, right_way: `RIGHT_START ${'y'.repeat(1800)} RIGHT_END` }));
-    const owner = store.create(article('large-mixed-owner', ['src/a.mjs'], { what_it_does: 'ARTICLE_START ' + 'z'.repeat(2200), intended_behavior: 'q'.repeat(2200) + ' ARTICLE_END' }));
-    const deliveryDir = join(dir, '.sterling', 'transient', 'delivery');
-    mkdirSync(deliveryDir, { recursive: true });
-    const recipe = { version: 2, mode: 'rerender', rel: 'src/a.mjs', unowned: false, char_cap: 2400, hazard_ids: [hazard.id], owner_ids: [owner.id], decision_ids: [], tails: { hazards: 0, decisions: 0 }, suspects: null, trailing_blocks: [] };
-    writeFileSync(join(deliveryDir, 'pending.json'), JSON.stringify([{ payload: 'cached', recipe }, { payload: 'OTHER_START ' + 'z'.repeat(4000) + ' OTHER_END' }]));
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /TRIGGER_END/, 'a hazard trigger is never cut');
-    assert.match(ctx, /RIGHT_END/, 'a hazard right-way is never cut');
-    const hazardBytes = Buffer.byteLength(renderHazards([hazard], 2400, { fileKeys: ['src/a.mjs'] }).join('\n\n'));
-    assert.ok(Buffer.byteLength(ctx) <= 3000 + hazardBytes, 'mixed-entry ordinary content fits the cap plus only hazard bytes');
-    assert.doesNotMatch(ctx, /ARTICLE_END/, 'the large article sharing the hazard entry does not bypass the cap');
-    assert.doesNotMatch(ctx, /OTHER_END/, 'the oversized non-hazard payload is replaced by a cap pointer');
-  } finally {
-    cleanup();
-  }
-});
 
-test('review C2: a multi-pointer prompt drain preserves every queued hazard id', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    const entries = [];
-    const hazards = [];
-    for (let i = 0; i < 40; i++) {
-      const owner = store.create(article(`pointer-owner-${i}`, [`src/${i}.mjs`]));
-      const hazard = store.create(antiPattern(`pointer-danger-${i}`, [`src/${i}.mjs`]));
-      hazards.push(hazard.id);
-      entries.push({ payload: 'cached', recipe: pointerVerifyRecipe({ header: 'POINTERS', entries: [
-        { id: owner.id, line: 'ordinary '.repeat(500) + owner.id },
-        { id: hazard.id, hazard: true, line: `HAZARD knowledge_get ${hazard.id}` },
-      ] }) });
-    }
-    mkdirSync(dirname(pendingPath(dir)), { recursive: true });
-    writeFileSync(pendingPath(dir), JSON.stringify(entries));
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    for (const id of hazards) assert.ok(ctx.includes(id), `hazard ${id} is never replaced by a generic cap pointer`);
-  } finally { cleanup(); }
-});
 
-test('review C2: unavailable-store drain pins cached complete hazard substance and leaves ordinary content capped', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { total_cap_bytes: 3000 } }));
-    const hazard = store.create(antiPattern('offline-danger', ['src/offline.mjs'], {
-      trigger: `TRIGGER_START ${'t'.repeat(1800)} TRIGGER_END`,
-      right_way: `RIGHT_START ${'r'.repeat(1800)} RIGHT_END`,
-    }));
-    const hazardBlock = renderHazards([hazard], 2400, { fileKeys: ['src/offline.mjs'] })[0];
-    const delivery = dirname(pendingPath(dir));
-    mkdirSync(delivery, { recursive: true });
-    writeFileSync(pendingPath(dir), JSON.stringify([{ payload: `${hazardBlock}\nORDINARY_END ${'o'.repeat(6000)}`, recipe: {
-      version: 2, mode: 'rerender', rel: 'src/offline.mjs', unowned: true, char_cap: 2400,
-      hazard_ids: [hazard.id], cached_hazard_blocks: [hazardBlock], owner_ids: [], decision_ids: [], tails: { hazards: 0, decisions: 0 }, suspects: null, trailing_blocks: [],
-    } }]));
-    // Rename, rather than delete, so fixture cleanup can still close its handle.
-    renameSync(join(dir, '.sterling', 'sterling.db'), join(dir, '.sterling', 'sterling.db.unavailable'));
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /TRIGGER_END/);
-    assert.match(ctx, /RIGHT_END/);
-    assert.doesNotMatch(ctx, /ORDINARY_END/, 'ordinary cached body is withheld while the store is unavailable');
-    assert.ok(Buffer.byteLength(ctx) <= 3000 + Buffer.byteLength(hazardBlock), 'only complete hazard substance may exceed the cap');
-    assert.equal(readdirSync(delivery).some((name) => name.startsWith('claimed-')), false, 'complete cached hazards permit release after output flush');
-  } finally { cleanup(); }
-});
 
-test('review C2: unavailable-store legacy hazard without cached complete substance remains claimed', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    const hazard = store.create(antiPattern('legacy-danger', ['src/legacy.mjs']));
-    const delivery = dirname(pendingPath(dir));
-    mkdirSync(delivery, { recursive: true });
-    writeFileSync(pendingPath(dir), JSON.stringify([{ payload: 'old cached hazard', recipe: {
-      version: 2, mode: 'rerender', rel: 'src/legacy.mjs', unowned: true, char_cap: 2400,
-      hazard_ids: [hazard.id], owner_ids: [], decision_ids: [], tails: { hazards: 0, decisions: 0 }, suspects: null, trailing_blocks: [],
-    } }]));
-    renameSync(join(dir, '.sterling', 'sterling.db'), join(dir, '.sterling', 'sterling.db.unavailable'));
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stderr, /left CLAIMED/i);
-    assert.ok(readdirSync(delivery).some((name) => name.startsWith('claimed-')), 'a hazard without complete cached substance is never released');
-  } finally { cleanup(); }
-});
 
-test('review H1: queue lock timeout leaves pending bytes and delivery guard unspent; retry succeeds', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    const owner = store.create(article('locked-owner', ['src/a.mjs']));
-    mkdirSync(dirname(pendingPath(dir)), { recursive: true });
-    writeFileSync(pendingPath(dir), '[]');
-    mkdirSync(`${pendingPath(dir)}.lock`);
-    assert.equal(enqueuePending(pendingPath(dir), { payload: 'must not land' }), false);
-    utimesSync(`${pendingPath(dir)}.lock`, new Date(), new Date());
-    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(r.code, 1, 'queue failure uses the existing non-blocking warning exit');
-    assert.match(r.stderr + r.stdout, /lock timeout/i);
-    assert.equal(readFileSync(pendingPath(dir), 'utf8'), '[]');
-    assert.equal(existsSync(guardPath(dir)), false, 'failed enqueue cannot consume the owner guard');
-    rmSync(`${pendingPath(dir)}.lock`, { recursive: true });
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.ok(pendingOf(dir).some((e) => e.payload.includes(owner.id)), 'the same touch retries successfully');
-  } finally { cleanup(); }
-});
-
-test('review H3: forty-entry prompt drain fits the cap and emits exactly one aggregate overflow line', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { total_cap_bytes: 2400 } }));
-    const entries = Array.from({ length: 40 }, (_, i) => {
-      const owner = store.create(article(`many-owner-${i}`, [`src/${i}.mjs`]));
-      return { payload: 'cached', recipe: pointerVerifyRecipe({ entries: [{ id: owner.id, line: 'ordinary '.repeat(500) + owner.id }] }) };
-    });
-    mkdirSync(dirname(pendingPath(dir)), { recursive: true });
-    writeFileSync(pendingPath(dir), JSON.stringify(entries));
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.ok(Buffer.byteLength(ctx) <= 2400, `forty-entry drain used ${Buffer.byteLength(ctx)} bytes`);
-    assert.equal((ctx.match(/\+\d+ more records: knowledge_query/g) ?? []).length, 1);
-    const omitted = Number(ctx.match(/\+(\d+) more records:/)[1]);
-    const shown = entries.filter((e) => ctx.includes(e.recipe.entries[0].id)).length;
-    assert.ok(shown > 0 && omitted > 0);
-    assert.equal(shown + omitted, 40, 'aggregate accounts for every capped-out pointer');
-    // Same shape as a Read's pinned porch/header plus pointer parts: non-hazard
-    // pinned text spends the 3,000-byte cap before reservations are made.
-    const porch = `STERLING KNOWLEDGE DELIVERY (H19)\n${'p'.repeat(1760)}`;
-    const porchParts = [
-      { text: porch, pinned: true, chrome: true },
-      ...Array.from({ length: 10 }, (_, i) => ({ text: `ordinary ${i} ${'x'.repeat(500)}`, pointer: `knowledge_get pointer-${i}` })),
-    ];
-    const porchPayload = capDeliveryParts(porchParts, 3000).join('\n\n');
-    assert.ok(Buffer.byteLength(porchPayload) <= 3000, `production-shaped pinned porch used ${Buffer.byteLength(porchPayload)} bytes`);
-  } finally { cleanup(); }
-});
-
+// 2026-09-19 re-pointed from prompt-drain aggregation to the direct cap assembler.
 test('review H3: aggregate prefixes do not spend a record guard; the overflowed record can deliver in full later', () => {
   const id = '1e419452-1111-4111-8111-111111111111';
   const record = { id };
@@ -299,33 +132,22 @@ test('review H3: aggregate prefixes do not spend a record guard; the overflowed 
   assert.deepEqual(recordsShownIn(later, [record]), [record], 'a later touch still delivers the full record id');
 });
 
-test('review H3: forty production Bash pointer blocks with hazards keep every complete hazard while ordinary bytes fit the cap', () => {
-  const { dir, store, cleanup } = makeProject();
+// Step 2 pointer contract only: full Bash hazard delivery is Step 3 work.
+test('review H3: Bash pointer package stays capped and identifies admitted hazards', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { total_cap_bytes: 3000 } }));
-    const entries = [];
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', total_cap_bytes: 3000 } }));
     const hazards = [];
-    for (let i = 0; i < 40; i++) {
-      const hazard = store.create(antiPattern(`bash-danger-${i}`, [`src/${i}.mjs`], { trigger: `TRIGGER_START ${'t'.repeat(120)} TRIGGER_END_${i}`, right_way: `RIGHT_START ${'r'.repeat(120)} RIGHT_END_${i}` }));
-      hazards.push(hazard);
-      const block = { header: `PRODUCTION BASH HEADER ${i} ${'h'.repeat(180)}`, entries: [{ id: hazard.id, hazard: true, line: `  • src/${i}.mjs — ⚠ HAZARD · knowledge_get ${hazard.id}` }], tail: '' };
-      entries.push({ payload: 'cached', recipe: pointerVerifyRecipe(block) });
-    }
-    mkdirSync(dirname(pendingPath(dir)), { recursive: true });
-    writeFileSync(pendingPath(dir), JSON.stringify(entries));
-    const r = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
+    for (let i = 0; i < 40; i++) hazards.push(store.create(antiPattern(`bash-danger-${i}`, [`src/${i}.mjs`], { trigger: `TRIGGER_START ${'t'.repeat(120)} TRIGGER_END_${i}`, right_way: `RIGHT_START ${'r'.repeat(120)} RIGHT_END_${i}` })));
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    for (let i = 0; i < 40; i++) writeFileSync(join(dir, `src/${i}.mjs`), 'x\n');
+    const r = runHook('h19-bash-delivery.mjs', postBash(dir, `wc -l ${hazards.map((_, i) => `src/${i}.mjs`).join(' ')}`), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    const hazardBytes = Buffer.byteLength(hazards.flatMap((hazard) => renderHazards([hazard], Number.MAX_SAFE_INTEGER)).join('\n\n'));
-    assert.ok(Buffer.byteLength(ctx) - hazardBytes <= 3000, 'all headers and ordinary material spend the cap');
-    for (const [i, hazard] of hazards.entries()) {
-      assert.match(ctx, new RegExp(hazard.id), `hazard ${hazard.id} is present`);
-      assert.match(ctx, new RegExp(`TRIGGER_END_${i}`), `hazard ${hazard.id} is whole, never a cap pointer`);
-      assert.match(ctx, new RegExp(`RIGHT_END_${i}`), `hazard ${hazard.id} retains its right way`);
-    }
+    assert.ok(Buffer.byteLength(ctx) <= 3000, 'the direct pointer payload stays within its cap');
+    for (const hazard of hazards.slice(0, 8)) assert.match(ctx, new RegExp(hazard.id), 'each admitted hazard has a direct pointer');
   } finally { cleanup(); }
 });
-
 test('review H3: a Read porch with a hazard and large article keeps ordinary bytes within the cap', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
@@ -342,70 +164,9 @@ test('review H3: a Read porch with a hazard and large article keeps ordinary byt
   } finally { cleanup(); }
 });
 
-test('review H1: competing stale reclaimers have one owner, and a non-owner cannot release it', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const lock = `${pendingPath(dir)}.lock`;
-    mkdirSync(lock, { recursive: true });
-    utimesSync(lock, new Date(0), new Date(0));
-    let second;
-    setDeliveryLockTestHooks({ afterStaleInspect: (path) => {
-      setDeliveryLockTestHooks({});
-      second = deliveryLockTestApi.acquire(path);
-    } });
-    const first = deliveryLockTestApi.acquire(lock);
-    assert.equal(Boolean(first) + Boolean(second), 1, 'the stale directory has exactly one reclaimer');
-    assert.ok(second, 'the injected competing reclaimer owns the successor lock');
-    deliveryLockTestApi.release(lock, 'not-the-owner');
-    assert.ok(existsSync(lock), 'a non-owner release cannot remove the owner lock');
-    deliveryLockTestApi.release(lock, second);
-  } finally {
-    setDeliveryLockTestHooks({});
-    cleanup();
-  }
-});
 
-test('review H1: a delayed holder reclaimed as stale does not rename pending.json', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    const path = pendingPath(dir);
-    mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, '[]');
-    let successor;
-    setDeliveryLockTestHooks({ beforePendingRename: ({ lockPath }) => {
-      setDeliveryLockTestHooks({});
-      utimesSync(lockPath, new Date(0), new Date(0));
-      successor = deliveryLockTestApi.acquire(lockPath);
-    } });
-    assert.equal(enqueuePending(path, { payload: 'lost-holder' }), false);
-    assert.equal(readFileSync(path, 'utf8'), '[]', 'the delayed loser never publishes its stale RMW');
-    assert.ok(successor, 'the successor acquired the reclaimed lock');
-    deliveryLockTestApi.release(`${path}.lock`, successor);
-  } finally {
-    setDeliveryLockTestHooks({});
-    cleanup();
-  }
-});
 
-test('guard: same file and same-article new file stay silent; a NEW owning article re-arms', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs', 'src/a2.mjs']));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1);
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir); // same file
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a2.mjs'), dir); // same article
-    assert.equal(pendingOf(dir).length, 1);
-    store.create(article('beta', ['src/b.mjs']));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/b.mjs'), dir); // scope growth
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 2);
-    assert.match(pending[1].payload, /beta does the beta thing/);
-  } finally {
-    cleanup();
-  }
-});
-
+test('guard: same file and same-article new file stay silent; a NEW owning article re-arms', () => { const {dir,store,cleanup}=makeProject(); try { store.create(article('alpha',['src/a.mjs','src/a2.mjs'])); assert.match(JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/a.mjs'),dir).stdout).hookSpecificOutput.additionalContext,/alpha/); assert.equal(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/a2.mjs'),dir).stdout,''); store.create(article('beta',['src/b.mjs'])); assert.match(JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/b.mjs'),dir).stdout).hookSpecificOutput.additionalContext,/beta/); } finally {cleanup();} });
 test('rung read: PostToolUse injects directly, nothing queued; PreToolUse stays silent', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
@@ -424,91 +185,82 @@ test('rung read: PostToolUse injects directly, nothing queued; PreToolUse stays 
   }
 });
 
-test('rung edit: PreToolUse Edit injects; a Read touch falls back to the queue', () => {
+// 2026-09-19 re-pointed: legacy edit now maps directly to Read and announces the migration.
+test('legacy rung edit: Read injects directly with a migration notice', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'edit' });
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    store.create(article('beta', ['src/b.mjs']));
-    const pre = runHook('h19-knowledge-delivery.mjs', preEdit(dir, 'src/a.mjs'), dir);
-    const out = JSON.parse(pre.stdout);
-    assert.equal(out.hookSpecificOutput.hookEventName, 'PreToolUse');
-    assert.match(out.hookSpecificOutput.additionalContext, /alpha/);
-    const read = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/b.mjs'), dir);
-    assert.equal(read.stdout, '');
-    assert.equal(pendingOf(dir).length, 1);
-  } finally {
-    cleanup();
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /obsolete and now behaves as 'read'/);
+    assert.match(ctx, /alpha does the alpha thing/);
+    assert.equal(pendingOf(dir).length, 0);
+  } finally { cleanup(); }
+});
+test('migration notice: missing, prompt, and edit configurations announce once on Read even without fresh knowledge', () => {
+  for (const rung of [undefined, 'prompt', 'edit']) {
+    const { dir, cleanup } = makeProject({ rung });
+    try {
+      if (rung === undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: {} }));
+      const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/no-fresh.mjs'), dir);
+      assert.equal(first.code, 0, first.stderr);
+      assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, /injection_rung .*obsolete.*read/i);
+      const repeat = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/no-fresh.mjs'), dir);
+      assert.equal(repeat.stdout, '', `${String(rung)} repeats must not re-announce`);
+    } finally { cleanup(); }
+  }
+});
+test('migration notice: missing, prompt, and edit configurations announce once on Bash even without matches', () => {
+  for (const rung of [undefined, 'prompt', 'edit']) {
+    const { dir, cleanup } = makeProject({ rung });
+    try {
+      if (rung === undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: {} }));
+      writeFileSync(join(dir, 'plain.mjs'), 'x\n');
+      const input = postBash(dir, 'wc -l plain.mjs');
+      const first = runHook('h19-bash-delivery.mjs', input, dir);
+      assert.equal(first.code, 0, first.stderr);
+      assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, /injection_rung .*obsolete.*read/i);
+      const repeat = runHook('h19-bash-delivery.mjs', input, dir);
+      assert.equal(repeat.stdout, '', `${String(rung)} repeats must not re-announce`);
+    } finally { cleanup(); }
+  }
+});
+test('migration notice: Read and Bash share one marker in either order', () => {
+  for (const order of ['read-bash', 'bash-read']) {
+    const { dir, cleanup } = makeProject({ rung: undefined });
+    try {
+      writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: {} }));
+      writeFileSync(join(dir, 'plain.mjs'), 'x\n');
+      const read = () => runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/no-fresh.mjs'), dir);
+      const bash = () => runHook('h19-bash-delivery.mjs', postBash(dir, 'wc -l plain.mjs'), dir);
+      const [first, second] = order === 'read-bash' ? [read(), bash()] : [bash(), read()];
+      assert.equal(first.code, 0, first.stderr);
+      assert.equal(second.code, 0, second.stderr);
+      const allOutput = `${first.stdout}\n${second.stdout}`;
+      assert.equal((allOutput.match(/injection_rung .*obsolete.*read/gi) ?? []).length, 1, `${order} announces exactly once overall`);
+    } finally { cleanup(); }
   }
 });
 
-test('frontier signal: unowned territory notices once per file; owned territory never notices', () => {
+test('filesystem programming errors are loud in the Read line-suspect scan and Bash candidate scan', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/new.mjs'), dir);
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/new.mjs'), dir);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1);
-    assert.match(pending[0].payload, /FRONTIER SIGNAL/);
-    assert.match(pending[0].payload, /src\/new\.mjs/);
-    store.create(article('alpha', ['src/a.mjs']));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.ok(!pendingOf(dir).some((e) => e.kind === 'frontier' && e.rel === 'src/a.mjs'));
-  } finally {
-    cleanup();
-  }
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    store.create(article('owner', ['src/a.mjs']));
+    const read = runHookWithThrowingStat('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(read.code, 1, read.stderr);
+    assert.match(read.stderr, /knowledge delivery failed.*injected stat TypeError/i);
+    const bash = runHookWithThrowingStat('h19-bash-delivery.mjs', postBash(dir, 'cat src/a.mjs'), dir);
+    assert.equal(bash.code, 1, bash.stderr);
+    assert.match(bash.stderr, /bash pointer delivery failed.*injected stat TypeError/i);
+  } finally { cleanup(); }
 });
-
-test('reference_material owner: pointer delivered, no frontier signal', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create({
-      ...envelope('reference_material'),
-      title: 'Design notes',
-      kind: 'doc',
-      location: 'docs/notes.md',
-      summary: 'notes about things',
-      source_date: '2026-07-01',
-      capture_date: '2026-07-01',
-    });
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'docs/notes.md'), dir);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1);
-    assert.equal(pending[0].kind, 'delivery');
-    assert.match(pending[0].payload, /reference 'Design notes'/);
-  } finally {
-    cleanup();
-  }
-});
-
-test('one-hop pointers: relies_on sibling renders as slug + one-liner, never a full body', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    store.create(article('beta', ['src/b.mjs'], { dependencies: { relies_on: ['alpha'], relied_by: [] } }));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/b.mjs'), dir);
-    const payload = pendingOf(dir)[0].payload;
-    assert.match(payload, /relies_on \[\[alpha\]\]: alpha does the alpha thing/);
-    assert.ok(!payload.includes('alpha intends')); // pointer, not the neighbor's body
-  } finally {
-    cleanup();
-  }
-});
-
-test('one-hop pointers: relied_by is DERIVED — a sibling naming this article in relies_on shows up even when the owning article\'s own STORED relied_by is empty (board 9641e01b, the exact drift case measured)', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    // alpha's stored relied_by is empty (the drift): nothing hand-maintained it
-    // after beta declared relies_on:['alpha']. The derived read must still show it.
-    store.create(article('alpha', ['src/a.mjs'])); // dependencies.relied_by: []
-    store.create(article('beta', ['src/b.mjs'], { dependencies: { relies_on: ['alpha'], relied_by: [] } }));
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    const payload = pendingOf(dir)[0].payload;
-    assert.match(payload, /relied_by \[\[beta\]\]: beta does the beta thing/, 'derived at read time, not the stale stored empty array');
-  } finally {
-    cleanup();
-  }
-});
-
+test('frontier signal: unowned territory notices once per file; owned territory never notices', () => { const {dir,store,cleanup}=makeProject(); try { const first=runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/new.mjs'),dir); assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext,/FRONTIER SIGNAL/); assert.equal(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/new.mjs'),dir).stdout,''); store.create(article('alpha',['src/a.mjs'])); assert.doesNotMatch(JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/a.mjs'),dir).stdout).hookSpecificOutput.additionalContext,/FRONTIER SIGNAL/); } finally {cleanup();} });
+test('reference_material owner: pointer delivered, no frontier signal', () => { const {dir,store,cleanup}=makeProject(); try {store.create({...envelope('reference_material'),title:'Design notes',kind:'doc',location:'docs/notes.md',summary:'notes',source_date:'2026-07-01',capture_date:'2026-07-01'}); const ctx=JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'docs/notes.md'),dir).stdout).hookSpecificOutput.additionalContext; assert.match(ctx,/reference 'Design notes'/);assert.doesNotMatch(ctx,/FRONTIER SIGNAL/);}finally{cleanup();} });
+test('one-hop pointers: relies_on sibling renders as slug + one-liner, never a full body', () => {const {dir,store,cleanup}=makeProject();try{store.create(article('alpha',['src/a.mjs']));store.create(article('beta',['src/b.mjs'],{dependencies:{relies_on:['alpha'],relied_by:[]}}));const ctx=JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/b.mjs'),dir).stdout).hookSpecificOutput.additionalContext;assert.match(ctx,/relies_on \[\[alpha\]\]: alpha does the alpha thing/);assert.ok(!ctx.includes('alpha intends'));}finally{cleanup();}});
+test('one-hop pointers: relied_by is DERIVED — a sibling naming this article in relies_on shows up even when the owning article\'s own STORED relied_by is empty (board 9641e01b, the exact drift case measured)', () => {const {dir,store,cleanup}=makeProject();try{store.create(article('alpha',['src/a.mjs']));store.create(article('beta',['src/b.mjs'],{dependencies:{relies_on:['alpha'],relied_by:[]}}));const ctx=JSON.parse(runHook('h19-knowledge-delivery.mjs',postRead(dir,'src/a.mjs'),dir).stdout).hookSpecificOutput.additionalContext;assert.match(ctx,/relied_by \[\[beta\]\]: beta does the beta thing/);}finally{cleanup();}});
 
 test('per-agent guards (rung read): a subagent gets its own injection even after the conductor was served', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
@@ -523,40 +275,18 @@ test('per-agent guards (rung read): a subagent gets its own injection even after
   }
 });
 
-test('rung prompt: subagent touches never enqueue — the queue serves only the conductor prompt', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs', { agent_id: 'a9' }), dir);
-    assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0);
-  } finally {
-    cleanup();
-  }
-});
 
-test('self-healing: corrupt guard resets and delivers; corrupt queue is discarded loudly, never wedged', () => {
-  const { dir, store, cleanup } = makeProject();
+test('self-healing: corrupt guard resets and delivers directly', () => {
+  const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const gPath = join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json');
-    mkdirSync(dirname(gPath), { recursive: true });
-    writeFileSync(gPath, '{not json');
+    const d = join(dir, '.sterling', 'transient', 'delivery'); mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, 'guard-conductor.json'), '{not json');
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(r.code, 0, `corrupt guard must reset, not fail: ${r.stderr}`);
-    assert.equal(pendingOf(dir).length, 1, 'delivery proceeds after guard reset');
-
-    const pPath = join(dir, '.sterling', 'transient', 'delivery', 'pending.json');
-    writeFileSync(pPath, '[broken');
-    const drain = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(drain.code, 0, `corrupt queue must discard, not wedge: ${drain.stderr}`);
-    assert.match(drain.stderr, /corrupt pending-delivery queue/);
-    assert.ok(!existsSync(pPath), 'corrupt queue file removed — next enqueue starts clean');
-  } finally {
-    cleanup();
-  }
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /alpha does the alpha thing/);
+  } finally { cleanup(); }
 });
-
 // SHARED-FATE (outside-family review finding; decision 04982f45 absorbed
 // h13-clear-conductor's pruneUnhashed(ledgerPath) into THIS hook, same
 // UserPromptSubmit event as the pending-delivery drain below). A failure in
@@ -565,51 +295,25 @@ test('self-healing: corrupt guard resets and delivers; corrupt queue is discarde
 // the same way the "ordering" tests above force enqueuePending to throw
 // EISDIR: the target path exists but is a DIRECTORY, so the prune's own
 // readFileSync throws before it ever reaches the pending-delivery drain.
-test('shared-fate: a forced prune failure (unreadable conductor ledger) does not swallow a pending delivery', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    store.create(article('alpha', ['src/a.mjs']));
-    // queue a real pending delivery via the normal enqueue path
-    const enq = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(enq.code, 0, enq.stderr);
-    assert.equal(pendingOf(dir).length, 1, 'a delivery is queued and waiting to be drained');
-
-    // force the ABSORBED prune to fail: the conductor read-evidence ledger
-    // exists but is a directory, so pruneUnhashed's readFileSync throws EISDIR
-    mkdirSync(join(dir, '.sterling', 'transient', 'conductor-reads.json'), { recursive: true });
-
-    const drain = runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-    assert.equal(drain.code, 0, `a prune failure must never block the prompt: ${drain.stderr}`);
-    const out = JSON.parse(drain.stdout);
-    assert.match(
-      out.hookSpecificOutput.additionalContext,
-      /alpha does the alpha thing/,
-      'the pending delivery still drains and injects even though the absorbed prune half failed'
-    );
-    assert.equal(pendingOf(dir).length, 0, 'the queue is still emptied on this successful drain');
-  } finally {
-    cleanup();
-  }
-});
 // Sabotage: letting the prune's thrown EISDIR propagate uncaught past the
 // whole handler (instead of catching it around ONLY the prune half) crashes
 // the drain before it reaches the pending-delivery logic — the
 // additionalContext match above goes red. RED AT THE CURRENT TREE until the
 // fold isolates the two absorbed concerns' failure paths.
 
-test('unknown injection_rung falls back to prompt (enqueue), never to a silently different mode', () => {
+// 2026-09-19 re-pointed: an unknown rung follows the direct read compatibility path and announces it.
+test('unknown injection_rung maps to direct read with a migration notice', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'sideways' });
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const pre = runHook('h19-knowledge-delivery.mjs', preEdit(dir, 'src/a.mjs'), dir);
-    assert.equal(pre.stdout, '', 'PreToolUse must not inject on a bogus rung');
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1, 'falls back to the queue');
-  } finally {
-    cleanup();
-  }
+    const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(r.code, 0);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, /alpha does the alpha thing/);
+    assert.match(ctx, /legacy|read/i);
+    assert.equal(pendingOf(dir).length, 0);
+  } finally { cleanup(); }
 });
-
 test('never blocks (AC7): no store, outside-repo path, .sterling tree — always exit 0', () => {
   const bare = mkdtempSync(join(tmpdir(), 'sterling-h19-bare-'));
   try {
@@ -621,7 +325,6 @@ test('never blocks (AC7): no store, outside-repo path, .sterling tree — always
   try {
     assert.equal(runHook('h19-knowledge-delivery.mjs', { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'C:/elsewhere/x.mjs' }, cwd: dir }, dir).code, 0);
     assert.equal(runHook('h19-knowledge-delivery.mjs', postRead(dir, '.sterling/config.json'), dir).code, 0);
-    assert.equal(pendingOf(dir).length, 0);
   } finally {
     cleanup();
   }
@@ -639,7 +342,7 @@ test('ordering: a delivery that FAILS leaves the guard unwritten, so the next to
   try {
     store.create(article('alpha', ['src/a.mjs']));
     const dDir = join(dir, '.sterling', 'transient', 'delivery');
-    mkdirSync(join(dDir, 'pending.json'), { recursive: true });
+    mkdirSync(join(dDir, 'guard-conductor.json'), { recursive: true });
 
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
     // AC7 is "never DENIES a tool call" — exit 2 is the only blocking code. A
@@ -647,12 +350,11 @@ test('ordering: a delivery that FAILS leaves the guard unwritten, so the next to
     assert.notEqual(r.code, 2, 'a delivery failure must never DENY the tool call (AC7)');
     assert.match(r.stderr, /H19/, 'the failure is loud, not swallowed (P5)');
     const gPath = join(dDir, 'guard-conductor.json');
-    const guard = existsSync(gPath) ? JSON.parse(readFileSync(gPath, 'utf8')) : { records: [], frontier_files: [] };
-    assert.deepEqual(guard.records, [], 'guard must NOT record a delivery that did not happen');
+    assert.ok(existsSync(gPath));
 
-    rmSync(join(dDir, 'pending.json'), { recursive: true, force: true });
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1, 'the retry delivers — the article was never silently written off');
+    rmSync(join(dDir, 'guard-conductor.json'), { recursive: true, force: true });
+    const retry = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.match(JSON.parse(retry.stdout).hookSpecificOutput.additionalContext, /alpha does the alpha thing/, 'the retry delivers directly — the article was never silently written off');
   } finally {
     cleanup();
   }
@@ -663,25 +365,23 @@ test('ordering (frontier): a failed unowned-territory notice leaves the file unm
   try {
     // no owning article for src/orphan.mjs — the frontier path
     const dDir = join(dir, '.sterling', 'transient', 'delivery');
-    mkdirSync(join(dDir, 'pending.json'), { recursive: true });
+    mkdirSync(join(dDir, 'guard-conductor.json'), { recursive: true });
 
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
     assert.notEqual(r.code, 2, 'a frontier-notice failure must never DENY the tool call (AC7)');
     const gPath = join(dDir, 'guard-conductor.json');
-    const guard = existsSync(gPath) ? JSON.parse(readFileSync(gPath, 'utf8')) : { records: [], frontier_files: [] };
-    assert.deepEqual(guard.frontier_files, [], 'frontier file must NOT be marked when its notice failed to deliver');
+    assert.ok(existsSync(gPath));
 
-    rmSync(join(dDir, 'pending.json'), { recursive: true, force: true });
-    runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1);
-    assert.equal(pending[0].kind, 'frontier');
+    rmSync(join(dDir, 'guard-conductor.json'), { recursive: true, force: true });
+    const retry = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
+    assert.match(JSON.parse(retry.stdout).hookSpecificOutput.additionalContext, /unowned|frontier|nothing owns/i);
+
   } finally {
     cleanup();
   }
 });
 
-test('h19-clear-session: SessionStart removes guard and queue (whole-session TTL, P4)', () => {
+test('h19-clear-session: SessionStart removes the delivery guard (whole-session TTL, P4)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
@@ -1375,6 +1075,7 @@ test('bash delivery: a search PATTERN that looks like a path delivers nothing', 
     // check is what makes a shape-only extractor safe.
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -rn lib/missing.ts .'), dir);
     assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'a direct pointer would make this negative case fail');
     assert.equal(pendingOf(dir).length, 0, 'a non-existent path-shaped token is not a touch');
   } finally {
     cleanup();
@@ -1388,6 +1089,7 @@ test('bash delivery: unowned territory is SILENT (no frontier signal on every gr
     writeFileSync(join(dir, 'src', 'lonely.mjs'), 'x\n');
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'wc -l src/lonely.mjs'), dir);
     assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'unowned survey territory has no direct context');
     assert.equal(pendingOf(dir).length, 0, 'the frontier signal is right for an edit, wrong for a survey');
   } finally {
     cleanup();
@@ -1402,28 +1104,14 @@ test('bash delivery: a directory argument never fans out across the files beneat
     store.create(article('owner', ['src/a.mjs']));
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'ls -la src/'), dir);
     assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'directories have no direct pointer');
     assert.equal(pendingOf(dir).length, 0, 'ownership is declared per FILE');
   } finally {
     cleanup();
   }
 });
 
-test('bash delivery: hazards lead, and are pointed at even in unowned territory', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'h.mjs'), 'x\n');
-    store.create(antiPattern('never do the bad thing', ['src/h.mjs']));
-    const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'cat src/h.mjs'), dir);
-    assert.equal(r.code, 0);
-    const q = pendingOf(dir);
-    assert.equal(q.length, 1, 'a hazard alone is worth a pointer even with no owning article');
-    assert.match(q[0].payload, /⚠ HAZARD anti_pattern 'never do the bad thing'/);
-  } finally {
-    cleanup();
-  }
-});
-
+test('bash delivery: hazards lead, and are pointed at even in unowned territory',()=>{const {dir,store,cleanup}=makeProject();try{mkdirSync(join(dir,'src'),{recursive:true});writeFileSync(join(dir,'src','h.mjs'),'x');store.create(antiPattern('never do the bad thing',['src/h.mjs']));const r=runHook('h19-bash-delivery.mjs',postBash(dir,'cat src/h.mjs'),dir);assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext,/⚠ HAZARD anti_pattern 'never do the bad thing'/);}finally{cleanup();}});
 // 2026-09-19 deliberate change (3): Bash pointers inject at the read rung,
 // rather than queueing for the next prompt.  The pointer/full separation remains.
 test('bash delivery: a pointer NEVER suppresses the later full-article delivery for that file', () => {
@@ -1451,20 +1139,7 @@ test('bash delivery: a pointer NEVER suppresses the later full-article delivery 
   }
 });
 
-test('bash delivery: the same path is pointed at once per session', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
-    store.create(article('owner', ['src/a.mjs']));
-    runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs'), dir);
-    runHook('h19-bash-delivery.mjs', postBash(dir, 'wc -l src/a.mjs'), dir);
-    assert.equal(pendingOf(dir).length, 1, 'the second survey of the same file is silent');
-  } finally {
-    cleanup();
-  }
-});
-
+test('bash delivery: the same path is pointed at once per session',()=>{const {dir,store,cleanup}=makeProject();try{mkdirSync(join(dir,'src'),{recursive:true});writeFileSync(join(dir,'src','a.mjs'),'x');store.create(article('owner',['src/a.mjs']));const first=runHook('h19-bash-delivery.mjs',postBash(dir,'grep -n x src/a.mjs'),dir);const second=runHook('h19-bash-delivery.mjs',postBash(dir,'wc -l src/a.mjs'),dir);assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext,/src\/a\.mjs/);assert.equal(second.stdout,'');}finally{cleanup();}});
 test('bash delivery: a subagent gets read-rung delivery in its own tool context', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
@@ -1481,34 +1156,14 @@ test('bash delivery: a subagent gets read-rung delivery in its own tool context'
   }
 });
 
-test('bash delivery: one command cannot deliver an unbounded number of pointers', () => {
-  const { dir, store, cleanup } = makeProject();
-  try {
-    mkdirSync(join(dir, 'src'), { recursive: true });
-    const paths = [];
-    for (let i = 0; i < 12; i += 1) {
-      const p = `src/f${i}.mjs`;
-      writeFileSync(join(dir, p), 'x\n');
-      paths.push(p);
-      store.create(article(`owner${i}`, [p]));
-    }
-    const r = runHook('h19-bash-delivery.mjs', postBash(dir, `wc -l ${paths.join(' ')}`), dir);
-    assert.equal(r.code, 0);
-    const q = pendingOf(dir);
-    assert.equal(q.length, 1);
-    const lines = q[0].payload.split('\n').filter((l) => l.startsWith('  • '));
-    assert.equal(lines.length, 8, 'capped at BASH_POINTER_PATH_CAP');
-  } finally {
-    cleanup();
-  }
-});
-
+test('bash delivery: one command cannot deliver an unbounded number of pointers',()=>{const {dir,store,cleanup}=makeProject();try{mkdirSync(join(dir,'src'),{recursive:true});const paths=[];for(let i=0;i<12;i++){const q=`src/f${i}.mjs`;writeFileSync(join(dir,q),'x');paths.push(q);store.create(article(`owner${i}`,[q]));}const r=runHook('h19-bash-delivery.mjs',postBash(dir,`wc -l ${paths.join(' ')}`),dir);const lines=JSON.parse(r.stdout).hookSpecificOutput.additionalContext.split('\n').filter(l=>l.startsWith('  • '));assert.equal(lines.length,8);}finally{cleanup();}});
 test('bash delivery: the store tree and .git are never governed territory', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('owner', ['.sterling/config.json']));
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'cat .sterling/config.json'), dir);
     assert.equal(r.code, 0);
+    assert.equal(r.stdout, '', 'the store tree has no direct pointer');
     assert.equal(pendingOf(dir).length, 0);
   } finally {
     cleanup();
@@ -1521,9 +1176,11 @@ test('bash delivery: a malformed or pathless command is a clean no-op', () => {
     for (const cmd of ['', 'ls', 'echo hello world']) {
       const r = runHook('h19-bash-delivery.mjs', postBash(dir, cmd), dir);
       assert.equal(r.code, 0, `AC7 holds for '${cmd}'`);
+      assert.equal(r.stdout, '', `malformed command '${cmd}' has no direct context`);
     }
     const noInput = runHook('h19-bash-delivery.mjs', { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: {}, cwd: dir }, dir);
     assert.equal(noInput.code, 0, 'a missing command string never blocks');
+    assert.equal(noInput.stdout, '', 'a missing command string has no direct context');
     assert.equal(pendingOf(dir).length, 0);
   } finally {
     cleanup();

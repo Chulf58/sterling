@@ -24,7 +24,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID, createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -123,6 +123,18 @@ function runStop(dir) {
     env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
   });
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+function drainNotices(dir) {
+  const r = spawnSync(process.execPath, [join(HOOKS, 'h19-delivery-drain.mjs')], {
+    input: JSON.stringify({ cwd: dir, hook_event_name: 'UserPromptSubmit' }), encoding: 'utf8', cwd: dir, timeout: 60_000,
+  });
+  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+function noticeTexts(dir) {
+  const notices = join(dir, '.sterling', 'transient', 'notices');
+  return readdirSync(notices).map((name) => JSON.parse(readFileSync(join(notices, name), 'utf8')).text);
 }
 
 const reconcileItems = (store) => store.query({ types: ['todo'], cap: 100 }).filter((t) => t.source === 'system' && t.system_reason === 'reconcile_needed');
@@ -329,9 +341,12 @@ test('gauge (3): an UNKNOWN model reports the fill as unreliable — no percenta
     assert.match(message, /unreliable/i, 'says the number is unreliable');
     assert.match(message, /context_watch\.windows/, 'names the config key to add');
     assert.doesNotMatch(message, /\d+(\.\d+)?%/, 'prints no percentage');
-    const pending = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'pending.json'), 'utf8'));
-    assert.equal(pending.length, 1, 'the next-prompt queue carries the advisory to the model');
-    assert.match(pending[0].payload, /unreliable/i);
+    const notices = noticeTexts(dir);
+    assert.ok(notices.some((text) => /claude-novel-9/.test(text) && /unreliable/i.test(text)), 'the immutable notice preserves the unknown-window advisory');
+    const drained = drainNotices(dir);
+    assert.equal(drained.code, 0, drained.stderr);
+    assert.match(drained.stdout, /claude-novel-9/);
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'notices')) && readdirSync(join(dir, '.sterling', 'transient', 'notices')).length, 0, 'notice files delete only after emission');
     const s = pressureSample(dir);
     assert.equal(s.fill_pct, null, 'no fill number is persisted');
     assert.equal(s.level, 'unknown');
@@ -341,14 +356,14 @@ test('gauge (3): an UNKNOWN model reports the fill as unreliable — no percenta
   }
 });
 
-test('gauge (4): past the 50% target H10 WARNS to finish and commit through the next-prompt queue — it never demands a clear or refuses Stop', () => {
+test('gauge (4): past the 50% target H10 WARNS to finish and commit through an immutable notice — it never demands a clear or refuses Stop', () => {
   const { dir, cleanup } = makeGitProject(SHIPPED_WINDOWS);
   try {
     writeTranscript(dir, 600_000, 'claude-fable-5-1');
     const r = runStop(dir);
     // EXIT-2 PIN UPDATE (settled conductor design A): this used to assert 2 because
     // pressure rode writeThenSpend. A warning cannot refuse Stop; it is now exit 0,
-    // visible to the user and queued for UserPromptSubmit.
+    // visible to the user and published for UserPromptSubmit.
     assert.equal(r.code, 0, 'pressure is advisory and never refuses Stop');
     const message = JSON.parse(r.stdout).systemMessage;
     assert.match(message, /60\.0%/, 'names the fill');
@@ -357,9 +372,12 @@ test('gauge (4): past the 50% target H10 WARNS to finish and commit through the 
     assert.match(message, /finish/i);
     assert.match(message, /commit/i);
     assert.doesNotMatch(message, /READY TO CLEAR|\/clear|rotation-note/i, 'no clear demand, no rotation protocol');
-    const pending = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'pending.json'), 'utf8'));
-    assert.equal(pending.length, 1, 'the advisory is queued for the next model turn');
-    assert.match(pending[0].payload, /finish/i);
+    const notices = noticeTexts(dir);
+    assert.ok(notices.some((text) => /60\.0%/.test(text) && /finish/i.test(text) && /commit/i.test(text)), 'the immutable notice preserves the pressure advisory');
+    const drained = drainNotices(dir);
+    assert.equal(drained.code, 0, drained.stderr);
+    assert.match(drained.stdout, /60\.0%/);
+    assert.equal(existsSync(join(dir, '.sterling', 'transient', 'notices')) && readdirSync(join(dir, '.sterling', 'transient', 'notices')).length, 0, 'notice files delete only after emission');
     assert.equal(runStop(dir).code, 0, 'once per session');
   } finally {
     cleanup();

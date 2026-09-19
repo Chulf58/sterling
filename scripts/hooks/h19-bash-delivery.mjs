@@ -17,28 +17,22 @@
 //     file, so full-article delivery here could cost more context than the
 //     reads it protects. One line per owned path is the design, not a
 //     degradation.
-//  2. IT HONOURS THE DELIVERY RUNG. On 'read' and 'edit' it puts the pointer in
-//     this PostToolUse envelope; only 'prompt' queues for UserPromptSubmit.
-//     Queueing direct-capable Bash calls causes a fatal one-turn lag and sends a
-//     child agent's knowledge to the conductor instead of the child.
+//  2. IT DELIVERS DIRECTLY in its PostToolUse envelope.
 //  3. IT IS SILENT ON UNOWNED TERRITORY. The frontier signal is right for an
 //     edit — you are about to work there. On Bash it would fire on every grep
 //     across every unowned file, which is most of a survey (P1: a signal that
 //     always fires teaches you to ignore it).
 //
 import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
-import { existsSync, statSync } from 'node:fs';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   guardPath,
-  pendingPath,
   readGuard,
   writeGuard,
-  enqueuePending,
   extractCommandPathCandidates,
   bashPointerBlock,
   joinPointerBlock,
-  pointerVerifyRecipe,
   BASH_POINTER_PATH_CAP,
   budgetKnownGaps,
   isGapDelivered,
@@ -46,31 +40,23 @@ import {
   capPointerBlock,
   resolveTotalCap,
   isDelivered,
+  claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
-const command = input.tool_input?.command;
-if (!command) allow(); // nothing to parse (not a shell call, or a malformed one)
+function main(input) {
+  const command = input.tool_input?.command;
+  if (!command) return allow(); // nothing to parse (not a shell call, or a malformed one)
 
-const store = openStore(input.cwd);
-if (!store) allow(); // not a Sterling project — no ceremony (P1)
+  const store = openStore(input.cwd);
+  if (!store) return allow(); // not a Sterling project — no ceremony (P1)
 
-try {
-  // Bash is PostToolUse. Both direct-capable rungs inject on this call; only a
-  // prompt-rung session uses the delayed queue. Unknown hand-edited values keep
-  // the conservative prompt fallback used by the Read delivery hook.
+  try {
+  // Step 2: Bash pointers are always direct on their PostToolUse.
   const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
-  const rung = ['prompt', 'read', 'edit'].includes(rawRung) ? rawRung : 'prompt';
-  const mode = rung === 'prompt' ? 'enqueue' : 'inject';
-  // UserPromptSubmit belongs only to the conductor. Do not enqueue a child's
-  // pointer into somebody else's context when the project explicitly selects
-  // the prompt rung.
-  if (mode === 'enqueue' && input.agent_id) allow();
+  const migrationNotice = claimLegacyInjectionRungNotice(input.cwd, rawRung);
 
-  // NO run gating here, deliberately: a pipeline AGENT is already excluded above
-  // (the pending queue is the conductor's), and the conductor's own inline
-  // surveying during a run deserves delivery exactly as much as it does outside
-  // one — which is what h19-knowledge-delivery's AC6 carve-out says too.
+  // No run gating: every context gets its own direct advisory.
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
 
@@ -88,13 +74,15 @@ try {
     // not a file on disk dies right here. Directories are excluded because
     // ownership is declared per FILE — a governed directory would fan one `ls`
     // out across every article beneath it.
-    let abs;
+    let isFile;
     try {
-      abs = join(input.cwd, rel);
-      if (!existsSync(abs) || !statSync(abs).isFile()) continue;
-    } catch {
-      continue;
+      isFile = statSync(join(input.cwd, rel)).isFile();
+    } catch (e) {
+      // The candidate can vanish or have an ancestor replaced during the scan.
+      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') continue;
+      throw e;
     }
+    if (!isFile) continue;
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
@@ -107,7 +95,10 @@ try {
     entries.push({ rel, owners, hazards });
   }
 
-  if (!entries.length) allow();
+  if (!entries.length) {
+    if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
+    return allow();
+  }
 
   // KNOWN_GAPS RE-EMISSION AT THE BASH/PROBE-OUTPUT SEAM (board f1489964,
   // decision known-gaps-inline-ships-with-probe-seam-boarded 53fd6f62's ship
@@ -144,23 +135,19 @@ try {
   // happens turns any failure into permanent silent loss — nothing retries,
   // because the next touch sees the paths already marked.
   // POINTER-VERIFY recipe (decision db3392db part 2, v2 per fixer F1): the block
-  // is enqueued DECOMPOSED — the fixed two-sentence header plus one {id, line}
-  // per record — so the drain can REBUILD it: a still-live record's line replays
-  // verbatim, while a superseded or missing one is REPLACED by its stub. The
-  // earlier shape sent bare ids and let the drain append disclosures beneath the
-  // whole cached blob, which left the dead record's own line standing above the
-  // footnote, still naming it as governing this path. Gap substance rides the
-  // SAME per-owner {id, line} entry (see bashPointerBlock), so it inherits the
-  // identical live/superseded/missing verdict as the pointer it sits beside.
+  // keeps the fixed two-sentence header plus one {id, line} per record. Gap
+  // substance rides the same per-owner entry (see bashPointerBlock).
   // Dedup (one line per record; none for a record a Read already delivered
-  // this session — same guard ledger) and the per-delivery total cap
-  // (scale-down Slice 3c): the drain re-resolves hazard lines to complete
-  // hazard substance; ordinary lines are disclosed as a count under the cap.
+  // this session — same guard ledger) and the per-delivery total cap keep the
+  // direct pointer payload bounded.
   const deliveredIds = new Set(entries.flatMap((e) => [...e.owners, ...e.hazards]).filter((r) => isDelivered(guard, r)).map((r) => r.id));
   const block = capPointerBlock(bashPointerBlock(entries, { gapsByOwner }), resolveTotalCap(input.cwd), {
     skip: (id) => deliveredIds.has(id),
   });
-  if (!block.lines.length) allow(); // every named record was already delivered this session
+  if (!block.lines.length) {
+    if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
+    return allow();
+  }
   // MARK ONLY WHAT ACTUALLY RENDERED (fixer round LOW finding, mirrors the
   // cappedHazards precedent: a hazard/decision capped OUT of a payload is
   // never marked delivered, so it can surface on a later touch instead of
@@ -183,25 +170,15 @@ try {
     writeGuard(gPath, guard);
   };
   const payload = joinPointerBlock(block);
-  if (mode === 'enqueue') {
-    if (!enqueuePending(pendingPath(input.cwd), {
-      kind: 'bash_pointers',
-      rel: [...emittedPaths].join(' '),
-      payload,
-      recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines, tail: block.tail }),
-      agent_id: 'conductor',
-    })) throw new Error('delivery queue lock timeout');
-    recordDelivered();
-    allow();
-  }
-  exitAfterWrite(
-    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
+  return exitAfterWrite(
+    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: `${migrationNotice ? `${migrationNotice}\n\n` : ''}${payload}` } }),
     0,
     { onWritten: recordDelivered }
   );
-} catch (e) {
+  } catch (e) {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking
   // (P5 visibility without an AC7 violation).
-  warnNonBlocking(`H19: bash pointer delivery failed: ${(e && e.message) || e}`);
+    return warnNonBlocking(`H19: bash pointer delivery failed: ${(e && e.message) || e}`);
+  }
 }
-// no close: every path above exits the process, which releases the handle (board f81b1987)
+main(input);

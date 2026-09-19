@@ -5060,7 +5060,9 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -7290,21 +7292,32 @@ function repoRel(toolPath, cwd) {
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
-import { existsSync as existsSync4, statSync as statSync3 } from "node:fs";
+import { statSync as statSync2 } from "node:fs";
 import { join as join4 } from "node:path";
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, renameSync, openSync, closeSync } from "node:fs";
 import { join as join3, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join3(cwd, ".sterling", "transient", "delivery");
 }
+function claimLegacyInjectionRungNotice(cwd, rawRung) {
+  if (rawRung === "read") return null;
+  const transient = join3(cwd, ".sterling", "transient");
+  const marker = join3(transient, "legacy-injection-rung-noticed");
+  mkdirSync2(transient, { recursive: true });
+  try {
+    const fd = openSync(marker, "wx");
+    closeSync(fd);
+  } catch (error) {
+    if (error?.code === "EEXIST") return null;
+    throw error;
+  }
+  const configured = rawRung == null ? "missing" : `'${rawRung}'`;
+  return `\u24D8 STERLING: delivery.injection_rung ${configured} is obsolete and now behaves as 'read'.`;
+}
 function guardPath(cwd, agentId) {
   return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
-}
-function pendingPath(cwd) {
-  return join3(deliveryDir(cwd), "pending.json");
 }
 function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
@@ -7362,101 +7375,6 @@ function statusBracket(record) {
 }
 function statusAnnotation(record) {
   return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
-}
-var LOCK_DEADLINE_MS = 2e3;
-var LOCK_STALE_MS = 5e3;
-var LOCK_POLL_MS = 5;
-var LOCK_OWNER_FILE = "owner";
-var lockTestHooks = {};
-function lockOwnerPath(lockPath) {
-  return join3(lockPath, LOCK_OWNER_FILE);
-}
-function ownsLock(lockPath, token) {
-  try {
-    return readFileSync2(lockOwnerPath(lockPath), "utf8") === token;
-  } catch {
-    return false;
-  }
-}
-function readLockOwner(lockPath) {
-  try {
-    return readFileSync2(lockOwnerPath(lockPath), "utf8");
-  } catch {
-    return null;
-  }
-}
-function sameLockObject(a, b) {
-  return a.dev === b.dev && a.ino === b.ino;
-}
-function acquireLock(lockPath) {
-  const deadline = Date.now() + LOCK_DEADLINE_MS;
-  while (Date.now() < deadline) {
-    const token = `${process.pid}-${randomUUID2()}`;
-    try {
-      mkdirSync2(lockPath);
-      writeFileSync(lockOwnerPath(lockPath), token, { flag: "wx" });
-      return token;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        const observed = statSync2(lockPath);
-        const observedOwner = readLockOwner(lockPath);
-        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
-          lockTestHooks.afterStaleInspect?.(lockPath);
-          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
-          try {
-            renameSync(lockPath, tombstone);
-          } catch (renameError) {
-            if (renameError.code !== "ENOENT") throw renameError;
-            continue;
-          }
-          if (sameLockObject(observed, statSync2(tombstone)) && readLockOwner(tombstone) === observedOwner) {
-            rmSync(tombstone, { recursive: true, force: true });
-          } else if (!existsSync3(lockPath)) {
-            renameSync(tombstone, lockPath);
-          }
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
-    }
-  }
-  return null;
-}
-function releaseLock(lockPath, token) {
-  try {
-    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
-  } catch {
-  }
-}
-function withFileLock(targetPath, fn) {
-  mkdirSync2(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
-  const token = acquireLock(lockPath);
-  if (!token) return { acquired: false, value: void 0 };
-  try {
-    return { acquired: true, value: fn({ lockPath, token }) };
-  } finally {
-    releaseLock(lockPath, token);
-  }
-}
-function enqueuePending(path, entry) {
-  const result = withFileLock(path, ({ lockPath, token }) => {
-    const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
-    entries.push(entry);
-    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(entries));
-    lockTestHooks.beforePendingRename?.({ lockPath, token });
-    if (!ownsLock(lockPath, token)) {
-      rmSync(tmp, { force: true });
-      return false;
-    }
-    renameSync(tmp, path);
-    return true;
-  });
-  return result.acquired && result.value === true;
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -7574,8 +7492,8 @@ function payloadHeaderLine(rel) {
 }
 var BASH_POINTER_PATH_CAP = 8;
 var COMMAND_PATH_SKIP = /* @__PURE__ */ new Set(["--", "-", ".", "./", "..", "../"]);
-function extractCommandPathCandidates(command2) {
-  const text = String(command2 ?? "");
+function extractCommandPathCandidates(command) {
+  const text = String(command ?? "");
   const tokens = text.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
   const out = [];
   const seen = /* @__PURE__ */ new Set();
@@ -7662,102 +7580,86 @@ function joinPointerBlock({ header, lines = [], tail } = {}) {
   }
   return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
-var DELIVERY_RECIPE_VERSION = 2;
-function pointerVerifyRecipe({ header, entries, tail } = {}) {
-  return {
-    version: DELIVERY_RECIPE_VERSION,
-    mode: "pointer_verify",
-    header: typeof header === "string" ? header : "",
-    entries: (entries ?? []).map((e) => {
-      const out = { id: e?.id, line: e?.line };
-      if (e?.hazard === true) out.hazard = true;
-      if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
-      return out;
-    }),
-    tail: typeof tail === "string" ? tail : ""
-  };
-}
 
 // scripts/hooks/h19-bash-delivery.mjs
 var input = readStdin();
-var command = input.tool_input?.command;
-if (!command) allow();
-var store = openStore(input.cwd);
-if (!store) allow();
-try {
-  const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
-  const rung = ["prompt", "read", "edit"].includes(rawRung) ? rawRung : "prompt";
-  const mode = rung === "prompt" ? "enqueue" : "inject";
-  if (mode === "enqueue" && input.agent_id) allow();
-  const gPath = guardPath(input.cwd, input.agent_id);
-  const guard = readGuard(gPath);
-  const entries = [];
-  for (const candidate of extractCommandPathCandidates(command)) {
-    if (entries.length >= BASH_POINTER_PATH_CAP) break;
-    const rel = repoRel(candidate, input.cwd);
-    if (!rel) continue;
-    if (rel === ".git" || rel.startsWith(".git/")) continue;
-    if (rel.startsWith(".sterling/")) continue;
-    if (guard.pointer_files.includes(rel)) continue;
-    let abs;
-    try {
-      abs = join4(input.cwd, rel);
-      if (!existsSync4(abs) || !statSync3(abs).isFile()) continue;
-    } catch {
-      continue;
+function main(input2) {
+  const command = input2.tool_input?.command;
+  if (!command) return allow();
+  const store = openStore(input2.cwd);
+  if (!store) return allow();
+  try {
+    const rawRung = loadConfig(input2.cwd)?.delivery?.injection_rung;
+    const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
+    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const guard = readGuard(gPath);
+    const entries = [];
+    for (const candidate of extractCommandPathCandidates(command)) {
+      if (entries.length >= BASH_POINTER_PATH_CAP) break;
+      const rel = repoRel(candidate, input2.cwd);
+      if (!rel) continue;
+      if (rel === ".git" || rel.startsWith(".git/")) continue;
+      if (rel.startsWith(".sterling/")) continue;
+      if (guard.pointer_files.includes(rel)) continue;
+      let isFile;
+      try {
+        isFile = statSync2(join4(input2.cwd, rel)).isFile();
+      } catch (e) {
+        if (e?.code === "ENOENT" || e?.code === "ENOTDIR") continue;
+        throw e;
+      }
+      if (!isFile) continue;
+      const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
+      const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
+      if (!owners.length && !hazards.length) continue;
+      entries.push({ rel, owners, hazards });
     }
-    const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
-    const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
-    if (!owners.length && !hazards.length) continue;
-    entries.push({ rel, owners, hazards });
-  }
-  if (!entries.length) allow();
-  const gapOwners = [];
-  const seenGapOwnerIds = /* @__PURE__ */ new Set();
-  for (const e of entries) {
-    for (const o of e.owners) {
-      if (!Array.isArray(o.known_gaps) || !o.known_gaps.length) continue;
-      if (seenGapOwnerIds.has(o.id)) continue;
-      seenGapOwnerIds.add(o.id);
-      if (isGapDelivered(guard, o)) continue;
-      gapOwners.push(o);
+    if (!entries.length) {
+      if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: migrationNotice } }), 0);
+      return allow();
     }
+    const gapOwners = [];
+    const seenGapOwnerIds = /* @__PURE__ */ new Set();
+    for (const e of entries) {
+      for (const o of e.owners) {
+        if (!Array.isArray(o.known_gaps) || !o.known_gaps.length) continue;
+        if (seenGapOwnerIds.has(o.id)) continue;
+        seenGapOwnerIds.add(o.id);
+        if (isGapDelivered(guard, o)) continue;
+        gapOwners.push(o);
+      }
+    }
+    const gapsByOwner = budgetKnownGaps(gapOwners);
+    const deliveredIds = new Set(entries.flatMap((e) => [...e.owners, ...e.hazards]).filter((r) => isDelivered(guard, r)).map((r) => r.id));
+    const block = capPointerBlock(bashPointerBlock(entries, { gapsByOwner }), resolveTotalCap(input2.cwd), {
+      skip: (id) => deliveredIds.has(id)
+    });
+    if (!block.lines.length) {
+      if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: migrationNotice } }), 0);
+      return allow();
+    }
+    const shownIds = new Set(block.lines.map((l) => l.id));
+    const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
+    const emittedPaths = /* @__PURE__ */ new Set();
+    for (const entry of entries) {
+      const eligible = [...entry.owners, ...entry.hazards].filter((r) => !deliveredIds.has(r.id));
+      if (eligible.length && eligible.every((r) => shownIds.has(r.id))) emittedPaths.add(entry.rel);
+    }
+    const recordDelivered = () => {
+      guard.pointer_files.push(...emittedPaths);
+      if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
+      writeGuard(gPath, guard);
+    };
+    const payload = joinPointerBlock(block);
+    return exitAfterWrite(
+      JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: `${migrationNotice ? `${migrationNotice}
+
+` : ""}${payload}` } }),
+      0,
+      { onWritten: recordDelivered }
+    );
+  } catch (e) {
+    return warnNonBlocking(`H19: bash pointer delivery failed: ${e && e.message || e}`);
   }
-  const gapsByOwner = budgetKnownGaps(gapOwners);
-  const deliveredIds = new Set(entries.flatMap((e) => [...e.owners, ...e.hazards]).filter((r) => isDelivered(guard, r)).map((r) => r.id));
-  const block = capPointerBlock(bashPointerBlock(entries, { gapsByOwner }), resolveTotalCap(input.cwd), {
-    skip: (id) => deliveredIds.has(id)
-  });
-  if (!block.lines.length) allow();
-  const shownIds = new Set(block.lines.map((l) => l.id));
-  const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
-  const emittedPaths = /* @__PURE__ */ new Set();
-  for (const entry of entries) {
-    const eligible = [...entry.owners, ...entry.hazards].filter((r) => !deliveredIds.has(r.id));
-    if (eligible.length && eligible.every((r) => shownIds.has(r.id))) emittedPaths.add(entry.rel);
-  }
-  const recordDelivered = () => {
-    guard.pointer_files.push(...emittedPaths);
-    if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
-    writeGuard(gPath, guard);
-  };
-  const payload = joinPointerBlock(block);
-  if (mode === "enqueue") {
-    if (!enqueuePending(pendingPath(input.cwd), {
-      kind: "bash_pointers",
-      rel: [...emittedPaths].join(" "),
-      payload,
-      recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines, tail: block.tail }),
-      agent_id: "conductor"
-    })) throw new Error("delivery queue lock timeout");
-    recordDelivered();
-    allow();
-  }
-  exitAfterWrite(
-    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
-    0,
-    { onWritten: recordDelivered }
-  );
-} catch (e) {
-  warnNonBlocking(`H19: bash pointer delivery failed: ${e && e.message || e}`);
 }
+main(input);

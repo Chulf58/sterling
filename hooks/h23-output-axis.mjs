@@ -5060,7 +5060,9 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -7588,17 +7590,13 @@ function recordAdvisoryFire(root, hook, sessionId) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
-import { randomUUID as randomUUID2 } from "node:crypto";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
 }
 function guardPath(cwd, agentId) {
   return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
-}
-function pendingPath(cwd) {
-  return join4(deliveryDir(cwd), "pending.json");
 }
 function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
@@ -7634,101 +7632,6 @@ var CITATION_BOILERPLATE_WORDS = [
 ];
 var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
 var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
-var LOCK_DEADLINE_MS = 2e3;
-var LOCK_STALE_MS = 5e3;
-var LOCK_POLL_MS = 5;
-var LOCK_OWNER_FILE = "owner";
-var lockTestHooks = {};
-function lockOwnerPath(lockPath) {
-  return join4(lockPath, LOCK_OWNER_FILE);
-}
-function ownsLock(lockPath, token) {
-  try {
-    return readFileSync3(lockOwnerPath(lockPath), "utf8") === token;
-  } catch {
-    return false;
-  }
-}
-function readLockOwner(lockPath) {
-  try {
-    return readFileSync3(lockOwnerPath(lockPath), "utf8");
-  } catch {
-    return null;
-  }
-}
-function sameLockObject(a, b) {
-  return a.dev === b.dev && a.ino === b.ino;
-}
-function acquireLock(lockPath) {
-  const deadline = Date.now() + LOCK_DEADLINE_MS;
-  while (Date.now() < deadline) {
-    const token = `${process.pid}-${randomUUID2()}`;
-    try {
-      mkdirSync3(lockPath);
-      writeFileSync(lockOwnerPath(lockPath), token, { flag: "wx" });
-      return token;
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      try {
-        const observed = statSync2(lockPath);
-        const observedOwner = readLockOwner(lockPath);
-        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
-          lockTestHooks.afterStaleInspect?.(lockPath);
-          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
-          try {
-            renameSync(lockPath, tombstone);
-          } catch (renameError) {
-            if (renameError.code !== "ENOENT") throw renameError;
-            continue;
-          }
-          if (sameLockObject(observed, statSync2(tombstone)) && readLockOwner(tombstone) === observedOwner) {
-            rmSync(tombstone, { recursive: true, force: true });
-          } else if (!existsSync4(lockPath)) {
-            renameSync(tombstone, lockPath);
-          }
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
-    }
-  }
-  return null;
-}
-function releaseLock(lockPath, token) {
-  try {
-    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
-  } catch {
-  }
-}
-function withFileLock(targetPath, fn) {
-  mkdirSync3(dirname3(targetPath), { recursive: true });
-  const lockPath = `${targetPath}.lock`;
-  const token = acquireLock(lockPath);
-  if (!token) return { acquired: false, value: void 0 };
-  try {
-    return { acquired: true, value: fn({ lockPath, token }) };
-  } finally {
-    releaseLock(lockPath, token);
-  }
-}
-function enqueuePending(path, entry) {
-  const result = withFileLock(path, ({ lockPath, token }) => {
-    const entries = existsSync4(path) ? JSON.parse(readFileSync3(path, "utf8")) : [];
-    entries.push(entry);
-    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-    writeFileSync(tmp, JSON.stringify(entries));
-    lockTestHooks.beforePendingRename?.({ lockPath, token });
-    if (!ownsLock(lockPath, token)) {
-      rmSync(tmp, { force: true });
-      return false;
-    }
-    renameSync(tmp, path);
-    return true;
-  });
-  return result.acquired && result.value === true;
-}
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 var PORCH_BYTE_COUNT_RESERVE = "000000";
@@ -7768,21 +7671,6 @@ function joinPointerBlock({ header, lines = [], tail } = {}) {
   }
   return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
-var DELIVERY_RECIPE_VERSION = 2;
-function pointerVerifyRecipe({ header, entries, tail } = {}) {
-  return {
-    version: DELIVERY_RECIPE_VERSION,
-    mode: "pointer_verify",
-    header: typeof header === "string" ? header : "",
-    entries: (entries ?? []).map((e) => {
-      const out = { id: e?.id, line: e?.line };
-      if (e?.hazard === true) out.hazard = true;
-      if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
-      return out;
-    }),
-    tail: typeof tail === "string" ? tail : ""
-  };
-}
 
 // scripts/hooks/h23-output-axis.mjs
 var OUTPUT_AXIS_CLIP = 16e3;
@@ -7795,7 +7683,6 @@ try {
   const input = readStdin();
   const toolName = input.tool_name;
   if (toolName !== "Read" && toolName !== "Bash" && toolName !== "PowerShell") allow();
-  if (input.agent_id) allow();
   const rawResponse = input.tool_response;
   if (rawResponse === void 0 || rawResponse === null) allow();
   const store = openStore(input.cwd);
@@ -7839,18 +7726,15 @@ try {
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
   recordAdvisoryFire(input.cwd, "h23", input.session_id);
-  if (!enqueuePending(pendingPath(input.cwd), {
-    kind: "output_axis_pointers",
-    rel: input.tool_input?.file_path ?? input.tool_input?.command ?? "",
-    payload: joinPointerBlock({ header, lines: pointerLines, tail }),
-    recipe: pointerVerifyRecipe({ header, entries: pointerLines, tail }),
-    agent_id: "conductor"
-  })) throw new Error("delivery queue lock timeout");
-  guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
-  writeGuard(gPath, guard);
-  allow();
-} catch {
-  allow();
+  const payload = joinPointerBlock({ header, lines: pointerLines, tail });
+  exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }), 0, {
+    onWritten: () => {
+      guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
+      writeGuard(gPath, guard);
+    }
+  });
+} catch (e) {
+  warnNonBlocking(`H23: output-axis delivery failed: ${e && e.message || e}`);
 }
 export {
   OUTPUT_AXIS_CLIP,
