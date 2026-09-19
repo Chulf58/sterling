@@ -697,7 +697,10 @@ test('E-3 (gitignored): a carried name that has since become gitignored is prune
     encounterTolerant(dir, store, ['src/a.mjs', 'src/b.mjs', 'build/gen.mjs'], '2026-08-28T09:00:00.000Z');
     assert.ok(demandedPaths(store).includes('build/gen.mjs'), 'baseline: build/gen.mjs was demanded while nothing ignored it');
 
-    writeFileSync(join(dir, '.gitignore'), 'build/\n');
+    // .git/info/exclude, not a worktree .gitignore: git-derived touches (slice 4)
+    // would count a hand-created .gitignore as a touched unowned file; the
+    // ignore semantics under test are identical.
+    writeFileSync(join(dir, '.git', 'info', 'exclude'), 'build/\n');
     encounterTolerant(dir, store, ['src/a.mjs', 'src/b.mjs', 'src/c.mjs'], '2026-08-28T10:00:00.000Z');
 
     assert.deepEqual(

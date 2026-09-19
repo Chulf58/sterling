@@ -580,8 +580,13 @@ function seedSubjectChannel(store) {
 }
 
 /** One staged SubagentStart dispatch into governed territory. */
-function stage({ budget, owners = 4, hazards = 3, rulings = 2, lock = true, agentType = 'debugger', slugPad = 0, seed, prompt = DISPATCH_PROMPT } = {}) {
-  const { dir, store, cleanup } = makeProject(budgetConfig(budget));
+function stage({ budget, owners = 4, hazards = 3, rulings = 2, lock = true, agentType = 'implementor', slugPad = 0, seed, prompt = DISPATCH_PROMPT, totalCap } = {}) {
+  // totalCap: config.delivery.total_cap_bytes (scale-down Slice 3c). The porch
+  // pins below are about the porch; fixtures that need every record to render
+  // in full raise the per-delivery total cap rather than fight it.
+  const cfg = budgetConfig(budget);
+  if (totalCap !== undefined) cfg.delivery = { ...(cfg.delivery ?? {}), total_cap_bytes: totalCap };
+  const { dir, store, cleanup } = makeProject(cfg);
   const facts = { slugs: [], tokens: [] };
   if (seed) seed(store, facts);
   else {
@@ -603,8 +608,10 @@ function stage({ budget, owners = 4, hazards = 3, rulings = 2, lock = true, agen
  * is written because nothing precedes this block (clause (5): "Tool-time
  * budget = preview_budget_bytes with nothing subtracted").
  */
-function toolTime({ budget = DEFAULT_BUDGET, owners = 4, hazards = 3, rulings = 2, rung = 'read', seed, path = 'src/a.mjs' } = {}) {
-  const { dir, store, cleanup } = makeProject({ delivery: { injection_rung: rung, preview_budget_bytes: budget } });
+function toolTime({ budget = DEFAULT_BUDGET, owners = 4, hazards = 3, rulings = 2, rung = 'read', seed, path = 'src/a.mjs', totalCap } = {}) {
+  const { dir, store, cleanup } = makeProject({
+    delivery: { injection_rung: rung, preview_budget_bytes: budget, ...(totalCap !== undefined ? { total_cap_bytes: totalCap } : {}) },
+  });
   const facts = { slugs: [], tokens: [] };
   if (seed) seed(store, facts);
   else {
@@ -696,14 +703,16 @@ test('CONTROL: default budget on the standard fixture — the porch-end detector
 // later ones (anti_pattern f1d66bef).
 // ===========================================================================
 
-test('A1: every rendered hazard\'s (clipped) TRIGGER and RIGHT WAY text is inside the first 1800 UTF-8 bytes of the COMPLETE additionalContext', () => {
+// 2026-09-19 conductor ruling: hazards are never clipped; oversized hazards get a porch pointer line and follow whole after PORCH END (rebuild of the cap assembler, decision 301d8a0a).
+test('A1: every hazard is named in the bounded porch and its complete trigger/right-way appears once in full output', () => {
   const s = stage({ budget: DEFAULT_BUDGET });
   try {
     assert.equal(s.r.code, 0, s.r.stderr);
     const prefix = bytePrefix(s.ctx, DEFAULT_BUDGET);
     for (let i = 0; i < 3; i += 1) {
-      assert.ok(prefix.includes(`TRG${i}`), `hazard ${i} trigger text missing from the 1800-byte prefix; prefix=${prefix}`);
-      assert.ok(prefix.includes(`RW${i}`), `hazard ${i} right_way text missing from the 1800-byte prefix; prefix=${prefix}`);
+      assert.ok(prefix.includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} is not reachable from the bounded porch; prefix=${prefix}`);
+      assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger must be whole exactly once`);
+      assert.equal(occurrences(s.ctx, `RW${i}`), 1, `hazard ${i} right way must be whole exactly once`);
     }
   } finally {
     s.cleanup();
@@ -817,10 +826,12 @@ test('A6: INVARIANT — the porch ends at or before byte 1800 of the COMPLETE ad
 // this pin goes red. The trailing assertion is the fixture control that keeps
 // the verdict from being satisfied by "there was no plan line anyway".
 
-test('A7: hazards appear ONCE in the whole context — the porch IS the hazard rendering, renderHazards is not repeated below', () => {
+// 2026-09-19 conductor ruling: hazards are never clipped; oversized hazards get a porch pointer line and follow whole after PORCH END (rebuild of the cap assembler, decision 301d8a0a).
+test('A7: hazards appear ONCE in full context and the porch contains their ids or complete blocks', () => {
   const s = stage({ budget: DEFAULT_BUDGET });
   try {
     for (let i = 0; i < 3; i += 1) {
+      assert.ok(porchOf(s.ctx).includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} is absent from the porch`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger text appears ${occurrences(s.ctx, `TRG${i}`)} times; it must appear exactly once`);
       assert.equal(occurrences(s.ctx, `RW${i}`), 1, `hazard ${i} right_way text appears ${occurrences(s.ctx, `RW${i}`)} times; it must appear exactly once`);
     }
@@ -855,6 +866,9 @@ const bothChannels = () =>
   stage({
     budget: DEFAULT_BUDGET,
     lock: false,
+    // Raised so the fixture control (every record rendered) holds; the
+    // accounting under the DEFAULT cap is pinned in h19-delivery-total-cap C8.
+    totalCap: 20000,
     prompt: `Go work on src/a.mjs and report back. Separately: ${SUBJ_PROMPT}`,
     seed: (store, facts) => {
       facts.slugs = seedOwners(store, 4);
@@ -1059,14 +1073,16 @@ test('C3: the overrun path throws nothing, exits 0, and still delivers (no silen
 // index owners[0] unconditionally) — the staging half disappears and the
 // KNOWLEDGE DELIVERY match goes red while stderr carries the trace.
 
-test('C4: ORDERING — owners are sacrificed before hazards; every hazard survives a budget too small for the owner lines', () => {
+// 2026-09-19 conductor ruling: hazards are never clipped; oversized hazards get a porch pointer line and follow whole after PORCH END (rebuild of the cap assembler, decision 301d8a0a).
+test('C4: a tight porch sacrifices ordinary owners, names every hazard, and emits each whole below', () => {
   const s = stage({ budget: 1300, owners: 6, slugPad: 150, lock: false });
   try {
     const porch = porchOf(s.ctx);
     assert.ok(porch, `expected a porch at 1300 bytes; ctx head=${bytePrefix(s.ctx, 1500)}`);
-    assert.ok(ownerPointerLines(porch).length < OWNER_CAP, `owners must be reduced first; porch=${porch}`);
+    assert.ok(bytes(porch) <= 1300, `all ordinary porch lines, including hazard pointers, must fit; porch=${porch}`);
     for (let i = 0; i < 3; i += 1) {
-      assert.ok(porch.includes(`TRG${i}`), `hazard ${i} was DROPPED for budget — the ruling clips hazards harder but never drops them; porch=${porch}`);
+      assert.ok(porch.includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} was not named in the tight porch; porch=${porch}`);
+      assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} was not emitted whole exactly once`);
     }
   } finally {
     s.cleanup();
@@ -1141,12 +1157,16 @@ test('D1: INVARIANT in BYTES with 3-byte UTF-8 content — the porch fits 1800 B
 // The two discrimination assertions are the control arm: if only they are red,
 // the fixture stopped being dense/full and the byte pin proved nothing.
 
-test('D2: multibyte hazards and slugs still reach the reader — the clip does not corrupt or drop them', () => {
+// 2026-09-19 conductor ruling: hazards are never clipped; oversized hazards get a porch pointer line and follow whole after PORCH END (rebuild of the cap assembler, decision 301d8a0a).
+test('D2: multibyte hazard ids reach the porch and full multibyte substance arrives once', () => {
   const s = stage({ budget: DEFAULT_BUDGET, lock: false, seed: seedMultibyte });
   try {
     const porch = porchOf(s.ctx);
     assert.ok(porch, 'no porch-end line found — see D1');
-    for (let i = 0; i < 3; i += 1) assert.ok(porch.includes(`TRG${i}`), `multibyte hazard ${i} missing from the porch; porch=${porch}`);
+    for (let i = 0; i < 3; i += 1) {
+      assert.ok(porch.includes(HAZARD_IDS[i].slice(0, 8)), `multibyte hazard ${i} missing from the porch; porch=${porch}`);
+      assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `multibyte hazard ${i} substance is not whole exactly once`);
+    }
     const ptrs = ownerPointerLines(porch);
     assert.ok(ptrs.length > 0, `expected at least one owner pointer line on the multibyte fixture; porch=${porch}`);
     for (const p of ptrs) assert.ok(s.slugs.includes(p.slug), `owner pointer slug '${p.slug}' is not one of the seeded multibyte slugs (clipped or mangled)`);
@@ -1297,7 +1317,8 @@ test('P3a: BOUNDED SKELETON — a hazard whose slug is 1000 CJK chars (3000 byte
 // what the pre-v2 skeleton did) — 3000 bytes of one slug blows the 1800-byte
 // budget and this pin goes red.
 
-test('P3b: BOUNDED SKELETON — nothing from the fixed skeleton is lost to the oversize record: the +N owners line and a COMPLETE porch-end line both survive, and the 1000-char slug appears nowhere in full', () => {
+// 2026-09-19 conductor ruling: hazards are never clipped; oversized hazards get a porch pointer line and follow whole after PORCH END (rebuild of the cap assembler, decision 301d8a0a).
+test('P3b: BOUNDED SKELETON keeps ordinary porch lines bounded while the oversize slug appears once in its complete hazard below', () => {
   const s = stage({ budget: DEFAULT_BUDGET, lock: false, seed: seedHugeHazard });
   try {
     const porch = porchOf(s.ctx);
@@ -1309,7 +1330,8 @@ test('P3b: BOUNDED SKELETON — nothing from the fixed skeleton is lost to the o
     const line = porchEndLine(s.ctx);
     assert.match(line.replace(/\s+$/, ''), /[.!]$/, `the porch-end line was cut by the oversize record: ${JSON.stringify(line)}`);
     assert.match(line, /precedence/i, `the porch-end line lost its precedence clause: ${JSON.stringify(line)}`);
-    assert.ok(!s.ctx.includes(HUGE_CJK_SLUG), 'the full 1000-char slug must never be interpolated raw anywhere in the context');
+    assert.ok(!porch.includes(HUGE_CJK_SLUG), 'the full 1000-char slug must never be interpolated raw in the ordinary porch');
+    assert.equal(occurrences(s.ctx, HUGE_CJK_SLUG), 1, 'the complete hazard is the only full-slug occurrence');
   } finally {
     s.cleanup();
   }
@@ -1765,14 +1787,16 @@ test('F1c: the tool-time porch-end line is COMPLETE — terminator plus the prec
 // precedence clause on the tool-time surface only — the second assertion
 // goes red.
 
-test('F1d: the tool-time porch carries the substance — every rendered hazard\'s trigger text is inside the porch, owner lines carry slug + id8 + uuid, and hazards appear exactly ONCE in the whole block', () => {
+// 2026-09-19 conductor ruling: hazards are never clipped; oversized hazards get a porch pointer line and follow whole after PORCH END (rebuild of the cap assembler, decision 301d8a0a).
+test('F1d: the tool-time porch names each hazard, full substance follows once, and owner pointers remain citable', () => {
   const s = toolTime({ budget: DEFAULT_BUDGET });
   try {
     const porch = porchOf(s.ctx);
     assert.ok(porch, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
     for (let i = 0; i < 3; i += 1) {
-      assert.ok(porch.includes(`TRG${i}`), `hazard ${i} trigger text missing from the tool-time porch; porch=${porch}`);
-      assert.ok(porch.includes(`RW${i}`), `hazard ${i} right_way text missing from the tool-time porch; porch=${porch}`);
+      assert.ok(porch.includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} missing from the tool-time porch; porch=${porch}`);
+      assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger must be whole exactly once`);
+      assert.equal(occurrences(s.ctx, `RW${i}`), 1, `hazard ${i} right way must be whole exactly once`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger text appears ${occurrences(s.ctx, `TRG${i}`)} times in the tool-time block; the porch IS the hazard rendering`);
     }
     const ptrs = ownerPointerLines(porch);
@@ -1795,7 +1819,10 @@ test('F1d: the tool-time porch carries the substance — every rendered hazard\'
 // well — the occurrences-equal-1 assertions go red.
 
 test('F1e: the tool-time block still delivers the ARTICLE BODY below the porch, with its id8-bearing header and its FULL RECORD line', () => {
-  const s = toolTime({ budget: DEFAULT_BUDGET });
+  // Total cap raised: this pins "the porch is a preview, not a replacement".
+  // Under the default cap the body degrades to header + FULL RECORD pointer
+  // (pinned in h19-delivery-total-cap.test.mjs).
+  const s = toolTime({ budget: DEFAULT_BUDGET, totalCap: 20000 });
   try {
     const end = porchEndCharIndex(s.ctx);
     assert.ok(end !== null, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
@@ -2036,13 +2063,13 @@ test('H2: an UNREADABLE config (corrupt JSON) never overruns and never throws �
 // never its precedence, so nothing here depended on the wrong premise.
 // ===========================================================================
 
-test('X1: the CODER dispatch class (plan line ahead of the porch, TDD posture line and return contract behind it) still ends its porch within the 1800-byte budget', () => {
-  const s = stage({ budget: DEFAULT_BUDGET, agentType: 'coder' });
+test('X1: the IMPLEMENTOR dispatch class (plan line ahead of the porch, TDD posture line and return contract behind it) still ends its porch within the 1800-byte budget', () => {
+  const s = stage({ budget: DEFAULT_BUDGET, agentType: 'implementor' });
   try {
     assert.equal(s.r.code, 0, s.r.stderr);
-    assert.match(s.ctx, /TDD posture:/, 'fixture control: this really is the coder class (the posture line is scoped to coder/test-writer)');
+    assert.match(s.ctx, /TDD posture:/, 'fixture control: this really is the implementor class (the posture line is scoped to implementor)');
     const end = porchEndOffset(s.ctx);
-    assert.ok(end !== null, `expected a porch on a coder dispatch; ctx head=${bytePrefix(s.ctx, 2200)}`);
+    assert.ok(end !== null, `expected a porch on an implementor dispatch; ctx head=${bytePrefix(s.ctx, 2200)}`);
     assert.ok(
       end <= DEFAULT_BUDGET,
       `porch ends at byte ${end} of the complete context (budget ${DEFAULT_BUDGET}) — the ACTIVE PLAN line ahead of the payload counts against the budget; porch=${porchOf(s.ctx)}`

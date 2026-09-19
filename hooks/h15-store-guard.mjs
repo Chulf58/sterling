@@ -4598,8 +4598,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4735,14 +4736,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4763,16 +4756,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -4912,7 +4911,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -4931,12 +4930,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)

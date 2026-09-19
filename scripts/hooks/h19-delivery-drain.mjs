@@ -7,7 +7,7 @@
 // deliberately does NOT (whole-session TTL — h19-clear-session at
 // SessionStart is its lifecycle event).
 import { readStdin, allow, warnNonBlocking, openStore } from './lib/common.mjs';
-import { pendingPath, drainPending, renderDrainEntry } from './lib/delivery.mjs';
+import { pendingPath, drainPending, renderDrainParts, dedupeDrainEntry, emptyDeliveryGuard, capDeliveryParts, resolveTotalCap } from './lib/delivery.mjs';
 import { ledgerPath, pruneUnhashed } from './lib/ledger.mjs';
 
 const input = readStdin();
@@ -73,12 +73,16 @@ try {
     storeReason = `the Sterling store could not be opened (${(e && e.message) || e}), so the queued ids could not be re-read`;
   }
 
-  // APPEND ORDER PRESERVED and NO CROSS-ENTRY DEDUP: a plain in-order map, one
-  // rendering per entry, with no drain-wide record cache — two entries naming
-  // one record both serve it, because full deliveries, Bash pointers and H23
-  // dedup in deliberately different namespaces. renderDrainEntry never throws,
-  // which is what contains a per-entry failure to that entry.
-  const context = entries.map((e) => renderDrainEntry(store, e, storeReason)).join('\n\n');
+  // One prompt may contain entries from Read, Bash and output-axis producers.
+  // They share no queue lock-time dedup, so run their record ids through a
+  // fresh in-memory guard before rendering. This is deliberately not persisted:
+  // the session guard was marked at enqueue time, and this guard's only scope is
+  // cross-entry duplication in THIS drain payload.
+  const drainGuard = emptyDeliveryGuard();
+  const uniqueEntries = entries.map((e) => dedupeDrainEntry(e, drainGuard)).filter(Boolean);
+  const parts = uniqueEntries.flatMap((entry) => renderDrainParts(store, entry, storeReason));
+  const hazardIncomplete = parts.some((part) => part.hazardIncomplete);
+  const context = capDeliveryParts(parts, resolveTotalCap(input.cwd)).join('\n\n');
 
   // DELETE ONLY FROM THE WRITE-COMPLETION CALLBACK (fixer H2 remainder). `allow()`
   // is a bare process.exit(0) (lib/common.mjs:113), and process.stdout.write is
@@ -102,6 +106,10 @@ try {
         process.stderr.write(
           `H19 drain: writing the drained batch failed (${(err && err.message) || err}) — batch left CLAIMED for the next prompt\n`
         );
+        process.exit(0);
+      }
+      if (hazardIncomplete) {
+        process.stderr.write('H19 drain: queued hazard could not be delivered whole — batch left CLAIMED for retry\n');
         process.exit(0);
       }
       release(); // flushed: only now is the claimed file disposable (P4)

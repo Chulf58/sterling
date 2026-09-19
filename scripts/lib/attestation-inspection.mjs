@@ -1,8 +1,7 @@
 // scripts/lib/attestation-inspection.mjs — the ONE read-only attestation
 // inspector behind decision attestation-staleness-disclosure-only-never-a-
 // refusing-gate (1f069af4 v2; board attestation-gate 9868a0dd), shared by
-// commit-reviewed.mjs (staged diff / --target-sha amend), direct-merge.mjs
-// (branch vs merge base) and merge-gate.mjs (run branch vs merge base).
+// direct-merge.mjs (branch vs merge base).
 //
 // WHAT THIS IS FOR, and what it deliberately is NOT. The consumer's ask was a
 // hook REFUSING a commit that touches render/asset paths without a fresh
@@ -60,7 +59,7 @@ const VERDICTS = ['approved', 'rejected', 'needs_rework'];
 
 /** Repo-relative POSIX normalization, matched on both sides of every
  *  comparison so a cosmetic spelling difference can never read as a
- *  non-match. Mirrors the identical helper in commit-reviewed.mjs. */
+ *  non-match. */
 const normalizePath = (p) => String(p).replace(/\\/g, '/').replace(/^\.\//, '');
 
 /**

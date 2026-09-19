@@ -129,13 +129,6 @@ function additionalContext(res) {
  *  ceiling number lives, per the conductor-contract bullet ("N concurrent subagents is
  *  a CEILING, not a target"). Scoping the assertion to this window (rather than the
  *  whole context blob) avoids false matches on unrelated digits elsewhere in H1's output. */
-function delegationClause(text) {
-  if (!text) return '';
-  const idx = text.search(/concurrent/i);
-  if (idx === -1) return '';
-  return text.slice(Math.max(0, idx - 80), idx + 80);
-}
-
 // --------------------------- board/maintenance fixtures ---------------------------
 
 const maintenanceItem = (store, text, over = {}) =>
@@ -167,37 +160,34 @@ test('AC1: 250 system maintenance items across lanes — H1 reports the TRUE tot
   }
 });
 
-test('AC2: with config.delegation.max_concurrent = 15, the injected delegation-conventions ceiling says 15 and never "five"/5', () => {
-  const { dir, cleanup } = makeProject({ delegation: { max_concurrent: 15 } });
+// AC2 (ORIGINAL, RETIRED 2026-09-19, slice 3 conductor context diet): the two
+// tests that stood here pinned H1's hardcoded conventions block, which
+// interpolated config.delegation.max_concurrent into a live "N concurrent
+// subagents is a CEILING" sentence it computed itself. That block — and the
+// maxConcurrent config read behind it — is deleted outright: H1 now injects
+// docs/conductor-contract.md's bytes verbatim from the clone, a STATIC file
+// with no per-config interpolation, so there is no live number left to pin.
+// Replaced by a single test proving the new invariant: H1's injected output
+// is identical whether or not config.delegation.max_concurrent is set,
+// because nothing in the injection path reads it any more.
+test('AC2 (retired mechanism, new invariant): config.delegation.max_concurrent no longer changes H1\'s injected output at all', () => {
+  const withCeiling = makeProject({ delegation: { max_concurrent: 15 } });
+  const withoutCeiling = makeProject(); // no `delegation` key at all
   try {
-    const r = h1(dir, 'startup');
-    assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
-    assert.ok(r.out, 'H1 must emit parseable JSON');
+    const r1 = h1(withCeiling.dir, 'startup');
+    const r2 = h1(withoutCeiling.dir, 'startup');
+    assert.equal(r1.code, 0, `H1 must exit 0 (soft hook): ${r1.stderr}`);
+    assert.equal(r2.code, 0, `H1 must exit 0 (soft hook): ${r2.stderr}`);
+    assert.ok(r1.out, 'H1 must emit parseable JSON');
+    assert.ok(r2.out, 'H1 must emit parseable JSON');
 
-    const ctx = additionalContext(r) ?? '';
-    const clause = delegationClause(ctx);
-    assert.notEqual(clause, '', 'the delegation-conventions text (mentioning "concurrent") is injected into additionalContext');
-    assert.match(clause, /15/, 'the ceiling reflects config.delegation.max_concurrent (15), not a hardcoded literal');
-    assert.doesNotMatch(clause, /\bfive\b/i, 'the stale hardcoded wording "five concurrent" must not appear once config sets 15');
-    assert.doesNotMatch(clause, /\b5\b/, 'the stale hardcoded ceiling of 5 must not appear once config sets 15 (this exact contradiction recurred 2026-08-20)');
+    const ctx1 = additionalContext(r1) ?? '';
+    const ctx2 = additionalContext(r2) ?? '';
+    assert.equal(ctx1, ctx2, 'the delegation ceiling config no longer affects H1\'s injected output — the conductor-contract injection is a static file read, not a templated one');
+    assert.doesNotMatch(ctx1, /concurrent subagents is a CEILING/i, 'the old live-interpolated delegation-ceiling sentence is gone from H1\'s own output (any such wording now lives, unparametrized, in docs/conductor-contract.md itself)');
   } finally {
-    cleanup();
-  }
-});
-
-test('AC2: with config.delegation entirely absent, the shipped default ceiling (5) appears', () => {
-  const { dir, cleanup } = makeProject(); // no `delegation` key at all
-  try {
-    const r = h1(dir, 'startup');
-    assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
-    assert.ok(r.out, 'H1 must emit parseable JSON');
-
-    const ctx = additionalContext(r) ?? '';
-    const clause = delegationClause(ctx);
-    assert.notEqual(clause, '', 'the delegation-conventions text (mentioning "concurrent") is injected even with no delegation config block');
-    assert.match(clause, /\b5\b|\bfive\b/i, 'the shipped default ceiling (5) is used when config.delegation is absent');
-  } finally {
-    cleanup();
+    withCeiling.cleanup();
+    withoutCeiling.cleanup();
   }
 });
 

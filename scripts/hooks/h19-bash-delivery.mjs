@@ -17,29 +17,16 @@
 //     file, so full-article delivery here could cost more context than the
 //     reads it protects. One line per owned path is the design, not a
 //     degradation.
-//  2. IT ALWAYS ENQUEUES, WHATEVER THE RUNG. injection_rung is probe-set per
-//     CELL, and upstream #55889 (research_finding d21d70c6) reports
-//     additionalContext DROPPED for the Bash matcher specifically while other
-//     matchers worked — auto-closed by a stale-bot, not by a fix. This machine's
-//     rung 'read' was probed on the Read/Edit matchers, which is a DIFFERENT
-//     cell; honouring it here would bet delivery on an unprobed surface that
-//     fails silently. Enqueueing needs no output channel at all (a file write
-//     and a clean exit), and h19-delivery-drain's UserPromptSubmit injection is
-//     the one surface proven on this platform. Cost: a one-turn lag. Raising
-//     this to direct injection is licensed by a probe of the Bash cell, nothing
-//     less.
+//  2. IT HONOURS THE DELIVERY RUNG. On 'read' and 'edit' it puts the pointer in
+//     this PostToolUse envelope; only 'prompt' queues for UserPromptSubmit.
+//     Queueing direct-capable Bash calls causes a fatal one-turn lag and sends a
+//     child agent's knowledge to the conductor instead of the child.
 //  3. IT IS SILENT ON UNOWNED TERRITORY. The frontier signal is right for an
 //     edit — you are about to work there. On Bash it would fire on every grep
 //     across every unowned file, which is most of a survey (P1: a signal that
 //     always fires teaches you to ignore it).
 //
-// SCOPE LIMIT, disclosed not hidden: this serves the CONDUCTOR only. The pending
-// queue drains at UserPromptSubmit, which a subagent never sees, so enqueueing a
-// subagent's touches would mis-route its knowledge into the conductor's context
-// (the correctness finding that shaped the same rule in h19-knowledge-delivery).
-// Pipeline agents get prep's knowledge_pack instead; a direct-mode subagent's
-// Bash surveying is genuinely uncovered until the Bash cell is probed.
-import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -56,19 +43,30 @@ import {
   budgetKnownGaps,
   isGapDelivered,
   markGapDelivered,
+  capPointerBlock,
+  resolveTotalCap,
+  isDelivered,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
 const command = input.tool_input?.command;
 if (!command) allow(); // nothing to parse (not a shell call, or a malformed one)
 
-// The queue serves the conductor's next prompt; a subagent never sees one.
-if (input.agent_id) allow();
-
 const store = openStore(input.cwd);
 if (!store) allow(); // not a Sterling project — no ceremony (P1)
 
 try {
+  // Bash is PostToolUse. Both direct-capable rungs inject on this call; only a
+  // prompt-rung session uses the delayed queue. Unknown hand-edited values keep
+  // the conservative prompt fallback used by the Read delivery hook.
+  const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
+  const rung = ['prompt', 'read', 'edit'].includes(rawRung) ? rawRung : 'prompt';
+  const mode = rung === 'prompt' ? 'enqueue' : 'inject';
+  // UserPromptSubmit belongs only to the conductor. Do not enqueue a child's
+  // pointer into somebody else's context when the project explicitly selects
+  // the prompt rung.
+  if (mode === 'enqueue' && input.agent_id) allow();
+
   // NO run gating here, deliberately: a pipeline AGENT is already excluded above
   // (the pending queue is the conductor's), and the conductor's own inline
   // surveying during a run deserves delivery exactly as much as it does outside
@@ -77,7 +75,6 @@ try {
   const guard = readGuard(gPath);
 
   const entries = [];
-  const delivered = [];
   for (const candidate of extractCommandPathCandidates(command)) {
     if (entries.length >= BASH_POINTER_PATH_CAP) break;
     const rel = repoRel(candidate, input.cwd);
@@ -108,7 +105,6 @@ try {
     if (!owners.length && !hazards.length) continue;
 
     entries.push({ rel, owners, hazards });
-    delivered.push(rel);
   }
 
   if (!entries.length) allow();
@@ -156,15 +152,15 @@ try {
   // footnote, still naming it as governing this path. Gap substance rides the
   // SAME per-owner {id, line} entry (see bashPointerBlock), so it inherits the
   // identical live/superseded/missing verdict as the pointer it sits beside.
-  const block = bashPointerBlock(entries, { gapsByOwner });
-  enqueuePending(pendingPath(input.cwd), {
-    kind: 'bash_pointers',
-    rel: delivered.join(' '),
-    payload: joinPointerBlock(block),
-    recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines }),
-    agent_id: 'conductor',
+  // Dedup (one line per record; none for a record a Read already delivered
+  // this session — same guard ledger) and the per-delivery total cap
+  // (scale-down Slice 3c): the drain re-resolves hazard lines to complete
+  // hazard substance; ordinary lines are disclosed as a count under the cap.
+  const deliveredIds = new Set(entries.flatMap((e) => [...e.owners, ...e.hazards]).filter((r) => isDelivered(guard, r)).map((r) => r.id));
+  const block = capPointerBlock(bashPointerBlock(entries, { gapsByOwner }), resolveTotalCap(input.cwd), {
+    skip: (id) => deliveredIds.has(id),
   });
-  guard.pointer_files.push(...delivered);
+  if (!block.lines.length) allow(); // every named record was already delivered this session
   // MARK ONLY WHAT ACTUALLY RENDERED (fixer round LOW finding, mirrors the
   // cappedHazards precedent: a hazard/decision capped OUT of a payload is
   // never marked delivered, so it can surface on a later touch instead of
@@ -174,10 +170,35 @@ try {
   // one shot at this seam's dedup — a subsequent probe of its territory
   // should still get a real chance to show its gaps, not a permanently
   // suppressed "0 of N" repeat.
-  const deliveredGapOwners = gapOwners.filter((o) => (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
-  if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
-  writeGuard(gPath, guard);
-  allow();
+  const shownIds = new Set(block.lines.map((l) => l.id));
+  const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
+  const emittedPaths = new Set();
+  for (const entry of entries) {
+    const eligible = [...entry.owners, ...entry.hazards].filter((r) => !deliveredIds.has(r.id));
+    if (eligible.length && eligible.every((r) => shownIds.has(r.id))) emittedPaths.add(entry.rel);
+  }
+  const recordDelivered = () => {
+    guard.pointer_files.push(...emittedPaths);
+    if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
+    writeGuard(gPath, guard);
+  };
+  const payload = joinPointerBlock(block);
+  if (mode === 'enqueue') {
+    if (!enqueuePending(pendingPath(input.cwd), {
+      kind: 'bash_pointers',
+      rel: [...emittedPaths].join(' '),
+      payload,
+      recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines, tail: block.tail }),
+      agent_id: 'conductor',
+    })) throw new Error('delivery queue lock timeout');
+    recordDelivered();
+    allow();
+  }
+  exitAfterWrite(
+    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
+    0,
+    { onWritten: recordDelivered }
+  );
 } catch (e) {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking
   // (P5 visibility without an AC7 violation).

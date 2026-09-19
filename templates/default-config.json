@@ -4,6 +4,7 @@
     "windows": {
       "default": 200000,
       "claude-fable-5": 1000000,
+      "claude-fable-5-1": 1000000,
       "claude-opus-5": 1000000,
       "claude-sonnet-5": 1000000,
       "claude-haiku-4-5": 200000
@@ -11,9 +12,9 @@
     "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
   "models": {
-    "coder": { "model": "claude-sonnet-5", "effort": "high" },
+    "implementor": { "model": "claude-sonnet-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5", "effort": "medium" },
-    "explorer": { "model": "claude-sonnet-5", "effort": "low" },
+    "scout": { "model": "claude-sonnet-5", "effort": "low" },
     "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },
     "librarian": { "model": "claude-sonnet-5", "effort": "low" },
     "debugger": { "model": "claude-sonnet-5", "effort": "high" }
@@ -23,10 +24,6 @@
   },
   "delegation": {
     "max_concurrent": 5
-  },
-  "delegation_watch": {
-    "min_hand_work": 15,
-    "max_dispatches": 0
   },
   "dispatch_register": {
     "stale_minutes": 60
@@ -44,8 +41,9 @@
     "staleness_days": 45
   },
   "delivery": {
-    "injection_rung": "prompt",
-    "payload_char_cap": 2400
+    "injection_rung": "read",
+    "payload_char_cap": 2400,
+    "total_cap_bytes": 3000
   },
   "article_history_genesis_entries": 2,
   "sparring_partner": {

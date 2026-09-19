@@ -1,6 +1,6 @@
 ---
 name: cleanup
-description: Gated deletion run SOP (§8.4) — the anti-accretion mechanism. Deletion earns full plan→grill→execute→review rigor; never a side-job inside a feature phase.
+description: Gated deletion run SOP (§8.4) — the anti-accretion mechanism. Deletion earns full plan, execution, and review rigor; never a side-job inside a feature phase.
 ---
 
 # Cleanup SOP (§8.4)
@@ -13,4 +13,4 @@ Trigger: /sterling:cleanup or maintenance-queue review. Input: `deprecated`/`dor
 4. **Verify:** run the relevant build and tests, inspect the deletion diff, and obtain an independent review appropriate to the risk before committing.
 5. **Retirement:** the articles' traced tests retire with them; articles remain as superseded history (never hard-deleted knowledge); board/queue entries are removed by the deletion artifact (P4). Removal operations take the exact full UUID, never a prefix.
 
-Cleanup is never a side-job inside a feature phase — a coder told to "tidy while you're at it" blows the contract by design.
+Cleanup is never a side-job inside a feature phase — an implementor told to "tidy while you're at it" blows the contract by design.

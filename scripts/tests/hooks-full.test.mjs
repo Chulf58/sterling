@@ -127,7 +127,13 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
     assert.match(out.systemMessage, /^2 tasks · 1 maintenance item pending/);
-    assert.match(out.hookSpecificOutput.additionalContext, /Anti-speculation/);
+    // CHANGED 2026-09-19 (slice 3, conductor context diet): H1's hardcoded
+    // conventions block (which carried "Anti-speculation") is deleted; H1 now
+    // injects docs/conductor-contract.md verbatim. This runHook() spawn runs
+    // scripts/hooks/h1-session-start.mjs from its real source location inside
+    // this repo, so pluginRoot()'s walk-up finds the real clone and the real
+    // contract file is read — its own heading is the new liveness marker.
+    assert.match(out.hookSpecificOutput.additionalContext, /You are the delegator, not the worker/);
     assert.ok(r.stderr.includes(ART_ROW), 'banner art on stderr');
     assert.ok(!r.stderr.includes('\x1b['), 'NO_COLOR strips ANSI');
     assert.match(r.stderr, /v\d+\.\d+\.\d+/, 'plugin version read live (fail-open contract)');
@@ -180,7 +186,9 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     assert.match(ctx, /2 items in lane article_missing/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
-    assert.match(ctx, /Anti-speculation/, 'the conventions injection is unaffected');
+    // CHANGED 2026-09-19 (slice 3): see the note at :131 — same runHook() shape,
+    // same real-contract marker.
+    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract injection is unaffected');
 
     // file_parked closes at branch merge, never by drain — it must not trip the
     // drain signal (2026-08-09 consuming project: 15 by-design-open file_parked
@@ -219,7 +227,7 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
     const broken = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' });
     assert.equal(broken.code, 0, broken.stderr);
-    assert.match(JSON.parse(broken.stdout).hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions survive a corrupt config');
+    assert.match(JSON.parse(broken.stdout).hookSpecificOutput.additionalContext, /You are the delegator, not the worker/, 'the conductor-contract injection survives a corrupt config');
   } finally {
     cleanup();
   }
@@ -251,7 +259,13 @@ test('H1 machine role (todo cabbc10f, decision a9b98b7d): stated only on a Sterl
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'consumer' }));
     const consumer = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
     assert.match(consumer.hookSpecificOutput.additionalContext, /MACHINE ROLE: CONSUMER — this clone consumes via \/sterling:update/);
-    assert.match(consumer.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions still present alongside the role line');
+    // CHANGED 2026-09-19 (slice 3): H1's hardcoded conventions block is
+    // deleted; H1 now reads docs/conductor-contract.md from pluginRoot(). This
+    // fixture's STERLING_PLUGIN_ROOT (`dir`, a bare makeProject() tmp dir) has
+    // no docs/ subdirectory, so the read genuinely fails and H1's fail-LOUD
+    // fallback fires — asserting that fallback text is present is itself the
+    // "never a crash, always something rendered" proof this line existed for.
+    assert.match(consumer.hookSpecificOutput.additionalContext, /CONDUCTOR CONTRACT UNAVAILABLE/, 'the contract fallback still renders alongside the role line');
 
     // NOT a clone (no STERLING_PLUGIN_ROOT override — and the seam bundle's
     // marker-free temp location means its own walk-up finds no plugin tree
@@ -283,7 +297,10 @@ test('H1 machine role (isolates the notAClone arm at :290-291): a fixture root w
     // and passes vacuously even if H1 crashed or returned garbage instead of
     // real additionalContext.
     assert.equal(typeof ctx, 'string', 'additionalContext must be a real string, not absent/undefined');
-    assert.match(ctx, /Anti-speculation/, 'H1 produced its normal conventions block — proof the hook actually ran and rendered content, not that it crashed silently');
+    // CHANGED 2026-09-19 (slice 3): see the note at :254 — no resolvable plugin
+    // root here either, so H1's fail-LOUD contract fallback is the proof of
+    // real (non-crashed) rendering.
+    assert.match(ctx, /CONDUCTOR CONTRACT UNAVAILABLE/, 'H1 produced its normal banner — proof the hook actually ran and rendered content, not that it crashed silently');
     assert.ok(!/MACHINE ROLE/.test(ctx), 'no role line off the plugin\'s own clone');
   } finally {
     cleanup();
@@ -306,7 +323,10 @@ test('H1 machine role: a malformed config on the plugin\'s own clone costs only 
     });
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    assert.match(out.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions survive a corrupt config even on the self-hosted clone');
+    // CHANGED 2026-09-19 (slice 3): see the note at :254 — this fixture's
+    // STERLING_PLUGIN_ROOT has no docs/ subdirectory, so H1's fail-LOUD
+    // fallback is what "never a crash" now looks like.
+    assert.match(out.hookSpecificOutput.additionalContext, /CONDUCTOR CONTRACT UNAVAILABLE/, 'the contract fallback survives a corrupt config even on the self-hosted clone');
     assert.match(out.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED/, 'a malformed config reads as absent, the safe default — never a crash');
   } finally {
     cleanup();
@@ -350,7 +370,10 @@ test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer cl
     assert.match(behind.systemMessage, /Sterling is 1 update\(s\) behind/, 'the human is told, with the double-click remedy');
     assert.match(behind.systemMessage, /sterling-update\.bat/);
     assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
-    assert.match(behind.hookSpecificOutput.additionalContext, /Anti-speculation/, 'conventions intact alongside the signal');
+    // CHANGED 2026-09-19 (slice 3): see the note at :254 — the fixture `clone`
+    // git repo has no docs/conductor-contract.md, so the fail-LOUD fallback is
+    // what "intact alongside the signal" now means.
+    assert.match(behind.hookSpecificOutput.additionalContext, /CONDUCTOR CONTRACT UNAVAILABLE/, 'the contract fallback is intact alongside the signal');
     assert.ok(existsSync(join(clone, '.git', 'sterling-update-check.json')), 'the fetch throttle is stamped');
 
     // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
@@ -398,7 +421,9 @@ test('H1: shared project registry — touches this project last_seen + makes the
     const ctx = out.hookSpecificOutput.additionalContext;
     assert.match(ctx, /Sibling Sterling projects/);
     assert.match(ctx, /- sib-live: node/, 'live sibling listed with its domains');
-    assert.match(ctx, /Anti-speculation/, 'conventions still present');
+    // CHANGED 2026-09-19 (slice 3): see the note at :131 — real runHook() spawn,
+    // real contract file read.
+    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract injection is still present');
     assert.doesNotMatch(ctx, /sib-missing/, 'a missing (stale) sibling is excluded from conductor awareness');
     assert.doesNotMatch(out.systemMessage, /sibling/, 'the human systemMessage is not used for sibling awareness');
     assert.match(out.systemMessage, /pending$/, 'systemMessage is counts-only');
@@ -451,7 +476,9 @@ test('H1 machine-activation guard: unresolvable baked hook node warns human + co
     assert.match(out.systemMessage, /baked for ANOTHER machine context/, 'human warned in systemMessage');
     assert.match(out.systemMessage, /probe-agent\.md/, 'offending agent named');
     assert.match(out.hookSpecificOutput.additionalContext, /MACHINE-CONTEXT DRIFT \(H1/, 'conductor told in additionalContext');
-    assert.match(out.hookSpecificOutput.additionalContext, /machine_rebaked/, 'recovery path names the sync re-bake');
+    // 2026-09-19 deliberate change (4): H1 compresses machine-drift notices
+    // to counted state lines with names instead of sync-status jargon.
+    assert.match(out.hookSpecificOutput.additionalContext, /sync-agents/i, 'recovery path names the sync repair');
 
     // this machine's node AND hook script resolve — quiet
     const liveHooksDir = join(dir, 'hooks-live');
@@ -2067,17 +2094,20 @@ test('H10 conductor pressure: soft classifies soft — advisory only, never a st
   }
 });
 
-test('H10 conductor pressure: hard denies ONCE per session naming fill, threshold and the delegation remedy; spent marker releases the next Stop', () => {
+// 2026-09-19 deliberate change (1): pressure is a non-blocking system message
+// plus next-prompt queue entry; its once-per-session content remains explicit.
+test('H10 conductor pressure: hard warns ONCE per session naming fill, threshold and the delegation remedy; spent marker releases the next Stop', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeConductorTranscript(dir, 170_000); // 85% — past hard 50 default
     const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(first.code, 2, 'hard pressure soft-blocks once');
-    assert.match(first.stderr, /conductor context pressure/i);
-    assert.match(first.stderr, /85\.0%/, 'names the fill');
-    assert.match(first.stderr, /50%/, 'names the threshold');
-    assert.match(first.stderr, /delegat/i, 'names the delegation remedy');
-    assert.doesNotMatch(first.stderr, /\/clear/, 'slice 1 never instructs /clear');
+    assert.equal(first.code, 0, 'hard pressure is non-blocking');
+    const firstMessage = JSON.parse(first.stdout).systemMessage;
+    assert.match(firstMessage, /H10 context warning/i);
+    assert.match(firstMessage, /85\.0%/, 'names the fill');
+    assert.match(firstMessage, /50%/, 'names the threshold');
+    assert.match(firstMessage, /delegat/i, 'names the delegation remedy');
+    assert.doesNotMatch(firstMessage, /\/clear/, 'slice 1 never instructs /clear');
     assert.equal(readPressureFile(dir).level, 'hard');
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'once per session — marker spent');
@@ -2086,21 +2116,27 @@ test('H10 conductor pressure: hard denies ONCE per session naming fill, threshol
   }
 });
 
-test('H10 conductor pressure: an UNMAPPED model warns loudly ONCE at any fill level — the gauge names the model, the default window, and the config key to add', () => {
+// 2026-09-19 deliberate change (1): unknown-window pressure remains loud but
+// no longer denies Stop.
+test('H10 conductor pressure: an UNMAPPED model warns loudly ONCE that the fill is UNRELIABLE — names the model and the config key, prints no percentage against a default (slice 4)', () => {
   const { dir, cleanup } = makeProject();
   try {
-    // 25% of the 200k DEFAULT — a plausible-looking number, previously silent:
-    // the dangerous case (2026-08-11 retrospective: 48% believed at ~10% of real
-    // capacity because the project config lacked the model's window entry).
+    // 25% of the 200k DEFAULT would be a plausible-looking number — the
+    // dangerous case (2026-08-11 retrospective: 48% believed at ~10% of real
+    // capacity; 2026-09-19: 66.2% on a 1M session). Slice 4: no default
+    // denominator at all — the fill is reported as unreliable instead.
     writeConductorTranscript(dir, 50_000, { model: 'claude-novel-9' });
     const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(first.code, 2, 'the gauge warning soft-blocks once even below every threshold');
-    assert.match(first.stderr, /claude-novel-9/, 'names the unmapped model');
-    assert.match(first.stderr, /context_watch\.windows/, 'names the config key to add');
-    assert.match(first.stderr, /200000|200[,_]000|200k/i, 'names the default window it fell back to');
+    assert.equal(first.code, 0, 'the gauge warning is non-blocking');
+    const firstMessage = JSON.parse(first.stdout).systemMessage;
+    assert.match(firstMessage, /claude-novel-9/, 'names the unmapped model');
+    assert.match(firstMessage, /context_watch\.windows/, 'names the config key to add');
+    assert.match(firstMessage, /unreliable/i, 'says the fill is unreliable');
+    assert.doesNotMatch(firstMessage, /\d+(\.\d+)?%/, 'no percentage against a default');
     const sample = readPressureFile(dir);
     assert.equal(sample.unmapped_model, 'claude-novel-9', 'the sample carries the unmapped model');
-    assert.equal(sample.level, 'below_soft', 'classification still runs against the default');
+    assert.equal(sample.level, 'unknown', 'no classification without a real window');
+    assert.equal(sample.fill_pct, null, 'no fill number without a real window');
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'once per session — gauge marker spent');
   } finally {
@@ -2130,7 +2166,7 @@ test('H10 conductor pressure: hard + open capture duty ride ONE deny (pressure a
     const nag = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(nag.code, 2);
     assert.match(nag.stderr, /nothing was captured/, 'duty nag present');
-    assert.match(nag.stderr, /conductor context pressure/i, 'pressure part rides the same deny');
+    assert.match(nag.stderr, /H10 context warning/i, 'pressure part rides the same deny');
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'second Stop releases (queue path) with no separate pressure deny');
   } finally {
@@ -2155,17 +2191,19 @@ test('H10 conductor pressure: missing transcript degrades LOUD to unknown — ch
   }
 });
 
+// 2026-09-19 deliberate change (1): configured hard pressure changes the
+// warning level, not the Stop exit code.
 test('H10 conductor pressure: config thresholds govern (custom soft/hard flip a below-soft fill to hard)', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeFileSync(
       join(dir, '.sterling', 'config.json'),
-      JSON.stringify({ ...CONFIG, context_watch: { conductor: { soft_pct: 10, hard_pct: 20 } } })
+      JSON.stringify({ ...CONFIG, context_watch: { ...CONFIG.context_watch, conductor: { soft_pct: 10, hard_pct: 20 } } })
     );
     writeConductorTranscript(dir, 50_000); // 25% — hard under the custom 20 threshold
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(r.code, 2, 'custom hard threshold fires');
-    assert.match(r.stderr, /20%/, 'names the configured threshold');
+    assert.equal(r.code, 0, 'custom hard threshold warns without blocking');
+    assert.match(JSON.parse(r.stdout).systemMessage, /20%/, 'names the configured threshold');
   } finally {
     cleanup();
   }
@@ -2222,16 +2260,19 @@ function gitProject() {
   return { dir, store, cleanup, dirty: () => writeFileSync(join(dir, 'wip.mjs'), '// uncommitted\n') };
 }
 
-test('H10 slice boundary: soft pressure + dirty tree soft-blocks ONCE naming the commit boundary; clean release after', () => {
+// 2026-09-19 deliberate change (1): boundary pressure is non-blocking while
+// retaining its once-per-session commit-boundary guidance.
+test('H10 slice boundary: soft pressure + dirty tree warns ONCE naming the commit boundary; clean release after', () => {
   const { dir, dirty, cleanup } = gitProject();
   try {
     writeConductorTranscript(dir, 80_000); // 40% of the 200k default — soft
     dirty();
     const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(first.code, 2, 'soft + dirty tree blocks once');
-    assert.match(first.stderr, /commit boundary/i);
-    assert.match(first.stderr, /uncommitted/i, 'names the dirty state');
-    assert.match(first.stderr, /once per session/i);
+    assert.equal(first.code, 0, 'soft + dirty tree warns without blocking');
+    const firstMessage = JSON.parse(first.stdout).systemMessage;
+    assert.match(firstMessage, /commit boundary/i);
+    assert.match(firstMessage, /uncommitted/i, 'names the dirty state');
+    assert.match(firstMessage, /once per session/i);
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'marker spent — no repeat');
   } finally {
@@ -2250,30 +2291,33 @@ test('H10 slice boundary: soft pressure + CLEAN tree stays advisory-silent (comm
   }
 });
 
-test('H10 slice boundary: hard pressure + dirty tree carries the boundary addendum in the hard block', () => {
+// 2026-09-19 deliberate change (1): hard pressure guidance no longer blocks.
+test('H10 slice boundary: hard pressure + dirty tree carries the boundary addendum in the hard warning', () => {
   const { dir, dirty, cleanup } = gitProject();
   try {
     writeConductorTranscript(dir, 170_000); // 85% — hard
     dirty();
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(r.code, 2);
-    assert.match(r.stderr, /conductor context pressure/i);
-    assert.match(r.stderr, /commit boundary/i, 'hard message names the boundary when dirty');
+    assert.equal(r.code, 0);
+    assert.match(JSON.parse(r.stdout).systemMessage, /H10 context warning/i);
+    assert.match(JSON.parse(r.stdout).systemMessage, /commit boundary/i, 'hard message names the boundary when dirty');
   } finally {
     cleanup();
   }
 });
 
-test('H10 slice boundary: soft-boundary block does not suppress a later hard escalation; hard marker ends it', () => {
+// 2026-09-19 deliberate change (1): escalation remains separately visible but
+// both levels are non-blocking.
+test('H10 slice boundary: soft-boundary warning does not suppress a later hard escalation; hard marker ends it', () => {
   const { dir, dirty, cleanup } = gitProject();
   try {
     writeConductorTranscript(dir, 80_000);
     dirty();
-    assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 2, 'soft boundary block');
+    assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 0, 'soft boundary warning');
     writeConductorTranscript(dir, 170_000); // escalate to hard
     const hard = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(hard.code, 2, 'escalation still notifies');
-    assert.match(hard.stderr, /hard threshold/);
+    assert.equal(hard.code, 0, 'escalation still notifies without blocking');
+    assert.match(JSON.parse(hard.stdout).systemMessage, /past the 50% target/);
     assert.equal(runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir).code, 0, 'hard marker spent — done for the session');
   } finally {
     cleanup();
@@ -2383,7 +2427,9 @@ test('H1 rotation restore: source=startup/resume neither injects nor consumes; c
     for (const source of ['startup', 'resume']) {
       const r = h1(dir, { source });
       assert.doesNotMatch(r.out.hookSpecificOutput.additionalContext, /ROTATION RESTORE/, `${source} does not inject`);
-      assert.match(r.out.hookSpecificOutput.additionalContext, /Sterling conventions/, 'conventions intact');
+      // CHANGED 2026-09-19 (slice 3): see the note at :131 — real runHook()
+      // spawn (via the local h1() wrapper), real contract file read.
+      assert.match(r.out.hookSpecificOutput.additionalContext, /You are the delegator, not the worker/, 'conductor-contract injection intact');
       assert.ok(readRotationNote(dir), `${source} does not consume`);
     }
   } finally {
@@ -2581,14 +2627,17 @@ test('rotation-note.mjs (Codex P1-B): a clone with origin/main but NO local main
   }
 });
 
-test('H10 hard pressure names the rotation protocol: rotation note + READY TO CLEAR', () => {
+// 2026-09-19 deliberate change (1): the hard warning is advisory at Stop.
+test('H10 hard pressure is a WARNING to finish and commit — it never demands a clear or names the rotation protocol (slice 4; was: names READY TO CLEAR)', () => {
   const { dir, cleanup } = gitProject();
   try {
     writeConductorTranscript(dir, 170_000); // 85% — hard
     const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
-    assert.equal(r.code, 2);
-    assert.match(r.stderr, /rotation-note\.mjs/, 'names the writer');
-    assert.match(r.stderr, /READY TO CLEAR/, 'names the protocol');
+    assert.equal(r.code, 0);
+    const message = JSON.parse(r.stdout).systemMessage;
+    assert.match(message, /finish the open work and commit/, 'names the finish-and-commit remedy');
+    assert.doesNotMatch(message, /rotation-note\.mjs/, 'no rotation writer');
+    assert.doesNotMatch(message, /READY TO CLEAR/, 'no clear demand');
   } finally {
     cleanup();
   }

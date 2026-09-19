@@ -226,11 +226,12 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
       ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     ],
     // insertion order fixes the row order + the cursor index per key:
-    // coder=0, researcher=1, explorer=2, librarian=3, classifiers=4
+    // coder=0 (orphan), implementor=1, researcher=2, scout=3, librarian=4, classifiers=5
     configModels: {
       coder: { model: 'claude-sonnet-4-6', effort: 'high' },
+      implementor: { model: 'claude-opus-4-8', effort: 'low' },
       researcher: { model: 'claude-opus-4-8', effort: 'low' },
-      explorer: { model: 'claude-opus-4-8', effort: 'low' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
@@ -385,8 +386,9 @@ test('AC1: the row shows the INSTALLED frontmatter value (the governing copy), N
     ],
     configModels: {
       coder: { model: 'claude-sonnet-4-6', effort: 'high' },
+      implementor: { model: 'claude-opus-4-8', effort: 'low' },
       researcher: { model: 'claude-sonnet-4-6', effort: 'high' },
-      explorer: { model: 'claude-opus-4-8', effort: 'low' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
       librarian: { model: 'claude-opus-4-8', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
@@ -462,8 +464,9 @@ test('AC4/AC5 (P5 backstop): a partially applied projection — config updated b
     ],
     configModels: {
       coder: { model: 'claude-sonnet-4-6', effort: 'high' },
+      implementor: { model: 'claude-sonnet-4-6', effort: 'low' },
       researcher: { model: 'claude-sonnet-4-6', effort: 'low' }, // config already swapped to sonnet
-      explorer: { model: 'claude-sonnet-4-6', effort: 'low' },
+      scout: { model: 'claude-sonnet-4-6', effort: 'low' },
       librarian: { model: 'claude-sonnet-4-6', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
@@ -611,10 +614,11 @@ test('AC5 commit (config-only key): a classifiers swap emits the effect with NO 
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    // classifiers row (cursor 4): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
+    // classifiers row (cursor 5: coder=0, implementor=1, researcher=2, scout=3,
+    // librarian=4, classifiers=5): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
     const res = drive(
       store,
-      st({ tab: SYS_TAB, cursor: 4 }),
+      st({ tab: SYS_TAB, cursor: 5 }),
       [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
       snap,
     );

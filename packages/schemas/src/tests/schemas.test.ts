@@ -711,13 +711,16 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
     'AGENT_MODEL_KEY keys are exactly the registered agents — none missing, none orphaned'
   );
 
-  // the exact expected mapping — scale-down decision
-  // sterling-claude-code-scale-down-boundary (2ad87dd1) cut the roster to the
-  // 3 conductor-direct survivors; the old pipeline agents and the
-  // reviewer-folding shape they carried are gone with them.
+  // the exact expected mapping — Slice 5/8 (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1, change 3): the roster
+  // is now implementor/researcher/scout/librarian (explorer -> scout, a
+  // coder-class agent -> implementor). config.models was renamed to match
+  // directly (coder -> implementor, explorer -> scout), so the map is now a
+  // straight identity.
   assert.deepEqual(map, {
+    implementor: 'implementor',
     researcher: 'researcher',
-    explorer: 'explorer',
+    scout: 'scout',
     librarian: 'librarian',
   });
 
@@ -726,6 +729,7 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
   // config-only keys have NO installed/registered agent, so they are NOT keys of AGENT_MODEL_KEY.
   assert.ok(!('coder_hard' in lookup), 'coder_hard is a config-only key — never a registered-agent key');
   assert.ok(!('classifiers' in lookup), 'classifiers is a config-only key — never a registered-agent key');
+  assert.ok(!('debugger' in lookup), 'debugger is a config-only key — no debugger template is registered yet');
 
   // every VALUE the map yields must be a real config.models key (cross-check against parseConfig defaults).
   const cfg = parseConfig({}) as unknown as { models: Record<string, unknown> };

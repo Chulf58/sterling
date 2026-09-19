@@ -646,14 +646,14 @@ test('R1-A37: withRegisterLock and withLedgerLock are the same primitive over DI
   }
 });
 
-test('R1-A38: the ledger lock refusal carries its OWN code (ledger_lock_held), not the register\'s', async () => {
+test('R1-A38: the compatibility lock refusal carries its own code, not the register\'s', async () => {
   const { dir, cleanup } = project([]);
   try {
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     const ledgerLock = join(dir, '.sterling', 'review-ledger.lock');
     forgeLock(ledgerLock, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'forged' });
     const r = await refusalOf(() => REG.withLedgerLock(dir, () => 'ran', { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(r.code, 'ledger_lock_held', `expected ledger_lock_held, got ${JSON.stringify(r)}`);
+    assert.equal(r.code, 'compatibility_lock_held', `expected compatibility_lock_held, got ${JSON.stringify(r)}`);
     assert.equal(r.facts?.lock_dir, ledgerLock);
   } finally {
     cleanup();

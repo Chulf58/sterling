@@ -39,6 +39,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { gitTouches } from '../hooks/lib/settlement.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -147,6 +148,36 @@ function additionalContext(res) {
   return (res.out && res.out.hookSpecificOutput ? res.out.hookSpecificOutput.additionalContext : undefined) ?? '';
 }
 
+test('H1 startup seeds a missing git-settled snapshot without absorbing work written after session start; clear does the same and never overwrites an existing snapshot', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    const snapshot = join(dir, '.sterling', 'transient', 'git-settled.json');
+    assert.ok(!existsSync(snapshot), 'fixture starts without a settled snapshot');
+    assert.equal(h1(dir, 'startup').code, 0, 'startup remains soft');
+    const seeded = JSON.parse(readFileSync(snapshot, 'utf8'));
+    assert.equal(typeof seeded.sha, 'string');
+    assert.deepEqual(seeded.dirty, {}, 'the clean startup tree is the baseline');
+    writeFileSync(join(dir, 'after-start.mjs'), 'export const afterStart = true;\n');
+    assert.deepEqual(gitTouches(dir, NOW).candidates.map((c) => c.path), ['after-start.mjs'], 'post-start shell work is visible to the first Stop');
+    assert.equal(h1(dir, 'clear').code, 0, 'clear remains soft');
+    assert.deepEqual(JSON.parse(readFileSync(snapshot, 'utf8')), seeded, 'an existing startup snapshot is never overwritten by clear');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 startup injection remains below 14,600 UTF-8 bytes for this repository fixture', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const r = h1(dir, 'startup');
+    assert.equal(r.code, 0, r.stderr);
+    const bytes = Buffer.byteLength(additionalContext(r), 'utf8');
+    assert.ok(bytes < 14_600, `startup injection is ${bytes}B; must stay below 14,600B`);
+  } finally {
+    cleanup();
+  }
+});
+
 // --------------------------- maintenance-queue fixtures ---------------------------
 
 function maintenanceLane(store, systemReason, count, prefix) {
@@ -184,35 +215,38 @@ const WHOLE_QUEUE_INSTRUCTION = /before taking new work/i;
 // bounded ASK this spec is about.
 const BOUNDED_DRAIN_ASK = /drain slice/i;
 
-// --------------------------- SPEC 1 (board eeb8ee53) ---------------------------
+// --------------------------- SPEC 1 (board eeb8ee53; RETIRED/INVERTED 2026-09-19) ---------------------------
+//
+// SPEC1 ORIGINALLY pinned: source=clear trims H1's hardcoded conventions block
+// (a ~70%-duplicate restatement of CLAUDE.md) because the platform reloads the
+// committed CLAUDE.md on /clear anyway. That mechanism and its rationale are
+// BOTH gone (slice 3, conductor context diet, board d0f3647a): H1 no longer
+// carries a hardcoded conventions block at all — it injects
+// docs/conductor-contract.md's bytes verbatim, read fresh from the clone. That
+// file is a SEPARATE file the platform never auto-loads, so trimming it on
+// clear would mean a freshly cleared session runs with no delegation/review/
+// capture posture until the next SessionStart. The two tests below are
+// REWRITTEN, not deleted, to pin the new (inverted) invariant: the contract
+// injects on EVERY source, clear included. The old markers ("Anti-
+// speculation", "Sterling conventions" — both strings from the deleted block)
+// are replaced with a phrase from docs/conductor-contract.md's own heading.
 
-test('SPEC1 control: source=startup still injects the Sterling-conventions block in full (Anti-speculation + "Sterling conventions" markers both present)', () => {
+test('SPEC1 control: source=startup injects the conductor-contract block in full ("You are the delegator" heading present)', () => {
   const { dir, cleanup } = makeProject();
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r);
-    // Both markers are mined from existing H1 tests' own assertions:
-    // hooks-full.test.mjs asserts /Anti-speculation/ on ordinary SessionStart output;
-    // hooks-full.test.mjs's rotation-restore tests assert /Sterling conventions/ for
-    // source=startup/resume ("conventions intact").
-    assert.match(ctx, /Anti-speculation/, 'the conventions block still appears on startup');
-    assert.match(ctx, /Sterling conventions/, 'the conventions header still appears on startup');
+    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract block still appears on startup');
   } finally {
     cleanup();
   }
 });
-// EXPECTED FAILURE SHAPE: none today — this is the CONTROL, pinning that startup
-// keeps behaving as every existing H1 test already shows. It exists to prove that if
-// the coder's fix over-applies (drops conventions injection universally instead of
-// only for source=clear-with-consumed-note), THIS test is the one that goes red,
-// distinguishing that bug from a correctly scoped fix.
-// NAMED SABOTAGE: delete/comment out the line(s) that append the conventions block to
-// additionalContext (unconditionally, for every source) — this test goes RED because
-// neither marker regex matches an empty/absent conventions section.
+// NAMED SABOTAGE: delete/comment out the line(s) that append conductorContractBlock()
+// to additionalContext — this test goes RED because the heading never appears.
 
-test('SPEC1: source=clear consuming a staged rotation note OMITS the conventions block but still carries the note payload', () => {
+test('SPEC1 (INVERTED): source=clear consuming a staged rotation note STILL carries the conductor-contract block, alongside the note payload', () => {
   const { dir, cleanup } = gitProject();
   try {
     const staged = runRotationNote(dir, ['--next-slice', 'Finish Goblin animations', '--risks', 'shader cache flaky']);
@@ -224,25 +258,21 @@ test('SPEC1: source=clear consuming a staged rotation note OMITS the conventions
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r);
 
-    // the note payload must still be there — SPEC1 trims conventions, not the note
+    // the note payload is still there
     assert.match(ctx, /ROTATION RESTORE/, 'the rotation-restore section still fires');
     assert.match(ctx, /Finish Goblin animations/, 'the staged next_slice text is still injected');
 
-    // the conventions block — the ~70%-duplicate-of-CLAUDE.md payload the board item
-    // names — must be gone from THIS injection
-    assert.doesNotMatch(ctx, /Anti-speculation/, 'the conventions block no longer appears when a rotation note is consumed on clear');
-    assert.doesNotMatch(ctx, /Sterling conventions/, 'the conventions header no longer appears when a rotation note is consumed on clear');
+    // the conductor-contract block — the ONLY way this content reaches context,
+    // since the platform never auto-loads docs/conductor-contract.md — must be
+    // present on clear exactly as on startup; trimming it here would leave a
+    // freshly cleared session with no delegation/review/capture posture at all.
+    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract block still appears when a rotation note is consumed on clear');
   } finally {
     cleanup();
   }
 });
-// EXPECTED FAILURE SHAPE (red against the CURRENT, unpatched H1): H1 today injects
-// the conventions block on every source per hooks-full.test.mjs's own "conventions
-// intact" assertions; the two doesNotMatch calls above are the ones expected to fail
-// (both markers currently present) until the trim ships.
-// NAMED SABOTAGE: revert/omit the trim — i.e. do not special-case source=clear+note-
-// consumed to skip the conventions append — this test goes RED because both
-// doesNotMatch assertions then find their marker present.
+// NAMED SABOTAGE: reintroduce a source==='clear' special case that skips
+// conductorContractBlock() — this test goes RED because the heading match fails.
 
 // --------------------------- SPEC 2 (board 91fc3d6f) ---------------------------
 

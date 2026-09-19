@@ -225,7 +225,32 @@ export type Projection = 'full' | 'digest' | 'count';
  * knowledge_query's tool schema (full/digest/count) cannot silently start
  * accepting a value it has no handling for.
  */
-export type BoardProjection = Projection | 'headline';
+export type BoardProjection = Projection | 'headline' | 'text';
+
+/**
+ * projection:'text' — board_query/maintenance_query's DEFAULT row shape.
+ * Scalar fields only (id, slug, objective, source, system_reason, status,
+ * priority, feature_link, updated_at), `text` clipped to BOARD_TEXT_CLIP
+ * characters, and the per-item artifact_evidence reduced to its count. The
+ * heavy per-row payloads (artifact_evidence records, full annotation prose,
+ * file_keys, provenance detail) ride projection:'full' only, because full
+ * rows on a large board overflowed the caller's tool-result budget.
+ */
+export const BOARD_TEXT_CLIP = 240;
+
+const BOARD_TEXT_FIELDS = ['id', 'slug', 'objective', 'source', 'system_reason', 'status', 'priority', 'feature_link', 'updated_at'] as const;
+
+function textRowRecord(record: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const f of BOARD_TEXT_FIELDS) {
+    const v = record[f];
+    if (v !== undefined && v !== null && v !== '') out[f] = v;
+  }
+  if (typeof record.text === 'string') {
+    out.text = record.text.length <= BOARD_TEXT_CLIP ? record.text : `${record.text.slice(0, BOARD_TEXT_CLIP - 1)}…`;
+  }
+  return out;
+}
 
 /**
  * PARALLEL-LANE SEED — one collision group in board_query's `lane_advisory`:
@@ -387,6 +412,12 @@ export interface BoardQueryResult {
    */
   lane_advisory?: LaneAdvisory;
   /**
+   * Non-full projections only: the number of lane_advisory collision groups,
+   * present only when lane_advisory would be. projection:'full' carries the
+   * lane_advisory block itself instead.
+   */
+  lane_advisory_count?: number;
+  /**
    * board 00fa8adb: whether the per-item `artifact_evidence` derivation ran over
    * this page — 'checked'; 'checked:budget_truncated' when the file-key arm's
    * per-call query budget ran out and the items past it say 'unavailable:budget'
@@ -405,7 +436,7 @@ export interface BoardQueryResult {
    * missing from exactly the pages most likely to be misread.
    */
   artifact_evidence_note: string;
-  /** full records, headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
+  /** text rows (default), full records (projection:'full'), headline digests (projection:'digest'), or minimal headlines (projection:'headline') */
   records: DurableRecord[] | Record<string, unknown>[];
 }
 
@@ -653,6 +684,10 @@ const ARTIFACT_EVIDENCE_NOTE =
   `file_keys or cite its id — within a bounded ${ARTIFACT_EVIDENCE_SCAN_CAP}-record scan per arm. A non-zero count means POSSIBLY ADDRESSED and ` +
   `nothing stronger: VERIFY against HEAD before acting on it. A zero count is equally weak evidence the other way — ` +
   `it checks the knowledge store only, never git, so work that was never captured leaves no trace here.`;
+
+/** The same reading instruction, compact, for the non-full projections. */
+const ARTIFACT_EVIDENCE_NOTE_SHORT =
+  `artifact_evidence is a LOOKUP, never a verdict: a non-zero count means POSSIBLY ADDRESSED (verify against HEAD); a zero count checks the knowledge store only, never git.`;
 
 /**
  * Total order for board/queue paging (board abafbd48 — Codex-adjudicated,
@@ -8762,7 +8797,7 @@ export class SterlingTools {
     const { matching, scanTruncated } = this.boardFiltered(filter);
     const cap = filter.cap ?? DEFAULT_BOARD_CAP;
     const { records, offset, capped, next_cursor } = this.pageBoard(surface, matching, filter);
-    const projection = filter.projection ?? 'full';
+    const projection = filter.projection ?? 'text';
     const notes: string[] = [];
     // MODE-SPECIFIC ADVICE (board abafbd48 re-review, MEDIUM): this page was
     // read by cursor iff the caller passed one — `offset` on the pageBoard
@@ -8791,7 +8826,7 @@ export class SterlingTools {
           // has nothing left to offer and stays hint-free.
           (projection === 'full'
             ? `, or re-run with projection:"digest"/"headline" for compact items (board items run to several KB of text each)`
-            : projection === 'digest'
+            : projection === 'digest' || projection === 'text'
               ? `, or re-run with projection:"headline" for the smallest per-item line (id, priority, system_reason, first 80 chars)`
               : '')
       );
@@ -8840,11 +8875,13 @@ export class SterlingTools {
     }
     const projectRecord = (r: DurableRecord): Record<string, unknown> => {
       const base =
-        projection === 'headline'
-          ? headlineRecord(r as unknown as Record<string, unknown>)
-          : projection === 'digest'
-            ? digestRecord(r as unknown as Record<string, unknown>)
-            : { ...(r as unknown as Record<string, unknown>) };
+        projection === 'text'
+          ? textRowRecord(r as unknown as Record<string, unknown>)
+          : projection === 'headline'
+            ? headlineRecord(r as unknown as Record<string, unknown>)
+            : projection === 'digest'
+              ? digestRecord(r as unknown as Record<string, unknown>)
+              : { ...(r as unknown as Record<string, unknown>) };
       const id = (r as unknown as { id: string }).id;
       const warning = warnings.get(id);
       // COMPOSED AFTER THE PROJECTION CLIP, like the provenance warning beside
@@ -8857,7 +8894,13 @@ export class SterlingTools {
       // when the derivation failed, never a zero-count that would read as a
       // checked-and-found-nothing result.
       const derived = artifactEvidence.get(id);
-      const withEvidence = derived ? { ...base, artifact_evidence: derived } : base;
+      // projection:'text' keeps only the COUNT (the per-row records list is
+      // the heavy part); absent when the derivation failed, as in full.
+      const withEvidence = derived
+        ? projection === 'text'
+          ? { ...base, artifact_evidence_count: derived.count }
+          : { ...base, artifact_evidence: derived }
+        : base;
       if (!warning && !note) return withEvidence;
       const text = typeof base.text === 'string' ? base.text : '';
       // OUTSIDE-MODEL FINDING 3: headline's line stays compact (short markers,
@@ -8865,6 +8908,9 @@ export class SterlingTools {
       // digest/full, which already tolerate multi-line text. Both annotations
       // can apply to one row (an aged keyed item whose drift is also gone), so
       // they compose rather than one displacing the other.
+      // Keep the compact row's text bounded without clipping away warnings.
+      // Both annotations remain visible as separate scalar fields.
+      if (projection === 'text') return { ...withEvidence, ...(warning ? { provenance_warning: warning.short } : {}), ...(note ? { reconcile_warning: note.short } : {}) };
       if (projection === 'headline') return { ...withEvidence, text: `${text}${warning ? warning.short : ''}${note ? note.short : ''}` };
       const parts = [text, warning?.full, note?.full].filter((p): p is string => typeof p === 'string' && p.length > 0);
       return { ...withEvidence, text: parts.join('\n\n') };
@@ -8882,12 +8928,13 @@ export class SterlingTools {
       // own "presence is the signal" convention.
       ...(next_cursor !== undefined ? { next_cursor } : {}),
       // AC3: the key is ABSENT when nothing collides, never an empty block.
-      ...(lane_advisory ? { lane_advisory } : {}),
+      // Non-full projections carry only the group count.
+      ...(lane_advisory ? (projection === 'full' ? { lane_advisory } : { lane_advisory_count: lane_advisory.collisions.length }) : {}),
       // board 00fa8adb: the status ALWAYS present (an absent per-item block must
       // be readable as "not checked" rather than "nothing found"), and the
       // reading instruction with it — once per envelope, not once per item.
       artifact_evidence_provenance,
-      artifact_evidence_note: ARTIFACT_EVIDENCE_NOTE,
+      artifact_evidence_note: projection === 'full' ? ARTIFACT_EVIDENCE_NOTE : ARTIFACT_EVIDENCE_NOTE_SHORT,
       ...(notes.length ? { note: notes.join('; ') } : {}),
       // AC6: unchanged, unfiltered, unreordered — the advisory above is derived
       // FROM this page's matched set and never acts on it.

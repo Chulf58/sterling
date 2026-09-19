@@ -353,9 +353,9 @@ test('a LOCALLY MODIFIED agent is never reported as merely stale — the stale /
     assert.notEqual(section, '', 'the notice still fires for the genuinely stale agent');
     assert.match(lineFor(section, 'coder'), /stale/i, 'the unmodified-but-behind agent is stale');
 
-    const modifiedLine = lineFor(section, 'test-writer');
-    assert.doesNotMatch(modifiedLine, /stale/i, 'a locally MODIFIED install is not describable as stale — sync refuses it, it is not a missed refresh');
-    if (modifiedLine !== '') assert.match(modifiedLine, /modif/i, 'if the modified install is mentioned at all, it is classified as locally modified');
+    // 2026-09-19 deliberate change (4): one counted line per state names its
+    // agents, so inspect the refused state rather than a per-agent detail line.
+    assert.match(section, /refused_local_modification \(behind template\): test-writer\.md/i, 'a locally MODIFIED install is classified as refused, never stale');
     assert.match(section, /\b1\b/, 'the stale COUNT is 1 — the modified agent is not counted as stale');
   } finally {
     cleanup();
@@ -881,22 +881,9 @@ test('F11: a hand-edited agent that is LEVEL with its template is worded differe
     assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
 
     const section = currencySection(contextOf(r));
-    const levelLine = lineFor(section, 'coder');
-    const behindLine = lineFor(section, 'test-writer');
-
-    assert.notEqual(levelLine, '', 'the hand-edited but level agent is reported (F7)');
-    assert.notEqual(behindLine, '', 'so is the hand-edited agent that is behind');
-
-    // The wording-independent half: strip the names and the two must still differ.
-    const shape = (l) => l.replace(/coder|test-writer/g, '<agent>').replace(/\s+/g, ' ').trim();
-    assert.notEqual(
-      shape(levelLine),
-      shape(behindLine),
-      'the two cases must NOT collapse to one sentence — sync leaves the level one alone and REFUSES the behind one, which are different problems with different remedies'
-    );
-
-    assert.match(behindLine, /(refus|will not|won\'t|blocked|declin)/i, 'the behind-and-edited agent is the one sync refuses');
-    assert.doesNotMatch(levelLine, /(refus|will not|won\'t|blocked|declin)/i, 'the level-and-edited agent is NOT described as refused — nothing is being withheld from it; it is simply hand-owned now');
+    assert.match(section, /locally modified \(current template\): coder\.md/i, 'the hand-edited but level agent is reported as locally modified/current');
+    assert.match(section, /refused_local_modification \(behind template\): test-writer\.md/i, 'the behind-and-edited agent is the one sync refuses');
+    assert.doesNotMatch(section.match(/locally modified \(current template\):[^;.]*/i)?.[0] ?? '', /refus/i, 'the level-and-edited agent is not described as refused');
   } finally {
     cleanup();
     clone.cleanup();

@@ -29,7 +29,7 @@ test('backupPathForRuntime: translates under WSL/Linux, leaves drive paths on na
   if (process.platform === 'win32') {
     assert.equal(backupPathForRuntime('C:/Users/cuj/x'), 'C:/Users/cuj/x', 'native Windows leaves the drive path');
   } else {
-    // the WSL/Linux case — where dispose-run realistically runs
+    // the WSL/Linux case
     assert.equal(backupPathForRuntime('C:/Users/cuj/x'), '/mnt/c/Users/cuj/x', 'WSL rewrites the drive path');
     assert.equal(backupPathForRuntime('/mnt/c/Users/cuj/x'), '/mnt/c/Users/cuj/x', 'already-POSIX passes through');
     assert.equal(backupPathForRuntime('backups'), 'backups', 'relative passes through (resolved against the project)');

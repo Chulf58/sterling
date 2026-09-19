@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h10-direct-capture.mjs
-import { randomUUID as randomUUID3, createHash as createHash3 } from "node:crypto";
-import { spawnSync as spawnSync4 } from "node:child_process";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, writeSync, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
-import { join as join5, basename as basename3 } from "node:path";
+import { randomUUID as randomUUID4, createHash as createHash3 } from "node:crypto";
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, writeSync, rmSync as rmSync4, existsSync as existsSync6, mkdirSync as mkdirSync5, renameSync as renameSync4 } from "node:fs";
+import { join as join6, basename as basename3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4629,8 +4629,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4904,14 +4905,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4932,16 +4925,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -5081,7 +5080,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5100,12 +5099,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
@@ -7336,7 +7343,7 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_corrupt",
   "ledger_absent",
   "ledger_digest_mismatch",
-  "ledger_lock_held",
+  "compatibility_lock_held",
   "entry_not_found",
   "entry_selector_ambiguous",
   "entry_not_active",
@@ -7361,7 +7368,7 @@ var CODES = /* @__PURE__ */ new Set([
   "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
-  // §1.4 commit-reviewed
+  // commit operation
   "nothing_staged",
   "message_missing",
   "no_spendable_receipt",
@@ -7502,7 +7509,7 @@ function readRegister(root) {
 }
 var LOCK_CODE_BY_BASENAME = {
   "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "ledger_lock_held"
+  "review-ledger.lock": "compatibility_lock_held"
 };
 function lockCodeFor(lockDir) {
   return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
@@ -7653,8 +7660,9 @@ var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
-import { join as join4 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3, renameSync as renameSync2 } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { join as join4, dirname as dirname4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -7807,6 +7815,85 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
   }
   return minted;
 }
+var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+function gitZ(root, args) {
+  const r = spawnSync2("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
+  return r.stdout.split("\0").filter(Boolean);
+}
+function changedSince(root, base2) {
+  const diff = ["diff", "--name-only", "-z", "--no-renames", "--relative"];
+  return /* @__PURE__ */ new Set([
+    ...gitZ(root, [...diff, base2]),
+    ...gitZ(root, [...diff, "--cached", base2]),
+    ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+  ]);
+}
+var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
+function readGitSettled(root) {
+  try {
+    const s2 = JSON.parse(readFileSync3(join4(root, GIT_SETTLED_REL), "utf8"));
+    return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
+  } catch {
+    return null;
+  }
+}
+function gitTouches(root, now) {
+  let head;
+  try {
+    const r = spawnSync2("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    if (r.status === 0) head = r.stdout.trim();
+    else if (spawnSync2("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else return { ok: false, reason: "no_git" };
+    const settled = readGitSettled(root);
+    let base2 = settled?.sha;
+    if (base2 && base2 !== EMPTY_TREE && (spawnSync2("git", ["cat-file", "-e", `${base2}^{tree}`], { cwd: root, timeout: 3e4 }).status !== 0 || spawnSync2("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0)) base2 = null;
+    const hashOf = (p) => hashFile(root, p) ?? null;
+    const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next };
+    const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
+    const pool = /* @__PURE__ */ new Set([...base2 ? changedSince(root, base2) : dirtyNow, ...Object.keys(settled.dirty)]);
+    const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
+    const candidates = [...changed].map((path) => {
+      let at = settled.at;
+      try {
+        at = statSync3(join4(root, path)).mtime.toISOString();
+      } catch {
+      }
+      return { path, at: typeof at === "string" ? at : now };
+    });
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2) };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e) };
+  }
+}
+function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
+  const p = join4(root, GIT_SETTLED_REL);
+  mkdirSync3(dirname4(p), { recursive: true });
+  if (ifAbsent) {
+    try {
+      writeFileSync2(p, JSON.stringify(snapshot), { flag: "wx" });
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  }
+  writeFileSync2(`${p}.tmp`, JSON.stringify(snapshot));
+  renameSync2(`${p}.tmp`, p);
+  return true;
+}
+function gitTrackedSubset(root, paths) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return /* @__PURE__ */ new Set();
+  try {
+    return new Set(gitZ(root, ["ls-files", "-z", "--", ...list.map((p) => `:(literal)${p}`)]));
+  } catch {
+    return null;
+  }
+}
 
 // scripts/hooks/lib/transcript.mjs
 import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync as readdirSync2 } from "node:fs";
@@ -7855,7 +7942,7 @@ function fillPct(usage, windowSize) {
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 
 // scripts/hooks/lib/dispatch-prompt.mjs
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
@@ -7887,7 +7974,7 @@ function probeDirtyPaths(projectDir, files) {
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
   try {
-    r = spawnSync2("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+    r = spawnSync3("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
       cwd: projectDir,
       encoding: "utf8",
       timeout: 1e4
@@ -7922,9 +8009,9 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 }
 
 // scripts/lib/test-integrity.mjs
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync3("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync4("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -7945,6 +8032,158 @@ function gitTestIntegrity({ cwd, testGlobs }) {
     else if (status.startsWith("M")) modified.push(rel);
   }
   return { no_git: false, modified, deleted };
+}
+
+// scripts/hooks/lib/delivery.mjs
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, rmSync as rmSync3, renameSync as renameSync3, statSync as statSync5, readdirSync as readdirSync3 } from "node:fs";
+import { randomUUID as randomUUID3 } from "node:crypto";
+import { join as join5, dirname as dirname5 } from "node:path";
+function deliveryDir(cwd) {
+  return join5(cwd, ".sterling", "transient", "delivery");
+}
+function pendingPath(cwd) {
+  return join5(deliveryDir(cwd), "pending.json");
+}
+var CITATION_BOILERPLATE_WORDS = [
+  "knowledge_get",
+  "anti_pattern",
+  "decisions",
+  "decision",
+  "rulings",
+  "ruling",
+  "overriding",
+  "overrides",
+  "override",
+  "ids",
+  "id"
+];
+var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
+var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
+var LOCK_DEADLINE_MS2 = 2e3;
+var LOCK_STALE_MS2 = 5e3;
+var LOCK_POLL_MS2 = 5;
+var LOCK_OWNER_FILE = "owner";
+var lockTestHooks = {};
+function lockOwnerPath(lockPath) {
+  return join5(lockPath, LOCK_OWNER_FILE);
+}
+function ownsLock(lockPath, token) {
+  try {
+    return readFileSync4(lockOwnerPath(lockPath), "utf8") === token;
+  } catch {
+    return false;
+  }
+}
+function readLockOwner(lockPath) {
+  try {
+    return readFileSync4(lockOwnerPath(lockPath), "utf8");
+  } catch {
+    return null;
+  }
+}
+function sameLockObject(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
+function acquireLock(lockPath) {
+  const deadline = Date.now() + LOCK_DEADLINE_MS2;
+  while (Date.now() < deadline) {
+    const token = `${process.pid}-${randomUUID3()}`;
+    try {
+      mkdirSync4(lockPath);
+      writeFileSync3(lockOwnerPath(lockPath), token, { flag: "wx" });
+      return token;
+    } catch (e) {
+      if (e.code !== "EEXIST") throw e;
+      try {
+        const observed = statSync5(lockPath);
+        const observedOwner = readLockOwner(lockPath);
+        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS2) {
+          lockTestHooks.afterStaleInspect?.(lockPath);
+          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID3()}`;
+          try {
+            renameSync3(lockPath, tombstone);
+          } catch (renameError) {
+            if (renameError.code !== "ENOENT") throw renameError;
+            continue;
+          }
+          if (sameLockObject(observed, statSync5(tombstone)) && readLockOwner(tombstone) === observedOwner) {
+            rmSync3(tombstone, { recursive: true, force: true });
+          } else if (!existsSync5(lockPath)) {
+            renameSync3(tombstone, lockPath);
+          }
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS2);
+    }
+  }
+  return null;
+}
+function releaseLock(lockPath, token) {
+  try {
+    if (ownsLock(lockPath, token)) rmSync3(lockPath, { recursive: true, force: true });
+  } catch {
+  }
+}
+function withFileLock2(targetPath, fn) {
+  mkdirSync4(dirname5(targetPath), { recursive: true });
+  const lockPath = `${targetPath}.lock`;
+  const token = acquireLock(lockPath);
+  if (!token) return { acquired: false, value: void 0 };
+  try {
+    return { acquired: true, value: fn({ lockPath, token }) };
+  } finally {
+    releaseLock(lockPath, token);
+  }
+}
+function enqueuePending(path, entry) {
+  const result = withFileLock2(path, ({ lockPath, token }) => {
+    const entries = existsSync5(path) ? JSON.parse(readFileSync4(path, "utf8")) : [];
+    entries.push(entry);
+    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync3(tmp, JSON.stringify(entries));
+    lockTestHooks.beforePendingRename?.({ lockPath, token });
+    if (!ownsLock(lockPath, token)) {
+      rmSync3(tmp, { force: true });
+      return false;
+    }
+    renameSync3(tmp, path);
+    return true;
+  });
+  return result.acquired && result.value === true;
+}
+var GAP_EVIDENCE_CHAR_CAP = 400;
+var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
+var PORCH_BYTE_COUNT_RESERVE = "000000";
+function porchByteLen(s2) {
+  return Buffer.byteLength(String(s2 ?? ""), "utf8");
+}
+function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
+  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+}
+function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
+  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+}
+function porchEndLine(byteCountText, meta) {
+  const { pathDecisionPointerCount } = meta;
+  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
+}
+var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
+var PORCH_END_TEMPLATE_BYTES = porchByteLen(
+  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
+    articleBodiesCount: 99,
+    referencePointerCount: 99,
+    pathDecisionPointerCount: 99,
+    hasSubjectChannel: true,
+    subjectHazardCount: 99,
+    subjectDecisionPointerCount: 99
+  })
+);
+var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+function payloadHeaderLine(rel) {
+  return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
 }
 
 // scripts/hooks/h10-direct-capture.mjs
@@ -7974,7 +8213,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   }
   if (stampIds.size) {
     try {
-      mkdirSync4(join5(cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync5(join6(cwd, ".sterling", "transient"), { recursive: true });
       await withRegisterLock(
         cwd,
         () => {
@@ -7985,11 +8224,11 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
               entry.residue_reported_at = nowIso;
             }
           }
-          const transient = join5(cwd, ".sterling", "transient");
-          mkdirSync4(transient, { recursive: true });
-          const tmpPath = join5(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
-          writeFileSync2(tmpPath, JSON.stringify(fresh));
-          renameSync2(tmpPath, registerPath2);
+          const transient = join6(cwd, ".sterling", "transient");
+          mkdirSync5(transient, { recursive: true });
+          const tmpPath = join6(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
+          writeFileSync4(tmpPath, JSON.stringify(fresh));
+          renameSync4(tmpPath, registerPath2);
         },
         { retryMs: 1e3, timeoutMs: 1e4 }
       );
@@ -8017,9 +8256,9 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join5(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join5(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join5(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join6(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join6(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join6(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -8037,7 +8276,7 @@ try {
 `);
     }
   };
-  const pressureMarker = join5(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join6(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -8047,20 +8286,22 @@ try {
         store.recordCheckSkipped("conductor-pressure", reason ?? "format_unparseable", void 0, now);
         sample = { session_id: input.session_id, level: "unknown", fill_pct: null, reason, at: now };
       } else {
-        const mapped = Boolean(model && cw.windows[model]);
-        const windowSize = mapped ? cw.windows[model] : cw.windows.default;
-        const unmapped = !mapped && model ? { unmapped_model: model } : {};
-        const fill = fillPct(usage, windowSize);
-        if (fill > 100) {
+        const baseModel = model ? String(model).replace(/\[[^\]]*\]$/, "") : null;
+        const windowSize = model ? cw.windows[model] ?? cw.windows[baseModel] : void 0;
+        const fill = windowSize ? fillPct(usage, windowSize) : null;
+        if (!windowSize) {
+          store.recordCheckSkipped("conductor-pressure", `window_unmapped:${model ?? "no-model-id"}`, void 0, now);
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: null, model: model ?? null, reason: "window_unmapped", ...model ? { unmapped_model: model } : {}, at: now };
+        } else if (fill > 100) {
           store.recordCheckSkipped("conductor-pressure", `window_mismatch:${model ?? "unknown-model"}:${fill.toFixed(1)}pct`, void 0, now);
-          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", ...unmapped, at: now };
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
         }
       }
-      mkdirSync4(join5(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync2(join5(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync5(join6(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync4(join6(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -8073,7 +8314,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync4("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync5("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -8088,126 +8329,26 @@ try {
     }
   })();
   const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
-  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
-  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) \u2192 finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
+  const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync4(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync5(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
-  const spendPressureMarker = (level) => writeFileSync2(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join5(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const spendPressureMarker = (level) => writeFileSync4(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const gaugeMarker = join6(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync4(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync5(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const spendGaugeMarker = () => writeFileSync2(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
-  const delegationMarker = join5(input.cwd, ".sterling", "transient", "delegation-nagged.json");
-  const delegationSpent = () => {
-    try {
-      return !!input.session_id && JSON.parse(readFileSync4(delegationMarker, "utf8")).session_id === input.session_id;
-    } catch {
-      return false;
-    }
-  };
-  const articleWritesPath = join5(input.cwd, ".sterling", "transient", "article-writes.json");
-  const readArticleWrites = () => {
-    try {
-      const raw = JSON.parse(readFileSync4(articleWritesPath, "utf8"));
-      return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
-    } catch {
-      return 0;
-    }
-  };
-  const statsPath = join5(input.cwd, ".sterling", "transient", "delegation-stats.json");
-  const writeDelegationStats = (stats) => {
-    try {
-      mkdirSync4(join5(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync2(statsPath, JSON.stringify(stats));
-    } catch {
-    }
-  };
-  const delegation = (() => {
-    try {
-      if (delegationSpent()) return null;
-      const dw = config.delegation_watch;
-      const tPath = input.transcript_path ?? "";
-      if (!tPath || !existsSync5(tPath)) {
-        store.recordCheckSkipped("delegation-watch", "transcript_missing", void 0, now);
-        return null;
-      }
-      const readFiles = /* @__PURE__ */ new Set();
-      let searches = 0;
-      let dispatches = 0;
-      let maxBatch = 0;
-      let soloDispatches = 0;
-      let assistantEntries = 0;
-      let contentArrays = 0;
-      for (const line of readFileSync4(tPath, "utf8").split("\n")) {
-        if (!line.trim()) continue;
-        let entry;
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (entry.type !== "assistant") continue;
-        if (entry.isSidechain === true) continue;
-        assistantEntries++;
-        const content = entry.message?.content;
-        if (!Array.isArray(content)) continue;
-        contentArrays++;
-        let batchCount = 0;
-        for (const b of content) {
-          if (!b || b.type !== "tool_use") continue;
-          if (b.name === "Read") {
-            if (b.input?.file_path) readFiles.add(b.input.file_path);
-          } else if (b.name === "Grep" || b.name === "Glob") {
-            searches++;
-          } else if (b.name === "Task" || b.name === "Agent") {
-            dispatches++;
-            batchCount++;
-          }
-        }
-        if (batchCount > maxBatch) maxBatch = batchCount;
-        if (batchCount === 1) soloDispatches++;
-      }
-      if (assistantEntries > 0 && contentArrays === 0) {
-        store.recordCheckSkipped("delegation-watch", "format_unparseable", void 0, now);
-        return null;
-      }
-      const articleWrites = readArticleWrites();
-      writeDelegationStats({
-        session_id: input.session_id,
-        hand_reads: readFiles.size,
-        searches,
-        dispatches,
-        max_batch: maxBatch,
-        solo_dispatches: soloDispatches,
-        article_writes: articleWrites,
-        at: now
-      });
-      if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
-        return { hand_reads: readFiles.size, searches, dispatches, max_batch: maxBatch, solo_dispatches: soloDispatches, article_writes: articleWrites };
-      }
-      return null;
-    } catch (e) {
-      try {
-        store.recordCheckSkipped("delegation-watch", String(e && e.message || e), void 0, now);
-      } catch {
-      }
-      return null;
-    }
-  })();
-  const spendDelegationMarker = () => writeFileSync2(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const delegationPart = () => `H10 delegation watch: hand-read ${delegation.hand_reads} file(s), ${delegation.searches} search(es), ${delegation.dispatches} dispatch(es) (max batch ${delegation.max_batch}, solo ${delegation.solo_dispatches}), ${delegation.article_writes} hand-run article write(s) \u2192 delegate reads/sweeps/mechanical work (opus judgment / sonnet mechanical). (once per session)`;
+  const spendGaugeMarker = () => writeFileSync4(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 context fill is UNRELIABLE and is not reported. Add context_watch.windows["${pressure.unmapped_model}"] = <window tokens> to .sterling/config.json. (once per session)`;
   const writeThenSpend = (text, spends) => {
     let delivered = false;
     try {
@@ -8232,28 +8373,35 @@ try {
     process.exit(2);
   };
   const releaseWithPressure = () => {
+    let advisoryText = "";
+    const advisorySpends = [];
     if (!input.stop_hook_active) {
       const parts = [];
       const spent = pressureMarkerState();
       if (pressure.level === "hard" && (!spent || spent.level !== "hard")) {
-        spendPressureMarker("hard");
         parts.push(pressurePart());
+        advisorySpends.push(() => spendPressureMarker("hard"));
       } else if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
-        spendPressureMarker("soft");
         parts.push(`${pressurePart()} (once per session)`);
-      }
-      if (delegation && !delegationSpent()) {
-        spendDelegationMarker();
-        parts.push(delegationPart());
+        advisorySpends.push(() => spendPressureMarker("soft"));
       }
       if (pressure.unmapped_model && !gaugeSpent()) {
-        spendGaugeMarker();
         parts.push(gaugePart());
+        advisorySpends.push(spendGaugeMarker);
       }
-      if (parts.length) writeThenSpend([...disclosureParts, ...parts].join("\n\n"), [spendDispatchUnknownKeys]);
+      advisoryText = parts.join("\n\n");
     }
-    if (disclosureParts.length) {
-      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }), 0, {
+    if (advisoryText) {
+      try {
+        if (!enqueuePending(pendingPath(input.cwd), { kind: "h10_context_advisory", rel: "Stop", payload: advisoryText, agent_id: "conductor" })) throw new Error("delivery queue lock timeout");
+        for (const spend of advisorySpends) spend();
+      } catch (e) {
+        disclose(`H10: context advisory queue failed \u2014 ${String(e && e.message || e)}; it will retry on the next Stop
+`);
+      }
+    }
+    if (disclosureParts.length || advisoryText) {
+      exitAfterWrite(JSON.stringify({ systemMessage: [...disclosureParts, advisoryText].filter(Boolean).join("\n\n") }), 0, {
         onWritten: spendDispatchUnknownKeys
       });
       throw Object.assign(new Error("h10-release-in-flight"), { h10ReleaseInFlight: true });
@@ -8266,29 +8414,44 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync5(touchesClaimPath)) {
+      if (existsSync6(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync5(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
       }
       let freshTouches = [];
       try {
-        renameSync2(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
+        renameSync4(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync5(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
       touches = [...orphanedTouches, ...freshTouches];
-      if (orphanedTouches.length) writeFileSync2(touchesClaimPath, JSON.stringify(touches));
+      if (orphanedTouches.length) writeFileSync4(touchesClaimPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
   );
+  const git = gitTouches(input.cwd, now);
+  let lostSettlementMessage = "";
+  if (!git.ok) {
+    skipRow("h10-git-touches", git.reason);
+  } else if (git.settled) {
+    if (git.base_lost) {
+      skipRow("h10-git-touches", `settled_sha_unreachable:${git.settled.sha}`);
+      lostSettlementMessage = `\u26A0 H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
+    }
+    const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git.changed.has(p));
+    const tracked = gitTrackedSubset(input.cwd, unchanged) ?? /* @__PURE__ */ new Set();
+    touches = touches.filter((t) => !tracked.has(t?.path));
+    const registered = new Set(touches.map((t) => t?.path));
+    touches = [...touches, ...git.candidates.filter((c) => !registered.has(c.path))];
+  }
   const discardTouchesClaim = () => {
     withFileLock(
       touchesPath,
-      () => rmSync3(touchesClaimPath, { force: true }),
+      () => rmSync4(touchesClaimPath, { force: true }),
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
   };
@@ -8296,7 +8459,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync5(touchesClaimPath) && !existsSync5(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
+        if (existsSync6(touchesClaimPath) && !existsSync6(touchesPath)) renameSync4(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -8304,15 +8467,15 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync5(eventsPath)) {
-      const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
+    if (existsSync6(eventsPath)) {
+      const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync5(join5(input.cwd, p))
+    (p) => existsSync6(join6(input.cwd, p))
   );
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
@@ -8341,6 +8504,7 @@ try {
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
   const disclosureParts = [];
+  if (lostSettlementMessage) disclosureParts.push(lostSettlementMessage);
   if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     const PATH_DISPLAY_CAP = 8;
@@ -8352,11 +8516,11 @@ try {
   const touchedKeys = new Set(touchedExisting.map(joinKey));
   const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
-  const dispatchUnknownNotedPath = join5(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
+  const dispatchUnknownNotedPath = join6(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
-      const raw = JSON.parse(readFileSync4(dispatchUnknownNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync5(dispatchUnknownNotedPath, "utf8"));
       if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
       if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
       return new Set(raw.keys);
@@ -8386,7 +8550,7 @@ try {
     try {
       const merged = new Set(dispatchUnknownNotedKeys);
       for (const k of pendingDispatchUnknownKeys) merged.add(k);
-      writeFileSync2(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
+      writeFileSync4(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
     } catch {
     }
   };
@@ -8408,13 +8572,19 @@ try {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync3(eventsPath, { force: true });
+      rmSync4(eventsPath, { force: true });
     }
-    rmSync3(nagMarker, { force: true });
+    rmSync4(nagMarker, { force: true });
   };
   const runSettlement = () => {
     try {
       mintSettlementReconcile(store, input.cwd, settlementCandidates, now);
+      if (git.ok && git.base_lost) {
+        const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
+        const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID4(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
+      }
+      if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
     } catch (e) {
       settlementFailed = true;
       try {
@@ -8473,7 +8643,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync5(join5(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync6(join6(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -8504,7 +8674,7 @@ try {
       ["ls-files", "-z", "--", ...clean],
       ["ls-tree", "-r", "-z", "HEAD", "--name-only", "--", ...clean]
     ]) {
-      const res = spawnSync4("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
+      const res = spawnSync5("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
       if (res.status !== 0) return null;
       for (const p of (res.stdout || "").split("\0").filter(Boolean)) seen.add(p);
     }
@@ -8557,7 +8727,7 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync5(join5(input.cwd, p))));
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync6(join6(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);
@@ -8603,7 +8773,7 @@ try {
   }
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync5("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4
@@ -8661,8 +8831,8 @@ try {
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    if (!existsSync5(nagMarker)) {
-      writeFileSync2(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+    if (!existsSync6(nagMarker)) {
+      writeFileSync4(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
       releaseTouchesClaim();
       releaseWithPressure();
     }
@@ -8673,7 +8843,7 @@ try {
     const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!openPending) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8703,7 +8873,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync5(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync6(nagMarker)) {
     const parts = [...disclosureParts];
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
@@ -8737,11 +8907,11 @@ try {
         deferral_owners: [...deferredAgents].sort()
       })
     ).digest("hex");
-    const dutyNaggedMarker = join5(input.cwd, ".sterling", "transient", "duty-nagged.json");
+    const dutyNaggedMarker = join6(input.cwd, ".sterling", "transient", "duty-nagged.json");
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
-        const raw = JSON.parse(readFileSync4(dutyNaggedMarker, "utf8"));
+        const raw = JSON.parse(readFileSync5(dutyNaggedMarker, "utf8"));
         if (raw.session_id !== input.session_id) return null;
         if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
         return raw;
@@ -8795,21 +8965,17 @@ try {
       parts.push(pressurePart());
       spendPressureMarker(pressure.level);
     }
-    if (delegation && !delegationSpent()) {
-      spendDelegationMarker();
-      parts.push(delegationPart());
-    }
     releaseTouchesClaim();
     const dutyText = compact ? parts.join("\n\n") : `${H10_HEADER}
 ${parts.join("\n\n")}`;
     writeThenSpend(dutyText, [
-      () => writeFileSync2(nagMarker, JSON.stringify({ at: now })),
+      () => writeFileSync4(nagMarker, JSON.stringify({ at: now })),
       // FIX 2: never persist a sessionless duty-nagged marker — the reader
       // above (priorDutyNag) already refuses to compact without a session;
       // this is the matching guard on the WRITE side.
       () => {
         if (!hasSession) return;
-        writeFileSync2(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
+        writeFileSync4(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys
     ]);
@@ -8818,7 +8984,7 @@ ${parts.join("\n\n")}`;
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8838,7 +9004,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync5(join5(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => !existsSync6(join6(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);
@@ -8847,7 +9013,7 @@ ${parts.join("\n\n")}`;
     }
     if (demandKeys.length) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8867,7 +9033,7 @@ ${parts.join("\n\n")}`;
   if (!conceptSatisfied) {
     for (const family of unmetFamilies) {
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,
@@ -8888,7 +9054,7 @@ ${parts.join("\n\n")}`;
     if (!open) {
       const queryTexts = activeResearchEvents.map((e) => e.detail).filter(Boolean).join("; ");
       store.enqueueSystemTodo({
-        id: randomUUID3(),
+        id: randomUUID4(),
         type: "todo",
         created_at: now,
         updated_at: now,

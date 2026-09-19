@@ -4609,8 +4609,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4884,14 +4885,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4912,16 +4905,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -5061,7 +5060,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5080,12 +5079,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
@@ -5401,10 +5408,13 @@ var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
   "through",
   "actually",
   "behavior",
-  "still"
+  "still",
+  "full"
 ]);
-function hasDiscriminatingHit(hits) {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+var AXIS_MIN_DISCRIMINATING_HITS = 2;
+function hasDiscriminatingHit(hits, minDiscriminating = 1) {
+  const distinct = new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)));
+  return distinct.size >= minDiscriminating;
 }
 var AXIS_RECORD_TOP_K = 6;
 var AXIS_MIN_RECORD_TERMS = 2;
@@ -7686,7 +7696,7 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_corrupt",
   "ledger_absent",
   "ledger_digest_mismatch",
-  "ledger_lock_held",
+  "compatibility_lock_held",
   "entry_not_found",
   "entry_selector_ambiguous",
   "entry_not_active",
@@ -7711,7 +7721,7 @@ var CODES = /* @__PURE__ */ new Set([
   "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
-  // §1.4 commit-reviewed
+  // commit operation
   "nothing_staged",
   "message_missing",
   "no_spendable_receipt",
@@ -7844,7 +7854,7 @@ function readRegister(root) {
 }
 var LOCK_CODE_BY_BASENAME = {
   "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "ledger_lock_held"
+  "review-ledger.lock": "compatibility_lock_held"
 };
 function lockCodeFor(lockDir) {
   return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
@@ -8217,17 +8227,17 @@ function stripReviewTerritoryLine(text) {
 function guardPath(cwd, agentId) {
   return join5(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
-function emptyGuard() {
+function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function readGuard(path) {
   try {
-    if (!existsSync5(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    if (!existsSync5(path)) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
-    return emptyGuard();
+    return emptyDeliveryGuard();
   }
 }
 function writeGuard(path, guard) {
@@ -8391,6 +8401,13 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
+function completePorchHazards(hazards) {
+  return cappedHazards(hazards ?? []).map((hazard) => [
+    hazardHeaderLine(hazard),
+    `  TRIGGER: ${hazard.trigger ?? ""}`,
+    `  RIGHT WAY: ${hazard.right_way ?? ""}`
+  ].join("\n"));
+}
 var DECISION_POINTER_CAP = 8;
 var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
 var DECISION_AUTHORITY_UNSTATED = 1;
@@ -8431,7 +8448,6 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
 }
 var PORCH_OWNER_CAP = 3;
 var PORCH_HAZARD_FLOOR_BYTES = 90;
-var PORCH_TITLE_CLIP_BYTES = 70;
 var PORCH_OWNER_LABEL_CLIP_BYTES = 90;
 var PORCH_SLUG_CLIP_BYTES = 60;
 var PORCH_HEADER_PATH_CLIP_BYTES = 200;
@@ -8490,13 +8506,6 @@ function rankOwnersForPorch(owners) {
     const ub = Date.parse(b?.updated_at ?? "");
     return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
   });
-}
-function porchHazardBody(hazard, textBudgetBytes) {
-  const half = Math.max(0, Math.floor(textBudgetBytes / 2));
-  const trigger = clipToBytes(hazard?.trigger, half);
-  const rightBudget = Math.max(0, textBudgetBytes - porchByteLen(trigger));
-  const rightWay = clipToBytes(hazard?.right_way, rightBudget);
-  return [`  TRIGGER: ${trigger}`, `  RIGHT WAY: ${rightWay}`].join("\n");
 }
 function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
   return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
@@ -8562,8 +8571,8 @@ function renderPorch(header, hazards, owners, budget, {
   subjectDecisionPointerCount = 0,
   fileKeys = []
 } = {}) {
-  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false };
-  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false };
+  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
+  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false, deferred_hazard_ids: [] };
   if (budget < PORCH_MIN_BUDGET_BYTES) {
     try {
       process.stderr.write(
@@ -8572,7 +8581,7 @@ function renderPorch(header, hazards, owners, budget, {
       );
     } catch {
     }
-    return { text: "", hazardsRendered: false };
+    return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
   }
   const shownHazards = cappedHazards(hazards ?? []);
   const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
@@ -8588,12 +8597,10 @@ function renderPorch(header, hazards, owners, budget, {
   const minOwnerCap = 0;
   const byteCountReserve = "0".repeat(String(budget).length);
   function hazardSectionAt(perHazardTextBudget) {
-    const blocks = shownHazards.map(
-      (hz) => [
-        hazardHeaderLine(hz, { clipTitleBytes: PORCH_TITLE_CLIP_BYTES, clipSlugBytes: PORCH_SLUG_CLIP_BYTES }),
-        porchHazardBody(hz, Math.max(0, perHazardTextBudget))
-      ].join("\n")
-    );
+    const blocks = shownHazards.map((hazard) => {
+      const whole = completePorchHazards([hazard])[0];
+      return porchByteLen(whole) <= perHazardTextBudget ? whole : `\u26A0 HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
+    });
     if (hazardOverflow > 0) {
       const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
       blocks.push(`\u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) \u2014 ${widen} for the full set`);
@@ -8625,8 +8632,7 @@ function renderPorch(header, hazards, owners, budget, {
     ].join("\n\n");
     const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
     const remaining2 = Math.max(0, budget - skeletonBytes2);
-    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
-    const fits = skeletonBytes2 <= budget && (shownHazards.length === 0 || remaining2 >= neededFloor);
+    const fits = skeletonBytes2 <= budget;
     pick = { admitted: admitted2, ownerOverflow, ownerLines: ownerLines2, overflowLine: overflowLine2, remaining: remaining2, skeletonBytes: skeletonBytes2 };
     if (fits || cap === minOwnerCap) break;
   }
@@ -8658,9 +8664,9 @@ function renderPorch(header, hazards, owners, budget, {
         );
       } catch {
       }
-      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
     }
-    return { text: minimalPorch, hazardsRendered: false };
+    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
   }
   const haveHazards = shownHazards.length > 0;
   const haveDigests = admitted.length > 0;
@@ -8702,21 +8708,124 @@ function renderPorch(header, hazards, owners, budget, {
       );
     } catch {
     }
-    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
   }
-  return { text: finalPorch, hazardsRendered: true };
+  const deferred_hazard_ids = shownHazards.filter((hazard, index) => !finalPorch.includes(completePorchHazards([hazard])[0])).map((hazard) => hazard.id);
+  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids };
+}
+var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+function resolveTotalCap(cwd) {
+  try {
+    const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
+    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+  } catch {
+    return DELIVERY_TOTAL_CAP_DEFAULT;
+  }
+}
+function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({ ...part, kind: part.kind === "hazard" ? "hazard" : "ordinary" }));
+  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
+  const bytes = (text) => porchByteLen(text);
+  const hazards = new Set(items.filter((part) => part.kind === "hazard"));
+  const selected = /* @__PURE__ */ new Map();
+  const omitted = [];
+  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
+  const ordinaryBytes = () => {
+    const text = output().join(sep);
+    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
+  };
+  const fits = () => ordinaryBytes() <= capBytes;
+  const pointerFor = (part) => part.pointer || "";
+  for (const part of items) {
+    if (part.kind === "hazard") continue;
+    selected.set(part, part.text);
+    if (fits()) continue;
+    selected.delete(part);
+    const suffix = part.suffix || pointerFor(part);
+    if (suffix) {
+      const lines = part.text.split("\n");
+      let clipped = "";
+      let best = "";
+      for (const line of lines) {
+        const candidate = clipped ? `${clipped}
+${line}` : line;
+        selected.set(part, `${candidate}
+${suffix}`);
+        if (!fits()) {
+          break;
+        }
+        clipped = candidate;
+        best = `${candidate}
+${suffix}`;
+      }
+      if (best) {
+        selected.set(part, best);
+        continue;
+      }
+      selected.delete(part);
+      selected.set(part, pointerFor(part));
+      if (pointerFor(part) && fits()) continue;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  }
+  if (omitted.length) {
+    const aggregatePart = { kind: "ordinary", text: "" };
+    items.push(aggregatePart);
+    const aggregate = () => {
+      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
+      const prefix = `+${omitted.length} more records: knowledge_query`;
+      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      while (ids.length && bytes(line) > capBytes) {
+        ids.pop();
+        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      }
+      return line;
+    };
+    while (true) {
+      aggregatePart.text = aggregate();
+      selected.set(aggregatePart, aggregatePart.text);
+      if (fits()) break;
+      selected.delete(aggregatePart);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
+      if (!last) break;
+      selected.delete(last);
+      omitted.push(last);
+    }
+  }
+  return output();
+}
+function partitionPorchHazards(text, hazardBlocks) {
+  const blocks = (hazardBlocks ?? []).filter(Boolean);
+  let cursor = 0;
+  const parts = [];
+  for (const block of blocks) {
+    const at = text.indexOf(block, cursor);
+    if (at < 0) return null;
+    if (at > cursor) parts.push({ kind: "ordinary", text: text.slice(cursor, at) });
+    parts.push({ kind: "hazard", text: block });
+    cursor = at + block.length;
+  }
+  if (cursor < text.length) parts.push({ kind: "ordinary", text: text.slice(cursor) });
+  return parts;
+}
+function recordsShownIn(text, records) {
+  const t = String(text ?? "");
+  return (records ?? []).filter((r) => r?.id && t.includes(r.id));
+}
+function ownerPointer(rendered, record) {
+  const head = String(rendered ?? "").split("\n")[0];
+  return `${clipToBytes(head, 300)}
+\u25B8 FULL RECORD (delivery cap reached): knowledge_get ${record.id}`;
+}
+function ownerSuffix(record) {
+  return `\u25B8 FULL RECORD (clipped at the delivery cap): knowledge_get ${record.id}`;
+}
+function decisionBlockPointer(count, widen) {
+  return `\u25B8 DECISIONS (${count}) held back by the delivery cap \u2014 ${widen}`;
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
-}
-function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) {
-  const substantive = substantiveCount ?? blocks.length;
-  return [unowned ? renderFrontier(rel, { hasOtherKnowledge: substantive > 0 }) : payloadHeaderLine(rel), ...blocks].join(
-    "\n\n"
-  );
-}
-function renderFrontier(rel, { hasOtherKnowledge = false } = {}) {
-  return `STERLING FRONTIER SIGNAL (H19): territory '${rel}' is UNOWNED \u2014 no owning article exists in the store. ` + (hasOtherKnowledge ? `KEEP READING: no article describes this territory, but the store DOES hold the hazards and/or decisions below for this exact path \u2014 they are all it has here. ` : `There is no knowledge to deliver; `) + `H10 will demand the owning article at session end if this work lands here. Query adjacent knowledge (knowledge_query) before designing in unmapped territory.`;
 }
 
 // scripts/hooks/h19-dispatch-staging.mjs
@@ -8724,7 +8833,7 @@ var SUBJECT_MAX_DECISIONS = 5;
 var EXEMPT_AGENT_TYPES = /* @__PURE__ */ new Set(["statusline-setup"]);
 var RETURN_CONTRACT = "STERLING DEFAULT RETURN CONTRACT \u2014 Explicit output requirements in your agent definition or dispatch brief take precedence. Otherwise, return the conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw logs, or step-by-step narration. Report only the outcome, decisive evidence, relevant files/tests, and unresolved risks.";
 var input = readStdin();
-var TDD_POSTURE_AGENT_TYPES = /* @__PURE__ */ new Set(["coder", "test-writer"]);
+var TDD_POSTURE_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor"]);
 var tddPostureLine = "";
 try {
   if (TDD_POSTURE_AGENT_TYPES.has(input.agent_type)) {
@@ -8749,7 +8858,7 @@ try {
   }
 } catch {
 }
-var PLAN_LINE_AGENT_TYPES = /* @__PURE__ */ new Set(["coder", "debugger", "test-writer"]);
+var PLAN_LINE_AGENT_TYPES = /* @__PURE__ */ new Set(["implementor"]);
 var PLAN_TITLE_MAX = 120;
 var PLAN_PATH_MAX = 320;
 var activePlanLine = "";
@@ -8818,7 +8927,7 @@ async function main(input2) {
       for (const r of candidatesBySubject) {
         if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
         const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, subjectText)) {
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(r, subjectText)) {
           seenSubject.add(r.id);
           subjectMatches.push({ record: r, hits, prompt: subjectText });
         }
@@ -8843,46 +8952,102 @@ async function main(input2) {
     const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
     const shownSubjectHazards = cappedHazards(subjectHazards);
     const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
-    const parts = [];
-    if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-      const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
-      const referenceOwnersForPorch = freshOwners.filter((r) => r.type === "reference_material");
-      const porch = porchBudget > 0 ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
-        articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
-        referencePointerCount: referenceOwnersForPorch.length,
-        pathDecisionPointerCount: shownDecisionsForPorch.length,
-        hasSubjectChannel: true,
-        subjectHazardCount: shownSubjectHazards.length,
-        subjectDecisionPointerCount: shownSubjectDecisions.length,
-        fileKeys: rels
-      }) : { text: "", hazardsRendered: false };
-      const remainderBlocks = [
-        ...porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: rels }),
-        ...freshOwners.map((r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap)),
-        ...freshDecisions.length ? [renderDecisionPointers(rels.join(", "), freshDecisions)] : []
-      ];
-      if (porch.text) {
-        parts.push([porch.text, ...remainderBlocks].join("\n\n"));
-      } else {
-        parts.push(renderPayload(rels.join(", "), remainderBlocks, { unowned: false }));
+    const totalCap = resolveTotalCap(input2.cwd);
+    const cappedPorchBudget = totalCap > 0 ? Math.min(porchBudget, totalCap) : porchBudget;
+    const assemble = (counts2) => {
+      const parts = [];
+      let porchText = "";
+      if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+        const referenceOwnersForPorch = freshOwners.filter((r) => r.type === "reference_material");
+        let porch = cappedPorchBudget > 0 ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, cappedPorchBudget, {
+          articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
+          referencePointerCount: referenceOwnersForPorch.length,
+          pathDecisionPointerCount: counts2.pathM,
+          hasSubjectChannel: true,
+          subjectHazardCount: counts2.subjN,
+          subjectDecisionPointerCount: counts2.subjP,
+          fileKeys: rels
+        }) : { text: "", hazardsRendered: false };
+        const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(",")}] cap:${freshDecisions.length}`;
+        porchText = porch.text;
+        const ownerParts = freshOwners.map((r) => {
+          const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap);
+          return { kind: "ordinary", text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+        });
+        const decisionParts = freshDecisions.length ? [
+          {
+            kind: "ordinary",
+            text: renderDecisionPointers(rels.join(", "), freshDecisions),
+            pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
+            suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
+          }
+        ] : [];
+        const shownHazards = cappedHazards(freshHazards);
+        const fullHazards = renderHazards(shownHazards, Number.MAX_SAFE_INTEGER, { fileKeys: rels });
+        const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
+        const porchHazards = completePorchHazards(shownHazards.filter((hazard) => !deferredHazardIds.has(hazard.id)));
+        const deferredHazards = fullHazards.filter((_, index) => deferredHazardIds.has(shownHazards[index]?.id)).map((text) => ({ kind: "hazard", text }));
+        let porchParts = porch.text ? partitionPorchHazards(porch.text, porchHazards) : null;
+        if (porch.text && !porchParts) {
+          porch = renderPorch(porchHeaderLine(rels), [], freshOwners, cappedPorchBudget, {
+            articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
+            referencePointerCount: referenceOwnersForPorch.length,
+            pathDecisionPointerCount: counts2.pathM,
+            hasSubjectChannel: true,
+            subjectHazardCount: counts2.subjN,
+            subjectDecisionPointerCount: counts2.subjP,
+            fileKeys: rels
+          });
+        }
+        parts.push(
+          ...porch.text ? porchParts ?? [{ kind: "ordinary", text: porch.text }] : [{ kind: "ordinary", text: payloadHeaderLine(rels.join(", ")) }, ...fullHazards.map((text) => ({ kind: "hazard", text }))],
+          ...porch.text ? deferredHazards : [],
+          ...porch.text ? [...decisionParts, ...ownerParts] : [...ownerParts, ...decisionParts]
+        );
       }
+      if (subjectHazards.length || subjectDecisions.length) {
+        const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
+        const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
+        const subjectLabel = `your task's SUBJECT`;
+        const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
+        const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
+        const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
+        parts.push(
+          {
+            text: `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
+            kind: "ordinary"
+          },
+          ...renderHazards(subjectHazards, Number.MAX_SAFE_INTEGER, { remedy }).map((text) => ({ kind: "hazard", text })),
+          ...subjectDecisions.length ? [
+            {
+              kind: "ordinary",
+              text: renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy }),
+              pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
+              suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
+            }
+          ] : []
+        );
+      }
+      return { payload: capDeliveryParts(parts, totalCap).join("\n\n"), porchText };
+    };
+    const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+    const actualCounts = (built2) => {
+      const below = built2.payload.slice(built2.porchText.length);
+      return {
+        pathM: shownPathDecisions.filter((r) => below.includes(r.id)).length,
+        subjN: shownSubjectHazards.filter((r) => below.includes(r.id)).length,
+        subjP: shownSubjectDecisions.filter((r) => below.includes(r.id)).length
+      };
+    };
+    let counts = { pathM: shownPathDecisions.length, subjN: shownSubjectHazards.length, subjP: shownSubjectDecisions.length };
+    let built = assemble(counts);
+    for (let i = 0; i < 3; i++) {
+      const actual = actualCounts(built);
+      if (actual.pathM === counts.pathM && actual.subjN === counts.subjN && actual.subjP === counts.subjP) break;
+      counts = actual;
+      built = assemble(counts);
     }
-    if (subjectHazards.length || subjectDecisions.length) {
-      const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(", ");
-      const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(", ");
-      const subjectLabel = `your task's SUBJECT`;
-      const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
-      const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectHazards.length || 1}`;
-      const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(",")}] cap:${subjectDecisions.length || 1}`;
-      parts.push(
-        [
-          `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
-          ...renderHazards(subjectHazards, charCap, { remedy }),
-          ...subjectDecisions.length ? [renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy })] : []
-        ].join("\n\n")
-      );
-    }
-    const payload = parts.join("\n\n");
+    const payload = built.payload;
     const fresh = [
       ...freshOwners,
       ...cappedHazards(freshHazards),
@@ -8891,7 +9056,7 @@ async function main(input2) {
       ...shownSubjectDecisions
     ];
     const recordStaged = () => {
-      guard.records.push(...fresh.map((r) => r.id));
+      guard.records.push(...recordsShownIn(payload, fresh).map((r) => r.id));
       writeGuard(gPath, guard);
     };
     const out = combinedContext(payload);

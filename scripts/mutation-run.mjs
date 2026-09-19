@@ -4,18 +4,14 @@
 // ============================================================================
 // THIS IS NOT AN AGENT CAPABILITY. Run it by hand, as the conductor, only.
 // Decision 02e03ed8 [clean-room-mutation-runs-via-conductor-only-helper] makes
-// that an OPERATIONAL boundary, not a claim of containment: "The helper must not
-// be advertised or granted as an agent capability", and "Do NOT add an
-// agent-facing H14 allowance". No H14 command shape is added for this file, and
-// none may be added without a new ruling.
+// that an OPERATIONAL boundary, not a claim of containment: the helper must not
+// be advertised or granted as an agent capability.
 //
 // !! UNENFORCED AS SHIPPED — READ THIS BEFORE TRUSTING THE CONTAINMENT BELOW.
 // Decision 02e03ed8 requires that "the helper plus its manifest are themselves
 // protected as enforcement surface, conductor-modifiable only". THAT PROTECTION
-// IS NOT IN PLACE. scripts/mutation-run.mjs matches nothing in
-// ENFORCEMENT_SURFACE (scripts/hooks/lib/contract.mjs), H17 guards hooks/**
-// only, and H5 guards *.test.mjs only — so an agent with scripts/** in scope can
-// edit the MANIFEST below and the conductor would then execute agent-authored
+// IS NOT IN PLACE. An agent with scripts/** in scope can edit the manifest below
+// and the conductor would then execute agent-authored
 // code out of repo with an arbitrary string rewrite. The ARGV containment is
 // real; the MANIFEST containment is the load-bearing half and is currently only
 // this comment. CLOSING IT means adding 'scripts/mutation-run.mjs' to
@@ -36,11 +32,8 @@
 //
 // WHY IT EXISTS. Decision 23afbc83 mandates clean-room mutation verification and
 // anti_pattern 37b3cb0a [BLOCK] forbids mutating in place or touching the live
-// enforcement surface — but research_finding 01cab59b measured that no location
-// satisfies H14 + H5 + H15 + H17 jointly, and 02e03ed8 found the decisive fourth
-// gate: H14 rejects an ENV-VAR ASSIGNMENT PREFIX, so `STERLING_HOOKS_DIR=<dir>
-// node --test <file>` is unrunnable from any agent seat at all. Setting the seam
-// INSIDE this process via spawnSync's `env` is the whole point of the file.
+// enforcement surface. Setting the seam inside this process via spawnSync's
+// `env` keeps it out of the runner's caller interface.
 //
 // SCOPE: the SMALLEST FIRST STEP named by 02e03ed8 — a FIXED-PURPOSE runner for
 // the ONE stalled routing mutation. Generalizing this into the manifest-driven
@@ -90,36 +83,13 @@ const LIVE_HOOKS = join(REPO_ROOT, 'hooks');
 const RUN_TIMEOUT_MS = 300_000;
 
 // ---------------------------------------------------------------------------
-// THE MANIFEST — the checked-in allowlist. One entry, by design (see SCOPE).
+// THE MANIFEST — the checked-in allowlist.
 // Every path is repo-relative POSIX. `find` is the BYTE-EXPECTED text: if it is
 // not present EXACTLY ONCE in the copied source, the run REFUSES rather than
 // applying a fuzzy match.
 //
-// The hook copied is the BUNDLE (hooks/), not the source (scripts/hooks/):
-// scripts/hooks/h24-gate-exit-lint.mjs imports './lib/common.mjs' and
-// '@sterling/schemas', so it is not relocatable outside the workspace, while the
-// esbuild bundle is standalone by invariant 4. hooks/** is READ ONLY here and is
-// snapshotted at both ends.
 // ---------------------------------------------------------------------------
-const MANIFEST = Object.freeze({
-  's0-routing-seam': Object.freeze({
-    summary:
-      'S0 routing pin: the STERLING_HOOKS_DIR read in the h24 suite is what routes the spawn to a relocated hook. Removing it is the sabotage named in scripts/tests/mutation-arm-s0-hooks-dir-routing.test.mjs (AC4) and by board 5402a024 precondition P1.',
-    rationale_ref: 'decision 1dab2a9f / 02e03ed8; board 5402a024 P1; pin AC4',
-    hook_src: 'hooks/h24-gate-exit-lint.mjs',
-    hook_fixture_name: 'h24-gate-exit-lint.mjs',
-    test_src: 'scripts/tests/h24-gate-exit-lint.test.mjs',
-    // Depth matters: the copied suite computes its own root as <file>/../.., so
-    // the copy must sit two levels below each arm's root for the MUTATED copy to
-    // resolve its hard-coded 'scripts/hooks' INSIDE the fixture (where it does
-    // not exist) and never into the live repo.
-    test_fixture_rel: 'scripts/tests/fixture-suite.test.mjs',
-    find: "const HOOKS = process.env.STERLING_HOOKS_DIR || join(root, 'scripts', 'hooks');",
-    replace: "const HOOKS = join(root, 'scripts', 'hooks');",
-    expect:
-      'CONTROL green (the seam finds the relocated bundle); MUTANT red (the hard-coded path is absent inside the fixture, so every spawn is a module-not-found).',
-  }),
-});
+const MANIFEST = Object.freeze({});
 
 // ---------------------------------------------------------------------------
 // Refusals and small helpers
@@ -253,8 +223,7 @@ function runArm({ armRoot, testPath, hooksDir }) {
   for (const key of Object.keys(env)) {
     if (key.startsWith('NODE_TEST')) delete env[key];
   }
-  // THE SEAM. H14 rejects an env-assignment prefix on a command line, which is
-  // why this is set here and not by a caller (decision 02e03ed8).
+  // THE SEAM is set here, rather than accepted from a caller.
   env.STERLING_HOOKS_DIR = hooksDir;
 
   // Fixed executable, fixed argument list, shell:false. `--test-reporter tap` is

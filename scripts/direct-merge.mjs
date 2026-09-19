@@ -16,8 +16,8 @@ import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/l
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
-// a-refusing-gate, 1f069af4 v2) — the SAME read-only inspector commit-reviewed
-// and merge-gate use; see the block above the merge action.
+// a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
+// block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
@@ -83,7 +83,7 @@ if (dirtyLines.length > 0) {
 
 // Gate precondition (merge.md): every affected article reconciled. Open
 // reconcile_needed debt on files this branch changed refuses the merge — the
-// §8.2 mirror of dispose-run's article_unreconciled refusal (decision 9df61181).
+// direct-merge reconciliation requirement (decision 9df61181).
 // -c core.quotePath=false (r-review F3, applied here too for consistency): without
 // it, non-ASCII filenames arrive C-quoted and defeat the plain-string path
 // comparisons further down.

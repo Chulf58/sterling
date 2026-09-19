@@ -5,7 +5,7 @@
 // INVARIANT (register): this module is the ONE authority for the transient
 // dispatch register's persisted shape (RegisterEntry), its parser, its
 // TRI-STATE liveness classifier, and the owner-mkdir lock primitive shared
-// with the review ledger. A dispatch's liveness is never a binary live/dead
+// with a legacy compatibility lock. A dispatch's liveness is never a binary live/dead
 // verdict — the platform emits no death signal for a killed subagent, so an
 // expired lease is UNKNOWN, never confirmed dead; only an explicit terminal
 // event (`ended`) yields inactive-confirmed. Stop MARKS an entry ended; it is
@@ -62,7 +62,7 @@ export function registerLockDir(root) {
   return join(root, '.sterling', 'transient', 'dispatch-register.lock');
 }
 
-function ledgerLockDir(root) {
+function legacyCompatibilityLockDir(root) {
   return join(root, '.sterling', 'review-ledger.lock');
 }
 
@@ -87,7 +87,7 @@ export function readSessionId(root) {
 }
 
 // resolveSessionIdentity — THE ONE session-identity resolver shared by every
-// CLI that reads STERLING_SESSION_ID (commit-reviewed.mjs, review-ledger.mjs).
+// CLI that reads STERLING_SESSION_ID.
 // A19/A20: STERLING_SESSION_ID WINS when set — it is always the effective
 // identity (a hook-launched process, or an explicit escape hatch, both need
 // this) — but the OVERRIDE DISCLOSURE fires on a narrower, laundering-shaped
@@ -202,7 +202,7 @@ export function readRegister(root) {
 
 // ---------------------------------------------------------------------------
 // withOwnerMkdirLock — the ONE lock primitive, shared by the register and the
-// review ledger. mkdir-exclusivity + an owner.json {pid, host, at, nonce}.
+// legacy compatibility lock. mkdir-exclusivity + an owner.json {pid, host, at, nonce}.
 // Takeover ONLY when owner.host === this host AND owner.pid is verified not
 // running (process.kill(pid, 0) -> ESRCH). NEVER by age. A lock whose owner
 // cannot be verified dead on this host refuses (coordination, not evidence);
@@ -215,7 +215,7 @@ export function readRegister(root) {
 
 const LOCK_CODE_BY_BASENAME = {
   'dispatch-register.lock': 'register_lock_held',
-  'review-ledger.lock': 'ledger_lock_held',
+  'review-ledger.lock': 'compatibility_lock_held',
 };
 
 function lockCodeFor(lockDir) {
@@ -356,7 +356,7 @@ export function withRegisterLock(root, fn, opts = {}) {
 }
 
 export function withLedgerLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(ledgerLockDir(root), fn, opts);
+  return withOwnerMkdirLock(legacyCompatibilityLockDir(root), fn, opts);
 }
 
 // ---------------------------------------------------------------------------

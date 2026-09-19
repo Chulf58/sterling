@@ -31,6 +31,7 @@ export {
   axisHits,
   GENERIC_DEV_TERMS,
   hasDiscriminatingHit,
+  AXIS_MIN_DISCRIMINATING_HITS,
   AXIS_RECORD_TOP_K,
   AXIS_MIN_RECORD_TERMS,
   recordCentralityHits,
@@ -123,7 +124,7 @@ export function pendingPath(cwd) {
  *  `records`/`slugs` (the full-article Read-path guard — riding it would
  *  either silently suppress the bash re-emission after an unrelated Read, or
  *  vice versa; the board asks for this seam's OWN bounded dedup). */
-function emptyGuard() {
+export function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 
@@ -177,13 +178,13 @@ export function readGuard(path) {
   // Self-healing: a torn/corrupt guard resets to empty (worst case a duplicate
   // delivery) instead of disabling delivery for the rest of the session.
   try {
-    if (!existsSync(path)) return emptyGuard();
+    if (!existsSync(path)) return emptyDeliveryGuard();
     // Tolerate a guard written before a field existed (mid-session upgrade):
     // a missing array must read as empty, never as undefined.
-    return { ...emptyGuard(), ...JSON.parse(readFileSync(path, 'utf8')) };
+    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync(path, 'utf8')) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} — reset to empty\n`);
-    return emptyGuard();
+    return emptyDeliveryGuard();
   }
 }
 
@@ -703,11 +704,8 @@ export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
 // a crashed holder; never PID-liveness (anti_pattern 8e603e23: a recycled PID
 // gives a false lock identity).
 //
-// TWO CALLER SEMANTICS, deliberately different (fixer F2):
-//   PRODUCERS (enqueuePending) keep the ORIGINAL degrade-to-unlocked behavior
-//     (decision cdb50670 untouched): on deadline expiry they PROCEED WITHOUT THE
-//     LOCK rather than blocking the hook forever — a lost append costs one
-//     duplicate/late pointer, and delivery is an aid, never a gate.
+// Both producers and the drain require the lock. Producers return false on
+// timeout so callers keep their delivery guards unspent and retry later.
 //   THE DRAIN (drainPending) is LOCK-REQUIRED: it MUTATES the queue by claiming
 //     it away, so proceeding unlocked can delete a producer's just-appended
 //     entry whose guard already marked those records delivered — permanent
@@ -719,6 +717,37 @@ export function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
 const LOCK_DEADLINE_MS = 2000;
 const LOCK_STALE_MS = 5000;
 const LOCK_POLL_MS = 5;
+const LOCK_OWNER_FILE = 'owner';
+let lockTestHooks = {};
+
+/** Test-only race seam; production callers never install hooks. */
+export function setDeliveryLockTestHooks(hooks = {}) {
+  lockTestHooks = hooks;
+}
+
+function lockOwnerPath(lockPath) {
+  return join(lockPath, LOCK_OWNER_FILE);
+}
+
+function ownsLock(lockPath, token) {
+  try {
+    return readFileSync(lockOwnerPath(lockPath), 'utf8') === token;
+  } catch {
+    return false;
+  }
+}
+
+function readLockOwner(lockPath) {
+  try {
+    return readFileSync(lockOwnerPath(lockPath), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function sameLockObject(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
 
 /** Poll for the lock directory until the deadline. Returns whether it was taken
  *  — the ONE acquisition path both semantics above share, so they can never
@@ -726,14 +755,32 @@ const LOCK_POLL_MS = 5;
 function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
   while (Date.now() < deadline) {
+    const token = `${process.pid}-${randomUUID()}`;
     try {
       mkdirSync(lockPath);
-      return true;
+      writeFileSync(lockOwnerPath(lockPath), token, { flag: 'wx' });
+      return token;
     } catch (e) {
       if (e.code !== 'EEXIST') throw e;
       try {
-        if (Date.now() - statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
+        const observed = statSync(lockPath);
+        const observedOwner = readLockOwner(lockPath);
+        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
+          lockTestHooks.afterStaleInspect?.(lockPath);
+          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID()}`;
+          try {
+            renameSync(lockPath, tombstone);
+          } catch (renameError) {
+            if (renameError.code !== 'ENOENT') throw renameError;
+            continue;
+          }
+          if (sameLockObject(observed, statSync(tombstone)) && readLockOwner(tombstone) === observedOwner) {
+            rmSync(tombstone, { recursive: true, force: true });
+          } else if (!existsSync(lockPath)) {
+            // A later owner replaced the pathname after our inspection. Put
+            // that owner back without deleting it; its token still governs it.
+            renameSync(tombstone, lockPath);
+          }
           continue; // retake immediately — no need to sleep first
         }
       } catch {
@@ -743,26 +790,33 @@ function acquireLock(lockPath) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
-  return false;
+  return null;
 }
 
-function releaseLock(lockPath) {
+function releaseLock(lockPath, token) {
   try {
-    rmSync(lockPath, { recursive: true, force: true });
+    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
   } catch {
     // best-effort release; a leftover lock self-heals via the staleness check
   }
 }
 
-/** PRODUCER semantics: runs `fn` whether or not the lock was taken. */
+export const deliveryLockTestApi = {
+  acquire: acquireLock,
+  release: releaseLock,
+  owns: ownsLock,
+};
+
+/** PRODUCER semantics: never mutate the shared queue without its lock. */
 function withFileLock(targetPath, fn) {
   mkdirSync(dirname(targetPath), { recursive: true });
   const lockPath = `${targetPath}.lock`;
-  const acquired = acquireLock(lockPath);
+  const token = acquireLock(lockPath);
+  if (!token) return { acquired: false, value: undefined };
   try {
-    return fn();
+    return { acquired: true, value: fn({ lockPath, token }) };
   } finally {
-    if (acquired) releaseLock(lockPath);
+    releaseLock(lockPath, token);
   }
 }
 
@@ -772,23 +826,31 @@ function withFileLock(targetPath, fn) {
 function withRequiredFileLock(targetPath, fn) {
   mkdirSync(dirname(targetPath), { recursive: true });
   const lockPath = `${targetPath}.lock`;
-  if (!acquireLock(lockPath)) return { acquired: false, value: undefined };
+  const token = acquireLock(lockPath);
+  if (!token) return { acquired: false, value: undefined };
   try {
-    return { acquired: true, value: fn() };
+    return { acquired: true, value: fn({ lockPath, token }) };
   } finally {
-    releaseLock(lockPath);
+    releaseLock(lockPath, token);
   }
 }
 
 export function enqueuePending(path, entry) {
-  withFileLock(path, () => {
+  const result = withFileLock(path, ({ lockPath, token }) => {
     const entries = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : [];
     entries.push(entry);
     // tmp+rename: a crash mid-write can never leave a torn file behind.
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
     writeFileSync(tmp, JSON.stringify(entries));
+    lockTestHooks.beforePendingRename?.({ lockPath, token });
+    if (!ownsLock(lockPath, token)) {
+      rmSync(tmp, { force: true });
+      return false;
+    }
     renameSync(tmp, path);
+    return true;
   });
+  return result.acquired && result.value === true;
 }
 
 // ---------------------------------------------------------------------------
@@ -930,10 +992,10 @@ export function drainPending(path) {
 
   // (2) THE LIVE QUEUE — claimed under a REQUIRED lock, then released at once.
   if (existsSync(path)) {
-    const { acquired, value } = withRequiredFileLock(path, () =>
+    const { acquired, value } = withRequiredFileLock(path, ({ lockPath, token }) =>
       // Re-checked INSIDE the lock: another drain may have claimed the batch
       // between the existsSync above and the lock being granted.
-      existsSync(path) ? claimByRename(path, dir) : null
+      existsSync(path) && ownsLock(lockPath, token) ? claimByRename(path, dir) : null
     );
     if (!acquired) {
       process.stderr.write(
@@ -1415,6 +1477,15 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
     blocks.push(`… ${dropped} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return blocks;
+}
+
+/** Complete hazard blocks in the porch's indented presentation. */
+export function completePorchHazards(hazards) {
+  return cappedHazards(hazards ?? []).map((hazard) => [
+    hazardHeaderLine(hazard),
+    `  TRIGGER: ${hazard.trigger ?? ''}`,
+    `  RIGHT WAY: ${hazard.right_way ?? ''}`,
+  ].join('\n'));
 }
 
 /** How many feature_article pointers render per dispatch (H20 subject-axis
@@ -2116,7 +2187,7 @@ export function renderPorch(
     fileKeys = [],
   } = {}
 ) {
-  if (!Number.isFinite(budget) || budget <= 0) return { text: '', hazardsRendered: false };
+  if (!Number.isFinite(budget) || budget <= 0) return { text: '', hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
   // ACCEPTED (Codex review, item C): a touch whose only fresh knowledge is
   // decision pointers (zero hazards, zero owners) gets no porch — a decision-
   // pointer block is a handful of capped one-line pointers (DECISION_POINTER_
@@ -2125,7 +2196,7 @@ export function renderPorch(
   // builds a porch when freshOwners.length || freshHazards.length ||
   // freshDecisions.length is true, so this branch IS reachable (a decision-
   // only touch) — it is a real, intended no-op, not dead code.
-  if (!hazards?.length && !owners?.length) return { text: '', hazardsRendered: false };
+  if (!hazards?.length && !owners?.length) return { text: '', hazardsRendered: false, deferred_hazard_ids: [] };
 
   // MISCONFIGURED BUDGET (Codex review, HIGH item B, first half): a budget
   // below the structural minimum can never host even the smallest real
@@ -2141,7 +2212,7 @@ export function renderPorch(
     } catch {
       /* a failed stderr write must not change the already-decided outcome */
     }
-    return { text: '', hazardsRendered: false };
+    return { text: '', hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
   }
 
   const shownHazards = cappedHazards(hazards ?? []);
@@ -2208,12 +2279,12 @@ export function renderPorch(
   // the skeleton over-reserves by 3 bytes for an owner whose final digest
   // happens to clip to nothing, which is conservative, never an overrun.
   function hazardSectionAt(perHazardTextBudget) {
-    const blocks = shownHazards.map((hz) =>
-      [
-        hazardHeaderLine(hz, { clipTitleBytes: PORCH_TITLE_CLIP_BYTES, clipSlugBytes: PORCH_SLUG_CLIP_BYTES }),
-        porchHazardBody(hz, Math.max(0, perHazardTextBudget)),
-      ].join('\n')
-    );
+    const blocks = shownHazards.map((hazard) => {
+      const whole = completePorchHazards([hazard])[0];
+      return porchByteLen(whole) <= perHazardTextBudget
+        ? whole
+        : `⚠ HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
+    });
     if (hazardOverflow > 0) {
       // THE SAME OVERFLOW DISCLOSURE renderHazards EMITS (consolidation,
       // decision 6f3e334c: hazards are substance, rendered the SAME WAY
@@ -2267,8 +2338,7 @@ export function renderPorch(
     ].join('\n\n');
     const skeletonBytes = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
     const remaining = Math.max(0, budget - skeletonBytes);
-    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
-    const fits = skeletonBytes <= budget && (shownHazards.length === 0 || remaining >= neededFloor);
+    const fits = skeletonBytes <= budget;
     pick = { admitted, ownerOverflow, ownerLines, overflowLine, remaining, skeletonBytes };
     if (fits || cap === minOwnerCap) break;
   }
@@ -2331,9 +2401,9 @@ export function renderPorch(
       } catch {
         /* a failed stderr write must not change the clamp outcome */
       }
-      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
     }
-    return { text: minimalPorch, hazardsRendered: false };
+    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
   }
 
   // 60/40 hazards/digests, redistributed toward the hazard floor first (borrow
@@ -2406,15 +2476,181 @@ export function renderPorch(
     } catch {
       /* a failed stderr write must not change the clamp outcome */
     }
-    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
   }
-  return { text: finalPorch, hazardsRendered: true };
+  const deferred_hazard_ids = shownHazards.filter((hazard, index) => !finalPorch.includes(completePorchHazards([hazard])[0])).map((hazard) => hazard.id);
+  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids };
 }
 
 /** The owned-territory header line — factored out (was inlined in
  *  renderPayload) so the SubagentStart porch (renderPorch below) can lead
  *  with the IDENTICAL line renderPayload uses, rather than a second hand-
  *  copied string the two could drift apart on. */
+// ---------------------------------------------------------------------------
+// PER-DELIVERY TOTAL CAP (scale-down Slice 3c, decision
+// sterling-claude-code-scale-down-boundary). payload_char_cap bounds one FIELD;
+// nothing bounded a delivery as a whole, and one governed Read measured
+// 13-17KB. Every delivery surface (H19 tool-time, Bash pointers, dispatch
+// staging, H20) now assembles its blocks through capDeliveryParts: hazard
+// blocks are PINNED (verbatim, never cut, but they do spend the budget);
+// everything else is kept whole while it fits, then clipped at a line
+// boundary with a pointer suffix, then reduced to its pointer. Nothing is
+// dropped silently: a part with no pointer that cannot fit is counted in a
+// trailing omission line.
+// ---------------------------------------------------------------------------
+
+/** Default total cap in UTF-8 bytes; config.delivery.total_cap_bytes overrides
+ *  it (0 = no total cap). */
+export const DELIVERY_TOTAL_CAP_DEFAULT = 3000;
+
+/** Smallest clipped excerpt worth emitting ahead of a pointer. */
+export const DELIVERY_EXCERPT_MIN_BYTES = 160;
+
+export function resolveTotalCap(cwd) {
+  try {
+    const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
+    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+  } catch {
+    return DELIVERY_TOTAL_CAP_DEFAULT;
+  }
+}
+
+/** Keep whole lines while they fit `maxBytes`; if not even the first line
+ *  fits, byte-clip it. */
+function clipLinesToBytes(text, maxBytes) {
+  if (maxBytes <= 0) return '';
+  const lines = String(text ?? '').split('\n');
+  const out = [];
+  let used = 0;
+  for (const line of lines) {
+    const cost = porchByteLen(line) + (out.length ? 1 : 0);
+    if (used + cost > maxBytes) break;
+    out.push(line);
+    used += cost;
+  }
+  return out.length ? out.join('\n') : clipToBytes(lines[0], maxBytes);
+}
+
+/**
+ * Decision 301d8a0a: each delivery part is either HAZARD (a complete
+ * anti-pattern block) or ORDINARY (everything else). Hazards are whole and
+ * unbudgeted; every ordinary byte, including separators and disclosures, is
+ * within capBytes. This intentionally does not promise a total payload cap
+ * when hazards exist, nor complete ordinary context.
+ */
+export function capDeliveryParts(parts, capBytes, { sep = '\n\n' } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === 'string' && part.text).map((part) => ({ ...part, kind: part.kind === 'hazard' ? 'hazard' : 'ordinary' }));
+  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
+  const bytes = (text) => porchByteLen(text);
+  const hazards = new Set(items.filter((part) => part.kind === 'hazard'));
+  const selected = new Map();
+  const omitted = [];
+  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
+  const ordinaryBytes = () => {
+    const text = output().join(sep);
+    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
+  };
+  const fits = () => ordinaryBytes() <= capBytes;
+  const pointerFor = (part) => part.pointer || '';
+
+  for (const part of items) {
+    if (part.kind === 'hazard') continue;
+    selected.set(part, part.text);
+    if (fits()) continue;
+    selected.delete(part);
+
+    const suffix = part.suffix || pointerFor(part);
+    if (suffix) {
+      const lines = part.text.split('\n');
+      let clipped = '';
+      let best = '';
+      for (const line of lines) {
+        const candidate = clipped ? `${clipped}\n${line}` : line;
+        selected.set(part, `${candidate}\n${suffix}`);
+        if (!fits()) {
+          break;
+        }
+        clipped = candidate;
+        best = `${candidate}\n${suffix}`;
+      }
+      if (best) {
+        selected.set(part, best);
+        continue;
+      }
+      selected.delete(part);
+      selected.set(part, pointerFor(part));
+      if (pointerFor(part) && fits()) continue;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  }
+
+  if (omitted.length) {
+    const aggregatePart = { kind: 'ordinary', text: '' };
+    items.push(aggregatePart);
+    const aggregate = () => {
+      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
+      const prefix = `+${omitted.length} more records: knowledge_query`;
+      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(' ')}` : `${prefix}; knowledge_get`;
+      while (ids.length && bytes(line) > capBytes) {
+        ids.pop();
+        line = ids.length ? `${prefix}; knowledge_get ${ids.join(' ')}` : `${prefix}; knowledge_get`;
+      }
+      return line;
+    };
+    while (true) {
+      aggregatePart.text = aggregate();
+      selected.set(aggregatePart, aggregatePart.text);
+      if (fits()) break;
+      selected.delete(aggregatePart);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
+      if (!last) break;
+      selected.delete(last);
+      omitted.push(last);
+    }
+  }
+  return output();
+}
+
+/** Split a porch only when its rendered hazard substrings are complete. */
+export function partitionPorchHazards(text, hazardBlocks) {
+  const blocks = (hazardBlocks ?? []).filter(Boolean);
+  let cursor = 0;
+  const parts = [];
+  for (const block of blocks) {
+    const at = text.indexOf(block, cursor);
+    if (at < 0) return null;
+    if (at > cursor) parts.push({ kind: 'ordinary', text: text.slice(cursor, at) });
+    parts.push({ kind: 'hazard', text: block });
+    cursor = at + block.length;
+  }
+  if (cursor < text.length) parts.push({ kind: 'ordinary', text: text.slice(cursor) });
+  return parts;
+}
+
+/** Records whose FULL id appears in the emitted text — the only ones a caller
+ *  may mark delivered (never mark delivered what the reader was not shown). */
+export function recordsShownIn(text, records) {
+  const t = String(text ?? '');
+  return (records ?? []).filter((r) => r?.id && t.includes(r.id));
+}
+
+/** The capped-delivery pointer for an owning record: its rendered header line
+ *  plus the full-record read. */
+export function ownerPointer(rendered, record) {
+  const head = String(rendered ?? '').split('\n')[0];
+  return `${clipToBytes(head, 300)}\n▸ FULL RECORD (delivery cap reached): knowledge_get ${record.id}`;
+}
+
+export function ownerSuffix(record) {
+  return `▸ FULL RECORD (clipped at the delivery cap): knowledge_get ${record.id}`;
+}
+
+/** Pointer for a decision block the cap cannot hold. */
+export function decisionBlockPointer(count, widen) {
+  return `▸ DECISIONS (${count}) held back by the delivery cap — ${widen}`;
+}
+
 export function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) — owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
 }
@@ -2537,6 +2773,7 @@ export function bashPointerBlock(entries, { gapsByOwner } = {}) {
       lines.push({
         id: h.id,
         line: `  • ${e.rel} — ⚠ HAZARD anti_pattern '${hazardLabel}' · knowledge_get ${h.id}${statusAnnotation(h)}`,
+        hazard: true,
       });
     }
     for (const o of e.owners) {
@@ -2557,6 +2794,42 @@ export function bashPointerBlock(entries, { gapsByOwner } = {}) {
     }
   }
   return { header, lines };
+}
+
+/** Dedup + total-cap a `{header, lines}` pointer block (scale-down Slice 3c).
+ *  One line per record id (the first path naming it wins); records `skip(id)`
+ *  says were already delivered this session are dropped; hazard lines are
+ *  retained for queue recipe semantics; at drain, anti-pattern lines become
+ *  complete hazard substance while ordinary owner lines are capped and disclosed
+ *  in `tail`. capBytes <= 0 disables the cap (dedup still applies). */
+export function capPointerBlock({ header, lines = [] } = {}, capBytes, { skip = () => false } = {}) {
+  const seen = new Set();
+  const kept = [];
+  for (const l of lines) {
+    if (!l?.id || seen.has(l.id) || skip(l.id)) continue;
+    seen.add(l.id);
+    kept.push(l);
+  }
+  if (!capBytes || capBytes <= 0) return { header, lines: kept, tail: '' };
+  const lineBytes = (l) => [l.line, ...(Array.isArray(l.gapLines) ? l.gapLines : [])].reduce((n, x) => n + porchByteLen(x) + 1, 0);
+  const TAIL_RESERVE = 160;
+  let used = porchByteLen(header) + kept.filter((l) => l.hazard).reduce((n, l) => n + lineBytes(l), 0);
+  const out = [];
+  let held = 0;
+  for (const l of kept) {
+    if (l.hazard) {
+      out.push(l);
+      continue;
+    }
+    if (used + lineBytes(l) + TAIL_RESERVE <= capBytes) {
+      out.push(l);
+      used += lineBytes(l);
+    } else held++;
+  }
+  const tail = held
+    ? `  (+${held} more pointer line(s) held back by the ${capBytes}-byte delivery cap — knowledge_query the command's governed paths)`
+    : '';
+  return { header, lines: out, tail };
 }
 
 /** Join a `{header, lines, tail}` pointer block into the payload text. ONE
@@ -2667,6 +2940,7 @@ export function rerenderRecipe({
   decisionIds,
   hazardTail,
   decisionTail,
+  cachedHazardBlocks,
   suspects,
   trailingBlocks,
 }) {
@@ -2679,6 +2953,10 @@ export function rerenderRecipe({
     hazard_ids: hazardIds ?? [],
     owner_ids: ownerIds ?? [],
     decision_ids: decisionIds ?? [],
+    // A drain can lose store access after enqueue. Keep the exact hazard
+    // substance separately so that arm never turns trigger/right-way text into
+    // an ordinary cappable cached payload.
+    cached_hazard_blocks: cachedHazardBlocks ?? [],
     tails: { hazards: hazardTail ?? 0, decisions: decisionTail ?? 0 },
     suspects: suspects
       ? {
@@ -2717,11 +2995,54 @@ export function pointerVerifyRecipe({ header, entries, tail } = {}) {
     header: typeof header === 'string' ? header : '',
     entries: (entries ?? []).map((e) => {
       const out = { id: e?.id, line: e?.line };
+      if (e?.hazard === true) out.hazard = true;
       if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
       return out;
     }),
     tail: typeof tail === 'string' ? tail : '',
   };
+}
+
+/** Filter a prompt-drain entry through a fresh, in-memory delivery guard.
+ * The queue can contain several producers' entries for the same record in one
+ * turn. Reusing the guard's id semantics keeps that batch from repeating a
+ * record, without touching the session guard that was intentionally marked at
+ * enqueue time. Returns null when an entry has no record-bearing content left.
+ */
+export function dedupeDrainEntry(entry, guard) {
+  const recipe = entry?.recipe;
+  if (!recipe || recipe.version !== DELIVERY_RECIPE_VERSION) return entry;
+  // Validation must precede drain-wide dedup.  Otherwise a malformed rerender
+  // recipe with (for example) a string decision_ids is reduced to no ids and
+  // silently dropped instead of taking renderDrainEntry's cached+banner arm.
+  if (recipe.mode === 'rerender' && validateRerenderRecipe(recipe)) return entry;
+  const seen = (id) => isDelivered(guard, { id });
+  const mark = (ids) => markDelivered(guard, ids.map((id) => ({ id })));
+  if (recipe.mode === 'pointer_verify' && Array.isArray(recipe.entries)) {
+    const entries = recipe.entries.filter((item) => item?.id && !seen(item.id));
+    if (!entries.length) return null;
+    mark(entries.map((item) => item.id));
+    return { ...entry, recipe: { ...recipe, entries } };
+  }
+  if (recipe.mode === 'rerender') {
+    const keys = ['hazard_ids', 'owner_ids', 'decision_ids'];
+    const next = { ...recipe };
+    const ids = [];
+    for (const key of keys) {
+      const values = Array.isArray(recipe[key]) ? recipe[key].filter((id) => !seen(id)) : recipe[key];
+      next[key] = values;
+      if (Array.isArray(values)) ids.push(...values);
+    }
+    // A valid frontier rerender intentionally has no record ids.  It is still
+    // an entry with knowledge to deliver; only an entry emptied by dedup drops.
+    if (!ids.length) {
+      const hadRecordIds = keys.some((key) => recipe[key].length > 0);
+      return hadRecordIds ? null : entry;
+    }
+    mark(ids);
+    return { ...entry, recipe: next };
+  }
+  return entry;
 }
 
 // ---------------------------------------------------------------------------
@@ -2749,6 +3070,7 @@ function validateRerenderRecipe(r) {
   for (const key of ['hazard_ids', 'owner_ids', 'decision_ids']) {
     if (!isStrArray(r[key])) return `${key} is not an array of strings`;
   }
+  if (r.cached_hazard_blocks !== undefined && !isStrArray(r.cached_hazard_blocks)) return 'cached_hazard_blocks is not an array of strings';
   if (!isStrArray(r.trailing_blocks)) return 'trailing_blocks is not an array of strings';
   // `suspects` is OPTIONAL (absent/null = no advisory block), but present means
   // fully shaped — a half-valid suspect block routes to the banner arm like any
@@ -2886,7 +3208,7 @@ function resolveQueuedId(store, id) {
   return { served: record, disclosure: null };
 }
 
-function rerenderFromRecipe(store, recipe) {
+function rerenderFromRecipe(store, recipe, { parts = false } = {}) {
   const charCap = recipe.char_cap;
   const disclosures = [];
   const take = (ids) => {
@@ -2959,7 +3281,64 @@ function rerenderFromRecipe(store, recipe) {
     // outranks the footnote about what changed under it.
     ...(disclosures.length ? [disclosures.join('\n')] : []),
   ];
+  if (parts) {
+    const hazardBlocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { fileKeys: [recipe.rel], total: hazardTotal, suppressed: hazardTail });
+    const ordinaryBlocks = substantive.slice(hazardBlocks.length);
+    return [
+      { kind: 'ordinary', text: renderPayload(recipe.rel, [], { unowned: recipe.unowned, substantiveCount: substantive.length }) },
+      ...hazardBlocks.map((text) => ({ kind: 'hazard', text })),
+      ...ordinaryBlocks.map((text, i) => owners[i]
+        ? { kind: 'ordinary', text, pointer: ownerPointer(text, owners[i]), suffix: ownerSuffix(owners[i]) }
+        : { kind: 'ordinary', text, pointer: `▸ Delivery cap: knowledge_query file_keys:[${JSON.stringify(recipe.rel)}]` }),
+      ...disclosures.map((text) => ({ kind: 'ordinary', text })),
+    ];
+  }
   return renderPayload(recipe.rel, blocks, { unowned: recipe.unowned, substantiveCount: substantive.length });
+}
+
+/** Preserve hazard/ordinary boundaries until the batch's final byte budget. */
+export function renderDrainParts(store, entry, storeReason) {
+  const recipe = entry?.recipe;
+  if (store && recipe?.version === DELIVERY_RECIPE_VERSION) {
+    try {
+      if (recipe.mode === 'rerender' && !validateRerenderRecipe(recipe)) return rerenderFromRecipe(store, recipe, { parts: true });
+      if (recipe.mode === 'pointer_verify' && !validatePointerVerifyRecipe(recipe)) {
+        return [
+          { kind: 'ordinary', text: recipe.header },
+          ...recipe.entries.flatMap((line) => {
+            const { served } = resolveQueuedId(store, line.id);
+            if (line.hazard === true && served?.type === 'anti_pattern') {
+              return renderHazards([served], Number.MAX_SAFE_INTEGER).map((text) => ({ kind: 'hazard', text }));
+            }
+            return [{
+              kind: 'ordinary', text: rebuildPointerPayload(store, { entries: [line] }),
+              pointer: `▸ Delivery cap: knowledge_get ${line.id}`,
+            }];
+          }),
+          { kind: 'ordinary', text: recipe.tail },
+        ];
+      }
+    } catch { /* use the explicit unverified fallback below */ }
+  }
+  // Store-unavailable fallback. Current recipes carry the original complete
+  // hazard blocks separately, so cached ordinary payload can never cut a
+  // trigger/right-way pair. A legacy recipe without those blocks stays CLAIMED:
+  // it has no evidence that a hazard could be delivered whole.
+  const hazardIds = [...(Array.isArray(recipe?.hazard_ids) ? recipe.hazard_ids : []),
+    ...(Array.isArray(recipe?.entries) ? recipe.entries.filter((e) => e.hazard).map((e) => e.id) : [])];
+  if (!hazardIds.length) {
+    return [{ kind: 'ordinary', text: renderDrainEntry(store, entry, storeReason), pointer: '▸ QUEUED DELIVERY held back by the delivery cap — knowledge_query the touched territory before acting.' }];
+  }
+  const cachedHazards = Array.isArray(recipe?.cached_hazard_blocks) ? recipe.cached_hazard_blocks : [];
+  const notice = `⚠ UNVERIFIED AT DRAIN (H19): ${storeReason ?? 'the project store could not be read at drain'}. Hazard substance below is cached from enqueue; re-query before relying on ordinary cached context.`;
+  if (hazardIds.length && cachedHazards.length < hazardIds.length) {
+    return [{ kind: 'ordinary', text: `${notice}\n⚠ HAZARD DELIVERY HELD CLAIMED: ${hazardIds.join(', ')} could not be verified whole.`, hazardIncomplete: true }];
+  }
+  return [
+    { kind: 'ordinary', text: notice },
+    ...cachedHazards.map((text) => ({ kind: 'hazard', text })),
+    { kind: 'ordinary', text: '▸ CACHED ORDINARY DELIVERY withheld while the store is unavailable — knowledge_query the touched territory before acting.', pointer: '▸ CACHED ORDINARY DELIVERY held back by the delivery cap — knowledge_query the touched territory before acting.' },
+  ];
 }
 
 /** REBUILD the pointer block from the recipe's per-record lines (fixer F1) —

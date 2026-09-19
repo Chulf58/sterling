@@ -4609,8 +4609,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4884,14 +4885,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4912,16 +4905,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -5061,7 +5060,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5080,12 +5079,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
@@ -5401,10 +5408,13 @@ var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
   "through",
   "actually",
   "behavior",
-  "still"
+  "still",
+  "full"
 ]);
-function hasDiscriminatingHit(hits) {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+var AXIS_MIN_DISCRIMINATING_HITS = 2;
+function hasDiscriminatingHit(hits, minDiscriminating = 1) {
+  const distinct = new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)));
+  return distinct.size >= minDiscriminating;
 }
 var AXIS_RECORD_TOP_K = 6;
 var AXIS_MIN_RECORD_TERMS = 2;
@@ -7579,6 +7589,7 @@ function recordAdvisoryFire(root, hook, sessionId) {
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
@@ -7589,17 +7600,17 @@ function guardPath(cwd, agentId) {
 function pendingPath(cwd) {
   return join4(deliveryDir(cwd), "pending.json");
 }
-function emptyGuard() {
+function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function readGuard(path) {
   try {
-    if (!existsSync4(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    if (!existsSync4(path)) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
-    return emptyGuard();
+    return emptyDeliveryGuard();
   }
 }
 function writeGuard(path, guard) {
@@ -7626,17 +7637,55 @@ var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")}
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;
+var LOCK_OWNER_FILE = "owner";
+var lockTestHooks = {};
+function lockOwnerPath(lockPath) {
+  return join4(lockPath, LOCK_OWNER_FILE);
+}
+function ownsLock(lockPath, token) {
+  try {
+    return readFileSync3(lockOwnerPath(lockPath), "utf8") === token;
+  } catch {
+    return false;
+  }
+}
+function readLockOwner(lockPath) {
+  try {
+    return readFileSync3(lockOwnerPath(lockPath), "utf8");
+  } catch {
+    return null;
+  }
+}
+function sameLockObject(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
 function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
   while (Date.now() < deadline) {
+    const token = `${process.pid}-${randomUUID2()}`;
     try {
       mkdirSync3(lockPath);
-      return true;
+      writeFileSync(lockOwnerPath(lockPath), token, { flag: "wx" });
+      return token;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
+        const observed = statSync2(lockPath);
+        const observedOwner = readLockOwner(lockPath);
+        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
+          lockTestHooks.afterStaleInspect?.(lockPath);
+          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
+          try {
+            renameSync(lockPath, tombstone);
+          } catch (renameError) {
+            if (renameError.code !== "ENOENT") throw renameError;
+            continue;
+          }
+          if (sameLockObject(observed, statSync2(tombstone)) && readLockOwner(tombstone) === observedOwner) {
+            rmSync(tombstone, { recursive: true, force: true });
+          } else if (!existsSync4(lockPath)) {
+            renameSync(tombstone, lockPath);
+          }
           continue;
         }
       } catch {
@@ -7645,32 +7694,40 @@ function acquireLock(lockPath) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
-  return false;
+  return null;
 }
-function releaseLock(lockPath) {
+function releaseLock(lockPath, token) {
   try {
-    rmSync(lockPath, { recursive: true, force: true });
+    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
   } catch {
   }
 }
 function withFileLock(targetPath, fn) {
   mkdirSync3(dirname3(targetPath), { recursive: true });
   const lockPath = `${targetPath}.lock`;
-  const acquired = acquireLock(lockPath);
+  const token = acquireLock(lockPath);
+  if (!token) return { acquired: false, value: void 0 };
   try {
-    return fn();
+    return { acquired: true, value: fn({ lockPath, token }) };
   } finally {
-    if (acquired) releaseLock(lockPath);
+    releaseLock(lockPath, token);
   }
 }
 function enqueuePending(path, entry) {
-  withFileLock(path, () => {
+  const result = withFileLock(path, ({ lockPath, token }) => {
     const entries = existsSync4(path) ? JSON.parse(readFileSync3(path, "utf8")) : [];
     entries.push(entry);
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
     writeFileSync(tmp, JSON.stringify(entries));
+    lockTestHooks.beforePendingRename?.({ lockPath, token });
+    if (!ownsLock(lockPath, token)) {
+      rmSync(tmp, { force: true });
+      return false;
+    }
     renameSync(tmp, path);
+    return true;
   });
+  return result.acquired && result.value === true;
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
@@ -7719,6 +7776,7 @@ function pointerVerifyRecipe({ header, entries, tail } = {}) {
     header: typeof header === "string" ? header : "",
     entries: (entries ?? []).map((e) => {
       const out = { id: e?.id, line: e?.line };
+      if (e?.hazard === true) out.hazard = true;
       if (Array.isArray(e?.gapLines) && e.gapLines.length) out.gap_lines = e.gapLines;
       return out;
     }),
@@ -7760,7 +7818,7 @@ try {
     ...store.query({ types: ["decision"], rank_terms: terms, cap: 40 })
   ];
   if (!candidates.length) allow();
-  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
+  const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
   const gPath = guardPath(input.cwd, input.agent_id);
   const guard = readGuard(gPath);
@@ -7777,17 +7835,17 @@ try {
     const r = x.record;
     const kind = r.type === "anti_pattern" ? "HAZARD anti_pattern" : "DECISION";
     const authorityMarker = r.authority ? `[${r.authority}] ` : "";
-    return { id: r.id, line: `  \u2192 ${authorityMarker}${kind} '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
+    return { id: r.id, hazard: r.type === "anti_pattern", line: `  \u2192 ${authorityMarker}${kind} '${clipTitle(r.title)}' \xB7 knowledge_get ${r.id}` };
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : "";
   recordAdvisoryFire(input.cwd, "h23", input.session_id);
-  enqueuePending(pendingPath(input.cwd), {
+  if (!enqueuePending(pendingPath(input.cwd), {
     kind: "output_axis_pointers",
     rel: input.tool_input?.file_path ?? input.tool_input?.command ?? "",
     payload: joinPointerBlock({ header, lines: pointerLines, tail }),
     recipe: pointerVerifyRecipe({ header, entries: pointerLines, tail }),
     agent_id: "conductor"
-  });
+  })) throw new Error("delivery queue lock timeout");
   guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
   writeGuard(gPath, guard);
   allow();

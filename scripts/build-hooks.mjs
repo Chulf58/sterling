@@ -71,7 +71,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // Wave-settle disclosure (board 54c451b4): a mid-wave bundle rebuild can race a
-// coder's in-flight source edit (the 6ef262fc shape). Advisory only — never a gate.
+// agent's in-flight source edit (the 6ef262fc shape). Advisory only — never a gate.
 const advisory = inFlightAdvisory(root, 'a bundle rebuilt now may race an in-flight edit of scripts/hooks sources.');
 if (advisory) console.log(`build-hooks: ${advisory}`);
 

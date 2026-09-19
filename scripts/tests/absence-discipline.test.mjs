@@ -19,36 +19,36 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const templateDir = join(root, 'agent-templates');
 
 test('a listed template WITHOUT an Absence claims section fails the rule', () => {
-  const v = lintAbsenceDiscipline('# Role\n# Inputs\n', 'explorer.md');
+  const v = lintAbsenceDiscipline('# Role\n# Inputs\n', 'scout.md');
   assert.equal(v.length, 1);
   assert.equal(v[0].kind, 'missing_absence_discipline');
-  assert.match(v[0].detail, /explorer\.md/);
+  assert.match(v[0].detail, /scout\.md/);
   assert.match(v[0].detail, /00d8d8c6/, 'the violation must cite the board item that motivated it');
 });
 
 test('a listed template WITH the section passes', () => {
-  // 'explorer.md', not 'debugger.md': debugger.md was deleted and dropped
+  // 'scout.md', not 'debugger.md': debugger.md was deleted and dropped
   // from ABSENCE_REPORTING_TEMPLATES (scale-down decision
   // sterling-claude-code-scale-down-boundary, 2ad87dd1) — a label the rule no
   // longer covers would trivially pass regardless of content, which is not
   // what this test is meant to exercise.
-  const v = lintAbsenceDiscipline('# Role\n\n# Absence claims\n\nOpen the thing that would do the job.\n', 'explorer.md');
+  const v = lintAbsenceDiscipline('# Role\n\n# Absence claims\n\nOpen the thing that would do the job.\n', 'scout.md');
   assert.deepEqual(v, []);
 });
 
 test('the section matches case-insensitively and at any heading depth', () => {
   for (const heading of ['# Absence claims', '## ABSENCE CLAIMS', '### Absence Claims and evidence']) {
-    assert.deepEqual(lintAbsenceDiscipline(`${heading}\n`, 'explorer.md'), [], `${heading} should satisfy the rule`);
+    assert.deepEqual(lintAbsenceDiscipline(`${heading}\n`, 'scout.md'), [], `${heading} should satisfy the rule`);
   }
 });
 
 test('an UNLISTED template is not required to carry the section (scope is deliberate)', () => {
-  for (const other of ['coder.md', 'test-writer.md', 'librarian.md', 'reviewer-correctness.md']) {
+  for (const other of ['implementor.md', 'researcher.md', 'librarian.md']) {
     assert.deepEqual(lintAbsenceDiscipline('# Role\n', other), [], `${other} is out of scope for this rule`);
   }
 });
 
-test('the SHIPPED explorer and debugger templates satisfy the rule', () => {
+test('the SHIPPED scout template satisfies the rule', () => {
   for (const file of ABSENCE_REPORTING_TEMPLATES) {
     const content = readFileSync(join(templateDir, file), 'utf8');
     assert.deepEqual(lintAbsenceDiscipline(content, file), [], `${file} must carry the section`);
@@ -60,9 +60,9 @@ test('adding the section did NOT break the seven-section §7.3 contract or its o
   // order check walks the seven known sections by index, so an extra heading in
   // between must not disturb it — this is the regression that would bite.
   const templates = collectAgentTemplates(templateDir).filter((t) => t.file !== 'registry.json');
-  // Roster shrank to 3 (librarian, researcher, explorer) with the scale-down
-  // cut — decision sterling-claude-code-scale-down-boundary, 2ad87dd1.
-  assert.ok(templates.length >= 3, `expected the full roster, saw ${templates.length}`);
+  // Roster is 4 (implementor, researcher, scout, librarian) at Slice 5/8 —
+  // decision sterling-claude-code-scale-down-boundary, 2ad87dd1, change 3.
+  assert.ok(templates.length >= 4, `expected the full roster, saw ${templates.length}`);
   for (const t of templates) {
     assert.deepEqual(lintAgentPrompt(t.content, t.file), [], `${t.file} must still satisfy the seven sections in order`);
   }

@@ -6,10 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3 } from "node:crypto";
-import { readFileSync as readFileSync4, existsSync as existsSync6, mkdirSync as mkdirSync6, readdirSync as readdirSync3, renameSync as renameSync3, statSync as statSync4, writeFileSync as writeFileSync4, rmSync as rmSync2 } from "node:fs";
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { basename as basename3, dirname as dirname6, join as join7 } from "node:path";
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { readFileSync as readFileSync5, existsSync as existsSync6, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync5, statSync as statSync5, writeFileSync as writeFileSync5, rmSync as rmSync3 } from "node:fs";
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { basename as basename3, dirname as dirname7, join as join8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -4629,8 +4629,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4904,14 +4905,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4932,16 +4925,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -5081,7 +5080,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5100,12 +5099,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
@@ -7577,7 +7584,7 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_corrupt",
   "ledger_absent",
   "ledger_digest_mismatch",
-  "ledger_lock_held",
+  "compatibility_lock_held",
   "entry_not_found",
   "entry_selector_ambiguous",
   "entry_not_active",
@@ -7602,7 +7609,7 @@ var CODES = /* @__PURE__ */ new Set([
   "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
-  // §1.4 commit-reviewed
+  // commit operation
   "nothing_staged",
   "message_missing",
   "no_spendable_receipt",
@@ -7743,7 +7750,7 @@ function readRegister(root) {
 }
 var LOCK_CODE_BY_BASENAME = {
   "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "ledger_lock_held"
+  "review-ledger.lock": "compatibility_lock_held"
 };
 function lockCodeFor(lockDir) {
   return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
@@ -8270,8 +8277,8 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash3 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync3 } from "node:fs";
+import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync3, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
   return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
@@ -8304,6 +8311,24 @@ function loadRegistry(registryPath2) {
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
   }
+  const names = /* @__PURE__ */ new Set();
+  const files = /* @__PURE__ */ new Set();
+  for (const [index, entry] of registry.agents.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}] must be an object`);
+    }
+    if (typeof entry.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].name must be a safe agent name`);
+    }
+    if (typeof entry.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
+    }
+    if (names.has(entry.name) || files.has(entry.file)) {
+      throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
+    }
+    names.add(entry.name);
+    files.add(entry.file);
+  }
   return registry;
 }
 var RESTART_INSTRUCTION = [
@@ -8311,16 +8336,101 @@ var RESTART_INSTRUCTION = [
   "RESTART REQUIRED \u2014 project subagents load at session start.",
   "Agents installed into .claude/agents/ are NOT visible to a",
   "session that was already running. Restart Claude Code in this",
-  "project before the first pipeline run; the run is blocked until",
-  "the runtime visibility check confirms the installed agent set.",
+  "project before dispatching any of the agents above.",
   "================================================================"
 ].join("\n");
 
+// scripts/hooks/lib/settlement.mjs
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync2, statSync as statSync4, renameSync as renameSync4 } from "node:fs";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { join as join7, dirname as dirname6 } from "node:path";
+function hashFile(root, rel) {
+  try {
+    return createHash4("sha256").update(readFileSync4(join7(root, rel))).digest("hex");
+  } catch {
+    return void 0;
+  }
+}
+var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+function gitZ(root, args) {
+  const r = spawnSync3("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
+  return r.stdout.split("\0").filter(Boolean);
+}
+function changedSince(root, base2) {
+  const diff = ["diff", "--name-only", "-z", "--no-renames", "--relative"];
+  return /* @__PURE__ */ new Set([
+    ...gitZ(root, [...diff, base2]),
+    ...gitZ(root, [...diff, "--cached", base2]),
+    ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+  ]);
+}
+var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
+function readGitSettled(root) {
+  try {
+    const s2 = JSON.parse(readFileSync4(join7(root, GIT_SETTLED_REL), "utf8"));
+    return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
+  } catch {
+    return null;
+  }
+}
+function gitTouches(root, now) {
+  let head;
+  try {
+    const r = spawnSync3("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    if (r.status === 0) head = r.stdout.trim();
+    else if (spawnSync3("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else return { ok: false, reason: "no_git" };
+    const settled = readGitSettled(root);
+    let base2 = settled?.sha;
+    if (base2 && base2 !== EMPTY_TREE && (spawnSync3("git", ["cat-file", "-e", `${base2}^{tree}`], { cwd: root, timeout: 3e4 }).status !== 0 || spawnSync3("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0)) base2 = null;
+    const hashOf = (p) => hashFile(root, p) ?? null;
+    const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next };
+    const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
+    const pool = /* @__PURE__ */ new Set([...base2 ? changedSince(root, base2) : dirtyNow, ...Object.keys(settled.dirty)]);
+    const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
+    const candidates = [...changed].map((path) => {
+      let at = settled.at;
+      try {
+        at = statSync4(join7(root, path)).mtime.toISOString();
+      } catch {
+      }
+      return { path, at: typeof at === "string" ? at : now };
+    });
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2) };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e) };
+  }
+}
+function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
+  const p = join7(root, GIT_SETTLED_REL);
+  mkdirSync6(dirname6(p), { recursive: true });
+  if (ifAbsent) {
+    try {
+      writeFileSync4(p, JSON.stringify(snapshot), { flag: "wx" });
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  }
+  writeFileSync4(`${p}.tmp`, JSON.stringify(snapshot));
+  renameSync4(`${p}.tmp`, p);
+  return true;
+}
+function writeInitialGitSettled(root, snapshot) {
+  return writeGitSettled(root, snapshot, { ifAbsent: true });
+}
+
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
-  const transientDir = join7(cwd, ".sterling", "transient");
+  const transientDir = join8(cwd, ".sterling", "transient");
   try {
-    mkdirSync6(transientDir, { recursive: true });
+    mkdirSync7(transientDir, { recursive: true });
     await withRegisterLock(
       cwd,
       () => {
@@ -8329,10 +8439,10 @@ async function deleteRegisterUnderLock(cwd) {
           process.stderr.write(`${sweep.refused}
 `);
         }
-        rmSync2(registerPath(cwd), { force: true });
+        rmSync3(registerPath(cwd), { force: true });
         const registerBasename = basename3(registerPath(cwd));
         for (const f of readdirSync3(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync2(join7(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync3(join8(transientDir, f), { force: true });
         }
       },
       { retryMs: 1e3, timeoutMs: 1e4 }
@@ -8346,61 +8456,21 @@ async function deleteRegisterUnderLock(cwd) {
     }
   }
 }
-function conventions(maxConcurrent2) {
-  return [
-    "Sterling conventions (injected by H1):",
-    `- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don't know, checking" and check.`,
-    "- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.",
-    "- Canonical naming: one name per concept, from the registries; phase execution, intake, steps \u2014 kill synonyms on sight.",
-    // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
-    // reach every project at its next session start with no per-project copy and no
-    // stamp-contract propagation — the same reason the todo/queue routing lines live on
-    // the commands. Stated because the user was otherwise re-declaring them per project.
-    // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
-    // rule read "3-5 active at all times" in a consuming project and the user withdrew it
-    // within a day — "i am afraid that a session will feel force to spend up subagents even
-    // if they see necessary" — and the same concern was raised again here on 2026-07-29:
-    // "i am afraid that the conductor feel force to dispatch subagents without any value,
-    // for the sake of just doing it to keep the claude.md happy". Leading with "up to N"
-    // reads as a target; leading with the ceiling reads as a limit. Both halves of the
-    // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
-    // because a rule that only pushes one way is the rule that produced the fear.
-    `- Delegation: ${maxConcurrent2} concurrent subagents is a CEILING, not a target \u2014 there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real \u2014 speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice \u2014 it fills the session's scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.`,
-    '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind \u2014 being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" \u2014 it is the conductor reading files by hand that an agent should have read for it.',
-    // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
-    // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
-    // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
-    // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
-    `- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS \u2014 an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise \u2014 adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch \u2014 hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent's claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor's attention spent where it should not be (decision 677f1639).`,
-    // Slice ordering (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22): the
-    // stable-identity campaign ran its critical path single-file for hours with free seats while
-    // later slices' independent pieces were already dispatchable — the user had to interrupt
-    // to demand the frontier be widened. This states WHAT TO PICK; 677f1639 above states WHEN
-    // to check. Sharpened by an external-model (Codex) consult, adjudicated: pure unlock-count
-    // starved risky-but-low-unlock proof slices and mandatory low-unlock slices, and re-picking
-    // on every freed seat could interrupt coherent in-flight work for no reason.
-    "- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement \u2014 a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) \u2014 never disturb coherent in-flight work just because a seat freed. The frontier \u2014 ready work across the board, the maintenance queue, and future slices' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice's commit boundary) \u2014 must GROW while an objective's slice list is still expanding; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies \u2014 a free seat alone never implies dispatch (the quota pathology stays forbidden).",
-    // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
-    // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
-    // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
-    // results default to a digest receipt), but the dispatch shape stands: drafting a
-    // slice's reconciles still spends conductor attention per write, and the librarian
-    // batches them off the critical path. Drafting stays with the conductor.
-    "- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text \u2014 the librarian never authors knowledge \u2014 then BATCHES the slice's drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 \u2014 the old ~50KB full-record echo is opt-in via projection:'full' \u2014 so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor's next work \u2014 never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).",
-    `- The Workflow tool stays OPT-IN and needs the user's explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting \u2014 its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.`,
-    // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
-    // stops were rejected verbatim ("demands attention all the time"); the three subagent
-    // purposes are the user's own words. Ships here so every project gets it next session.
-    `- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended \u2014 never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure \u2192 rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor's context window (decision aac19532).`,
-    // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
-    // the rationale lives in the store (decision + the paired-exploration research_finding), and
-    // conventions injected on every session stay short to stay read.
-    "- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user's prior agreement for that specific spawn \u2014 and never a silent inherit of the session model.",
-    '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself \u2014 measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.',
-    "- CODEX (sparring partner) IS THE DEFAULT for repo-grounded read-only work AND code review: the DEFAULT independent reviewer on every significant code-touching diff, beside the mandatory roster reviewer (an outside model family catches shared-blind-spot defects a same-family reviewer cannot); and the DEFAULT ENGINE for repo-grounded read-only investigation (diagnosis, subsystem reading, bypass hunting) since it reads the repo itself in its own sandbox at zero marginal cost. THE DIVIDING LINE: repo-grounded READ-ONLY work goes to Codex; implementation and writes NEVER do (Codex runs outside the entire hook enforcement surface); store/KB-context work stays on Claude agents (Codex has no knowledge tools). On a plan-cap hit, fall back to a Claude dispatch and say so. ADVISORY, NEVER GATING \u2014 it never writes and disagreement never blocks work (decision codex-preferred-for-read-shaped-analysis).",
-    "- QUESTION DISCIPLINE: every decision put to the user goes through the AskUserQuestion tool form \u2014 a question asked in prose (even a numbered section) reads as rhetorical and gets missed (user-stated 2026-08-11). Ask ONE highest-leverage question through that form; consolidate the CONSIDERATIONS into that single question, never several questions into one form. When a prompt may time out unanswered, prefer the safe default and proceed unattended, disclosing the assumption \u2014 but ONLY for a REVERSIBLE choice needing no user authorization, and NEVER for a gate/grill decision, which is re-asked or waited out instead (user, 2026-07-02).",
-    "- SOLVE, DON'T BOARD: for findings INSIDE the current task's scope or an already-selected board item, evaluate and fix in-session; board only what genuinely cannot be done now, saying why \u2014 many smells dissolve on two minutes of checking (user-stated 2026-07-27). UNRELATED findings are surfaced for the user's disposition, never fixed inline (surface smells, don't fix them). Small board items get NO per-item slice ceremony: fix directly, one commit per task, one review pass (user-decided 2026-08-21)."
-  ].join("\n");
+function conductorContractBlock() {
+  const root = pluginRoot();
+  if (!root) {
+    return "CONDUCTOR CONTRACT UNAVAILABLE (H1): the Sterling plugin root could not be resolved, so docs/conductor-contract.md could not be read. The conductor has no posture contract this session.";
+  }
+  const contractPath = join8(root, "docs", "conductor-contract.md");
+  try {
+    const text = readFileSync5(contractPath, "utf8");
+    if (!text.trim()) {
+      return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} exists but is empty. The conductor has no posture contract this session.`;
+    }
+    return text;
+  } catch (e) {
+    return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} could not be read (${e?.code ?? e?.message ?? e}). The conductor has no posture contract this session.`;
+  }
 }
 var BANNER_ROWS = [
   "\u2584\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588   \u2580\u2588\u2580 \u2588\u2584 \u2588 \u2584\u2580\u2580\u2584",
@@ -8433,10 +8503,10 @@ function pluginRoot() {
   return process.env.STERLING_PLUGIN_ROOT || null;
 }
 function walkUpPluginRoot() {
-  let dir = dirname6(fileURLToPath(import.meta.url));
+  let dir = dirname7(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync6(join7(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname6(dir);
+    if (existsSync6(join8(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname7(dir);
   }
   return null;
 }
@@ -8448,7 +8518,7 @@ function pluginVersion() {
   try {
     const root = pluginRoot();
     if (!root) return null;
-    const v = JSON.parse(readFileSync4(join7(root, ".claude-plugin", "plugin.json"), "utf8")).version;
+    const v = JSON.parse(readFileSync5(join8(root, ".claude-plugin", "plugin.json"), "utf8")).version;
     return typeof v === "string" && v.length ? v : null;
   } catch {
   }
@@ -8470,21 +8540,28 @@ function computeH1DeadDispatchResidue(cwd, source) {
   return lines;
 }
 var input = readStdin();
-var sessionMarkerPath = join7(input.cwd, ".sterling", "transient", "session.json");
-var sessionMarkerTmp = join7(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
+if (input.source === "startup" || input.source === "clear") {
+  try {
+    const git = gitTouches(input.cwd, (/* @__PURE__ */ new Date()).toISOString());
+    if (git.ok) writeInitialGitSettled(input.cwd, git.next);
+  } catch {
+  }
+}
+var sessionMarkerPath = join8(input.cwd, ".sterling", "transient", "session.json");
+var sessionMarkerTmp = join8(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync6(join7(input.cwd, ".sterling", "config.json"))) {
-    mkdirSync6(join7(input.cwd, ".sterling", "transient"), { recursive: true });
-    writeFileSync4(
+  if (existsSync6(join8(input.cwd, ".sterling", "config.json"))) {
+    mkdirSync7(join8(input.cwd, ".sterling", "transient"), { recursive: true });
+    writeFileSync5(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync3(sessionMarkerTmp, sessionMarkerPath);
+    renameSync5(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
-    rmSync2(sessionMarkerPath, { recursive: true, force: true });
-    rmSync2(sessionMarkerTmp, { recursive: true, force: true });
+    rmSync3(sessionMarkerPath, { recursive: true, force: true });
+    rmSync3(sessionMarkerTmp, { recursive: true, force: true });
   } catch {
   }
 }
@@ -8565,33 +8642,33 @@ var currencyWarning = "";
 var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
-  const gitDir = root ? join7(root, ".git") : null;
-  if (gitDir && existsSync6(gitDir) && statSync4(gitDir).isDirectory()) {
+  const gitDir = root ? join8(root, ".git") : null;
+  if (gitDir && existsSync6(gitDir) && statSync5(gitDir).isDirectory()) {
     let role = null;
     try {
-      role = JSON.parse(readFileSync4(join7(root, ".sterling", "config.json"), "utf8")).machine_role;
+      role = JSON.parse(readFileSync5(join8(root, ".sterling", "config.json"), "utf8")).machine_role;
     } catch {
     }
     if (role !== "authoring") {
       const git = (args, timeout = 5e3) => {
-        const r = spawnSync3("git", args, { cwd: root, encoding: "utf8", timeout });
+        const r = spawnSync4("git", args, { cwd: root, encoding: "utf8", timeout });
         return r.status === 0 ? (r.stdout ?? "").trim() : null;
       };
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
       const hasOrigin = (git(["remote"]) ?? "").split("\n").includes("origin");
       const defaultBranch = hasOrigin ? (git(["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]) ?? "").replace(/^origin\//, "") || "main" : null;
       if (hasOrigin && branch && branch === defaultBranch) {
-        const cachePath = join7(gitDir, "sterling-update-check.json");
+        const cachePath = join8(gitDir, "sterling-update-check.json");
         const ttl = Number(process.env.STERLING_CURRENCY_TTL_MS ?? 24 * 60 * 60 * 1e3);
         let fresh = false;
         try {
-          fresh = Date.now() - Date.parse(JSON.parse(readFileSync4(cachePath, "utf8")).checked_at) < ttl;
+          fresh = Date.now() - Date.parse(JSON.parse(readFileSync5(cachePath, "utf8")).checked_at) < ttl;
         } catch {
         }
         if (!fresh) {
-          spawnSync3("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          spawnSync4("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
-            writeFileSync4(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
+            writeFileSync5(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
           }
         }
@@ -8614,8 +8691,8 @@ function planLockSection(ctx) {
   const STALE_DAYS = 14;
   const DAY_MS = 24 * 60 * 60 * 1e3;
   const clean = sanitizeForContext;
-  const sterlingDir = join7(ctx.cwd, ".sterling");
-  const transientDir = join7(sterlingDir, "transient");
+  const sterlingDir = join8(ctx.cwd, ".sterling");
+  const transientDir = join8(sterlingDir, "transient");
   const blocks = [];
   const MARKERS = [
     {
@@ -8635,7 +8712,7 @@ function planLockSection(ctx) {
   for (const marker of MARKERS) {
     let raw = null;
     try {
-      raw = claimMarker(join7(transientDir, marker.file));
+      raw = claimMarker(join8(transientDir, marker.file));
     } catch {
       raw = null;
     }
@@ -8673,7 +8750,7 @@ function planLockSection(ctx) {
     }
     let branchNow = "unknown";
     try {
-      const r = spawnSync3("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync4("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
       const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
       const approved = clean(lock.approved_branch, 120);
       if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
@@ -8726,13 +8803,13 @@ var NOTE_FIELD_MAX = {
 var rotationContext = "";
 try {
   if (input.source === "clear") {
-    const notePath = join7(input.cwd, ".sterling", "transient", "rotation-note.json");
+    const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
     if (existsSync6(notePath)) {
-      const note = JSON.parse(readFileSync4(notePath, "utf8"));
-      rmSync2(notePath, { force: true });
+      const note = JSON.parse(readFileSync5(notePath, "utf8"));
+      rmSync3(notePath, { force: true });
       const head = (() => {
         try {
-          const r = spawnSync3("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+          const r = spawnSync4("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
           return r.status === 0 ? (r.stdout ?? "").trim() : null;
         } catch {
           return null;
@@ -8749,7 +8826,7 @@ try {
           commitsAheadUnverified = true;
         } else {
           try {
-            const countR = spawnSync3("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+            const countR = spawnSync4("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
             const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
             if (Number.isFinite(actual)) {
               if (actual !== note.commits_ahead) {
@@ -8842,8 +8919,8 @@ Resume from next_slice. The board and knowledge store remain the authorities for
 }
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
-    const conductorLedger = join7(input.cwd, ".sterling", "transient", "conductor-reads.json");
-    rmSync2(conductorLedger, { force: true });
+    const conductorLedger = join8(input.cwd, ".sterling", "transient", "conductor-reads.json");
+    rmSync3(conductorLedger, { force: true });
   }
 } catch {
 }
@@ -8855,8 +8932,8 @@ await deleteRegisterUnderLock(input.cwd);
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
-    const transient = join7(input.cwd, ".sterling", "transient");
-    const regPaths = [join7(transient, "touches.json"), join7(transient, "session-events.json"), join7(transient, "capture-nagged.json")];
+    const transient = join8(input.cwd, ".sterling", "transient");
+    const regPaths = [join8(transient, "touches.json"), join8(transient, "session-events.json"), join8(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
     if (regPaths.some((p) => existsSync6(p))) {
       let touches = [];
@@ -8864,7 +8941,7 @@ try {
       let malformed = false;
       try {
         if (existsSync6(touchesPath)) {
-          const raw = JSON.parse(readFileSync4(touchesPath, "utf8"));
+          const raw = JSON.parse(readFileSync5(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
         }
@@ -8873,7 +8950,7 @@ try {
       }
       try {
         if (existsSync6(eventsPath)) {
-          const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
+          const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
         }
@@ -8899,7 +8976,7 @@ try {
           if (!open) {
             const now = (/* @__PURE__ */ new Date()).toISOString();
             store.enqueueSystemTodo({
-              id: randomUUID3(),
+              id: randomUUID5(),
               type: "todo",
               created_at: now,
               updated_at: now,
@@ -8920,7 +8997,7 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
           }
         }
       }
-      for (const p of regPaths) rmSync2(p, { force: true });
+      for (const p of regPaths) rmSync3(p, { force: true });
     }
   }
 } catch {
@@ -8996,7 +9073,7 @@ function markerWriterAlive(pid) {
   }
   if (process.platform !== "linux") return true;
   try {
-    const cmdline = readFileSync4(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
+    const cmdline = readFileSync5(`/proc/${pid}/cmdline`, "utf8").replaceAll("\0", " ").trim();
     if (cmdline && !cmdline.includes("mcp-server")) return false;
   } catch (err) {
     if (err?.code === "ENOENT" || err?.code === "ESRCH") return false;
@@ -9006,12 +9083,12 @@ function markerWriterAlive(pid) {
 var staleWarning = "";
 try {
   const root = pluginRoot();
-  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join7(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync6(buildIdPath(serverDist)) ? readFileSync4(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join8(root, "packages", "mcp-server", "dist") : null);
+  const currentBuildId = serverDist && existsSync6(buildIdPath(serverDist)) ? readFileSync5(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
-  const markerPath = runtimeMarkerPath(join7(input.cwd, ".sterling", "sterling.db"));
+  const markerPath = runtimeMarkerPath(join8(input.cwd, ".sterling", "sterling.db"));
   if (existsSync6(markerPath)) {
-    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync4(markerPath, "utf8")));
+    const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync5(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
   const verdict = stalenessVerdict(currentBuildId, marker, marker ? markerWriterAlive(marker.pid) : null);
@@ -9023,7 +9100,7 @@ try {
 var machineWarning = "";
 var machineContext = "";
 try {
-  const agentsDir = join7(input.cwd, ".claude", "agents");
+  const agentsDir = join8(input.cwd, ".claude", "agents");
   const dead = [];
   const unknown = [];
   let dirEntries = null;
@@ -9039,7 +9116,7 @@ try {
   for (const f of (dirEntries ?? []).filter((n) => n.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync4(join7(agentsDir, f), "utf8");
+      content = readFileSync5(join8(agentsDir, f), "utf8");
     } catch (err) {
       unknown.push(`- ${f} \u2014 activation UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -9059,16 +9136,14 @@ try {
     machineWarning = (dead.length ? `\u26A0 ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context (e.g. ${dead[0].agent} \u2192 ${dead[0].node}) \u2014 their hooks fail silently. ` : "") + (unknown.length ? `\u26A0 ${unknown.length} installed agent file(s) could not be checked at all \u2014 whether their hooks run on this machine is UNKNOWN. ` : "") + `Run /sterling:sync-agents from this context, then restart. `;
     machineContext = `
 
-MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. ` : "") + (unknown.length ? `${unknown.length} installed agent file(s) could not be checked, so their activation is UNKNOWN \u2014 an unreadable file is not a healthy one, and one bad file no longer silences this guard:
-` + unknown.join("\n") + `
-` : "") + `Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
+MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.length} inactive (${dead.map((d) => d.agent).join(", ")}); ` : "") + (unknown.length ? `${unknown.length} UNKNOWN (${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? "agent").join(", ")}). ` : "") + `Hooks for inactive agents fail non-blocking. Run /sterling:sync-agents, restart, then pass scripts/check-agents-visible.mjs before dispatching.`;
   }
 } catch {
 }
 var agentCurrencyWarning = "";
 var agentCurrencyContext = "";
 try {
-  const agentsDir = join7(input.cwd, ".claude", "agents");
+  const agentsDir = join8(input.cwd, ".claude", "agents");
   const installed = [];
   const unknown = [];
   let dirEntries = null;
@@ -9084,7 +9159,7 @@ try {
   for (const n of (dirEntries ?? []).filter((x) => x.endsWith(".md"))) {
     let content = null;
     try {
-      content = readFileSync4(join7(agentsDir, n), "utf8");
+      content = readFileSync5(join8(agentsDir, n), "utf8");
     } catch (err) {
       unknown.push(`- ${n} \u2014 currency UNKNOWN: the installed file could not be read (${err?.code ?? err?.message ?? err})`);
       continue;
@@ -9103,16 +9178,17 @@ try {
   const unreadableBeforeClassification = unknown.length;
   if (installed.length || unknown.length) {
     const root = pluginRoot();
-    const templatesDir = root ? join7(root, "agent-templates") : null;
+    const templatesDir = root ? join8(root, "agent-templates") : null;
     let templateFor = null;
     let cloneProblem = null;
     try {
-      templateFor = new Map(loadRegistry(join7(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
+      templateFor = new Map(loadRegistry(join8(templatesDir, "registry.json")).agents.map((a) => [a.name, a.file]));
     } catch (err) {
       cloneProblem = `the clone's agent templates at ${templatesDir ?? "(plugin root unresolved)"} could not be read: ${err?.message ?? err}`;
     }
     const stale = [];
     const modified = [];
+    const refusedModified = [];
     for (const { file, content, header } of installed) {
       if (!templateFor) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: ${cloneProblem}`);
@@ -9133,7 +9209,7 @@ try {
       }
       let templateContent = null;
       try {
-        templateContent = readFileSync4(join7(templatesDir, templateFile), "utf8");
+        templateContent = readFileSync5(join8(templatesDir, templateFile), "utf8");
       } catch (err) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: the clone template ${templateFile} could not be read (${err?.code ?? err?.message ?? err})`);
         continue;
@@ -9142,27 +9218,30 @@ try {
       const locallyModified = isLocallyModified(content, header);
       if (templateCurrent && !locallyModified) continue;
       if (locallyModified) {
-        modified.push(
-          templateCurrent ? `- ${file} \u2014 locally MODIFIED: its body no longer matches its own header content_hash, so a hand edit is what governs dispatch here; sync records it as locally_modified_up_to_date and never refreshes it (re-apply the edit on a fresh install, or delete the file and re-install)` : `- ${file} \u2014 locally MODIFIED and behind the clone template: sync re-renders it only if its body byte-matches the fresh template (header_repaired) and REFUSES otherwise (refused_local_modification), so it may never refresh on its own (re-apply your edits on the fresh template, or delete the file and re-install)`
-        );
+        (templateCurrent ? modified : refusedModified).push(file);
       } else {
         stale.push(`- ${file} \u2014 STALE: installed ${String(header.installedAt).slice(0, 10)}, the clone template has changed since (an unmodified install refreshes on sight)`);
       }
     }
-    if (stale.length || modified.length || unknown.length) {
+    if (stale.length || modified.length || refusedModified.length || unknown.length) {
       const inspected = installed.length + unreadableBeforeClassification;
       const parts = [
         stale.length ? `${stale.length} stale` : null,
-        modified.length ? `${modified.length} locally modified` : null,
+        modified.length ? `${modified.length} locally modified (current template)` : null,
+        refusedModified.length ? `${refusedModified.length} refused_local_modification (behind template)` : null,
         unknown.length ? `${unknown.length} of UNKNOWN currency` : null
       ].filter(Boolean);
-      const named = [...stale, ...modified, ...unknown];
+      const named = [...stale, ...unknown];
+      const stateLines = [
+        stale.length ? `stale: ${stale.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? "agent").join(", ")}` : null,
+        modified.length ? `locally modified (current template): ${modified.join(", ")}` : null,
+        refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(", ")}` : null,
+        unknown.length ? `unknown: ${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? "agent").join(", ")}` : null
+      ].filter(Boolean);
       agentCurrencyWarning = `\u26A0 AGENT CURRENCY: ${parts.join(", ")} of ${inspected} installed Sterling agent file(s) \u2014 run /sterling:sync-agents in this project, then restart. `;
       agentCurrencyContext = `
 
-AGENT CURRENCY (H1, research_finding 0038af7c): of ${inspected} Sterling-generated agent file(s) in .claude/agents/, ${parts.join(", ")} against the clone's templates (${templatesDir ?? "(plugin root unresolved)"}).
-` + named.join("\n") + `
-The agent sync only visits projects in the SHARED PROJECT REGISTRY, so a project the registry does not know is never refreshed however current the clone is. Run scripts/sync-agents.mjs --target ${input.cwd} from this context, tell the user a RESTART is required (project subagents load at session start), and check /sterling:projects \u2014 an absence there is the root cause, not a symptom.`;
+AGENT CURRENCY (H1, research_finding 0038af7c): ${parts.join(", ")} of ${inspected} generated agent file(s): ` + stateLines.join("; ") + `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
     }
   }
 } catch {
@@ -9188,13 +9267,7 @@ if (process.env.STERLING_NO_BANNER !== "1") {
   process.stderr.write(`${paint(BANNER_ROWS)}
 ${versionLine}`);
 }
-var maxConcurrent = 5;
-try {
-  maxConcurrent = config?.delegation?.max_concurrent ?? 5;
-} catch {
-  maxConcurrent = 5;
-}
-var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
+var conventionsBlock = conductorContractBlock();
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this

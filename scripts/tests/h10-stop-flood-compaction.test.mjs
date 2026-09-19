@@ -575,29 +575,26 @@ test('C6e: with the Stop payload\'s session_id ABSENT the note is shown on EVERY
 
 // The NO-DUTY DENY fixture (C6d). h10's third output path is a Stop with NO
 // duty that denies anyway because an advisory part rides the emission. It is
-// driven here through the DELEGATION advisory, whose fixture is proven by the
-// frozen scripts/tests/h10-delegation-watch.test.mjs test (a): >= 15 distinct
-// hand Reads with 0 Task/Agent blocks in the conductor's own transcript denies
-// standalone, with no duty pending. `input_tokens: 1000` against the 200_000
-// window keeps the independent context-pressure classifier below_soft so it
-// cannot be what fires. DISCLOSED: the context-pressure gauge itself is NOT
-// what this arm drives — its soft threshold is not stated in the decision or
-// in any test fixture visible to this author, and inventing a number would be
-// an oracle for a rule nobody stated. What the arm pins is the property the
-// reviewer named: disclosureParts carried through a deny that no DUTY caused.
+// driven here through the WINDOW-GAUGE advisory: a conductor transcript whose
+// model has no context_watch.windows entry denies standalone, once per session,
+// with no duty pending (pinned in hooks-full "an UNMAPPED model ..." and
+// h10-git-touches-and-gauge gauge (3)). An unmapped model is never classified
+// soft/hard, so the pressure classifier cannot be what fires. (This arm was
+// driven through the delegation-watch advisory until that tool-activity nag was
+// removed in slice 4.) What the arm pins is the property the reviewer named:
+// disclosureParts carried through a deny that no DUTY caused.
 function writeHandWorkTranscript(dir) {
   const p = join(dir, 't', 's1.jsonl');
   mkdirSync(dirname(p), { recursive: true });
-  const content = Array.from({ length: 16 }, (_, i) => ({
-    type: 'tool_use', name: 'Read', input: { file_path: join(dir, 'src', `hand-${i}.mjs`) },
-  }));
-  writeFileSync(p, [
-    JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1000, cache_read_input_tokens: 0 }, model: 'claude-fable-5' } }),
-    JSON.stringify({ type: 'assistant', isSidechain: false, message: { content } }),
-  ].join('\n') + '\n');
+  writeFileSync(
+    p,
+    JSON.stringify({ type: 'assistant', message: { usage: { input_tokens: 1000, cache_read_input_tokens: 0 }, model: 'claude-unmapped-fixture' } }) + '\n'
+  );
 }
 
-test('C6d: the once-per-session note also holds on the NO-DUTY deny path — an advisory-riding deny shows [dispatch_status_unknown] once and spends the key; the next deny in the session does not repeat it', () => {
+// 2026-09-19 deliberate change (1): unknown-window advice is non-blocking but
+// retains its once-per-session marker and next-prompt disclosure.
+test('C6d: the once-per-session note also holds on the NO-DUTY advisory path — an advisory shows [dispatch_status_unknown] once and spends the key; the later duty deny does not repeat it', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     touch(dir, [FILE_A], T1);
@@ -606,7 +603,7 @@ test('C6d: the once-per-session note also holds on the NO-DUTY deny path — an 
     writeHandWorkTranscript(dir);
 
     const advisoryDeny = runStop(dir);
-    assert.equal(advisoryDeny.code, 2, `C6d PRECONDITION: no duty is open, so this deny is caused by the advisory alone — if this is 0 the no-duty deny path was never exercised; out=${out(advisoryDeny)}`);
+    assert.equal(advisoryDeny.code, 0, `C6d PRECONDITION: no duty is open, so the advisory remains non-blocking; out=${out(advisoryDeny)}`);
     assert.doesNotMatch(advisoryDeny.stderr, /nothing was captured/, 'C6d PRECONDITION: the capture duty is paid — no duty may be what denies here');
     assert.match(out(advisoryDeny), /\[dispatch_status_unknown\]/, `C6d: the disclosure rides the advisory deny too — a Stop that denies without a duty must not lose the uncertainty; out=${out(advisoryDeny)}`);
     assert.match(out(advisoryDeny), /settle via SubagentStop\/TaskStop/, 'C6d: with the same remedy as every other path');

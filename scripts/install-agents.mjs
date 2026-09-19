@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
-import { installAgents } from './lib/agent-distribution.mjs';
+import { installAgents, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -43,6 +43,12 @@ const { report, restartInstruction } = installAgents({
   config,
 });
 
-for (const r of report) console.log(`${r.status}: ${r.name}`);
+let refused = 0;
+for (const r of report) {
+  console.log(`${r.status}: ${r.name}`);
+  if (r.refused) refused += 1;
+  if (r.instruction) console.error('\n' + r.instruction + '\n');
+}
 if (report.length === 0) console.log('no agents registered — nothing installed');
-else console.log('\n' + restartInstruction);
+else if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
+process.exit(refused > 0 ? 2 : 0);

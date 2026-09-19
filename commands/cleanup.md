@@ -8,4 +8,4 @@ Run the deletion-evidence script and present its output, then invoke the `cleanu
 node "${CLAUDE_PLUGIN_ROOT}/scripts/cleanup-plan.mjs"
 ```
 
-Walk the human through each candidate (grill: confirm or strike, one at a time). Execute confirmed deletions as a gated pipeline using `fs-remove` (contract-checked) — never raw deletion, never inside a feature phase.
+Walk the human through each candidate (confirm or strike, one at a time). Execute confirmed deletions using `fs-remove` (contract-checked) — never raw deletion, never inside a feature phase.

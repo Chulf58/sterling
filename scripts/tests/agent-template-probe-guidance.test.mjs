@@ -46,7 +46,7 @@ test('P1 sanity: agent-templates/*.md is read via readdirSync and covers at leas
   // Guard against an empty/broken directory read silently greening the
   // per-file loop below by iterating zero files.
   assert.ok(files.length > 0, 'agent-templates directory listing must not be empty');
-  for (const must of ['librarian.md', 'researcher.md', 'explorer.md']) {
+  for (const must of ['librarian.md', 'researcher.md', 'scout.md', 'implementor.md']) {
     assert.ok(
       files.includes(must),
       `expected ${must} in the dynamic agent-templates/*.md listing, got: ${JSON.stringify(files)}`

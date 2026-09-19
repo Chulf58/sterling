@@ -92,7 +92,7 @@ import { join, dirname, basename, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, hasRecordCentralityHit, MAX_RANK_TERMS,
+  extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, AXIS_MIN_DISCRIMINATING_HITS, hasRecordCentralityHit, MAX_RANK_TERMS,
   decodeLiveRecordRow, classifyClaimPath,
 } from '@sterling/store';
 import { arg, hasFlag } from './lib/project.mjs';
@@ -315,7 +315,7 @@ function deriveOutputAxisExpected(store, probe, index) {
     ];
     const scored = candidates
       .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, clipped));
+      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped));
     hazards = scored.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record.id);
     rationale = scored.filter((x) => x.record.type === 'decision').map((x) => x.record.id);
   }
@@ -1169,7 +1169,7 @@ function newestPriorRun(projectRoot) {
 // scripts/tests/fixtures/delivery-golden/*.json —
 // {event, payload, expected_ids, expected_absent_ids, source_incident} — and
 // the frozen test file carries a SHA-256 digest pin over a canonical manifest
-// of ONLY the expectations, guarding against a coder turning a red golden
+// of ONLY the expectations, guarding against an implementor turning a red golden
 // scenario green by editing the fixture instead of the code.
 //
 // REPLAY MECHANISM (not pinned by the decision, decided here): each fixture
@@ -1401,7 +1401,7 @@ function isEligibleForRel(store, id, rel) {
 // NO `repoRoot` OPTION HERE, deliberately (round-2 review finding: an API
 // defect, not a test mistake). `deriveExpected`'s `repoRoot` names the
 // AUDITED PROJECT; a same-named option here was read the same way by a
-// test-writer blind to the implementation, but this function needs the
+// test author blind to the implementation, but this function needs the
 // CLONE root instead — where hooks/*.mjs actually live — which is always the
 // module-level `repoRoot` constant above and never varies per call. Taking
 // it as a caller option only invited exactly this confusion, so hook

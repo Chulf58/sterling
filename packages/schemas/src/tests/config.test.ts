@@ -14,7 +14,7 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (738253b2) — bumped 4.x -> 5 on 2026-07-26, so this pair is expected to change
   // on each generational bump; the assertion exists to catch an accidental drift to
   // an alias or a stale pin, not to freeze a version.
-  assert.equal(shipped.models.coder.model, 'claude-sonnet-5');
+  assert.equal(shipped.models.implementor.model, 'claude-sonnet-5');
   for (const [role, v] of Object.entries(shipped.models)) {
     assert.match(v.model, /^claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
   }
@@ -28,7 +28,7 @@ test('empty config gets full defaults; malformed config fails loud', () => {
   const empty = parseConfig({});
   assert.equal(empty.context_watch.conductor.soft_pct, 35);
   assert.throws(() => parseConfig({ context_watch: { conductor: { soft_pct: 'thirty' } } }));
-  assert.throws(() => parseConfig({ models: { coder: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
 });
 
 // ------------------- session_events config (run r-0501, AC7 / interface slice 3) -------------------
@@ -108,55 +108,46 @@ test('conductor pressure: shipped windows map carries verified per-model context
   assert.equal(shipped.context_watch.windows.default, 200_000, 'unknown models stay conservative — mismatch degrades loud, never false-blocks');
 });
 
-// ------------------- delegation_watch config (H10 delegation-watch advisory, decision 677f1639) -------------------
+// ------------------- delivery.total_cap_bytes (H19 delivery per-delivery cap) -------------------
 
-// delegation_watch is a NEW top-level config block (a sibling of context_watch,
-// not nested under it — mirrors the context_watch.conductor precedent in shape
-// only). Accessed through a cast so referencing it here does not require the
-// field to exist at compile time — the assertions below fail cleanly (not the
-// package build) until parseConfig grows the block.
-type CfgWithDelegationWatch = {
-  delegation_watch?: { min_hand_work?: number; max_dispatches?: number };
-};
+// delegation_watch (H10's hand-work-vs-dispatch advisory) was deleted along
+// with H10's delegation-watch Stop seam in Slice 4 (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — its config block and
+// this section's former tests went with it. total_cap_bytes is a NEW field
+// nested inside the existing delivery block (see the injection_rung/
+// payload_char_cap tests elsewhere in this file for that block's other
+// fields). scripts/hooks/lib/delivery.mjs's DELIVERY_TOTAL_CAP_DEFAULT (3000)
+// mirrors this schema default; an absent/invalid value falls back there.
+type CfgWithDelivery = { delivery?: { total_cap_bytes?: number; injection_rung?: string } };
 
-test('delegation_watch: defaults {min_hand_work:15, max_dispatches:0} from an empty config', () => {
-  const empty = parseConfig({}) as unknown as CfgWithDelegationWatch;
-  assert.ok(empty.delegation_watch, 'parseConfig defaults must add a delegation_watch block');
-  assert.equal(empty.delegation_watch?.min_hand_work, 15, 'min_hand_work defaults to 15');
-  assert.equal(empty.delegation_watch?.max_dispatches, 0, 'max_dispatches defaults to 0');
+test('delivery.injection_rung: defaults to read, and the shipped template says read', () => {
+  const empty = parseConfig({}) as unknown as CfgWithDelivery;
+  assert.equal(empty.delivery?.injection_rung, 'read', 'new projects inject before action by default');
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithDelivery;
+  assert.equal(shipped.delivery?.injection_rung, 'read', 'the template must not override the schema default with prompt');
 });
 
-test('delegation_watch: explicit values are honored; a non-number fails loud', () => {
-  const tuned = parseConfig({ delegation_watch: { min_hand_work: 20, max_dispatches: 2 } }) as unknown as CfgWithDelegationWatch;
-  assert.equal(tuned.delegation_watch?.min_hand_work, 20, 'an explicit min_hand_work overrides the default 15');
-  assert.equal(tuned.delegation_watch?.max_dispatches, 2, 'an explicit max_dispatches overrides the default 0');
-  assert.throws(
-    () => parseConfig({ delegation_watch: { min_hand_work: 'many' } }),
-    /invalid/i,
-    'min_hand_work must be a number — a non-number fails loud'
-  );
-  assert.throws(
-    () => parseConfig({ delegation_watch: { max_dispatches: 'none' } }),
-    /invalid/i,
-    'max_dispatches must be a number — a non-number fails loud'
-  );
+test('delivery.total_cap_bytes: defaults to 3000 from an empty config; 0 is a valid explicit "off"', () => {
+  const empty = parseConfig({}) as unknown as CfgWithDelivery;
+  assert.equal(empty.delivery?.total_cap_bytes, 3000, 'total_cap_bytes defaults to 3000');
+  const off = parseConfig({ delivery: { total_cap_bytes: 0 } }) as unknown as CfgWithDelivery;
+  assert.equal(off.delivery?.total_cap_bytes, 0, '0 (disabled) is a valid explicit nonnegative value');
 });
 
-test('delegation_watch: min_hand_work is zod-positive (0 and negative rejected); max_dispatches is nonnegative (negative rejected, 0 allowed)', () => {
-  assert.throws(() => parseConfig({ delegation_watch: { min_hand_work: 0 } }), 'min_hand_work must be positive — 0 is rejected');
-  assert.throws(() => parseConfig({ delegation_watch: { min_hand_work: -5 } }), 'min_hand_work must be positive — a negative is rejected');
-  assert.throws(() => parseConfig({ delegation_watch: { max_dispatches: -1 } }), 'max_dispatches must be nonnegative — a negative is rejected');
-  const zeroOk = parseConfig({ delegation_watch: { max_dispatches: 0 } }) as unknown as CfgWithDelegationWatch;
-  assert.equal(zeroOk.delegation_watch?.max_dispatches, 0, 'max_dispatches: 0 is a valid, explicit, nonnegative value');
+test('delivery.total_cap_bytes: an explicit value is honored; negative and non-number fail loud', () => {
+  const tuned = parseConfig({ delivery: { total_cap_bytes: 5000 } }) as unknown as CfgWithDelivery;
+  assert.equal(tuned.delivery?.total_cap_bytes, 5000, 'an explicit value overrides the default');
+  assert.throws(() => parseConfig({ delivery: { total_cap_bytes: -1 } }), 'negative is rejected — the field is nonnegative, not positive');
+  assert.throws(() => parseConfig({ delivery: { total_cap_bytes: 'lots' } }), 'a non-number fails loud');
 });
 
 // ------------------- sparring_partner config (decision cd019e0b, sparring-partner-partnership-shape) -------------------
 
-// sparring_partner is a NEW top-level config block, additive-optional like
-// delegation_watch above: an absent block still parses with defaults
-// ({enabled: true}). Accessed through a cast so referencing it here does not
-// require the field to exist at compile time — the assertions below fail
-// cleanly (not the package build) until parseConfig grows the block.
+// sparring_partner is a NEW top-level config block, additive-optional: an
+// absent block still parses with defaults ({enabled: true}). Accessed through
+// a cast so referencing it here does not require the field to exist at
+// compile time — the assertions below fail cleanly (not the package build)
+// until parseConfig grows the block.
 type CfgWithSparringPartner = { sparring_partner?: { enabled?: boolean } };
 
 test('sparring_partner: absent block defaults to {enabled: true}', () => {

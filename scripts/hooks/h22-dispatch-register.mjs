@@ -13,13 +13,9 @@
 // in the same call; the owner module is the ONE authority for the persisted
 // shape, the lock and the duplicate rule; this file never re-implements any of
 // that. SubagentStop closes the register round and the dispatch-state record
-// together via finishDispatchAndRegisterEnd (A1: marked, never deleted). The
-// review-ledger receipt promotion this hook used to perform at Stop (Reviewed-
-// By-Agent trailer / commit-review mechanism) was DELETED under decision
-// `sterling-claude-code-scale-down-boundary` (2ad87dd1) — this hook now stays
-// minimal dispatch bookkeeping for child-agent knowledge staging: the
-// register and its Start-time territory declaration/attribution advisories
-// survive, the Stop-time ledger write does not.
+// together via finishDispatchAndRegisterEnd (A1: marked, never deleted). This
+// hook provides minimal dispatch bookkeeping for child-agent knowledge staging:
+// the register and its Start-time territory declaration/attribution advisories.
 // Every refusal/disclosure this file renders is built through
 // scripts/lib/review-errors.mjs and carries a `[code]` token.
 // DOES NOT GUARANTEE: that an unattributed/unbound territory reflects

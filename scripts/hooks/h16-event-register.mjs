@@ -1,8 +1,6 @@
 // H16 — session-event register (spec §6, run r-0501). PostToolUse
 // WebSearch|WebFetch|Task|Agent. Records research and agent-dispatch events
-// to .sterling/transient/session-events.json — direct mode is the only mode
-// (the staged pipeline was removed, scale-down decision
-// sterling-claude-code-scale-down-boundary, 2ad87dd1).
+// to .sterling/transient/session-events.json in direct mode.
 // Missing store: allow, no recording (fail-open, mirrors H7).
 // Never deduplicates: the register is a pure append log.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';

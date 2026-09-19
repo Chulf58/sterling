@@ -29,7 +29,7 @@
 // here is the project's OWN declared run_commands value read from
 // .sterling/config.json — never anything from this process's argv, stdin, or
 // model output — the same trust boundary every other sanctioned consumer of
-// run_commands (H14's allowlist, the toolchain adapters) already relies on.
+// run_commands already relies on.
 //
 // Correctness-review fixes (board babf3a9e, decision 98549344), D1-D3/G1-G3:
 //  - D1: judged output was silently lost to buffering. spawnSync's own
@@ -51,8 +51,7 @@
 //    try/catch — an invalid pattern is a loud refusal, never an uncaught
 //    stack.
 //  - G3: artifact.path is resolved against cwd and refused if it escapes cwd
-//    (mirrors the valueEscapesRoot precedent in
-//    scripts/hooks/h14-bash-allowlist.mjs).
+//    (mirrors the repository-root containment rule).
 
 import { readFileSync, existsSync, statSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { join, resolve, relative, sep } from 'node:path';
@@ -205,7 +204,7 @@ if (predicate !== undefined) {
 }
 
 // G3: resolve artifact.path against cwd and refuse when it escapes cwd
-// (mirrors valueEscapesRoot in scripts/hooks/h14-bash-allowlist.mjs).
+// (mirrors the repository-root containment rule).
 let artifactPath;
 if (predicate !== undefined && predicate.artifact !== undefined) {
   const resolvedArtifactPath = resolve(cwd, predicate.artifact.path);

@@ -34,7 +34,7 @@
 //
 // FOLLOW-UP ROUND 2 (board a6b76e8c, outside-model review) — two more
 // measured repro shapes, kept here as a code-comment table since the pin
-// file is frozen to the test-writer:
+// file keeps the measured cases beside the implementation:
 //
 //   | # | prompt (to a tool-less/no-Bash agent)                | before | after |
 //   |---|-------------------------------------------------------|--------|-------|
@@ -80,7 +80,7 @@ import { PATH_CANDIDATE_RE, extractPathCandidates } from './dispatch-prompt.mjs'
 // A period is a clause boundary only when SENTENCE-ENDING (followed by
 // whitespace or end-of-string) — a bare '.' can never split mid-path, because
 // nearly every candidate mention here (a file path, an extension) contains
-// one ("util.mjs", "h26-dispatch-overlap.mjs"); splitting on it unconditionally
+// one ("util.mjs", "h22-dispatch-register.mjs"); splitting on it unconditionally
 // would sever the very mention this module exists to evaluate.
 const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
 
@@ -123,16 +123,10 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // applied it to every match indiscriminately, and hasUnsuppressedMatch is NOT
 // a path-only surface:
 //
-//   (i) PATH-SHAPED MENTIONS ONLY. h25-dispatch-capability.mjs:119 asks this
-//   same function about TOOL CAPABILITIES (wholeTokenRe('Bash')) and
-//   lib/dispatch-residue.mjs:118 about CONFIGURED RESOURCE NAMES. "Use Bash to
-//   inspect scripts/a.mjs; do not edit it." prohibits the FILE, yet the first
-//   cut reported Bash as suppressed too — H25 then silently drops a
-//   missing-capability warning for a tool the brief explicitly requires. An
-//   anaphoric TERRITORY prohibition can only be disclaiming TERRITORY, so the
-//   reach now fires only when the matched text is itself path- or glob-shaped
-//   (isPathShapedMention, asking the SAME shared regexes — never a second path
-//   heuristic). A capability or resource mention is never suppressed by it.
+//   (i) PATH-SHAPED MENTIONS ONLY. An anaphoric TERRITORY prohibition can only
+//   disclaim TERRITORY, so the reach fires only when the matched text is itself
+//   path- or glob-shaped (isPathShapedMention, asking the SAME shared regexes
+//   — never a second path heuristic).
 //
 //   (ii) A SINGULAR PRONOUN CANNOT REFER TO SEVERAL PATHS. "Claim src/a.mjs
 //   and src/b.mjs; do not edit it." unclaimed BOTH paths on the first cut.
@@ -429,7 +423,7 @@ export function escapeRe(s) {
 // — the flood risk a prefix-aware overlap comparison introduces). A
 // directory-prefix claim is inherently BROADER than an exact-file claim, so
 // the depth of the prefix is the only lever that keeps the overlap
-// comparison (h26-dispatch-overlap.mjs) from crying wolf on every lane that
+// registered claims from becoming overly broad for every lane that
 // merely mentions a file somewhere under a shallow, near-universal
 // directory. A ONE-segment prefix — "scripts/**", "packages/**" — would
 // make nearly every lane in this repo overlap nearly every other one (both
@@ -450,18 +444,11 @@ export function escapeRe(s) {
 // exact string equality; repoRel/normalizeRepoPath legitimately STRIPS a
 // trailing '/', so a trailing-slash marker could not even survive the same
 // toRegisterPaths() normalization every candidate already goes through).
-// h26-dispatch-overlap.mjs compares the OUTGOING dispatch's own literal
-// candidate files against a live entry's `claimed_glob_prefixes` via
-// startsWith — prefix-aware ONLY for that field, exact-string equality is
-// completely unchanged for `claimed_files`/`files`. Suppression falls out
-// for free either way: hasUnsuppressedMatch/isNegatedContext are plain
-// clause-scoped text analysis with no dependency on the mention being
-// file-shaped, so a prohibition marker ahead of a glob token suppresses it
-// exactly as it would a literal path. The SAME pre-existing gap applies
-// unchanged either way: isNegatedContext only inspects text BEFORE the
-// mention (see above), so a TRAILING marker after a glob mention leaks
-// precisely as it does for a literal path today — this addition neither
-// narrows nor widens that separate, already-known defect.
+// H22 keeps `claimed_glob_prefixes` separate from exact `claimed_files`/`files`
+// so consumers can distinguish prefix claims from literal file claims.
+// hasUnsuppressedMatch applies the same clause-scoped negation analysis before
+// H22 records either kind of claim, including a prohibition marker before or
+// after the candidate token.
 const GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 
 // GATE (i)'s test — see the TRAILING PROHIBITION comment block above. Built
@@ -492,7 +479,7 @@ export function extractGlobPrefixCandidates(text) {
   return [...new Set(found.map((m) => m.slice(0, -2)))]; // strip the trailing '**', keep the '/'
 }
 
-/** Any 'reviewer-*' agent type (reviewer-correctness, reviewer-security, …). */
+/** Legacy classifier for an externally supplied `reviewer-*` agent type. */
 export function isReviewerClass(type) {
   return !!type && type.startsWith('reviewer-');
 }

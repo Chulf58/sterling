@@ -16,13 +16,6 @@ import { openProject } from './lib/project.mjs';
 // this table, and the test is the check that catches a miss.
 const SETS = [
   {
-    key: 'signals',
-    title: 'Signals (the closed exit enum)',
-    article: 'brain-signal-protocol',
-    registry: 'packages/schemas/src/transient.ts — SIGNALS + SIGNAL_PAYLOADS (consumed by the brain REACTIONS table)',
-    checks: 'scripts/check-totality.mjs (npm run check) + the brain totality test (packages/mcp-server brain.test)',
-  },
-  {
     key: 'record-types',
     title: 'Record types (durable knowledge shapes)',
     article: 'record-schemas-registry',

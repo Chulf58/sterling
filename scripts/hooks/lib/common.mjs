@@ -313,7 +313,7 @@ export const { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers(
  * Standardized wrapper for a gate denial caused by BROKEN INTERNAL STATE (a
  * torn ledger, a corrupt config/store, a missing transient file) rather than
  * by anything the calling agent did (board c7b81456). Motivating incident: a
- * coder burned ~205k tokens diagnosing H3's fail-closed denial over a torn
+ * agent burned ~205k tokens diagnosing a fail-closed denial over a torn
  * reads-ledger — the denial read exactly like ordinary "you never read it"
  * misconduct, so the agent tried to fix its own behavior (re-reading,
  * re-diagnosing, retrying the gate) instead of exiting blocked and letting
@@ -344,7 +344,7 @@ export const { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers(
  * and gets EXACTLY the original unconditional agent-facing text: opting a
  * caller in requires naming `agentId`, never an implicit default switch, so
  * this shared-lib change carries zero blast radius into hooks this fixer
- * pass never touched (H4/H5/H14/H18).
+ * pass never touched.
  *
  * SELF-HEALING STATES (review finding F1): some broken states heal on the
  * very next successful action (a torn read-evidence ledger is rebuilt by the

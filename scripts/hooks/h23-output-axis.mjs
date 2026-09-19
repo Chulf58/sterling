@@ -73,6 +73,7 @@ import {
   axisHits,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  AXIS_MIN_DISCRIMINATING_HITS,
   hasRecordCentralityHit,
   pointerVerifyRecipe,
   joinPointerBlock,
@@ -188,7 +189,7 @@ try {
   // must be central to the RECORD's own narrow fields, not a passing mention.
   const scored = candidates
     .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, clipped))
+    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped))
     .sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
 
@@ -219,7 +220,7 @@ try {
     const r = x.record;
     const kind = r.type === 'anti_pattern' ? 'HAZARD anti_pattern' : 'DECISION';
     const authorityMarker = r.authority ? `[${r.authority}] ` : '';
-    return { id: r.id, line: `  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
+    return { id: r.id, hazard: r.type === 'anti_pattern', line: `  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : '';
 
@@ -232,13 +233,13 @@ try {
   // that went superseded or missing between this match and the next prompt.
   // Only the shown ones: a record capped out of the payload was never pointed
   // at, so re-resolving it would disclose a record the reader never saw.
-  enqueuePending(pendingPath(input.cwd), {
+  if (!enqueuePending(pendingPath(input.cwd), {
     kind: 'output_axis_pointers',
     rel: input.tool_input?.file_path ?? input.tool_input?.command ?? '',
     payload: joinPointerBlock({ header, lines: pointerLines, tail }),
     recipe: pointerVerifyRecipe({ header, entries: pointerLines, tail }),
     agent_id: 'conductor',
-  });
+  })) throw new Error('delivery queue lock timeout');
   // Only the SHOWN (capped) records are marked seen — a record capped out of
   // the payload was never actually pointed at, so it stays eligible for a
   // later, smaller-batch match instead of being silently lost for the session.

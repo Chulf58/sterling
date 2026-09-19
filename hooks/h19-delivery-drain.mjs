@@ -4595,8 +4595,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4870,14 +4871,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4898,16 +4891,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -5047,7 +5046,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5066,12 +5065,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
@@ -7249,6 +7256,10 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   stderr: process.stderr,
   exit: (code) => process.exit(code)
 });
+function loadConfig(cwd) {
+  const p = join2(cwd, ".sterling", "config.json");
+  return existsSync2(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
+}
 function openStore(cwd) {
   const p = join2(cwd, ".sterling", "sterling.db");
   return existsSync2(p) ? new SterlingStore(p) : null;
@@ -7263,6 +7274,22 @@ function deliveryDir(cwd) {
 }
 function pendingPath(cwd) {
   return join3(deliveryDir(cwd), "pending.json");
+}
+function emptyDeliveryGuard() {
+  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+}
+function lineageKey(record) {
+  return record?.slug ?? record?.id;
+}
+function isDelivered(guard, record) {
+  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+}
+function markDelivered(guard, records) {
+  for (const r of records) {
+    if (!guard.records.includes(r.id)) guard.records.push(r.id);
+    const key = lineageKey(r);
+    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+  }
 }
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
@@ -7290,17 +7317,55 @@ function statusAnnotation(record) {
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;
+var LOCK_OWNER_FILE = "owner";
+var lockTestHooks = {};
+function lockOwnerPath(lockPath) {
+  return join3(lockPath, LOCK_OWNER_FILE);
+}
+function ownsLock(lockPath, token) {
+  try {
+    return readFileSync2(lockOwnerPath(lockPath), "utf8") === token;
+  } catch {
+    return false;
+  }
+}
+function readLockOwner(lockPath) {
+  try {
+    return readFileSync2(lockOwnerPath(lockPath), "utf8");
+  } catch {
+    return null;
+  }
+}
+function sameLockObject(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
 function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
   while (Date.now() < deadline) {
+    const token = `${process.pid}-${randomUUID2()}`;
     try {
       mkdirSync2(lockPath);
-      return true;
+      writeFileSync(lockOwnerPath(lockPath), token, { flag: "wx" });
+      return token;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
+        const observed = statSync2(lockPath);
+        const observedOwner = readLockOwner(lockPath);
+        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
+          lockTestHooks.afterStaleInspect?.(lockPath);
+          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
+          try {
+            renameSync(lockPath, tombstone);
+          } catch (renameError) {
+            if (renameError.code !== "ENOENT") throw renameError;
+            continue;
+          }
+          if (sameLockObject(observed, statSync2(tombstone)) && readLockOwner(tombstone) === observedOwner) {
+            rmSync(tombstone, { recursive: true, force: true });
+          } else if (!existsSync3(lockPath)) {
+            renameSync(tombstone, lockPath);
+          }
           continue;
         }
       } catch {
@@ -7309,22 +7374,23 @@ function acquireLock(lockPath) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
-  return false;
+  return null;
 }
-function releaseLock(lockPath) {
+function releaseLock(lockPath, token) {
   try {
-    rmSync(lockPath, { recursive: true, force: true });
+    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
   } catch {
   }
 }
 function withRequiredFileLock(targetPath, fn) {
   mkdirSync2(dirname3(targetPath), { recursive: true });
   const lockPath = `${targetPath}.lock`;
-  if (!acquireLock(lockPath)) return { acquired: false, value: void 0 };
+  const token = acquireLock(lockPath);
+  if (!token) return { acquired: false, value: void 0 };
   try {
-    return { acquired: true, value: fn() };
+    return { acquired: true, value: fn({ lockPath, token }) };
   } finally {
-    releaseLock(lockPath);
+    releaseLock(lockPath, token);
   }
 }
 var CLAIM_PREFIX = "claimed-";
@@ -7397,10 +7463,10 @@ function drainPending(path) {
   if (existsSync3(path)) {
     const { acquired, value } = withRequiredFileLock(
       path,
-      () => (
+      ({ lockPath, token }) => (
         // Re-checked INSIDE the lock: another drain may have claimed the batch
         // between the existsSync above and the lock being granted.
-        existsSync3(path) ? claimByRename(path, dir) : null
+        existsSync3(path) && ownsLock(lockPath, token) ? claimByRename(path, dir) : null
       )
     );
     if (!acquired) {
@@ -7665,6 +7731,96 @@ var PORCH_END_TEMPLATE_BYTES = porchByteLen(
   })
 );
 var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
+var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+function resolveTotalCap(cwd) {
+  try {
+    const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
+    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+  } catch {
+    return DELIVERY_TOTAL_CAP_DEFAULT;
+  }
+}
+function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({ ...part, kind: part.kind === "hazard" ? "hazard" : "ordinary" }));
+  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
+  const bytes = (text) => porchByteLen(text);
+  const hazards = new Set(items.filter((part) => part.kind === "hazard"));
+  const selected = /* @__PURE__ */ new Map();
+  const omitted = [];
+  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
+  const ordinaryBytes = () => {
+    const text = output().join(sep);
+    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
+  };
+  const fits = () => ordinaryBytes() <= capBytes;
+  const pointerFor = (part) => part.pointer || "";
+  for (const part of items) {
+    if (part.kind === "hazard") continue;
+    selected.set(part, part.text);
+    if (fits()) continue;
+    selected.delete(part);
+    const suffix = part.suffix || pointerFor(part);
+    if (suffix) {
+      const lines = part.text.split("\n");
+      let clipped = "";
+      let best = "";
+      for (const line of lines) {
+        const candidate = clipped ? `${clipped}
+${line}` : line;
+        selected.set(part, `${candidate}
+${suffix}`);
+        if (!fits()) {
+          break;
+        }
+        clipped = candidate;
+        best = `${candidate}
+${suffix}`;
+      }
+      if (best) {
+        selected.set(part, best);
+        continue;
+      }
+      selected.delete(part);
+      selected.set(part, pointerFor(part));
+      if (pointerFor(part) && fits()) continue;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  }
+  if (omitted.length) {
+    const aggregatePart = { kind: "ordinary", text: "" };
+    items.push(aggregatePart);
+    const aggregate = () => {
+      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
+      const prefix = `+${omitted.length} more records: knowledge_query`;
+      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      while (ids.length && bytes(line) > capBytes) {
+        ids.pop();
+        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      }
+      return line;
+    };
+    while (true) {
+      aggregatePart.text = aggregate();
+      selected.set(aggregatePart, aggregatePart.text);
+      if (fits()) break;
+      selected.delete(aggregatePart);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
+      if (!last) break;
+      selected.delete(last);
+      omitted.push(last);
+    }
+  }
+  return output();
+}
+function ownerPointer(rendered, record) {
+  const head = String(rendered ?? "").split("\n")[0];
+  return `${clipToBytes(head, 300)}
+\u25B8 FULL RECORD (delivery cap reached): knowledge_get ${record.id}`;
+}
+function ownerSuffix(record) {
+  return `\u25B8 FULL RECORD (clipped at the delivery cap): knowledge_get ${record.id}`;
+}
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
 }
@@ -7675,6 +7831,36 @@ function renderPayload(rel, blocks, { unowned = false, substantiveCount } = {}) 
   );
 }
 var DELIVERY_RECIPE_VERSION = 2;
+function dedupeDrainEntry(entry, guard) {
+  const recipe = entry?.recipe;
+  if (!recipe || recipe.version !== DELIVERY_RECIPE_VERSION) return entry;
+  if (recipe.mode === "rerender" && validateRerenderRecipe(recipe)) return entry;
+  const seen = (id) => isDelivered(guard, { id });
+  const mark = (ids) => markDelivered(guard, ids.map((id) => ({ id })));
+  if (recipe.mode === "pointer_verify" && Array.isArray(recipe.entries)) {
+    const entries = recipe.entries.filter((item) => item?.id && !seen(item.id));
+    if (!entries.length) return null;
+    mark(entries.map((item) => item.id));
+    return { ...entry, recipe: { ...recipe, entries } };
+  }
+  if (recipe.mode === "rerender") {
+    const keys = ["hazard_ids", "owner_ids", "decision_ids"];
+    const next = { ...recipe };
+    const ids = [];
+    for (const key of keys) {
+      const values = Array.isArray(recipe[key]) ? recipe[key].filter((id) => !seen(id)) : recipe[key];
+      next[key] = values;
+      if (Array.isArray(values)) ids.push(...values);
+    }
+    if (!ids.length) {
+      const hadRecordIds = keys.some((key) => recipe[key].length > 0);
+      return hadRecordIds ? null : entry;
+    }
+    mark(ids);
+    return { ...entry, recipe: next };
+  }
+  return entry;
+}
 var isStr = (v) => typeof v === "string";
 var isStrArray = (v) => Array.isArray(v) && v.every(isStr);
 var isCount = (v) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
@@ -7685,6 +7871,7 @@ function validateRerenderRecipe(r) {
   for (const key of ["hazard_ids", "owner_ids", "decision_ids"]) {
     if (!isStrArray(r[key])) return `${key} is not an array of strings`;
   }
+  if (r.cached_hazard_blocks !== void 0 && !isStrArray(r.cached_hazard_blocks)) return "cached_hazard_blocks is not an array of strings";
   if (!isStrArray(r.trailing_blocks)) return "trailing_blocks is not an array of strings";
   if (r.suspects !== void 0 && r.suspects !== null) {
     const s2 = r.suspects;
@@ -7755,7 +7942,7 @@ function resolveQueuedId(store, id) {
   if (record.status === "superseded") return { served: null, disclosure: supersededDisclosure(store, record) };
   return { served: record, disclosure: null };
 }
-function rerenderFromRecipe(store, recipe) {
+function rerenderFromRecipe(store, recipe, { parts = false } = {}) {
   const charCap = recipe.char_cap;
   const disclosures = [];
   const take = (ids) => {
@@ -7793,7 +7980,61 @@ function rerenderFromRecipe(store, recipe) {
     // outranks the footnote about what changed under it.
     ...disclosures.length ? [disclosures.join("\n")] : []
   ];
+  if (parts) {
+    const hazardBlocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { fileKeys: [recipe.rel], total: hazardTotal, suppressed: hazardTail });
+    const ordinaryBlocks = substantive.slice(hazardBlocks.length);
+    return [
+      { kind: "ordinary", text: renderPayload(recipe.rel, [], { unowned: recipe.unowned, substantiveCount: substantive.length }) },
+      ...hazardBlocks.map((text) => ({ kind: "hazard", text })),
+      ...ordinaryBlocks.map((text, i) => owners[i] ? { kind: "ordinary", text, pointer: ownerPointer(text, owners[i]), suffix: ownerSuffix(owners[i]) } : { kind: "ordinary", text, pointer: `\u25B8 Delivery cap: knowledge_query file_keys:[${JSON.stringify(recipe.rel)}]` }),
+      ...disclosures.map((text) => ({ kind: "ordinary", text }))
+    ];
+  }
   return renderPayload(recipe.rel, blocks, { unowned: recipe.unowned, substantiveCount: substantive.length });
+}
+function renderDrainParts(store, entry, storeReason) {
+  const recipe = entry?.recipe;
+  if (store && recipe?.version === DELIVERY_RECIPE_VERSION) {
+    try {
+      if (recipe.mode === "rerender" && !validateRerenderRecipe(recipe)) return rerenderFromRecipe(store, recipe, { parts: true });
+      if (recipe.mode === "pointer_verify" && !validatePointerVerifyRecipe(recipe)) {
+        return [
+          { kind: "ordinary", text: recipe.header },
+          ...recipe.entries.flatMap((line) => {
+            const { served } = resolveQueuedId(store, line.id);
+            if (line.hazard === true && served?.type === "anti_pattern") {
+              return renderHazards([served], Number.MAX_SAFE_INTEGER).map((text) => ({ kind: "hazard", text }));
+            }
+            return [{
+              kind: "ordinary",
+              text: rebuildPointerPayload(store, { entries: [line] }),
+              pointer: `\u25B8 Delivery cap: knowledge_get ${line.id}`
+            }];
+          }),
+          { kind: "ordinary", text: recipe.tail }
+        ];
+      }
+    } catch {
+    }
+  }
+  const hazardIds = [
+    ...Array.isArray(recipe?.hazard_ids) ? recipe.hazard_ids : [],
+    ...Array.isArray(recipe?.entries) ? recipe.entries.filter((e) => e.hazard).map((e) => e.id) : []
+  ];
+  if (!hazardIds.length) {
+    return [{ kind: "ordinary", text: renderDrainEntry(store, entry, storeReason), pointer: "\u25B8 QUEUED DELIVERY held back by the delivery cap \u2014 knowledge_query the touched territory before acting." }];
+  }
+  const cachedHazards = Array.isArray(recipe?.cached_hazard_blocks) ? recipe.cached_hazard_blocks : [];
+  const notice = `\u26A0 UNVERIFIED AT DRAIN (H19): ${storeReason ?? "the project store could not be read at drain"}. Hazard substance below is cached from enqueue; re-query before relying on ordinary cached context.`;
+  if (hazardIds.length && cachedHazards.length < hazardIds.length) {
+    return [{ kind: "ordinary", text: `${notice}
+\u26A0 HAZARD DELIVERY HELD CLAIMED: ${hazardIds.join(", ")} could not be verified whole.`, hazardIncomplete: true }];
+  }
+  return [
+    { kind: "ordinary", text: notice },
+    ...cachedHazards.map((text) => ({ kind: "hazard", text })),
+    { kind: "ordinary", text: "\u25B8 CACHED ORDINARY DELIVERY withheld while the store is unavailable \u2014 knowledge_query the touched territory before acting.", pointer: "\u25B8 CACHED ORDINARY DELIVERY held back by the delivery cap \u2014 knowledge_query the touched territory before acting." }
+  ];
 }
 function rebuildPointerPayload(store, recipe) {
   const out = [];
@@ -7911,7 +8152,11 @@ try {
     store = null;
     storeReason = `the Sterling store could not be opened (${e && e.message || e}), so the queued ids could not be re-read`;
   }
-  const context = entries.map((e) => renderDrainEntry(store, e, storeReason)).join("\n\n");
+  const drainGuard = emptyDeliveryGuard();
+  const uniqueEntries = entries.map((e) => dedupeDrainEntry(e, drainGuard)).filter(Boolean);
+  const parts = uniqueEntries.flatMap((entry) => renderDrainParts(store, entry, storeReason));
+  const hazardIncomplete = parts.some((part) => part.hazardIncomplete);
+  const context = capDeliveryParts(parts, resolveTotalCap(input.cwd)).join("\n\n");
   process.stdout.write(
     JSON.stringify({ hookSpecificOutput: { hookEventName: "UserPromptSubmit", additionalContext: context } }),
     (err) => {
@@ -7920,6 +8165,10 @@ try {
           `H19 drain: writing the drained batch failed (${err && err.message || err}) \u2014 batch left CLAIMED for the next prompt
 `
         );
+        process.exit(0);
+      }
+      if (hazardIncomplete) {
+        process.stderr.write("H19 drain: queued hazard could not be delivered whole \u2014 batch left CLAIMED for retry\n");
         process.exit(0);
       }
       release();

@@ -29,6 +29,7 @@ import {
   renderArticle,
   renderReference,
   renderHazards,
+  completePorchHazards,
   cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
@@ -43,6 +44,13 @@ import {
   isDelivered,
   markDelivered,
   budgetKnownGaps,
+  capDeliveryParts,
+  partitionPorchHazards,
+  resolveTotalCap,
+  recordsShownIn,
+  ownerPointer,
+  ownerSuffix,
+  decisionBlockPointer,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
@@ -253,60 +261,95 @@ function main(input) {
     // notice's own header stays exactly as rendered by `payload` above in that
     // case, unmodified by this amendment.
     let injectPayload = payload;
-    if (mode === 'inject' && !unowned) {
-      const shownDecisionsForInject = freshDecisions.slice(0, DECISION_POINTER_CAP);
-      // NOTHING SUBTRACTED from the budget here — unlike the SubagentStart
-      // porch, no plan-lock line (or anything else) precedes this block: the
-      // tool-time hook's additionalContext IS the payload, so the budget
-      // applies to it directly.
-      const porchBudget = resolvePorchBudget(input.cwd);
-      // porchHeaderLine (not payloadHeaderLine) — the SAME bounded header
-      // staging uses (Codex review, MEDIUM 1): payloadHeaderLine interpolates
-      // `rel` UNBOUNDED, so a long governed path could inflate the skeleton
-      // before a single byte of hazard/owner text is considered, forcing the
-      // MINIMAL-porch fallback even when the bounded header would leave room.
-      // The REMAINDER's own header (renderPayload, via payloadHeaderLine)
-      // stays unclipped — only the porch, which is budget-constrained, needs
-      // this.
-      // articleBodiesCount / referencePointerCount split (roster reviewer,
-      // same round): a reference_material owner renders as ONE POINTER LINE
-      // below (renderReference), never an article body — folding it into a
-      // single count made the porch-end line's own self-report disagree with
-      // what actually renders.
-      const referenceOwnersForInject = freshOwners.filter((r) => r.type === 'reference_material');
-      const porch =
-        porchBudget > 0
-          ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget, {
-              articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
-              referencePointerCount: referenceOwnersForInject.length,
-              pathDecisionPointerCount: shownDecisionsForInject.length,
-              hasSubjectChannel: false,
-              fileKeys: [rel],
-            })
-          : { text: '', hazardsRendered: false };
-      if (porch.text) {
-        // THE REMAINDER: today's rendering minus renderHazards, but ONLY when
-        // the porch itself actually rendered hazard substance — mirrors
-        // h19-dispatch-staging.mjs's own remainder exactly (`porch.
-        // hazardsRendered`, never `porch.text` truthiness alone). Every owner
-        // still gets its full renderArticle/renderReference, the same capped
-        // renderDecisionPointers call, and the same trailing line-suspect
-        // advisory — hazards appear exactly once either way.
-        const remainderBlocks = [
-          ...(porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: [rel] })),
-          ...freshOwners.map((r) =>
-            r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
-          ),
-          ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
-          joinSuspectBlock(suspectBlock ?? {}),
-        ].filter((b) => typeof b === 'string' && b);
-        injectPayload = [porch.text, ...remainderBlocks].join('\n\n');
+    if (mode === 'inject') {
+      // PER-DELIVERY TOTAL CAP (scale-down Slice 3c; see capDeliveryParts in
+      // lib/delivery.mjs). Hazards are complete, unbudgeted substance; owners, decisions and
+      // the line-suspect footnote share what remains of the cap, degrading to
+      // `knowledge_get <id>` pointers. Only the direct-inject payload is capped
+      // here; the enqueued payload above is rebuilt from its recipe at drain.
+      const totalCap = resolveTotalCap(input.cwd);
+      const ownerPart = (r) => {
+        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) });
+        return { kind: 'ordinary', text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+      };
+      const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
+      const ownerParts = freshOwners.map(ownerPart);
+      const suspectParts = [{ kind: 'ordinary', text: joinSuspectBlock(suspectBlock ?? {}) }];
+      const decisionParts = [
+        ...(freshDecisions.length
+          ? [
+              {
+                kind: 'ordinary', text: renderDecisionPointers(rel, freshDecisions),
+                pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
+                suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
+              },
+            ]
+          : []),
+      ];
+      const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
+      const hazardParts = (list) => renderHazards(list, Number.MAX_SAFE_INTEGER, { fileKeys: [rel] }).map((text) => ({ kind: 'hazard', text }));
+
+      // FRONT PORCH (decision 0050a536 §5 amendment): the bounded prefix
+      // stays ahead of the capped remainder on owned territory; it is ordinary
+      // content and spends the total cap like every non-hazard part.
+      // Gated on `!unowned`: the porch header claims owning knowledge.
+      const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      const assemble = (pathM) => {
+      let porch = { text: '', hazardsRendered: false };
+      if (!unowned) {
+        const referenceOwnersForInject = freshOwners.filter((r) => r.type === 'reference_material');
+        const rawPorchBudget = resolvePorchBudget(input.cwd);
+        const porchBudget = totalCap > 0 ? Math.min(rawPorchBudget, totalCap) : rawPorchBudget;
+        porch =
+          porchBudget > 0
+            ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget, {
+                articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
+                referencePointerCount: referenceOwnersForInject.length,
+                pathDecisionPointerCount: pathM,
+                hasSubjectChannel: false,
+                fileKeys: [rel],
+              })
+            : porch;
       }
-      // else: injectPayload stays `payload` — byte-identical to today's
-      // rendering, exactly as renderPorch's own empty-text contract promises.
+      // With a porch the owners' digests are already delivered, so decision
+      // pointers take the remaining budget ahead of full article bodies.
+      const shownHazards = cappedHazards(freshHazards);
+      const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
+      const porchHazards = completePorchHazards(shownHazards.filter((hazard) => !deferredHazardIds.has(hazard.id)));
+      const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)));
+      const porchParts = porch.text ? partitionPorchHazards(porch.text, porchHazards) : null;
+      if (porch.text && !porchParts) {
+        porch = renderPorch(porchHeaderLine([rel]), [], freshOwners, porchBudget, {
+          articleBodiesCount: freshOwners.length - freshOwners.filter((r) => r.type === 'reference_material').length,
+          referencePointerCount: freshOwners.filter((r) => r.type === 'reference_material').length,
+          pathDecisionPointerCount: pathM, hasSubjectChannel: false, fileKeys: [rel],
+        });
+      }
+      const parts = porch.text
+        ? [...(porchParts ?? [{ kind: 'ordinary', text: porch.text }]), ...deferredHazards, ...decisionParts, ...ownerParts, ...suspectParts]
+        : [
+            { kind: 'ordinary', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
+            ...hazardParts(freshHazards),
+            ...tailParts,
+          ];
+      return { text: capDeliveryParts(parts, totalCap).join('\n\n'), porchText: porch.text };
+      };
+      // PORCH SELF-REPORT = POST-CAP ACTUAL: the porch-end line states how many
+      // decision pointers follow, and the cap decides that only after the porch
+      // is sized — re-render until the report matches what was emitted.
+      let pathM = shownPathDecisions.length;
+      let built = assemble(pathM);
+      for (let i = 0; i < 3; i++) {
+        const below = built.text.slice(built.porchText.length);
+        const actual = shownPathDecisions.filter((r) => below.includes(r.id)).length;
+        if (actual === pathM) break;
+        pathM = actual;
+        built = assemble(pathM);
+      }
+      injectPayload = built.text;
     }
 
-    // SIDE EFFECT FIRST, GUARD SECOND (council wf_db9a59aa-0af). The guard is what
+    // SIDE EFFECT FIRST, GUARD SECOND. The guard is what
     // makes delivery once-per-session, so writing it before the delivery actually
     // happens converts any failure into permanent silent loss: nothing retries,
     // because the next touch sees the records already marked. Ordered this way, a
@@ -337,7 +380,8 @@ function main(input) {
     // back to 'prompt' when the running session is not the probed cell — not
     // residue-on-inject, which would double-deliver every healthy payload to hedge it.
     const recordDelivered = () => {
-      markDelivered(guard, fresh);
+      // Inject path: guard only what the capped payload actually names by id.
+      markDelivered(guard, mode === 'inject' ? recordsShownIn(injectPayload, fresh) : fresh);
       if (frontierFresh) guard.frontier_files.push(rel);
       writeGuard(gPath, guard);
     };
@@ -357,7 +401,7 @@ function main(input) {
       // reader gets it twice, once as a record they were never shown. The counts
       // are what let the drain replay the original '… N more NOT shown' tail
       // without holding the ids it must not render.
-      enqueuePending(pendingPath(input.cwd), {
+      if (!enqueuePending(pendingPath(input.cwd), {
         kind: unowned ? 'frontier' : 'delivery',
         rel,
         payload,
@@ -369,6 +413,7 @@ function main(input) {
           ownerIds: freshOwners.map((r) => r.id),
           decisionIds: shownDecisions.map((r) => r.id),
           hazardTail: freshHazards.length - shownHazards.length,
+          cachedHazardBlocks: renderHazards(shownHazards, charCap, { fileKeys: [rel] }),
           decisionTail: freshDecisions.length - shownDecisions.length,
           // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
           // It reads as a note about the FILE's line positions, but every one of its
@@ -381,7 +426,7 @@ function main(input) {
           suspects: suspectBlock,
         }),
         agent_id: input.agent_id ?? 'conductor',
-      });
+      })) throw new Error('delivery queue lock timeout');
       // ENQUEUE'S BOOKKEEPING STAYS POSITIONAL — immediately after a successful
       // enqueuePending, exactly as before: there is no stream callback on this
       // path, and a throw above leaves the guard untouched for the next touch.

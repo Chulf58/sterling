@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
-import { syncAgents } from './lib/agent-distribution.mjs';
+import { syncAgents, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -44,14 +44,12 @@ const { report, restartInstruction } = syncAgents({
 });
 
 let refused = 0;
-let changed = 0;
 for (const r of report) {
   console.log(`${r.status}: ${r.name}`);
   if (r.instruction) {
-    refused += 1;
+    if (r.refused) refused += 1;
     console.error('\n' + r.instruction + '\n');
   }
-  if (r.status === 'installed' || r.status === 'refreshed' || r.status === 'header_repaired' || r.status === 'machine_rebaked') changed += 1;
   if (r.status === 'machine_rebaked') {
     console.error(
       `machine_rebaked: '${r.name}' carried hook commands baked for another machine context — re-baked for THIS machine (anti_pattern 60e8463d).`
@@ -59,10 +57,9 @@ for (const r of report) {
   }
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
-if (changed > 0) {
-  console.log('\n' + restartInstruction);
-  console.error(
-    '\nthis changes the enforcement (B) surface; run enforcement_reconcile {adopt:true} from the MCP surface before the next agent Bash call (H17 latch).'
-  );
-}
+// Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's
+// config-write taint latch and enforcement_reconcile were both removed per
+// decision sterling-claude-code-scale-down-boundary (2ad87dd1); there is no
+// latch left to clear. restartInstruction above is the only follow-up needed.
+if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
 process.exit(refused > 0 ? 2 : 0);

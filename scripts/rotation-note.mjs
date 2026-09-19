@@ -125,7 +125,7 @@ const commitsAhead = commitsAheadRaw !== null && /^\d+$/.test(commitsAheadRaw) ?
 // LIVE DISPATCHES (board efbddf09; R1 tri-state re-cut): a subagent dispatched
 // before the /clear keeps running across it — the register is the only
 // mechanical record of that, and the note is the only thing the fresh session
-// reads. Without it a coder still writing files is invisible and a second one
+// reads. Without it an implementor still writing files is invisible and a second one
 // gets dispatched at the same slice (measured 2026-09-04, ~330k subagent
 // tokens wasted). Liveness is now TRI-STATE (decision review-receipt-rebuild-
 // invariant-three-owner-modules-tri-state-liveness-receipt-bound-

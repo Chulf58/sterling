@@ -4614,8 +4614,9 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
+  scout: "scout",
   librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
@@ -4889,14 +4890,6 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0)
-  }).default({}),
   // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
@@ -4917,16 +4910,22 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
   }).default({}),
@@ -5066,7 +5065,7 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
     // SubagentStart "porch" budget (H19 front-porch, decision
     // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
@@ -5085,12 +5084,20 @@ var configSchema = external_exports.object({
     // suppresses the whole staging payload before this key is ever read, per
     // the pre-existing shared-fate ruling pinned in
     // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard as preview_budget_bytes above.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
   // flips it per project (decision 98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
@@ -7301,6 +7308,7 @@ function repoRel(toolPath, cwd) {
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync2, writeFileSync, mkdirSync as mkdirSync2, existsSync as existsSync3, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
+import { randomUUID as randomUUID2 } from "node:crypto";
 import { join as join3, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join3(cwd, ".sterling", "transient", "delivery");
@@ -7311,7 +7319,7 @@ function guardPath(cwd, agentId) {
 function pendingPath(cwd) {
   return join3(deliveryDir(cwd), "pending.json");
 }
-function emptyGuard() {
+function emptyDeliveryGuard() {
   return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
 }
 function lineageKey(record) {
@@ -7329,12 +7337,12 @@ function markDelivered(guard, records) {
 }
 function readGuard(path) {
   try {
-    if (!existsSync3(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
+    if (!existsSync3(path)) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
-    return emptyGuard();
+    return emptyDeliveryGuard();
   }
 }
 function writeGuard(path, guard) {
@@ -7369,17 +7377,55 @@ function statusAnnotation(record) {
 var LOCK_DEADLINE_MS = 2e3;
 var LOCK_STALE_MS = 5e3;
 var LOCK_POLL_MS = 5;
+var LOCK_OWNER_FILE = "owner";
+var lockTestHooks = {};
+function lockOwnerPath(lockPath) {
+  return join3(lockPath, LOCK_OWNER_FILE);
+}
+function ownsLock(lockPath, token) {
+  try {
+    return readFileSync2(lockOwnerPath(lockPath), "utf8") === token;
+  } catch {
+    return false;
+  }
+}
+function readLockOwner(lockPath) {
+  try {
+    return readFileSync2(lockOwnerPath(lockPath), "utf8");
+  } catch {
+    return null;
+  }
+}
+function sameLockObject(a, b) {
+  return a.dev === b.dev && a.ino === b.ino;
+}
 function acquireLock(lockPath) {
   const deadline = Date.now() + LOCK_DEADLINE_MS;
   while (Date.now() < deadline) {
+    const token = `${process.pid}-${randomUUID2()}`;
     try {
       mkdirSync2(lockPath);
-      return true;
+      writeFileSync(lockOwnerPath(lockPath), token, { flag: "wx" });
+      return token;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
-          rmSync(lockPath, { recursive: true, force: true });
+        const observed = statSync2(lockPath);
+        const observedOwner = readLockOwner(lockPath);
+        if (Date.now() - observed.mtimeMs > LOCK_STALE_MS) {
+          lockTestHooks.afterStaleInspect?.(lockPath);
+          const tombstone = `${lockPath}.stale-${process.pid}-${randomUUID2()}`;
+          try {
+            renameSync(lockPath, tombstone);
+          } catch (renameError) {
+            if (renameError.code !== "ENOENT") throw renameError;
+            continue;
+          }
+          if (sameLockObject(observed, statSync2(tombstone)) && readLockOwner(tombstone) === observedOwner) {
+            rmSync(tombstone, { recursive: true, force: true });
+          } else if (!existsSync3(lockPath)) {
+            renameSync(tombstone, lockPath);
+          }
           continue;
         }
       } catch {
@@ -7388,32 +7434,40 @@ function acquireLock(lockPath) {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_POLL_MS);
     }
   }
-  return false;
+  return null;
 }
-function releaseLock(lockPath) {
+function releaseLock(lockPath, token) {
   try {
-    rmSync(lockPath, { recursive: true, force: true });
+    if (ownsLock(lockPath, token)) rmSync(lockPath, { recursive: true, force: true });
   } catch {
   }
 }
 function withFileLock(targetPath, fn) {
   mkdirSync2(dirname3(targetPath), { recursive: true });
   const lockPath = `${targetPath}.lock`;
-  const acquired = acquireLock(lockPath);
+  const token = acquireLock(lockPath);
+  if (!token) return { acquired: false, value: void 0 };
   try {
-    return fn();
+    return { acquired: true, value: fn({ lockPath, token }) };
   } finally {
-    if (acquired) releaseLock(lockPath);
+    releaseLock(lockPath, token);
   }
 }
 function enqueuePending(path, entry) {
-  withFileLock(path, () => {
+  const result = withFileLock(path, ({ lockPath, token }) => {
     const entries = existsSync3(path) ? JSON.parse(readFileSync2(path, "utf8")) : [];
     entries.push(entry);
     const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
     writeFileSync(tmp, JSON.stringify(entries));
+    lockTestHooks.beforePendingRename?.({ lockPath, token });
+    if (!ownsLock(lockPath, token)) {
+      rmSync(tmp, { force: true });
+      return false;
+    }
     renameSync(tmp, path);
+    return true;
   });
+  return result.acquired && result.value === true;
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -7577,6 +7631,13 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
+function completePorchHazards(hazards) {
+  return cappedHazards(hazards ?? []).map((hazard) => [
+    hazardHeaderLine(hazard),
+    `  TRIGGER: ${hazard.trigger ?? ""}`,
+    `  RIGHT WAY: ${hazard.right_way ?? ""}`
+  ].join("\n"));
+}
 var DECISION_POINTER_CAP = 8;
 var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
 var DECISION_AUTHORITY_UNSTATED = 1;
@@ -7637,7 +7698,6 @@ function joinSuspectBlock({ header, lines = [], footer } = {}) {
 }
 var PORCH_OWNER_CAP = 3;
 var PORCH_HAZARD_FLOOR_BYTES = 90;
-var PORCH_TITLE_CLIP_BYTES = 70;
 var PORCH_OWNER_LABEL_CLIP_BYTES = 90;
 var PORCH_SLUG_CLIP_BYTES = 60;
 var PORCH_HEADER_PATH_CLIP_BYTES = 200;
@@ -7696,13 +7756,6 @@ function rankOwnersForPorch(owners) {
     const ub = Date.parse(b?.updated_at ?? "");
     return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
   });
-}
-function porchHazardBody(hazard, textBudgetBytes) {
-  const half = Math.max(0, Math.floor(textBudgetBytes / 2));
-  const trigger = clipToBytes(hazard?.trigger, half);
-  const rightBudget = Math.max(0, textBudgetBytes - porchByteLen(trigger));
-  const rightWay = clipToBytes(hazard?.right_way, rightBudget);
-  return [`  TRIGGER: ${trigger}`, `  RIGHT WAY: ${rightWay}`].join("\n");
 }
 function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
   return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
@@ -7768,8 +7821,8 @@ function renderPorch(header, hazards, owners, budget, {
   subjectDecisionPointerCount = 0,
   fileKeys = []
 } = {}) {
-  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false };
-  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false };
+  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
+  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false, deferred_hazard_ids: [] };
   if (budget < PORCH_MIN_BUDGET_BYTES) {
     try {
       process.stderr.write(
@@ -7778,7 +7831,7 @@ function renderPorch(header, hazards, owners, budget, {
       );
     } catch {
     }
-    return { text: "", hazardsRendered: false };
+    return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
   }
   const shownHazards = cappedHazards(hazards ?? []);
   const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
@@ -7794,12 +7847,10 @@ function renderPorch(header, hazards, owners, budget, {
   const minOwnerCap = 0;
   const byteCountReserve = "0".repeat(String(budget).length);
   function hazardSectionAt(perHazardTextBudget) {
-    const blocks = shownHazards.map(
-      (hz) => [
-        hazardHeaderLine(hz, { clipTitleBytes: PORCH_TITLE_CLIP_BYTES, clipSlugBytes: PORCH_SLUG_CLIP_BYTES }),
-        porchHazardBody(hz, Math.max(0, perHazardTextBudget))
-      ].join("\n")
-    );
+    const blocks = shownHazards.map((hazard) => {
+      const whole = completePorchHazards([hazard])[0];
+      return porchByteLen(whole) <= perHazardTextBudget ? whole : `\u26A0 HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
+    });
     if (hazardOverflow > 0) {
       const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
       blocks.push(`\u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) \u2014 ${widen} for the full set`);
@@ -7831,8 +7882,7 @@ function renderPorch(header, hazards, owners, budget, {
     ].join("\n\n");
     const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
     const remaining2 = Math.max(0, budget - skeletonBytes2);
-    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
-    const fits = skeletonBytes2 <= budget && (shownHazards.length === 0 || remaining2 >= neededFloor);
+    const fits = skeletonBytes2 <= budget;
     pick = { admitted: admitted2, ownerOverflow, ownerLines: ownerLines2, overflowLine: overflowLine2, remaining: remaining2, skeletonBytes: skeletonBytes2 };
     if (fits || cap === minOwnerCap) break;
   }
@@ -7864,9 +7914,9 @@ function renderPorch(header, hazards, owners, budget, {
         );
       } catch {
       }
-      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false };
+      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
     }
-    return { text: minimalPorch, hazardsRendered: false };
+    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
   }
   const haveHazards = shownHazards.length > 0;
   const haveDigests = admitted.length > 0;
@@ -7908,9 +7958,121 @@ function renderPorch(header, hazards, owners, budget, {
       );
     } catch {
     }
-    return { text: clipToBytes(finalPorch, budget), hazardsRendered: true };
+    return { text: clipToBytes(finalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
   }
-  return { text: finalPorch, hazardsRendered: true };
+  const deferred_hazard_ids = shownHazards.filter((hazard, index) => !finalPorch.includes(completePorchHazards([hazard])[0])).map((hazard) => hazard.id);
+  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids };
+}
+var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+function resolveTotalCap(cwd) {
+  try {
+    const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
+    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+  } catch {
+    return DELIVERY_TOTAL_CAP_DEFAULT;
+  }
+}
+function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({ ...part, kind: part.kind === "hazard" ? "hazard" : "ordinary" }));
+  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
+  const bytes = (text) => porchByteLen(text);
+  const hazards = new Set(items.filter((part) => part.kind === "hazard"));
+  const selected = /* @__PURE__ */ new Map();
+  const omitted = [];
+  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
+  const ordinaryBytes = () => {
+    const text = output().join(sep);
+    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
+  };
+  const fits = () => ordinaryBytes() <= capBytes;
+  const pointerFor = (part) => part.pointer || "";
+  for (const part of items) {
+    if (part.kind === "hazard") continue;
+    selected.set(part, part.text);
+    if (fits()) continue;
+    selected.delete(part);
+    const suffix = part.suffix || pointerFor(part);
+    if (suffix) {
+      const lines = part.text.split("\n");
+      let clipped = "";
+      let best = "";
+      for (const line of lines) {
+        const candidate = clipped ? `${clipped}
+${line}` : line;
+        selected.set(part, `${candidate}
+${suffix}`);
+        if (!fits()) {
+          break;
+        }
+        clipped = candidate;
+        best = `${candidate}
+${suffix}`;
+      }
+      if (best) {
+        selected.set(part, best);
+        continue;
+      }
+      selected.delete(part);
+      selected.set(part, pointerFor(part));
+      if (pointerFor(part) && fits()) continue;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  }
+  if (omitted.length) {
+    const aggregatePart = { kind: "ordinary", text: "" };
+    items.push(aggregatePart);
+    const aggregate = () => {
+      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
+      const prefix = `+${omitted.length} more records: knowledge_query`;
+      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      while (ids.length && bytes(line) > capBytes) {
+        ids.pop();
+        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      }
+      return line;
+    };
+    while (true) {
+      aggregatePart.text = aggregate();
+      selected.set(aggregatePart, aggregatePart.text);
+      if (fits()) break;
+      selected.delete(aggregatePart);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
+      if (!last) break;
+      selected.delete(last);
+      omitted.push(last);
+    }
+  }
+  return output();
+}
+function partitionPorchHazards(text, hazardBlocks) {
+  const blocks = (hazardBlocks ?? []).filter(Boolean);
+  let cursor = 0;
+  const parts = [];
+  for (const block of blocks) {
+    const at = text.indexOf(block, cursor);
+    if (at < 0) return null;
+    if (at > cursor) parts.push({ kind: "ordinary", text: text.slice(cursor, at) });
+    parts.push({ kind: "hazard", text: block });
+    cursor = at + block.length;
+  }
+  if (cursor < text.length) parts.push({ kind: "ordinary", text: text.slice(cursor) });
+  return parts;
+}
+function recordsShownIn(text, records) {
+  const t = String(text ?? "");
+  return (records ?? []).filter((r) => r?.id && t.includes(r.id));
+}
+function ownerPointer(rendered, record) {
+  const head = String(rendered ?? "").split("\n")[0];
+  return `${clipToBytes(head, 300)}
+\u25B8 FULL RECORD (delivery cap reached): knowledge_get ${record.id}`;
+}
+function ownerSuffix(record) {
+  return `\u25B8 FULL RECORD (clipped at the delivery cap): knowledge_get ${record.id}`;
+}
+function decisionBlockPointer(count, widen) {
+  return `\u25B8 DECISIONS (${count}) held back by the delivery cap \u2014 ${widen}`;
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
@@ -7931,6 +8093,7 @@ function rerenderRecipe({
   decisionIds,
   hazardTail,
   decisionTail,
+  cachedHazardBlocks,
   suspects,
   trailingBlocks
 }) {
@@ -7943,6 +8106,10 @@ function rerenderRecipe({
     hazard_ids: hazardIds ?? [],
     owner_ids: ownerIds ?? [],
     decision_ids: decisionIds ?? [],
+    // A drain can lose store access after enqueue. Keep the exact hazard
+    // substance separately so that arm never turns trigger/right-way text into
+    // an ordinary cappable cached payload.
+    cached_hazard_blocks: cachedHazardBlocks ?? [],
     tails: { hazards: hazardTail ?? 0, decisions: decisionTail ?? 0 },
     suspects: suspects ? {
       header: suspects.header ?? "",
@@ -8025,36 +8192,81 @@ function main(input2) {
     ].filter((b) => typeof b === "string" && b);
     const payload = renderPayload(rel, blocks, { unowned });
     let injectPayload = payload;
-    if (mode === "inject" && !unowned) {
-      const shownDecisionsForInject = freshDecisions.slice(0, DECISION_POINTER_CAP);
-      const porchBudget = resolvePorchBudget(input2.cwd);
-      const referenceOwnersForInject = freshOwners.filter((r) => r.type === "reference_material");
-      const porch = porchBudget > 0 ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget, {
-        articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
-        referencePointerCount: referenceOwnersForInject.length,
-        pathDecisionPointerCount: shownDecisionsForInject.length,
-        hasSubjectChannel: false,
-        fileKeys: [rel]
-      }) : { text: "", hazardsRendered: false };
-      if (porch.text) {
-        const remainderBlocks = [
-          ...porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
-          ...freshOwners.map(
-            (r) => r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
-          ),
-          ...freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : [],
-          joinSuspectBlock(suspectBlock ?? {})
-        ].filter((b) => typeof b === "string" && b);
-        injectPayload = [porch.text, ...remainderBlocks].join("\n\n");
+    if (mode === "inject") {
+      const totalCap = resolveTotalCap(input2.cwd);
+      const ownerPart = (r) => {
+        const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) });
+        return { kind: "ordinary", text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+      };
+      const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
+      const ownerParts = freshOwners.map(ownerPart);
+      const suspectParts = [{ kind: "ordinary", text: joinSuspectBlock(suspectBlock ?? {}) }];
+      const decisionParts = [
+        ...freshDecisions.length ? [
+          {
+            kind: "ordinary",
+            text: renderDecisionPointers(rel, freshDecisions),
+            pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
+            suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
+          }
+        ] : []
+      ];
+      const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
+      const hazardParts = (list) => renderHazards(list, Number.MAX_SAFE_INTEGER, { fileKeys: [rel] }).map((text) => ({ kind: "hazard", text }));
+      const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      const assemble = (pathM2) => {
+        let porch = { text: "", hazardsRendered: false };
+        if (!unowned) {
+          const referenceOwnersForInject = freshOwners.filter((r) => r.type === "reference_material");
+          const rawPorchBudget = resolvePorchBudget(input2.cwd);
+          const porchBudget2 = totalCap > 0 ? Math.min(rawPorchBudget, totalCap) : rawPorchBudget;
+          porch = porchBudget2 > 0 ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget2, {
+            articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
+            referencePointerCount: referenceOwnersForInject.length,
+            pathDecisionPointerCount: pathM2,
+            hasSubjectChannel: false,
+            fileKeys: [rel]
+          }) : porch;
+        }
+        const shownHazards2 = cappedHazards(freshHazards);
+        const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
+        const porchHazards = completePorchHazards(shownHazards2.filter((hazard) => !deferredHazardIds.has(hazard.id)));
+        const deferredHazards = hazardParts(shownHazards2.filter((hazard) => deferredHazardIds.has(hazard.id)));
+        const porchParts = porch.text ? partitionPorchHazards(porch.text, porchHazards) : null;
+        if (porch.text && !porchParts) {
+          porch = renderPorch(porchHeaderLine([rel]), [], freshOwners, porchBudget, {
+            articleBodiesCount: freshOwners.length - freshOwners.filter((r) => r.type === "reference_material").length,
+            referencePointerCount: freshOwners.filter((r) => r.type === "reference_material").length,
+            pathDecisionPointerCount: pathM2,
+            hasSubjectChannel: false,
+            fileKeys: [rel]
+          });
+        }
+        const parts = porch.text ? [...porchParts ?? [{ kind: "ordinary", text: porch.text }], ...deferredHazards, ...decisionParts, ...ownerParts, ...suspectParts] : [
+          { kind: "ordinary", text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
+          ...hazardParts(freshHazards),
+          ...tailParts
+        ];
+        return { text: capDeliveryParts(parts, totalCap).join("\n\n"), porchText: porch.text };
+      };
+      let pathM = shownPathDecisions.length;
+      let built = assemble(pathM);
+      for (let i = 0; i < 3; i++) {
+        const below = built.text.slice(built.porchText.length);
+        const actual = shownPathDecisions.filter((r) => below.includes(r.id)).length;
+        if (actual === pathM) break;
+        pathM = actual;
+        built = assemble(pathM);
       }
+      injectPayload = built.text;
     }
     const recordDelivered = () => {
-      markDelivered(guard, fresh);
+      markDelivered(guard, mode === "inject" ? recordsShownIn(injectPayload, fresh) : fresh);
       if (frontierFresh) guard.frontier_files.push(rel);
       writeGuard(gPath, guard);
     };
     if (mode === "enqueue") {
-      enqueuePending(pendingPath(input2.cwd), {
+      if (!enqueuePending(pendingPath(input2.cwd), {
         kind: unowned ? "frontier" : "delivery",
         rel,
         payload,
@@ -8066,6 +8278,7 @@ function main(input2) {
           ownerIds: freshOwners.map((r) => r.id),
           decisionIds: shownDecisions.map((r) => r.id),
           hazardTail: freshHazards.length - shownHazards.length,
+          cachedHazardBlocks: renderHazards(shownHazards, charCap, { fileKeys: [rel] }),
           decisionTail: freshDecisions.length - shownDecisions.length,
           // THE LINE-SUSPECT ADVISORY IS RECORD-DERIVED, not file-only (fixer M1).
           // It reads as a note about the FILE's line positions, but every one of its
@@ -8078,7 +8291,7 @@ function main(input2) {
           suspects: suspectBlock
         }),
         agent_id: input2.agent_id ?? "conductor"
-      });
+      })) throw new Error("delivery queue lock timeout");
       recordDelivered();
       return allow();
     }

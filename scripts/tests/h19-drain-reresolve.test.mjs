@@ -916,7 +916,9 @@ test('AC9: queue append order is preserved in the injected output', () => {
 // SABOTAGE: process/render entries in reverse (or by some non-append-order
 // key such as re-resolved status) — `ia < ib` goes red.
 
-test('AC9 (RE-AIMED per conductor repair 2026-08-31, item 4 — the per-agent session guard at h19-knowledge-delivery.mjs:107 dedups a second LIVE enqueue of the same record, so two real touches never produce two entries naming the same id): two hand-written pending entries whose recipes both name the SAME decision id each render it at drain — no cross-entry dedup', () => {
+// 2026-09-19 deliberate change (2): prompt-time drain deduplicates record ids
+// across queued entries, so a hand-written duplicate cannot spend the cap twice.
+test('AC9 (RE-AIMED per conductor repair 2026-08-31, item 4 — the per-agent session guard at h19-knowledge-delivery.mjs:107 dedups a second LIVE enqueue of the same record, so two real touches never produce two entries naming the same id): two hand-written pending entries whose recipes both name the SAME decision id render it ONCE at drain — cross-entry dedup', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'prompt' });
   try {
     const shared = store.create(decisionRec('AC9_SHARED_SENTINEL', []));
@@ -945,7 +947,7 @@ test('AC9 (RE-AIMED per conductor repair 2026-08-31, item 4 — the per-agent se
     assert.equal(d.code, 0, d.stderr);
     const ctx = ctxOf(d);
     const count = ctx.split('AC9_SHARED_SENTINEL').length - 1;
-    assert.equal(count, 2, 'the shared decision must render in BOTH entries — no cross-entry dedup');
+    assert.equal(count, 1, 'the shared decision renders exactly once — drain-wide dedup preserves the total-cap budget');
   } finally {
     cleanup();
   }
@@ -956,18 +958,16 @@ test('AC9 (RE-AIMED per conductor repair 2026-08-31, item 4 — the per-agent se
 // per-agent session guard dedups a second live enqueue of the SAME record
 // regardless of which file triggered it. The two entries are now
 // hand-written directly (the same Group-C technique AC10 uses) with recipes
-// naming the same decision id, bypassing the guard entirely (which only
-// governs the ENQUEUE path, never the drain) — this is the only way to
+// naming the same decision id, bypassing the guard entirely. This is the only way to
 // construct "two entries naming the same id" at all, since the guard makes
 // it unreachable through any real touch. `recipe`/`unowned`/`rel`/
 // `char_cap`/`hazard_ids`/`owner_ids`/`decision_ids`/`trailing_blocks` field
 // names are taken verbatim from the conductor's disclosed shape;
 // `unowned: true` is inferred (no owning article was created for either rel
 // path) and flagged as an assumption.
-// EXPECTED GREEN against the now-built S2a implementation.
-// SABOTAGE: add a drain-wide re-resolve cache keyed only by record id (skip
-// re-rendering a record already resolved once this drain) — `count === 2`
-// goes red (count becomes 1).
+// EXPECTED GREEN against the cap/dedup implementation.
+// SABOTAGE: remove the `seen(id)` filter in dedupeDrainEntry — `count === 1`
+// goes red (count becomes 2).
 
 // ===========================================================================
 // AC10 — LEGACY ENTRIES

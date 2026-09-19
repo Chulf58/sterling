@@ -71,6 +71,7 @@ import {
   ARTICLE_POINTER_CAP,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  AXIS_MIN_DISCRIMINATING_HITS,
   hasRecordCentralityHit,
   recordCentralityHits,
   HAZARD_CAP,
@@ -78,6 +79,10 @@ import {
   markDelivered,
   DENY_RULING_TYPES,
   subQuestionText,
+  capDeliveryParts,
+  resolveTotalCap,
+  recordsShownIn,
+  decisionBlockPointer,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -307,7 +312,7 @@ const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsW
 // callback exits.
 function main(input) {
   try {
-    // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where
+    // BOTH OF THESE SIT INSIDE THE TRY (2026-09-05), where
     // they were not before: outgoingProposalText reads an arbitrary tool_input and
     // openStore THROWS on a corrupt or locked db (it returns null only for an
     // ABSENT one — anti-pattern e13f0fb5 pins that distinction). An uncaught throw
@@ -414,7 +419,7 @@ function main(input) {
     // in passing in its own trigger (the measured 2026-08-09 Blender case).
     const scored = candidates
       .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing))
+      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, outgoing))
       .sort((a, b) => b.hits.length - a.hits.length);
     if (!scored.length) return finish();
 
@@ -475,15 +480,18 @@ function main(input) {
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
 
+    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
     const hazardDecisionBlocks = [
-      ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
+      ...renderHazards(hazards.map((x) => x.record), Number.MAX_SAFE_INTEGER, {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
-      }),
+      }).map((text) => ({ kind: 'hazard', text })),
       ...(decisions.length
         ? [
-            renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, {
-              remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`,
-            }),
+            {
+              kind: 'ordinary', text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
+              pointer: decisionBlockPointer(decisions.length, decisionRemedy),
+              suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
+            },
           ]
         : []),
     ];
@@ -541,17 +549,26 @@ function main(input) {
     // matched article is never withheld either way (AC3) — only its POSITION
     // in the payload moves.
     const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+    const asPart = (text, widen) => ({ kind: 'ordinary', text, pointer: `▸ held back by the delivery cap — ${widen}` });
+    const articleParts = articleBlocks.map((t) => asPart(t, `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`));
+    const priorParts = priorBlocks.map((t) =>
+      asPart(t, `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(',')}] cap:${priorAnswers.length}`)
+    );
+    // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, capDeliveryParts): the
+    // hazards are complete unbudgeted substance; header, decisions, prior
+    // answers and article pointers are ordinary and degrade under the cap.
     const blocks = [
-      header,
+      { kind: 'ordinary', text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
       ...(promptIsQuestionShaped
-        ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks]
-        : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]),
+        ? [...priorParts, ...articleParts, ...hazardDecisionBlocks]
+        : [...hazardDecisionBlocks, ...priorParts, ...articleParts]),
     ];
+    const carriage = capDeliveryParts(blocks, resolveTotalCap(input.cwd)).join('\n\n');
 
-    // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19 (council wf_db9a59aa-0af):
+    // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19:
     // the guard is what makes delivery once-per-session, so writing it before the
     // delivery lands turns any failure into permanent silent loss with no retry.
     // THAT ORDERING IS NOW MECHANICAL, not positional: the bookkeeping rides the
@@ -562,12 +579,12 @@ function main(input) {
     // Composed, not replaced: on a codex consult this envelope carries BOTH the
     // model pin and the carriage (board 7423f7a2 — the pin is on every output
     // path, and this is the one that already had an envelope).
-    return emitEnvelope(blocks.join('\n\n'), {
+    return emitEnvelope(carriage, {
       onWritten: () => {
         recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
         // POST-ENVELOPE BOOKKEEPING IS ITS OWN FAILURE DOMAIN (outside-family
         // review, 2026-09-05). These marks cannot run before the write — that
-        // is the H19 council ordering rule, and inverting it would turn a
+        // is the H19 ordering rule, and inverting it would turn a
         // failed delivery into permanent silent loss. The shared helper already
         // contains an onWritten throw (one stderr line, exit code unchanged);
         // this local catch is kept because the DISCLOSURE has to say that the
@@ -579,7 +596,8 @@ function main(input) {
           // read by the recipient, so it stays eligible for a later dispatch instead
           // of being silently lost for the rest of the session.
           const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-          markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
+          // Only records the capped carriage actually names by id.
+          markDelivered(guard, recordsShownIn(carriage, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]));
           writeGuard(gPath, guard);
         } catch (e) {
           // Cheap failure vs expensive one: a lost guard write costs at most a repeat

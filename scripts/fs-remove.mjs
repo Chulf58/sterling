@@ -1,6 +1,6 @@
 // fs-remove (spec §7.1): scope-checked deletion (scripts/lib/debug-scope.mjs's
 // scopeCheck), registers the file-touch so owning articles get reconciled.
-// The H14 allowlist admits exactly this invocation shape for coder/fixer agents.
+// This is a conductor-invoked, scope-checked operation.
 //   node scripts/fs-remove.mjs <path>... [--target <dir>]
 import { rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';

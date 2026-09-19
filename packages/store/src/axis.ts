@@ -197,15 +197,25 @@ export const GENERIC_DEV_TERMS = new Set([
   'running', 'item', 'items', 'text', 'change', 'changed', 'changes', 'code', 'repo', 'line',
   'lines', 'error', 'errors', 'string', 'value', 'values', 'field', 'fields', 'message',
   'messages', 'output', 'input', 'name', 'names', 'list', 'exact', 'existing', 'touched',
-  'untouched', 'through', 'actually', 'behavior', 'still',
+  'untouched', 'through', 'actually', 'behavior', 'still', 'full',
 ]);
 
-/** True once at least one matched term escapes GENERIC_DEV_TERMS. Two hits of
+/** How many matched terms must escape GENERIC_DEV_TERMS before a PUSH delivery
+ *  (H20 dispatch/consult/question, H23 output axis, H19 dispatch staging's
+ *  subject channel) fires. One escaped word was measured firing on a generic
+ *  dispatch (2026-09-19: "test, names, full, list, path, scripts, hook" — 'hook'
+ *  alone escaped). A PULL surface (knowledge_preflight) keeps the one-term
+ *  default of hasDiscriminatingHit, because the caller asked. */
+export const AXIS_MIN_DISCRIMINATING_HITS = 2;
+
+/** True once at least `minDiscriminating` distinct matched terms (default 1;
+ *  push deliveries pass AXIS_MIN_DISCRIMINATING_HITS) escape GENERIC_DEV_TERMS. Two hits of
  *  pure universal vocabulary ("test", "check") describe every dispatch ever
  *  written — a real match needs at least one term that actually says something
  *  about THIS prompt's subject. */
-export function hasDiscriminatingHit(hits: string[]): boolean {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+export function hasDiscriminatingHit(hits: string[], minDiscriminating = 1): boolean {
+  const distinct = new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)));
+  return distinct.size >= minDiscriminating;
 }
 
 /** RECORD CENTRALITY — the third stage-2 floor (decision 599a28ed). The first

@@ -1,8 +1,5 @@
 // Branch manager (spec §8.2): conductor-direct branch hygiene only — the
-// staged-pipeline run-branch lifecycle (startRunBranch/phaseCommit/
-// resetToLastPhaseCommit/mergeRun/discardRun/wholeRunDiffFiles/branchExists)
-// was DELETED under decision `sterling-claude-code-scale-down-boundary`
-// (2ad87dd1) along with the pipeline that was its only caller. What remains:
+// What remains:
 // isGitRepo (used repo-wide) and the direct-mode merge + branch-sweep helpers
 // (mergeBranchInto, sweepMergedBranches, currentBranch, defaultBranch)
 // scripts/direct-merge.mjs drives.

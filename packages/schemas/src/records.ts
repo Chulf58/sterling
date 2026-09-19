@@ -706,9 +706,16 @@ export const briefSchema = base
 // schemas.test.ts; coder_hard/classifiers are config-only keys (no installed
 // agent) and are NOT map keys.
 // ---------------------------------------------------------------------------
+// Slice 5/8 roster (decision sterling-claude-code-scale-down-boundary,
+// 2ad87dd1 change 3; "Roster shape and review pairing"): explorer -> scout,
+// coder -> implementor. config.models was renamed to match directly (coder ->
+// implementor, explorer -> scout — see packages/schemas/src/config.ts), so
+// this map is now a straight identity for every registered agent rather than
+// an indirection layer.
 export const AGENT_MODEL_KEY = {
+  implementor: 'implementor',
   researcher: 'researcher',
-  explorer: 'explorer',
+  scout: 'scout',
   librarian: 'librarian',
 } as Record<string, string>;
 

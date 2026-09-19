@@ -81,11 +81,13 @@ function knowledgeCreateRaw(tools: SterlingTools, type: string, fields: Loose): 
 }
 
 function boardQueryResultRaw(tools: SterlingTools, args: Loose = {}): Loose {
-  return (tools as unknown as { boardQueryResult: (a: Loose) => Loose }).boardQueryResult(args);
+  // projection:'full' explicitly: the per-item artifact_evidence block these
+  // pins read rides the full projection; the default text rows carry only its count.
+  return (tools as unknown as { boardQueryResult: (a: Loose) => Loose }).boardQueryResult({ projection: 'full', ...args });
 }
 
 function maintenanceQueryResultRaw(tools: SterlingTools, args: Loose = {}): Loose {
-  return (tools as unknown as { maintenanceQueryResult: (a: Loose) => Loose }).maintenanceQueryResult(args);
+  return (tools as unknown as { maintenanceQueryResult: (a: Loose) => Loose }).maintenanceQueryResult({ projection: 'full', ...args });
 }
 
 function maintenanceEnqueueRaw(tools: SterlingTools, args: Loose): Loose {

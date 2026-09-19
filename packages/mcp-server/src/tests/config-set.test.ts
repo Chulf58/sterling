@@ -790,16 +790,20 @@ test('CS-15: delivery.payload_char_cap still validates its value (30000 lands, \
 // check. A malformed model entry that lands silently is the
 // [94f16632] shape: recorded policy reverted by a write that reported success.
 // ---------------------------------------------------------------------------
-test('CS-16: models.coder with a malformed value (an extra key on the entry) is refused by document validation — nothing written', () => {
+test('CS-16: models.implementor with a malformed value (an extra key on the entry) is refused by document validation — nothing written', () => {
   const h = harness();
   try {
     const malformed = { model: 'sonnet', effort: 'high', junk: 1 };
     // CONTROL, opposite reason: the SCHEMA must consider this value invalid,
     // whatever the real shape of a models entry is (object-with-effort or a
-    // bare string — both refuse this).
+    // bare string — both refuse this). 'implementor', not 'coder': the Slice
+    // 5/8 roster rename (decision sterling-claude-code-scale-down-boundary,
+    // 2ad87dd1, change 3) renamed this config.models key — 'coder' is no
+    // longer a schema key at all, so it would be silently stripped rather
+    // than refused, which is exactly the false-negative this CONTROL guards.
     let controlErr: unknown;
     try {
-      parseConfig({ models: { coder: malformed } });
+      parseConfig({ models: { implementor: malformed } });
     } catch (e) {
       controlErr = e;
     }
@@ -812,8 +816,8 @@ test('CS-16: models.coder with a malformed value (an extra key on the entry) is 
 
     const call = handler(h.tools);
     const before = h.read();
-    const msg = refusalMessage(call, { path: 'models.coder', value: malformed });
-    assert.match(msg, /coder/, 'the refusal names the entry it refused');
+    const msg = refusalMessage(call, { path: 'models.implementor', value: malformed });
+    assert.match(msg, /implementor/, 'the refusal names the entry it refused');
     assert.doesNotMatch(msg, /allowlist/i, 'models.<key> IS allowlisted — the cause here is the VALUE, and the message must say so');
     assert.equal(h.read(), before, 'nothing written');
   } finally {

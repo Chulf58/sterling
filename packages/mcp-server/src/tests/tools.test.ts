@@ -890,7 +890,7 @@ test("board_query / maintenance_query take projection:'digest' — the 478 KB bo
     }
     tools.boardAdd({ text: `reconcile ${'z'.repeat(2000)}`, source: 'system', system_reason: 'reconcile_needed' });
 
-    const full = tools.boardQueryResult({ source: 'user' });
+    const full = tools.boardQueryResult({ source: 'user', projection: 'full' });
     const digest = tools.boardQueryResult({ source: 'user', projection: 'digest' });
     assert.equal(digest.returned, full.returned, 'same items');
     assert.ok(

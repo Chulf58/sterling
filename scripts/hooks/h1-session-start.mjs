@@ -30,6 +30,7 @@ import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
+import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -98,66 +99,34 @@ async function deleteRegisterUnderLock(cwd) {
   }
 }
 
-// Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): the
-// delegation bullet below states config.delegation.max_concurrent, never a
-// hardcoded literal — a same-day ruling on this machine (5 → 15) was
-// re-injected as the stale "FIVE" the next session, which is exactly the
-// drift a config-driven number closes. Absent config → shipped default 5.
-function conventions(maxConcurrent) {
-  return [
-    'Sterling conventions (injected by H1):',
-    '- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don\'t know, checking" and check.',
-    '- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.',
-    '- Canonical naming: one name per concept, from the registries; phase execution, intake, steps — kill synonyms on sight.',
-    // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
-    // reach every project at its next session start with no per-project copy and no
-    // stamp-contract propagation — the same reason the todo/queue routing lines live on
-    // the commands. Stated because the user was otherwise re-declaring them per project.
-    // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
-    // rule read "3-5 active at all times" in a consuming project and the user withdrew it
-    // within a day — "i am afraid that a session will feel force to spend up subagents even
-    // if they see necessary" — and the same concern was raised again here on 2026-07-29:
-    // "i am afraid that the conductor feel force to dispatch subagents without any value,
-    // for the sake of just doing it to keep the claude.md happy". Leading with "up to N"
-    // reads as a target; leading with the ceiling reads as a limit. Both halves of the
-    // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
-    // because a rule that only pushes one way is the rule that produced the fear.
-    `- Delegation: ${maxConcurrent} concurrent subagents is a CEILING, not a target — there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real — speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice — it fills the session's scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.`,
-    '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind — being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" — it is the conductor reading files by hand that an agent should have read for it.',
-    // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
-    // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
-    // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
-    // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
-    '- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS — an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise — adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch — hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent\'s claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor\'s attention spent where it should not be (decision 677f1639).',
-    // Slice ordering (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22): the
-    // stable-identity campaign ran its critical path single-file for hours with free seats while
-    // later slices' independent pieces were already dispatchable — the user had to interrupt
-    // to demand the frontier be widened. This states WHAT TO PICK; 677f1639 above states WHEN
-    // to check. Sharpened by an external-model (Codex) consult, adjudicated: pure unlock-count
-    // starved risky-but-low-unlock proof slices and mandatory low-unlock slices, and re-picking
-    // on every freed seat could interrupt coherent in-flight work for no reason.
-    '- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement — a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) — never disturb coherent in-flight work just because a seat freed. The frontier — ready work across the board, the maintenance queue, and future slices\' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice\'s commit boundary) — must GROW while an objective\'s slice list is still expanding; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies — a free seat alone never implies dispatch (the quota pathology stays forbidden).',
-    // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
-    // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
-    // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
-    // results default to a digest receipt), but the dispatch shape stands: drafting a
-    // slice's reconciles still spends conductor attention per write, and the librarian
-    // batches them off the critical path. Drafting stays with the conductor.
-    '- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text — the librarian never authors knowledge — then BATCHES the slice\'s drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 — the old ~50KB full-record echo is opt-in via projection:\'full\' — so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor\'s next work — never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).',
-    '- The Workflow tool stays OPT-IN and needs the user\'s explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting — its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.',
-    // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
-    // stops were rejected verbatim ("demands attention all the time"); the three subagent
-    // purposes are the user's own words. Ships here so every project gets it next session.
-    '- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended — never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure → rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor\'s context window (decision aac19532).',
-    // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
-    // the rationale lives in the store (decision + the paired-exploration research_finding), and
-    // conventions injected on every session stay short to stay read.
-    '- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user\'s prior agreement for that specific spawn — and never a silent inherit of the session model.',
-    '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself — measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.',
-    '- CODEX (sparring partner) IS THE DEFAULT for repo-grounded read-only work AND code review: the DEFAULT independent reviewer on every significant code-touching diff, beside the mandatory roster reviewer (an outside model family catches shared-blind-spot defects a same-family reviewer cannot); and the DEFAULT ENGINE for repo-grounded read-only investigation (diagnosis, subsystem reading, bypass hunting) since it reads the repo itself in its own sandbox at zero marginal cost. THE DIVIDING LINE: repo-grounded READ-ONLY work goes to Codex; implementation and writes NEVER do (Codex runs outside the entire hook enforcement surface); store/KB-context work stays on Claude agents (Codex has no knowledge tools). On a plan-cap hit, fall back to a Claude dispatch and say so. ADVISORY, NEVER GATING — it never writes and disagreement never blocks work (decision codex-preferred-for-read-shaped-analysis).',
-    '- QUESTION DISCIPLINE: every decision put to the user goes through the AskUserQuestion tool form — a question asked in prose (even a numbered section) reads as rhetorical and gets missed (user-stated 2026-08-11). Ask ONE highest-leverage question through that form; consolidate the CONSIDERATIONS into that single question, never several questions into one form. When a prompt may time out unanswered, prefer the safe default and proceed unattended, disclosing the assumption — but ONLY for a REVERSIBLE choice needing no user authorization, and NEVER for a gate/grill decision, which is re-asked or waited out instead (user, 2026-07-02).',
-    '- SOLVE, DON\'T BOARD: for findings INSIDE the current task\'s scope or an already-selected board item, evaluate and fix in-session; board only what genuinely cannot be done now, saying why — many smells dissolve on two minutes of checking (user-stated 2026-07-27). UNRELATED findings are surfaced for the user\'s disposition, never fixed inline (surface smells, don\'t fix them). Small board items get NO per-item slice ceremony: fix directly, one commit per task, one review pass (user-decided 2026-08-21).',
-  ].join('\n');
+// CONDUCTOR CONTRACT INJECTION (slice 3, objective sterling-takeover-2026-09,
+// board d0f3647a). Replaces the ~11KB "Sterling conventions" block that
+// restated CLAUDE.md prose from a hardcoded array of strings (compare git
+// history above this line) — the conventions/posture text now lives ONCE, in
+// docs/conductor-contract.md, and H1 injects its bytes verbatim rather than a
+// second, drifting copy. Read from the CLONE (pluginRoot()), never from the
+// project cwd: the contract is Sterling's own working posture, ships with the
+// plugin, and must reach every project the same way CLAUDE.md's conduct rules
+// do — no per-project copy, no stamp-contract propagation.
+// FAILS LOUD, NEVER SILENTLY EMPTY (P5): a missing/unreadable/empty file
+// renders a one-line CONDUCTOR CONTRACT UNAVAILABLE notice instead of quietly
+// contributing nothing to the injection, which would look like "no posture to
+// state" rather than "the file could not be read".
+function conductorContractBlock() {
+  const root = pluginRoot();
+  if (!root) {
+    return 'CONDUCTOR CONTRACT UNAVAILABLE (H1): the Sterling plugin root could not be resolved, so docs/conductor-contract.md could not be read. The conductor has no posture contract this session.';
+  }
+  const contractPath = join(root, 'docs', 'conductor-contract.md');
+  try {
+    const text = readFileSync(contractPath, 'utf8');
+    if (!text.trim()) {
+      return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} exists but is empty. The conductor has no posture contract this session.`;
+    }
+    return text;
+  } catch (e) {
+    return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} could not be read (${e?.code ?? e?.message ?? e}). The conductor has no posture contract this session.`;
+  }
 }
 
 // swappable art slot (§6 H1): fixed-width ≤40 cols, fits the 35% split pane
@@ -293,6 +262,18 @@ function computeH1DeadDispatchResidue(cwd, source) {
 }
 
 const input = readStdin();
+
+// H10's missing-snapshot policy intentionally yields no git candidates. Seed
+// before startup/clear work begins, so only post-start edits reach first Stop.
+// The exclusive writer makes an existing (or racing) snapshot immutable here.
+if (input.source === 'startup' || input.source === 'clear') {
+  try {
+    const git = gitTouches(input.cwd, new Date().toISOString());
+    if (git.ok) writeInitialGitSettled(input.cwd, git.next);
+  } catch {
+    // Non-git projects and failed probes are silently skipped by design.
+  }
+}
 
 // CURRENT-SESSION MARKER. SessionStart is the ONE moment the platform hands
 // Sterling a session_id at a known point in a session's life. This latest-
@@ -1060,15 +1041,16 @@ await deleteRegisterUnderLock(input.cwd);
 // minimal-b-hash-list (78dc9bd6) and b-baseline-hash-list-concrete-design
 // (fe861066): the stamp/attestation apparatus is gone whole, so there is nothing
 // left at that path for H1 to reclaim.
-// NOT REPOINTED, AND THAT IS THE RULING, NOT AN OVERSIGHT (fe861066 D2). The
-// stamp's successor — the persistent (B) baseline hash list at
-// `.sterling/enforcement-baseline.json` — is deliberately NOT transient,
-// session-scoped state: cross-session (B) tamper detection is the one strict
-// improvement it buys, and a SessionStart that deleted (or rewrote) it would
-// bless whatever is on disk at session start and reproduce exactly the
-// session-bound coverage that made the stamp worthless. It is minted ONLY by the
-// conductor-gated clearer (scripts/enforcement-reconcile.mjs). H1 must never
-// touch it; pinned by scripts/tests/h1-session-residue.test.mjs.
+// UPDATED 2026-09-19 (scale-down, decision sterling-claude-code-scale-down-
+// boundary): the stamp's would-be successor — the persistent (B) baseline hash
+// list at `.sterling/enforcement-baseline.json` — and its ONLY writer,
+// `scripts/enforcement-reconcile.mjs`, are BOTH deleted whole (commit a83f5be,
+// "delete ... enforcement self-protection"). Nothing in this codebase mints,
+// reads or clears that path any more. H1 STILL never touches it if it happens
+// to exist on disk (a leftover from before this cut, or hand-planted) — not
+// because anything still depends on it, but because a SessionStart hook has no
+// business deleting a file it does not own the meaning of; pinned as a no-op
+// invariant by scripts/tests/h1-session-residue.test.mjs.
 
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
 // (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
@@ -1467,24 +1449,13 @@ try {
       `Run /sterling:sync-agents from this context, then restart. `;
     machineContext =
       `\n\nMACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` +
-      (dead.length
-        ? `${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on ` +
-          `this machine (${dead.map((d) => d.agent).join(', ')}). Every hook of those agents fails ` +
-          `non-blocking — the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. `
-        : '') +
-      (unknown.length
-        ? `${unknown.length} installed agent file(s) could not be checked, so their activation is UNKNOWN — ` +
-          `an unreadable file is not a healthy one, and one bad file no longer silences this guard:\n` +
-          unknown.join('\n') +
-          `\n`
-        : '') +
-      `Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context ` +
-      `(re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work ` +
-      `until scripts/check-agents-visible.mjs passes.`;
+      (dead.length ? `${dead.length} inactive (${dead.map((d) => d.agent).join(', ')}); ` : '') +
+      (unknown.length ? `${unknown.length} UNKNOWN (${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}). ` : '') +
+      `Hooks for inactive agents fail non-blocking. Run /sterling:sync-agents, restart, then pass scripts/check-agents-visible.mjs before dispatching.`;
   }
 } catch {
   // fail-open — never break SessionStart (P1); the check-agents-visible gate
-  // still blocks pipeline dispatch on the same condition. LAST RESORT only: the
+  // still blocks subagent dispatch on the same condition. LAST RESORT only: the
   // enumeration, every per-file read and every damaged header each carry their
   // own catch and each degrades LOUD, so nothing routine reaches here (02a1ed39).
 }
@@ -1579,6 +1550,7 @@ try {
     }
     const stale = [];
     const modified = [];
+    const refusedModified = [];
     for (const { file, content, header } of installed) {
       if (!templateFor) {
         unknown.push(`- ${file} — currency UNKNOWN: ${cloneProblem}`);
@@ -1626,30 +1598,33 @@ try {
         // that is ALSO behind is re-rendered when its body byte-matches the fresh
         // template (header_repaired) and refused otherwise. "sync REFUSES it" was
         // true of only one of those three outcomes.
-        modified.push(
-          templateCurrent
-            ? `- ${file} — locally MODIFIED: its body no longer matches its own header content_hash, so a hand edit is what governs dispatch here; sync records it as locally_modified_up_to_date and never refreshes it (re-apply the edit on a fresh install, or delete the file and re-install)`
-            : `- ${file} — locally MODIFIED and behind the clone template: sync re-renders it only if its body byte-matches the fresh template (header_repaired) and REFUSES otherwise (refused_local_modification), so it may never refresh on its own (re-apply your edits on the fresh template, or delete the file and re-install)`
-        );
+        (templateCurrent ? modified : refusedModified).push(file);
       } else {
         stale.push(`- ${file} — STALE: installed ${String(header.installedAt).slice(0, 10)}, the clone template has changed since (an unmodified install refreshes on sight)`);
       }
     }
-    if (stale.length || modified.length || unknown.length) {
+    if (stale.length || modified.length || refusedModified.length || unknown.length) {
       const inspected = installed.length + unreadableBeforeClassification;
       const parts = [
         stale.length ? `${stale.length} stale` : null,
-        modified.length ? `${modified.length} locally modified` : null,
+        modified.length ? `${modified.length} locally modified (current template)` : null,
+        refusedModified.length ? `${refusedModified.length} refused_local_modification (behind template)` : null,
         unknown.length ? `${unknown.length} of UNKNOWN currency` : null,
       ].filter(Boolean);
-      const named = [...stale, ...modified, ...unknown];
+      const named = [...stale, ...unknown];
+      const stateLines = [
+        stale.length ? `stale: ${stale.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}` : null,
+        modified.length ? `locally modified (current template): ${modified.join(', ')}` : null,
+        refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(', ')}` : null,
+        unknown.length ? `unknown: ${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}` : null,
+      ].filter(Boolean);
       agentCurrencyWarning =
         `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
         `run /sterling:sync-agents in this project, then restart. `;
       agentCurrencyContext =
-        `\n\nAGENT CURRENCY (H1, research_finding 0038af7c): of ${inspected} Sterling-generated agent file(s) in .claude/agents/, ${parts.join(', ')} against the clone's templates (${templatesDir ?? '(plugin root unresolved)'}).\n` +
-        named.join('\n') +
-        `\nThe agent sync only visits projects in the SHARED PROJECT REGISTRY, so a project the registry does not know is never refreshed however current the clone is. Run scripts/sync-agents.mjs --target ${input.cwd} from this context, tell the user a RESTART is required (project subagents load at session start), and check /sterling:projects — an absence there is the root cause, not a symptom.`;
+        `\n\nAGENT CURRENCY (H1, research_finding 0038af7c): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
+        stateLines.join('; ') +
+        `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
     }
   }
 } catch {
@@ -1698,31 +1673,22 @@ if (process.env.STERLING_NO_BANNER !== '1') {
   process.stderr.write(`${paint(BANNER_ROWS)}\n${versionLine}`);
 }
 
-// Concurrent-subagent ceiling (decision d7a0289f): read from config, never a
-// literal. Guarded like every other H1 config read — a malformed config
-// costs only this number, never the conventions injection (H1 is soft); the
-// fallback is the schema default (5), not a value invented here.
-let maxConcurrent = 5;
-try {
-  maxConcurrent = config?.delegation?.max_concurrent ?? 5;
-} catch {
-  maxConcurrent = 5;
-}
-
-// PAYLOAD TRIM ON /clear (board eeb8ee53): a rotation restore already sits in a
-// context that just read the whole committed CLAUDE.md to get at the note —
-// re-injecting the conventions block (which mirrors CLAUDE.md almost verbatim)
-// on EVERY /clear was ~70% duplicate payload in the one injection a fresh
-// session must read most carefully. A genuinely fresh start (source=startup)
-// has no committed-CLAUDE.md context to fall back on yet, so it keeps the full
-// conventions injection; only source=clear trims it. Everything else here
-// (machine role, sibling projects, the deep-queue banner, the rotation note
-// itself) are per-machine/per-session facts CLAUDE.md does not carry, so they
-// are unaffected. INTENTIONAL (reviewer F2 confirm): the trim keys on
-// source==='clear' alone, not on whether a rotation note is staged — a /clear
-// with NO note reloads the committed CLAUDE.md exactly the same way, so the
-// duplication this closes is present either way.
-const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurrent);
+// CONDUCTOR CONTRACT ON EVERY SOURCE (supersedes the old PAYLOAD TRIM ON
+// /clear, board eeb8ee53): the retired conventions block was trimmed on
+// source==='clear' because it was a ~70%-duplicate restatement of the
+// committed CLAUDE.md, which the platform reloads on /clear anyway. That
+// rationale does not carry over — docs/conductor-contract.md is a SEPARATE
+// file the platform never auto-loads; H1's read of it here is the ONLY way
+// the conductor's posture reaches context, on every source (startup, resume,
+// clear, compact) alike. Trimming it on clear would mean a freshly cleared
+// session runs with no delegation/review/capture posture until the next
+// SessionStart — the opposite of "H1 injects it once per session" (CLAUDE.md
+// line 3). No config read is needed here any more: the retired block's only
+// config-driven line (the live max_concurrent ceiling) is dropped along with
+// it — the contract is a static file and cannot embed a per-machine live
+// value without going stale; the ceiling stays readable from
+// .sterling/config.json directly (delegation.max_concurrent) or the TUI.
+const conventionsBlock = conductorContractBlock();
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,

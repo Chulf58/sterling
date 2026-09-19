@@ -286,7 +286,7 @@ test("PIN7: a todo's digest projection OMITS freshness; the full projection carr
 
     // CONTROL FIRST: the full projection actually carries the field — proves
     // the digest omission is a targeted strip, not "todos never had it".
-    const fullResult = tools.boardQueryResult({ source: 'user' } as unknown as Parameters<SterlingTools['boardQueryResult']>[0]) as unknown as {
+    const fullResult = tools.boardQueryResult({ source: 'user', projection: 'full' } as unknown as Parameters<SterlingTools['boardQueryResult']>[0]) as unknown as {
       records: Loose[];
     };
     const fullRec = fullResult.records.find((r) => r.id === record.id)!;

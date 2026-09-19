@@ -4,13 +4,15 @@
 // subcommand (no third-party wrapper — research_finding dadf858e) and, when present,
 // auto-wires it beside the existing `sterling` entry in .claude-plugin/sterling-mcp.json.
 //
-// PROBE: `codex` resolvable on PATH AND `codex login status` exiting 0. Any spawn
-// failure (binary absent, non-zero exit, timeout) is treated as ABSENT (P5 degraded-
+// PROBE: `codex` resolvable on PATH, `codex mcp-server --help` succeeding, AND
+// `codex login status` exiting 0. The help invocation verifies the exact subcommand
+// without starting an interactive session. Any spawn failure (binary absent, non-zero
+// exit, timeout) is treated as ABSENT (P5 degraded-
 // loud) — init reports a loud `codex mcp: skipped — <reason>` line and wires nothing,
 // never blocking the rest of init. The probe result is machine-truth: it belongs in the
 // gitignored generated .claude-plugin/sterling-mcp.json, never in committed config.
 //
-// Pure(ish) and side-effect-free beyond the one spawn: spawnFn/env are injectable so
+// Pure(ish) and side-effect-free beyond its short capability/login spawns: spawnFn/env are injectable so
 // tests can stub the codex binary via PATH or inject a canned spawn result, without
 // depending on the real machine's Codex install/login state.
 import { spawnSync } from 'node:child_process';
@@ -18,17 +20,33 @@ import { spawnSync } from 'node:child_process';
 const PROBE_TIMEOUT_MS = 5000;
 
 // probeResult.reason is a TERSE, machine-readable literal ('binary-absent' |
-// 'not-logged-in' | 'timeout') — codexSkipLine (below) is what turns it into an
+// 'mcp-server-missing' | 'not-logged-in' | 'timeout') — codexSkipLine (below) is what turns it into an
 // actionable message. This literal form is also what the STERLING_CODEX_PROBE
 // init.mjs seam produces when forcing an outcome, so real and forced probes
 // compose identically through withCodexEntry/codexSkipLine.
 export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, env = process.env } = {}) {
-  let result;
-  try {
-    result = spawnFn('codex', ['login', 'status'], { encoding: 'utf8', timeout: timeoutMs, env });
-  } catch {
-    result = null;
+  const run = (args) => {
+    try {
+      return spawnFn('codex', args, { encoding: 'utf8', timeout: timeoutMs, env });
+    } catch {
+      return null;
+    }
+  };
+  const versionResult = run(['--version']);
+  if (!versionResult) return { ok: false, reason: 'binary-absent' };
+  if (versionResult.signal || versionResult.error?.code === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
+  if ((versionResult.error && versionResult.status == null) || versionResult.status !== 0) return { ok: false, reason: 'binary-absent' };
+  const version = String(versionResult.stdout ?? '').match(/\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/)?.[0] ?? 'unknown version';
+  const capabilityResult = run(['mcp-server', '--help']);
+  if (!capabilityResult) return { ok: false, reason: 'binary-absent' };
+  if (capabilityResult.signal || capabilityResult.error?.code === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
+  if (capabilityResult.error && capabilityResult.status == null) return { ok: false, reason: 'binary-absent' };
+  const capabilityHelp = `${capabilityResult.stdout ?? ''}\n${capabilityResult.stderr ?? ''}`;
+  if (capabilityResult.status !== 0 || !/\bcodex\s+mcp-server\b/i.test(capabilityHelp)) {
+    return { ok: false, reason: 'mcp-server-missing', version };
   }
+  let result;
+  result = run(['login', 'status']);
   if (!result) {
     return { ok: false, reason: 'binary-absent' };
   }
@@ -40,7 +58,7 @@ export function probeCodex({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_MS, 
   }
   // spawnSync sets .error (e.g. ENOENT) rather than throwing when the binary
   // cannot be resolved on PATH — treat that, and any wrapper-thrown failure, as absent.
-  if (result.error) {
+  if (result.error && result.status == null) {
     return { ok: false, reason: 'binary-absent' };
   }
   if (result.status !== 0) {
@@ -92,12 +110,28 @@ export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_M
   if (!codexPath) {
     return { ok: false, reason: 'binary-absent' };
   }
-  let result;
-  try {
-    result = spawnFn(codexPath, ['login', 'status'], { encoding: 'utf8', timeout: timeoutMs, env });
-  } catch {
-    result = null;
+  const run = (args) => {
+    try {
+      return spawnFn(codexPath, args, { encoding: 'utf8', timeout: timeoutMs, env });
+    } catch {
+      return null;
+    }
+  };
+  const versionResult = run(['--version']);
+  if (!versionResult) return { ok: false, reason: 'binary-absent' };
+  if (versionResult.signal || versionResult.error?.code === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
+  if ((versionResult.error && versionResult.status == null) || versionResult.status !== 0) return { ok: false, reason: 'binary-absent' };
+  const version = String(versionResult.stdout ?? '').match(/\b\d+\.\d+\.\d+(?:[-+][\w.-]+)?\b/)?.[0] ?? 'unknown version';
+  const capabilityResult = run(['mcp-server', '--help']);
+  if (!capabilityResult) return { ok: false, reason: 'binary-absent' };
+  if (capabilityResult.signal || capabilityResult.error?.code === 'ETIMEDOUT') return { ok: false, reason: 'timeout' };
+  if (capabilityResult.error && capabilityResult.status == null) return { ok: false, reason: 'binary-absent' };
+  const capabilityHelp = `${capabilityResult.stdout ?? ''}\n${capabilityResult.stderr ?? ''}`;
+  if (capabilityResult.status !== 0 || !/\bcodex\s+mcp-server\b/i.test(capabilityHelp)) {
+    return { ok: false, reason: 'mcp-server-missing', version };
   }
+  let result;
+  result = run(['login', 'status']);
   if (!result) {
     return { ok: false, reason: 'binary-absent' };
   }
@@ -106,7 +140,7 @@ export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_M
   if (result.signal || result.error?.code === 'ETIMEDOUT') {
     return { ok: false, reason: 'timeout' };
   }
-  if (result.error) {
+  if (result.error && result.status == null) {
     return { ok: false, reason: 'binary-absent' };
   }
   if (result.status !== 0) {
@@ -159,8 +193,11 @@ const REASON_TEXT = {
 
 // The exact loud skip line init prints (P5 degraded-loud) — naming WHICH condition
 // failed (binary absent vs not logged in vs timeout).
-export function codexSkipLine(reason) {
-  return `codex mcp: skipped — ${REASON_TEXT[reason] ?? reason}`;
+export function codexSkipLine(reason, version) {
+  const text = reason === 'mcp-server-missing'
+    ? `Codex CLI ${version ?? 'unknown version'} does not support \`mcp-server\`; the supported route is a user-scope pinned Codex MCP server (such as Codex 0.153.4)`
+    : (REASON_TEXT[reason] ?? reason);
+  return `codex mcp: skipped — ${text}`;
 }
 
 // ---------------------------------------------------------------------------

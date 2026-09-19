@@ -1,7 +1,8 @@
-// Runtime visibility check (spec §12): blocks the first pipeline run until the
-// installed agent set is confirmed visible — every registered agent installed
-// and the current session started after the newest install (project subagents
-// load at session start).
+// Runtime visibility check: confirms the installed agent set is visible —
+// every registered agent installed and the current session started after the
+// newest install (project subagents load at session start). Nothing in the
+// current harness gates dispatch on this automatically; run this manually
+// after an install/sync to confirm before trusting a fresh session.
 //   node scripts/check-agents-visible.mjs --target <projectDir> --session-started <ISO>
 // Exit codes: 0 = visible; 2 = not visible (reasons listed, loud).
 import { fileURLToPath } from 'node:url';
@@ -37,7 +38,7 @@ if (visible) {
   console.log('agent set visible: ok');
   process.exit(0);
 }
-console.error('agent set NOT visible — pipeline runs are blocked:');
+console.error('agent set NOT visible:');
 for (const p of problems) console.error(`  ${p.name}: ${p.reason}${p.detail ? ` (${p.detail})` : ''}`);
 console.error('If reasons include restart_required, restart Claude Code in this project.');
 if (problems.some((p) => p.reason === 'hook_node_unresolvable')) {

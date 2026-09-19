@@ -28,7 +28,7 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
-import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
+import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -643,11 +643,18 @@ for (const a of agentReport) {
     locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
     refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
     foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },
+    retired: { status: 'retired', detail: 'removed a clean Sterling-generated agent no longer in the registry' },
+    retired_unrecognized: { status: 'refused', detail: 'Sterling-marked retired agent has an unrecognized header — left untouched (see guidance below)' },
+    retired_but_modified: { status: 'refused', detail: 'retired Sterling agent was locally modified — left untouched (see guidance below)' },
+    retired_identity_mismatch: { status: 'refused', detail: 'retired Sterling agent identity is ambiguous — left untouched (see guidance below)' },
+    retired_read_failed: { status: 'refused', detail: 'retired Sterling agent could not be read — left untouched (see guidance below)' },
+    retired_delete_failed: { status: 'refused', detail: 'retired Sterling agent could not be deleted (see guidance below)' },
+    retired_scan_failed: { status: 'refused', detail: 'agent directory could not be scanned for retired Sterling agents (see guidance below)' },
   }[a.status];
   items.push({ item: `.claude/agents/${a.name}.md`, status: map.status, detail: map.detail });
   if (a.instruction) agentInstructions.push(a.instruction);
 }
-const restartNeeded = agentReport.some((a) => a.status === 'installed' || a.status === 'refreshed');
+const restartNeeded = agentChangesRequireRestart(agentReport);
 
 // MCP packaging (decision 097851ed, refined): the Sterling MCP server is declared
 // ONCE as the PLUGIN's server — but NOT via a root .mcp.json. A root .mcp.json is
@@ -780,7 +787,7 @@ const codexIsThisRunsConcern = initIsPluginRepo || !pluginMcpExists || !existing
 const codexProbe = !codexIsThisRunsConcern
   ? undefined
   : (forcedCodexProbe ?? (process.platform === 'win32' ? probeCodexWin() : probeCodex()));
-if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason));
+if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason, codexProbe.version));
 const desired = {
   mcpServers: codexProbe
     ? withCodexEntry({ sterling: pluginMcpEntry }, codexProbe)
@@ -1005,7 +1012,7 @@ if (initIsPluginRepo) {
           : codexProbeWinOverride === 'not-logged-in'
             ? { ok: false, reason: 'not-logged-in' }
             : fail(`STERLING_CODEX_PROBE_WIN must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeWinOverride}')`, 2);
-    if (!codexProbeWin.ok) warns.push(codexSkipLine(codexProbeWin.reason));
+    if (!codexProbeWin.ok) warns.push(codexSkipLine(codexProbeWin.reason, codexProbeWin.version));
     const desiredWin = {
       mcpServers: withCodexEntry(
         { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } },

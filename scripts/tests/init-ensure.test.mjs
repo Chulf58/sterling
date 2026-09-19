@@ -578,7 +578,7 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.ok(config.models && config.models.librarian, 'init wrote config.models with a librarian entry');
 
-    for (const name of ['librarian.md', 'explorer.md']) {
+    for (const name of ['librarian.md', 'scout.md']) {
       const installed = readFileSync(join(dir, '.claude', 'agents', name), 'utf8');
       const fm = installed.match(/^---\n([\s\S]*?)\n---/)[1];
       assert.ok(!installed.includes('{{'), `${name}: no substitution token survives install`);

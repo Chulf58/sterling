@@ -34,9 +34,11 @@ const MODELS = Object.fromEntries(
 const CFG = { config: { models: MODELS }, models: MODELS };
 
 // The scale-down cut (decision sterling-claude-code-scale-down-boundary,
-// 2ad87dd1) deleted 8 pipeline/debugger templates; librarian, researcher, and
-// explorer are the only surviving agents.
-const ROSTER = ['librarian', 'researcher', 'explorer'];
+// 2ad87dd1) deleted 8 pipeline/debugger templates. Slice 5/8 (same decision,
+// change 3) then reshaped the survivors to OpenSterling's roster shape:
+// explorer -> scout, plus a new implementor. The roster is now
+// implementor/researcher/scout/librarian.
+const ROSTER = ['implementor', 'researcher', 'scout', 'librarian'];
 
 test('the §7.1 roster is registered, linter-complete, and spawn-contracted', () => {
   const registry = loadRegistry(join(TPL, 'registry.json'));
@@ -105,11 +107,11 @@ test('tool-grant linter: the shipped roster is clean, and it catches every failu
 test('templates render with install-time vars: model/effort resolved from config.models (§6)', () => {
   // NODE/HOOKS_DIR/GIT_RO hook-command substitution is untestable against a real
   // shipped template since the scale-down cut (decision
-  // sterling-claude-code-scale-down-boundary, 2ad87dd1): the 3 surviving templates
-  // (librarian, researcher, explorer) carry NO hooks: block and reference only
-  // {{MODEL}}/{{EFFORT}} — the old coder.md-pinned hook-command literal this test
-  // used to check died with coder.md. What survives to test here is the
-  // model/effort resolution path.
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1): the 4 surviving/added
+  // templates (implementor, researcher, scout, librarian) carry NO hooks: block
+  // and reference only {{MODEL}}/{{EFFORT}} — the old coder.md-pinned
+  // hook-command literal this test used to check died with coder.md. What
+  // survives to test here is the model/effort resolution path.
   const content = readFileSync(join(TPL, 'librarian.md'), 'utf8');
   const { installedContent } = renderInstalledAgent(content, 'librarian.md', { ...OPTS, ...CFG });
   assert.ok(!installedContent.includes('{{'), 'no tokens survive install (model/effort resolved)');
@@ -132,7 +134,7 @@ test('full roster installs end-to-end through the CLI with detected vars; model/
     assert.match(r.stdout, /RESTART REQUIRED/);
     const librarian = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8');
     assert.match(librarian, /sterling-generated v=/);
-    // No hooks: block survives in any of the 3 surviving templates (scale-down
+    // No hooks: block survives in any of the 4 shipped templates (scale-down
     // decision sterling-claude-code-scale-down-boundary, 2ad87dd1) — HOOKS_DIR/NODE
     // baking is no longer exercised by a real shipped template; see the render test
     // above for what still is (model/effort resolution).
@@ -148,8 +150,13 @@ test('skills ship with live file references and pass the skill linter', () => {
   const skills = collectSkills(join(root, 'skills'));
   assert.deepEqual(skills.map((s) => s.file).sort(), [
     'cleanup/SKILL.md',
+    'closing-out-tasks/SKILL.md',
     'debug/SKILL.md',
+    'decision-records/SKILL.md',
+    'delegating-to-subagents/SKILL.md',
+    'design-research/SKILL.md',
     'drain/SKILL.md',
+    'review-brief/SKILL.md',
   ]);
   for (const s of skills) assert.deepEqual(lintSkill(s.content, s.file, root), []);
   assert.ok(existsSync(join(root, 'skills', 'debug', 'SKILL.md')));

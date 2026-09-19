@@ -3,7 +3,7 @@
 // direction the reporter identified as the only one that stops the pattern
 // rather than catching it later, because the cost lands when a work order is
 // written FROM the stale header (a near-miss double-charged players per trade
-// signal; the safety net was a coder doubting its brief, not a mechanism).
+// signal; the safety net was an agent doubting its brief, not a mechanism).
 //
 // WHY NOT AN EXTENSION OF wiring-check.mjs, which the board item proposed:
 // runWiringCheck reaches the repo only through completeness-check.mjs, which

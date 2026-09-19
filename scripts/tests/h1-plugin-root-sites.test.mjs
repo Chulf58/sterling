@@ -146,13 +146,16 @@ function makePlantedMarkerRoot(base, name = 'planted-root') {
 // C3-control going red for the wrong reason, and C1 going green for the wrong
 // reason — a security pin that passes because the subject never ran).
 //
-// The marker is a fact MEASURED by a sibling file, not invented here:
-// h1-receipt-remedy-wording.test.mjs's own docstring (written against a real
-// red gate) states "H1's ordinary SessionStart banner ALREADY carries the
-// phrase 'by hand' in its delegation-conventions prose ('reading files by
-// hand', h1-session-start.mjs:89, coordinator-supplied)". That phrase is
-// present on EVERY ordinary SessionStart regardless of ledger/fixture
-// content, which is exactly the property a liveness check needs.
+// The marker MUST be present on EVERY ordinary SessionStart regardless of
+// fixture content, which is exactly the property a liveness check needs.
+// CHANGED 2026-09-19 (slice 3, conductor context diet): the original marker
+// was the phrase "reading files by hand", part of H1's hardcoded delegation-
+// conventions block. That block is deleted — H1 now injects
+// docs/conductor-contract.md verbatim from the clone, so the old phrase is
+// gone from ordinary output. "TDD posture:" replaces it: it is produced by a
+// separate, unconditional H1 section (config.tdd.enabled / .mutation_
+// verification.enabled) untouched by this slice, so it stays a liveness
+// signal independent of the contract's own wording.
 // =============================================================================
 
 test('LIVENESS CONTROL (must be GREEN before any other pin in this file is trusted): H1 produces its ordinary banner in this file\'s base fixture shape (a project with a real store, no env overrides)', () => {
@@ -166,8 +169,8 @@ test('LIVENESS CONTROL (must be GREEN before any other pin in this file is trust
     );
     assert.match(
       r.combined,
-      /reading files by hand/i,
-      `H1 never reached its ordinary delegation-conventions banner in this exact fixture shape — every pin below this one asserts something about that banner (or the surviving-receipt/currency/version/stale-server text alongside it) and would be vacuous until this is green. combined=${flat(r.combined)}`
+      /TDD posture:/,
+      `H1 never reached its ordinary banner in this exact fixture shape — every pin below this one asserts something about that banner (or the surviving-receipt/currency/version/stale-server text alongside it) and would be vacuous until this is green. combined=${flat(r.combined)}`
     );
   } finally {
     cleanup();
