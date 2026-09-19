@@ -6,8 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h15-store-guard.mjs
-import { existsSync as existsSync2, realpathSync as realpathSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2, sep as sep3 } from "node:path";
+import { basename, isAbsolute, resolve as resolve2, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -3662,23 +3661,23 @@ var ZodEffects = class extends ZodType {
     }
     if (effect.type === "transform") {
       if (ctx.common.async === false) {
-        const base2 = this._def.schema._parseSync({
+        const base3 = this._def.schema._parseSync({
           data: ctx.data,
           path: ctx.path,
           parent: ctx
         });
-        if (!isValid(base2))
+        if (!isValid(base3))
           return INVALID;
-        const result = effect.transform(base2.value, checkCtx);
+        const result = effect.transform(base3.value, checkCtx);
         if (result instanceof Promise) {
           throw new Error(`Asynchronous transform encountered during synchronous parse operation. Use .parseAsync instead.`);
         }
         return { status: status.value, value: result };
       } else {
-        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base2) => {
-          if (!isValid(base2))
+        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base3) => {
+          if (!isValid(base3))
             return INVALID;
-          return Promise.resolve(effect.transform(base2.value, checkCtx)).then((result) => ({
+          return Promise.resolve(effect.transform(base3.value, checkCtx)).then((result) => ({
             status: status.value,
             value: result
           }));
@@ -4273,20 +4272,20 @@ var featureArticleSchema = base.extend({
     ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
     ["current_ac", rec.current_ac, "real content (ac_id/text)"]
   ];
-  for (const [field, value, contentHint] of gated) {
+  for (const [field2, value, contentHint] of gated) {
     const exempt = isExempt(value);
     if (exempt && !exemptKind) {
       ctx.addIssue({
         code: external_exports.ZodIssueCode.custom,
-        path: [field],
-        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+        path: [field2],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field2} \u2014 only kind probe/tool may; other kinds must supply real content`
       });
     }
     if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
       ctx.addIssue({
         code: external_exports.ZodIssueCode.custom,
-        path: [field],
-        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+        path: [field2],
+        message: `${field2} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
       });
     }
   }
@@ -5228,9 +5227,6 @@ var configSchema = external_exports.object({
     stale_days: external_exports.number().int().positive().max(3650).optional()
   }).passthrough().optional()
 });
-function parseConfig(raw) {
-  return configSchema.parse(raw);
-}
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -5393,910 +5389,46 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   stderr: process.stderr,
   exit: (code) => process.exit(code)
 });
-function environmentDefectDenial(gateName, detail, opts = {}) {
-  const audienceAware = "agentId" in opts;
-  const { agentId, selfHeal } = opts;
-  const repair = "repair it (or restart the session) before proceeding";
-  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to \u2014 ${repair}.`;
-  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself \u2014 exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
-  let instruction;
-  if (selfHeal) {
-    const resolution = !audienceAware || agentId ? "exit `blocked` citing it." : noConductorAbove;
-    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
-  } else if (audienceAware && !agentId) {
-    instruction = `This is broken state, and ${noConductorAbove}`;
-  } else {
-    instruction = agentFacing;
-  }
-  return `\u26A0 ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
-}
-function loadConfig(cwd) {
-  const p = join(cwd, ".sterling", "config.json");
-  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
-}
-
-// scripts/lib/store-remediation.mjs
-var SANCTIONED_SCRIPTS = Object.freeze([
-  "scripts/dispose-run.mjs",
-  "scripts/init.mjs",
-  "scripts/consume-exit.mjs",
-  "scripts/architecture-projection.mjs",
-  "scripts/domain-doctor.mjs",
-  "scripts/commit-reviewed.mjs",
-  "scripts/migration-preflight.mjs",
-  "scripts/migrate-stores.mjs",
-  "packages/tui/bundle/sterling-tui.mjs",
-  // INDIVIDUAL DISPOSITION, not a bulk add (decision 1434cd54 Ruling 6 forbids
-  // bulk-adding the 12 unsanctioned store-writers; this one earned its own).
-  // Decision 57984926 (3) makes `scripts/review-ledger.mjs discharge` the ONE
-  // explicit route for a receipt that can never be spent, and H1's SessionStart
-  // report PRINTS that route. Without this entry H15 denies it, which is exactly
-  // the shape Ruling 2 names as its sharpest finding — "the sanctioned recovery
-  // route ... is UNREACHABLE BY ITS OPERATOR" — and what the consuming project
-  // reported on 2026-09-03. A remedy the guard denies is not a remedy.
-  // The verb is not a general store-write grant: discharge refuses without a
-  // selector, a matching SHA-256 ledger digest, a recognized class and a reason,
-  // and it can only supersede an entry that already exists.
-  "scripts/review-ledger.mjs",
-  // INDIVIDUAL DISPOSITION (decision 1434cd54 Ruling 1 called this a TEMPORARY
-  // machine-local workaround; Ruling 6 forbids bulk-adding the unsanctioned
-  // writers). Decision 665be1f3 states it outright: "the writer is a small
-  // sanctioned CLI (scripts/rotation-note.mjs, no-capture.mjs precedent)" — it
-  // was DESIGNED as sanctioned and never wired in. Board 77fe18af, slice 1b.
-  "scripts/rotation-note.mjs",
-  // INDIVIDUAL DISPOSITION (decision 1434cd54): H10's Stop message prints the
-  // exact `node scripts/no-capture.mjs ...` command line as the sanctioned
-  // route to discharge a capture duty; a denied printed remedy is not a
-  // remedy. Board 77fe18af, slice 1b.
-  "scripts/no-capture.mjs",
-  // INDIVIDUAL DISPOSITION (decision 1434cd54): H5's frozen-test-wall denial
-  // names `scripts/test-repair.mjs` as THE sanctioned route past the wall.
-  // Board 77fe18af, slice 1b.
-  "scripts/test-repair.mjs",
-  // INDIVIDUAL DISPOSITION (board a6b118e4 point 9): the layer-1 conformance
-  // audit (scripts/delivery-oracle.mjs) must be runnable by a Bash-gated
-  // agent, not only by hand. Rides slice 1b's commit cycle as a fourth
-  // disposition.
-  "scripts/delivery-oracle.mjs",
-  // INDIVIDUAL DISPOSITION (decision plan-lock-approved-plan-bound-at-exit-plan-
-  // mode-delivered-at-every-reentry): the manual plan-lock writer is the ONLY
-  // route to release a lock, to record an observed plan edit, or to bind a plan
-  // when ExitPlanMode could not — and H1's PLAN LOCK section PRINTS those verbs
-  // as the remedy. A printed remedy the guard denies is not a remedy.
-  "scripts/plan-lock.mjs"
-]);
-function appendMissingSanctioned(allowScripts2) {
-  if (!Array.isArray(allowScripts2)) {
-    throw new Error(
-      `appendMissingSanctioned: allow_scripts must be an array, got ${allowScripts2 === null ? "null" : typeof allowScripts2}`
-    );
-  }
-  const existing = allowScripts2;
-  const added = SANCTIONED_SCRIPTS.filter((s) => !existing.includes(s));
-  return { next: added.length ? [...existing, ...added] : existing, added };
-}
-
-// scripts/hooks/lib/plugin-root.mjs
-import { realpathSync, statSync } from "node:fs";
-import { join as join2, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-var realNative = realpathSync.native ?? realpathSync;
-var toPosix = (p) => String(p).split(sep).join("/");
-var ABSENT_CODES = /* @__PURE__ */ new Set(["ENOENT", "ENOTDIR"]);
-var PLUGIN_MARKERS = [
-  [".claude-plugin/plugin.json", (dir) => statSync(join2(dir, ".claude-plugin", "plugin.json")).isFile()],
-  ["hooks/", (dir) => statSync(join2(dir, "hooks")).isDirectory()],
-  ["hooks/hooks.json", (dir) => statSync(join2(dir, "hooks", "hooks.json")).isFile()]
-];
-function probePluginLayout(dir) {
-  for (const [name, probe] of PLUGIN_MARKERS) {
-    let ok = false;
-    let threw = null;
-    try {
-      ok = probe(dir);
-    } catch (e) {
-      ok = false;
-      threw = ABSENT_CODES.has(e && e.code) ? null : e;
-    }
-    if (!ok) return { ok: false, missing: name, unreadable: threw !== null, error: threw };
-  }
-  return { ok: true, missing: null, unreadable: false, error: null };
-}
-function pluginLayoutFailure(dir) {
-  const r = probePluginLayout(dir);
-  return r.ok ? null : r.missing;
-}
-var WALK_UP_LIMIT = 6;
-function resolveActivePluginRoot(moduleUrl, env = process.env) {
-  let dir;
-  try {
-    dir = fileURLToPath(new URL(".", moduleUrl));
-  } catch (e) {
-    return {
-      root: null,
-      source: "walk-up",
-      reason: `the running hook's own module URL could not be resolved to a path (${e && e.message || e}); no sanctioned-script exemption is available and the test seam is not consulted.`
-    };
-  }
-  let walkUpFailure;
-  {
-    let lastFailure = null;
-    for (let i = 0; i < WALK_UP_LIMIT; i++) {
-      const probe = probePluginLayout(dir);
-      if (probe.unreadable) {
-        return {
-          root: null,
-          source: "walk-up",
-          reason: `the plugin-layout marker ${probe.missing} at ${toPosix(dir)} could not be READ (${probe.error && probe.error.code || probe.error && probe.error.message || probe.error}); an unreadable marker on the running hook's own walk-up is a fault, not an absence, so no sanctioned-script exemption is available and the test seam is not consulted.`
-        };
-      }
-      const missing = probe.missing;
-      if (!missing) {
-        let canonical;
-        try {
-          canonical = realNative(dir);
-        } catch (e) {
-          return {
-            root: null,
-            source: "walk-up",
-            reason: `the active plugin root ${toPosix(dir)} could not be canonicalized (${e && e.code || e && e.message || e}); no sanctioned-script exemption is available.`
-          };
-        }
-        return { root: canonical, source: "walk-up", reason: `active plugin root ${toPosix(canonical)} (derived from the running hook's own location)` };
-      }
-      lastFailure = { dir, missing };
-      const parent = join2(dir, "..");
-      if (parent === dir) break;
-      dir = parent;
-    }
-    walkUpFailure = `no ancestor within ${WALK_UP_LIMIT} levels of the running hook's own location carries the plugin layout (nearest candidate ${toPosix(lastFailure?.dir ?? "")} is missing ${lastFailure?.missing ?? ".claude-plugin/plugin.json"})`;
-  }
-  const seam = typeof env?.STERLING_PLUGIN_ROOT === "string" ? env.STERLING_PLUGIN_ROOT.trim() : "";
-  if (seam !== "") {
-    const missing = pluginLayoutFailure(seam);
-    if (missing) {
-      return {
-        root: null,
-        source: "seam",
-        reason: `the active plugin root named by STERLING_PLUGIN_ROOT (${toPosix(seam)}) FAILED PLUGIN LAYOUT VALIDATION \u2014 the marker ${missing} is absent. A root whose layout cannot be validated is not trusted (the seam was consulted because ${walkUpFailure}), so no sanctioned-script exemption is available.`
-      };
-    }
-    let canonical;
-    try {
-      canonical = realNative(seam);
-    } catch (e) {
-      return {
-        root: null,
-        source: "seam",
-        reason: `the active plugin root named by STERLING_PLUGIN_ROOT (${toPosix(seam)}) could not be canonicalized (${e && e.code || e && e.message || e}); no sanctioned-script exemption is available.`
-      };
-    }
-    return {
-      root: canonical,
-      source: "seam",
-      reason: `active plugin root ${toPosix(canonical)} (STERLING_PLUGIN_ROOT test seam, layout-validated; consulted because ${walkUpFailure})`
-    };
-  }
-  return {
-    root: null,
-    source: "walk-up",
-    reason: `no ACTIVE PLUGIN ROOT could be derived from the running hook's own location \u2014 ${walkUpFailure}. An unresolvable plugin root WITHHOLDS every sanctioned-script exemption rather than granting one.`
-  };
-}
-
-// scripts/hooks/lib/sanctioned-provenance.mjs
-import { realpathSync as realpathSync2, statSync as statSync2 } from "node:fs";
-import { isAbsolute, relative, sep as sep2 } from "node:path";
-var realNative2 = realpathSync2.native ?? realpathSync2;
-var toPosix2 = (p) => String(p).split(sep2).join("/");
-var WORD_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
-var WIN32_DRIVE_WORD_SYNTAX = /^[A-Za-z]:\/[A-Za-z0-9_./+-]+$/;
-function wordSyntaxAdmits(word, platform = process.platform) {
-  if (typeof word !== "string") return false;
-  if (WORD_SYNTAX.test(word)) return true;
-  if (platform === "win32" && WIN32_DRIVE_WORD_SYNTAX.test(word)) return true;
-  return false;
-}
-function sanctionedProvenance(word, entries, opts) {
-  const pluginRoot = opts?.pluginRoot ?? { root: null, reason: "no plugin root was supplied to the provenance check" };
-  const cwd = opts?.cwd;
-  const entrySet = Array.isArray(entries) ? entries : [];
-  const named = `compared against the sanctioned entry set [${entrySet.join(", ")}]`;
-  if (typeof word !== "string" || word === "") {
-    return { allow: false, candidate: null, reason: "no executable candidate could be read from the fragment; no exemption." };
-  }
-  if (!pluginRoot.root) {
-    return { allow: false, candidate: null, reason: pluginRoot.reason };
-  }
-  if (!wordSyntaxAdmits(word)) {
-    return {
-      allow: false,
-      candidate: null,
-      reason: `the executable candidate ${JSON.stringify(word)} is outside the sanctionable word syntax (letters, digits and _ . / + - only, plus a win32 forward-slash drive-absolute form on win32 \u2014 no backslash, ~, $, backtick or glob; a colon only in the win32 forward-slash drive form). Not sanctioned.`
-    };
-  }
-  if (typeof cwd !== "string" || cwd === "") {
-    return { allow: false, candidate: null, reason: "the project cwd is unknown, so a relative candidate cannot be resolved the way the shell would resolve it; no exemption." };
-  }
-  const rawCandidate = isAbsolute(word) ? word : `${String(cwd).replace(/[\\/]+$/, "")}${sep2}${word}`;
-  let canonicalCandidate;
-  try {
-    canonicalCandidate = realNative2(rawCandidate);
-  } catch (e) {
-    return {
-      allow: false,
-      candidate: null,
-      reason: `the executable candidate ${JSON.stringify(word)} (resolved from the project cwd as ${toPosix2(rawCandidate)}) could not be canonicalized (${e && e.code || e && e.message || e}) \u2014 it does not exist, or it is a dangling symlink. A candidate that cannot be resolved to a regular file inside the active plugin root is DENIED; there is no bare-name fallback.`
-    };
-  }
-  let stat;
-  try {
-    stat = statSync2(canonicalCandidate);
-  } catch (e) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which could not be stat'd (${e && e.code || e && e.message || e}). Not sanctioned.`
-    };
-  }
-  if (!stat.isFile()) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which is NOT A REGULAR FILE (${stat.isDirectory() ? "directory" : "special file"}). A sanctioned entry names a shipped script; not sanctioned.`
-    };
-  }
-  const rel = relative(pluginRoot.root, canonicalCandidate);
-  const escapes = rel === "" || rel === ".." || rel.startsWith(`..${sep2}`) || rel.startsWith("../") || isAbsolute(rel);
-  if (escapes) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which is OUTSIDE the active plugin root ${toPosix2(pluginRoot.root)}. Provenance binds the FILE, not the spelling: a project-local file matching a sanctioned NAME is a different file from the shipped one. Not sanctioned.`
-    };
-  }
-  const relPosix = toPosix2(rel);
-  const matched = entrySet.some((entry) => {
-    const e = typeof entry === "string" ? entry.startsWith("./") ? entry.slice(2) : entry : null;
-    return e !== null && relPosix === e;
-  });
-  if (!matched) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)} \u2014 a real file inside the active plugin root ${toPosix2(pluginRoot.root)}, at clone-relative path ${relPosix}, which is not ${named}. Not sanctioned.`
-    };
-  }
-  return {
-    allow: true,
-    candidate: canonicalCandidate,
-    reason: `sanctioned: ${toPosix2(canonicalCandidate)} is the shipped ${relPosix} inside the active plugin root ${toPosix2(pluginRoot.root)}.`
-  };
-}
 
 // scripts/hooks/h15-store-guard.mjs
+var DB_FILE_RE = /^sterling\.db(?:-wal|-shm|-journal|\..+)?$/i;
+var DB_REDIRECT_RE = /\d?>{1,2}\s*["']?[^\s"'|;&<>]*sterling\.db/i;
+var DB_DESTRUCTIVE_VERB_RE = /(?:^|[;&|(]\s*)(?:sudo\s+)?(?:rm|rmdir|unlink|mv|cp|dd|truncate|shred|sqlite3|tee|del|erase|move|copy|ri|rd|Remove-Item|Move-Item|Copy-Item|Rename-Item|Set-Content|Add-Content|Out-File|Clear-Content|New-Item)\b[^;&|]*sterling\.db/i;
+var DB_INPLACE_RE = /(?:^|[;&|(]\s*)(?:sudo\s+)?(?:sed|perl)\s+(?:-\S*\s+)*-\S*i\S*\s+[^;&|]*sterling\.db/i;
 var input;
 try {
   input = readStdin();
 } catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `[stdin] hook input could not be read or parsed (${e && e.message || e}) \u2014 a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the command would be ALLOWED unexamined). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise:`,
-      { agentId: void 0 }
-    )
-  );
+  deny(`H15: hook input could not be read (${e && e.message || e}) \u2014 a gate that cannot read its input fails closed (P5).`);
 }
-var inSterlingProject;
-try {
-  inSterlingProject = Boolean(input.cwd) && existsSync2(join3(input.cwd, ".sterling"));
-} catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `[cwd] the hook input's cwd could not be resolved to a project path (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
-      // OPTIONAL CHAIN, not decoration: a fail-closed HANDLER that can itself
-      // throw exits non-2 and voids the gate (the F5 class this file exists to
-      // avoid). MEASURED 2026-08-27: no reachable input lands here with a
-      // non-object `input` — stdin `null` throws inside readStdin's own
-      // `projectRoot(input.cwd)` and is caught above, and a primitive/array
-      // input yields `undefined` cwd, which takes the not-a-Sterling-project
-      // allow branch without ever throwing. So this is belt-and-braces on an
-      // unreachable path, kept because the cost is one character and the
-      // failure mode it forecloses is a silently voided blocking gate.
-      { agentId: input?.agent_id }
-    )
-  );
+function namesStoreComponent(absPath) {
+  const win32 = sep === "\\";
+  return absPath.split(win32 ? /[\\/]+/ : /\/+/).some((c) => (win32 ? c.replace(/[. ]+$/, "") : c).toLowerCase() === ".sterling");
 }
-function structuredWriteDestinationField(toolName) {
-  switch (toolName) {
-    case "Edit":
-    case "Write":
-    case "MultiEdit":
-      return "file_path";
-    case "NotebookEdit":
-      return "notebook_path";
-    default:
-      return null;
-  }
-}
-function isCommandChannelTool(toolName) {
-  return toolName === "Bash" || toolName === "PowerShell";
-}
-function namesStoreComponent(normalizedAbs) {
-  const win32 = sep3 === "\\";
-  const components = normalizedAbs.split(win32 ? /[\\/]+/ : /\/+/);
-  return components.some(
-    (component) => (win32 ? component.replace(/[. ]+$/, "") : component).toLowerCase() === ".sterling"
-  );
-}
-function pathIsInside(parentAbs, childAbs) {
-  const rel = relative2(parentAbs, childAbs);
-  if (rel === "") return true;
-  if (isAbsolute2(rel)) return false;
-  return rel !== ".." && !rel.startsWith(".." + sep3);
-}
-function pathIsInsideEitherCase(parentAbs, childAbs) {
-  if (pathIsInside(parentAbs, childAbs)) return true;
-  return pathIsInside(parentAbs.toLowerCase(), childAbs.toLowerCase());
-}
-function ancestorExists(p) {
-  try {
-    statSync3(p);
-    return true;
-  } catch (e) {
-    const code = e && e.code || "UNKNOWN";
-    if (code === "ENOENT" || code === "ENOTDIR") return false;
-    throw new Error(
-      `[canonical-layer] the path component ${p} could not be examined (${code}); an unreadable component is not an absent one \u2014 a same-user writer may still traverse it (Windows ACLs, some SMB/drop-box shares), so walking past it could resolve the wrong ancestor and miss a symlink into the store`
+var tool = input.tool_name;
+if (tool === "Bash" || tool === "PowerShell") {
+  const command = String(input.tool_input?.command ?? "");
+  if (DB_REDIRECT_RE.test(command) || DB_DESTRUCTIVE_VERB_RE.test(command) || DB_INPLACE_RE.test(command)) {
+    deny(
+      "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db), which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
     );
   }
+  allow();
 }
-function canonicalViaNearestAncestor(absPath) {
-  let anchor = absPath;
-  while (!ancestorExists(anchor)) {
-    const parent = dirname2(anchor);
-    if (parent === anchor) return null;
-    anchor = parent;
-  }
-  const suffix = relative2(anchor, absPath);
-  const real = realpathSync3(anchor);
-  return suffix === "" ? real : join3(real, suffix);
+var field = tool === "NotebookEdit" ? "notebook_path" : tool === "Edit" || tool === "Write" || tool === "MultiEdit" ? "file_path" : null;
+if (field === null) allow();
+var submitted = input.tool_input?.[field];
+if (typeof submitted !== "string" || submitted.trim() === "") {
+  deny(`H15: this ${tool} call carries no usable tool_input.${field}, so the store database cannot be shown untouched \u2014 re-issue with an explicit path.`);
 }
-function storeDestinationDenial(toolName, field, submitted, evidence) {
-  return `H15: this ${toolName} call targets a Sterling store and is denied \u2014 a store is read and written through the \xA710 MCP tool surface ONLY, never by a direct file edit.
-Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${evidence}.
-THE DESTINATION DECIDES, NOT THE CALLER'S CWD: every \`.sterling\` directory this call can name is protected, whichever project owns it. A session launched in another project (or with any other cwd) could otherwise write a different checkout's review-ledger.json \u2014 the file the merge gate reads to refuse unreviewed commits \u2014 its enforcement-baseline.json, or its config.json. That was a CONFIRMED bypass, reproduced by execution 2026-09-06.
-PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination's path COMPONENTS under the HOST's name rules (case-folded, and on Windows with each component's trailing dots and spaces dropped, since Win32 opens \`.sterling.\` and \`.sterling \` as the real directory), never by a per-file allowlist and never by a string prefix.
-NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-REMEDY for config.json specifically: use the config_set MCP tool (an allowlisted, schema-validated key write) or the TUI System tab \u2014 never a raw edit of the file. CONDUCTOR-RUN: config_set is not granted to roster agents by design, so a subagent hitting this denial has no config_set of its own to fall back on \u2014 surface the need to the conductor instead.
-WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only \u2014 a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project's store is not covered, deliberately.
-If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`;
+var base2 = typeof input.cwd === "string" ? input.cwd : "";
+if (!isAbsolute(submitted) && base2 === "") {
+  deny(`H15: '${submitted}' is a relative path and this call carries no cwd to resolve it against, so the store database cannot be shown untouched.`);
 }
-function unusableDestinationDenial(toolName, field, submitted) {
-  const seen = submitted === void 0 ? "absent" : submitted === null ? "null" : typeof submitted === "string" ? "an empty/whitespace-only string" : Array.isArray(submitted) ? "a value of type 'array'" : `a value of type '${typeof submitted}'`;
-  return `H15: this ${toolName} call carries no usable destination path, so it is denied.
-Required field: tool_input.${field} \u2014 received: ${seen}.
-The TYPE is checked before any path helper on purpose: a String() coercion would launder an array or an object into a plausible-looking path, and this gate would then decide containment on the laundered value.
-Without a destination H15 cannot establish that the Sterling store (.sterling/) is untouched, and a gate that cannot decide fails CLOSED (P5).
-Re-issue the call with an explicit path. If the tool genuinely sends its destination under another field, that is a platform change and it must be added to this gate \u2014 never worked around.`;
-}
-function undecidableDestinationDenial(toolName, field, submitted, reason) {
-  return `H15: the destination of this ${toolName} call could not be resolved, so it is denied.
-Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${reason}.
-A containment question this gate cannot answer is answered CLOSED (P5): H15 cannot establish that the Sterling store (.sterling/) is untouched, and answering "outside" on an unresolvable path is how a guard is walked past.`;
-}
-function unrecognizedToolDenial(toolName) {
-  return `H15: this call names a tool H15 does not recognize (${JSON.stringify(toolName)}), so it is denied.
-H15 judges exactly two channels: the shell channel (Bash, PowerShell), whose destination lives in the command text, and the structured-write channel (Edit, Write, MultiEdit, NotebookEdit), whose destination is an explicit tool_input field. A tool outside both has no known destination field, so this gate cannot establish that the Sterling store (.sterling/) is untouched \u2014 and a gate that cannot decide fails CLOSED (P5).
-No such call is agent-reachable today \u2014 hooks/hooks.json routes only those six names here \u2014 so this branch is DEFENCE IN DEPTH against a platform RENAME silently retiring the whole arm, not a demonstrated exploit.
-If a platform change renamed or added a writing tool, ADD IT TO THIS GATE (structuredWriteDestinationField, or isCommandChannelTool for a new shell) \u2014 never route the write around the gate, and never widen hooks/hooks.json without widening this file.`;
-}
-try {
-  const destinationField = structuredWriteDestinationField(input.tool_name);
-  if (destinationField === null) {
-    if (!isCommandChannelTool(input.tool_name)) deny(unrecognizedToolDenial(input.tool_name));
-  } else {
-    const submitted = input.tool_input?.[destinationField];
-    if (typeof submitted !== "string" || submitted.trim() === "") {
-      deny(unusableDestinationDenial(input.tool_name, destinationField, submitted));
-    }
-    const base2 = typeof input.cwd === "string" ? input.cwd : "";
-    if (!isAbsolute2(submitted) && base2 === "") {
-      deny(
-        undecidableDestinationDenial(
-          input.tool_name,
-          destinationField,
-          submitted,
-          "it is a relative path and this call carries no usable cwd to resolve it against"
-        )
-      );
-    }
-    const destination = isAbsolute2(submitted) ? resolve2(submitted) : resolve2(base2, submitted);
-    if (namesStoreComponent(destination)) {
-      deny(
-        storeDestinationDenial(
-          input.tool_name,
-          destinationField,
-          submitted,
-          `it resolves to ${destination}, which carries a '.sterling' directory component (compared under the host's name rules: case-folded, and on win32 with each component's trailing dots and spaces dropped)`
-        )
-      );
-    }
-    if (inSterlingProject && pathIsInsideEitherCase(base2, destination)) {
-      const canonical = canonicalViaNearestAncestor(destination);
-      if (canonical === null) {
-        deny(
-          undecidableDestinationDenial(
-            input.tool_name,
-            destinationField,
-            submitted,
-            `no existing ancestor of ${destination} could be resolved, so a symlink leading into the store cannot be ruled out`
-          )
-        );
-      }
-      if (namesStoreComponent(canonical)) {
-        deny(
-          storeDestinationDenial(
-            input.tool_name,
-            destinationField,
-            submitted,
-            `it canonicalizes, via its nearest existing ancestor, to ${canonical}, which carries a '.sterling' directory component \u2014 the submitted spelling reaches the store through a symlink`
-          )
-        );
-      }
-    }
-    allow();
-  }
-} catch (e) {
+var destination = isAbsolute(submitted) ? resolve2(submitted) : resolve2(base2, submitted);
+if (namesStoreComponent(destination) && DB_FILE_RE.test(basename(destination))) {
   deny(
-    `\u26A0 ENVIRONMENT DEFECT (H15): this denial is about BROKEN STATE, not your conduct. [structured-write] the store-destination check for this tool call could not be completed (${e && e.message || e}); the gate fails CLOSED rather than risk a silent void (P5). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise this is broken state, and there is no conductor above you to exit \`blocked\` to \u2014 repair it (or restart the session) before proceeding.`
+    `H15: this ${tool} call targets the Sterling store database (${destination}), which only the Sterling MCP server writes \u2014 use the knowledge_* / board_* tools. Every other file under .sterling/ (config.json, transient/*) may be edited directly.`
   );
 }
-if (!inSterlingProject) allow();
-var command = String(input.tool_input?.command ?? "");
-var STORE_MENTION_RE = /\.sterling(?![\w.-])|sterling\.db/i;
-var DB_MENTION_RE = /sterling\.db/i;
-var mentionsStore;
-try {
-  mentionsStore = STORE_MENTION_RE.test(command) || STORE_MENTION_RE.test(unquotedText(command));
-} catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `Internal error while preprocessing the command text for the store-mention check (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input?.agent_id }
-      // same handler-cannot-throw rule as the [cwd] catch above
-    )
-  );
-}
-if (!mentionsStore) allow();
-var allowScripts;
-try {
-  const raw = loadConfig(input.cwd) ?? {};
-  const declared = raw?.store_guard?.allow_scripts;
-  const configured = parseConfig(raw).store_guard.allow_scripts;
-  allowScripts = Array.isArray(declared) && declared.length === 0 ? [] : appendMissingSanctioned(configured).next;
-} catch (e) {
-  deny(
-    environmentDefectDenial("H15", `Store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {
-      agentId: input?.agent_id
-      // same handler-cannot-throw rule as the [cwd] catch above
-    })
-  );
-}
-function splitFragments(cmd) {
-  const parts = [];
-  let current = "";
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < cmd.length; i++) {
-    const c = cmd[i];
-    if (inSingle) {
-      current += c;
-      if (c === "'") inSingle = false;
-      continue;
-    }
-    if (inDouble) {
-      current += c;
-      if (c === '"' && cmd[i - 1] !== "\\") inDouble = false;
-      continue;
-    }
-    if (c === "'") {
-      inSingle = true;
-      current += c;
-      continue;
-    }
-    if (c === '"') {
-      inDouble = true;
-      current += c;
-      continue;
-    }
-    if (c === "<" && cmd[i + 1] === "<") {
-      const m = cmd.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
-      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
-      if (delim) {
-        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const rest = cmd.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
-        const span = end ? end.index + end[0].length : rest.length;
-        current += rest.slice(0, span);
-        i += span - 1;
-        continue;
-      }
-    }
-    if (c === "\n" || c === "\r") {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    if (c === "&" && cmd[i + 1] === "&") {
-      parts.push(current);
-      current = "";
-      i++;
-      continue;
-    }
-    if (c === "&") {
-      const prevChar = current.length ? current[current.length - 1] : "";
-      if (cmd[i + 1] === ">" || prevChar === ">") {
-        current += c;
-        continue;
-      }
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    if (c === "|" && cmd[i + 1] === "|") {
-      parts.push(current);
-      current = "";
-      i++;
-      continue;
-    }
-    if (c === ";" || c === "|") {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += c;
-  }
-  parts.push(current);
-  return parts.map((p) => p.trim()).filter(Boolean);
-}
-var READONLY_VERBS = /* @__PURE__ */ new Set([
-  "grep",
-  "egrep",
-  "fgrep",
-  "zgrep",
-  "rgrep",
-  "ls",
-  "cat",
-  "head",
-  "tail",
-  "wc",
-  "diff",
-  "file",
-  "stat",
-  "less",
-  "more",
-  "tree",
-  "du",
-  "od",
-  "xxd",
-  "hexdump"
-]);
-var GIT_READONLY_SUBVERBS = /* @__PURE__ */ new Set([
-  "log",
-  "show",
-  "diff",
-  "grep",
-  "ls-files",
-  "branch",
-  "cat-file",
-  "status",
-  "rev-parse"
-]);
-var GIT_WRITE_SUBVERBS = /* @__PURE__ */ new Set(["checkout", "restore", "clean", "rm", "stash", "mv"]);
-var GIT_GLOBAL_VALUE_FLAGS = /* @__PURE__ */ new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
-var GIT_GLOBAL_BARE_FLAGS = /* @__PURE__ */ new Set(["--no-pager", "-p", "-P", "--paginate", "--no-optional-locks"]);
-function skipGitGlobalFlags(argsText) {
-  let s = argsText;
-  let flaggedStoreValue = null;
-  for (; ; ) {
-    const m = s.match(/^\s*(\S+)/);
-    if (!m) break;
-    const token = m[1];
-    const eq = token.indexOf("=");
-    const flagName = eq >= 0 ? token.slice(0, eq) : token;
-    if (GIT_GLOBAL_VALUE_FLAGS.has(flagName)) {
-      s = s.slice(m[0].length);
-      let value;
-      if (eq >= 0) {
-        value = token.slice(eq + 1);
-      } else {
-        const v = s.match(/^\s*(\S+)/);
-        value = v ? v[1] : "";
-        if (v) s = s.slice(v[0].length);
-      }
-      if (!flaggedStoreValue && STORE_MENTION_RE.test(value)) flaggedStoreValue = value;
-      continue;
-    }
-    if (GIT_GLOBAL_BARE_FLAGS.has(flagName)) {
-      s = s.slice(m[0].length);
-      continue;
-    }
-    break;
-  }
-  return { rest: s, flaggedStoreValue };
-}
-function classifyGit(trimmed) {
-  const m = trimmed.match(/^git\s+(.*)$/i);
-  const { rest, flaggedStoreValue } = m ? skipGitGlobalFlags(m[1]) : { rest: "", flaggedStoreValue: null };
-  if (flaggedStoreValue) return true;
-  const sm = rest.match(/^\s*(\S+)/);
-  const subverb = sm ? sm[1].toLowerCase() : "";
-  if (GIT_READONLY_SUBVERBS.has(subverb)) return false;
-  if (GIT_WRITE_SUBVERBS.has(subverb)) return true;
-  return STORE_MENTION_RE.test(unquotedText(trimmed));
-}
-var FIND_MUTATING_FLAGS_RE = /(^|\s)-(delete|fdelete|execdir|exec|ok)\b/;
-function classifyFind(trimmed) {
-  return FIND_MUTATING_FLAGS_RE.test(trimmed);
-}
-function firstWord(fragment) {
-  const m = fragment.match(/^\s*(\S+)/);
-  return m ? m[1].toLowerCase() : "";
-}
-function unquotedText(str) {
-  let out = "";
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < str.length; i++) {
-    const c = str[i];
-    if (inSingle) {
-      if (c === "'") inSingle = false;
-      continue;
-    }
-    if (inDouble) {
-      if (c === '"' && str[i - 1] !== "\\") inDouble = false;
-      continue;
-    }
-    if (c === "'") {
-      inSingle = true;
-      continue;
-    }
-    if (c === '"') {
-      inDouble = true;
-      continue;
-    }
-    if (c === "<" && str[i + 1] === "<") {
-      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
-      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
-      if (delim) {
-        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const rest = str.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
-        const span = end ? end.index + end[0].length : rest.length;
-        i += span - 1;
-        continue;
-      }
-    }
-    out += c;
-  }
-  return out;
-}
-function executableWords(str) {
-  const words = [];
-  let current = "";
-  let started = false;
-  let inSingle = false;
-  let inDouble = false;
-  const push = () => {
-    if (started) {
-      words.push(current);
-      current = "";
-      started = false;
-    }
-  };
-  for (let i = 0; i < str.length; i++) {
-    const c = str[i];
-    if (inSingle) {
-      if (c === "'") inSingle = false;
-      else current += c;
-      continue;
-    }
-    if (inDouble) {
-      if (c === '"' && str[i - 1] !== "\\") inDouble = false;
-      else current += c;
-      continue;
-    }
-    if (c === "'") {
-      inSingle = true;
-      started = true;
-      continue;
-    }
-    if (c === '"') {
-      inDouble = true;
-      started = true;
-      continue;
-    }
-    if (c === "<" && str[i + 1] === "<") {
-      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
-      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
-      if (delim) {
-        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const rest = str.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
-        const span = end ? end.index + end[0].length : rest.length;
-        i += span - 1;
-        push();
-        continue;
-      }
-    }
-    if (/\s/.test(c)) {
-      push();
-      continue;
-    }
-    if (c === "#" && !started) break;
-    started = true;
-    current += c;
-  }
-  push();
-  return words;
-}
-var INTERPRETER_WORDS = /* @__PURE__ */ new Set(["node", "nodejs", "bash", "sh", "zsh", "python", "python3"]);
-function fragmentExecutableCandidate(fragment) {
-  const words = executableWords(fragment);
-  if (!words.length) return { word: null, viaInterpreter: false, interpreterOption: null };
-  if (!INTERPRETER_WORDS.has(words[0])) return { word: words[0], viaInterpreter: false, interpreterOption: null };
-  if (words.length < 2) return { word: null, viaInterpreter: true, interpreterOption: null };
-  if (words[1].startsWith("-") || words[1].startsWith("+")) {
-    const later = words.slice(2).find((w) => !w.startsWith("-") && !w.startsWith("+")) ?? null;
-    return { word: later, viaInterpreter: true, interpreterOption: words[1] };
-  }
-  return { word: words[1], viaInterpreter: true, interpreterOption: null };
-}
-function fragmentIsSafePredecessor(fragment) {
-  const SAFE_PREDECESSOR_WORDS = /* @__PURE__ */ new Set(["echo", "true", ":", "pwd"]);
-  const words = executableWords(fragment);
-  if (!words.length) return true;
-  if (!SAFE_PREDECESSOR_WORDS.has(words[0])) return false;
-  return !/[$`<>]/.test(String(fragment));
-}
-function fragmentSanctionedProvenance(fragment, entries, ctx) {
-  const { word, viaInterpreter, interpreterOption } = fragmentExecutableCandidate(fragment);
-  if (ctx?.unsafePredecessor) {
-    return {
-      allow: false,
-      word,
-      viaInterpreter,
-      detail: {
-        allow: false,
-        candidate: null,
-        reason: `an EARLIER fragment of this command (${JSON.stringify(ctx.unsafePredecessor)}) is not on the known-safe predecessor list (a literal echo, true, :, pwd \u2014 no expansion \u2014 or a sanctioned invocation), so the interpreter's environment and cwd can no longer be assumed to be the ones the platform launched \u2014 an exported NODE_OPTIONS/BASH_ENV/PYTHONPATH makes the interpreter load code before the script it was handed, a \`cd\` moves what a relative path names, and a function definition can shadow the interpreter word itself (decision 95c2c109 F1, Codex rounds 2-3). Run the sanctioned script on its own command line.`
-      }
-    };
-  }
-  if (interpreterOption !== null) {
-    return {
-      allow: false,
-      word: word ?? interpreterOption,
-      viaInterpreter,
-      detail: {
-        allow: false,
-        candidate: null,
-        reason: `the fragment carries the interpreter option ${interpreterOption} between the interpreter and the script, so it is not a plain \`<interpreter> <script> <args>\` run and NO sanctioned-script exemption is available \u2014 an interpreter option can load or evaluate code (node -r/--import/-e, bash -c/-s, python -c/-m/-, \u2026), so the first non-option word (${word ?? "none"}) is not necessarily the file that executes (decision 95c2c109 F1). Run the sanctioned script plainly, options AFTER the script path belong to the script and are fine.`
-      }
-    };
-  }
-  if (word === null) {
-    return { allow: false, word: null, viaInterpreter, detail: null };
-  }
-  const detail = sanctionedProvenance(word, entries, ctx);
-  return { allow: detail.allow, word, viaInterpreter, detail };
-}
-var PLAIN_WORD_RE = /^[A-Za-z0-9_./~+-]+$/;
-function redirectsIntoStore(str) {
-  const text = unquotedText(str);
-  const RE = /(?:[0-9]+|&)?(>>|>)(\s*)(\S+)?/g;
-  let m;
-  while (m = RE.exec(text)) {
-    const target = m[3];
-    if (target === void 0) return true;
-    if (/^&[0-9]+$/.test(target)) continue;
-    if (!PLAIN_WORD_RE.test(target)) return true;
-    if (STORE_MENTION_RE.test(target)) return true;
-  }
-  return false;
-}
-function sanctionedFragmentHasShellRider(fragment) {
-  return redirectsIntoStore(fragment) || /(?:\$\(|`|[<>]\()/.test(fragment);
-}
-function classifyFragment(fragment) {
-  const trimmed = fragment.trim();
-  if (!trimmed || !STORE_MENTION_RE.test(trimmed) && !STORE_MENTION_RE.test(unquotedText(trimmed))) {
-    return { write: false, fragment: trimmed };
-  }
-  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed, dbSeal: true };
-  if (redirectsIntoStore(trimmed)) return { write: true, fragment: trimmed };
-  const verb = firstWord(trimmed);
-  if (verb === "sed") {
-    if (/(^|\s)-\w*i\w*(\s|=|$)/.test(trimmed) || /(^|\s)--in-place(=\S*)?(\s|$)/.test(trimmed)) {
-      return { write: true, fragment: trimmed };
-    }
-    return { write: false, fragment: trimmed };
-  }
-  if (verb === "git") return { write: classifyGit(trimmed), fragment: trimmed };
-  if (verb === "find") return { write: classifyFind(trimmed), fragment: trimmed };
-  if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
-  return { write: true, fragment: trimmed, unknownVerb: true };
-}
-var offending = null;
-var offendingIsDbSeal = false;
-var offendingUnknownVerb;
-var offendingProvenance;
-try {
-  offendingProvenance = "";
-  offendingUnknownVerb = false;
-  const pluginRoot = resolveActivePluginRoot(import.meta.url, process.env);
-  const provenanceCtx = { pluginRoot, cwd: input.cwd, unsafePredecessor: null };
-  for (const frag of splitFragments(command)) {
-    const sanctioned = fragmentSanctionedProvenance(frag, allowScripts, provenanceCtx);
-    const exempt = sanctioned.allow && !sanctionedFragmentHasShellRider(frag);
-    if (provenanceCtx.unsafePredecessor === null && !exempt && !fragmentIsSafePredecessor(frag)) {
-      provenanceCtx.unsafePredecessor = frag.trim().slice(0, 80);
-    }
-    if (exempt) continue;
-    const result = classifyFragment(frag);
-    if (result.write) {
-      offending = result.fragment;
-      offendingIsDbSeal = Boolean(result.dbSeal);
-      offendingUnknownVerb = Boolean(result.unknownVerb);
-      const d = sanctioned.detail;
-      const looksLikeAScriptInvocation = Boolean(sanctioned.word) && (sanctioned.viaInterpreter || sanctioned.word.includes("/"));
-      offendingProvenance = d && !d.allow && looksLikeAScriptInvocation ? `Sanctioned-script provenance: ${d.reason}
-` : "";
-      break;
-    }
-  }
-} catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `Internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input?.agent_id }
-      // same handler-cannot-throw rule as the [cwd] catch above
-    )
-  );
-}
-if (!offending) allow();
-if (offendingIsDbSeal) {
-  const match = DB_MENTION_RE.exec(command);
-  const matchedText = match ? match[0] : "sterling.db";
-  const offset = match ? match.index : command.search(DB_MENTION_RE);
-  deny(
-    `H15: shell access to the Sterling store's database file is denied \u2014 DB access is the MCP tool surface's job, never raw shell.
-Denied fragment: ${offending}
-Matched substring: "${matchedText}" at offset ${offset} in the command text.
-This is a raw command-text DB seal: it matches the literal text of the command, not a resolved path or write target, so syntactic role and verb are intentionally ignored \u2014 it fires the same whether the literal sits in a path, inside a quoted search pattern, or in a redirect target, and regardless of whether the verb is a write or a normally read-only one like grep.
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root; the same name in a comment, a quoted flag value, an unrelated path, or a project-local file of the same name exempts nothing.
-` + offendingProvenance + "If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
-  );
-}
-deny(
-  `H15: shell write access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
-Denied fragment: ${offending}
-This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) \u2014 the denial does not assert the command was proven to write.
-` + // THE DISCRIMINATOR THAT ACTUALLY FIRED, when it was the fallback (board
-  // 31b2c872): every other deny path here has a positive finding behind it (a
-  // redirect into the store, sed -i, a writing git subverb). This one has
-  // none — it is a store-path MENTION under a verb the allowlist does not
-  // recognise — and saying so is the difference between "add your verb to
-  // READONLY_VERBS or use the tool surface" and hunting for a write that was
-  // never detected.
-  (offendingUnknownVerb ? `Discriminator: this fragment NAMES a store path and its verb ('${firstWord(offending)}') is not in the read-only verb allowlist \u2014 that combination alone is the denial. No write was detected in it.
-` : "") + `Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root.
-` + offendingProvenance + ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.\nNon-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c); the closed-world classifier above is what decides, and a verb it does not recognize as read-only is denied.\nIf the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
-);
+allow();

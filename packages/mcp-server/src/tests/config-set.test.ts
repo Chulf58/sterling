@@ -1,6 +1,10 @@
 // FROZEN PINS for the `config_set` MCP tool — spec-only, authored BLIND to the
 // implementation (H4 read wall). The contract is decision
 // [config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays]
+// NOTE 2026-09-19: the positive ALLOWLIST described in this contract block was REMOVED
+// (decision scale-down-enforcement-rules-and-locks-are-friction, 38c9e860): any dotted
+// key of any depth lands; CS-2/3/4/12 were deleted, CS-11/15/19 rewritten to "lands",
+// CS-23..26 added. The block below is kept as the history of the original contract.
 // (knowledge_get 1dc3f9aa-dbd6-4448-b1ac-61b3a4dabde7), PINS paragraph +
 // WHAT SHIPS.
 //
@@ -62,7 +66,6 @@ import { parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { createSterlingServer } from '../server.js';
 import { SterlingTools } from '../tools.js';
-import * as toolsModule from '../tools.js';
 
 const NOW = '2026-09-08T12:00:00.000Z';
 
@@ -336,151 +339,6 @@ test('CS-1 CONTROL: config_set tdd.enabled=false lands — receipt digest is sha
 // Each assertion carries its own verdict; none is defence in depth for another.
 
 // ---------------------------------------------------------------------------
-// CS-12 (added) — THE ALLOWLIST IS POLICY DATA, AND ITS CONTENT IS THE PIN.
-// CS-2/3/4 pin the RUNTIME refusals one path at a time; a WIDENED constant
-// behind an intact check is invisible to them (nobody writes a pin for a key
-// nobody thought of), so this pin is EXACT SET EQUALITY against the decision's
-// list: any entry added later — `context_watch.mode`, a second delivery
-// namespace, anything — reddens it, and growing the allowlist therefore
-// requires a decision plus a visible pin edit, which is exactly the intended
-// cost ("the allowlist is policy data and grows by decision, never by a caller
-// flag"). The ONLY latitude is notation: the decision writes `models.*` and
-// the build brief `models.<key>` for the same namespace, so a trailing
-// `.<key>` is normalized to `.*` before comparing. Nothing else is tolerated.
-// ---------------------------------------------------------------------------
-const EXPECTED_ALLOWLIST = [
-  'delegation.max_concurrent',
-  'delivery.*',
-  'dispatch_register.stale_minutes',
-  'maintenance_queue.deep_threshold',
-  'models.*',
-  'mutation_verification.enabled',
-  'review_ledger.stale_days',
-  'sparring_partner.enabled',
-  'sparring_partner.model',
-  'tdd.enabled',
-].sort();
-
-test('CS-12: CONFIG_SET_ALLOWLIST is exported policy data EQUAL to the decision\'s list — no entry added, none missing, never a gate-defining key', () => {
-  const allowlist = (toolsModule as unknown as Record<string, unknown>).CONFIG_SET_ALLOWLIST;
-  assert.ok(
-    Array.isArray(allowlist),
-    'CONFIG_SET_ALLOWLIST must be exported from packages/mcp-server/src/tools.ts as an array (the allowlist is policy data, one constant beside the tool). RED UNTIL THE TOOL EXISTS.'
-  );
-  const entries = (allowlist as unknown[]).map((e) => String(e));
-  assert.ok(entries.length > 0, 'an empty allowlist would refuse everything and pass every refusal pin vacuously');
-
-  const normalized = entries.map((e) => e.replace(/\.<key>$/, '.*')).sort();
-  assert.deepEqual(
-    normalized,
-    EXPECTED_ALLOWLIST,
-    'the shipped allowlist must be EXACTLY the decision\'s namespaces (decision 1dc3f9aa WHAT SHIPS; `.<key>` normalized to `.*`). ' +
-      'An entry here that is not in the decision is an ungoverned widening of a write surface that reaches H14/H5/H18 territory; ' +
-      'a missing entry is relief the consumer report asked for and did not get. Either way: change the decision first, then this pin.'
-  );
-
-  // Defence in depth: even if the set-equality above is ever re-specified,
-  // these six can never appear — they are the two-step-bypass keys.
-  const text = normalized.join(' ');
-  for (const forbidden of ['store_guard', 'toolchains', 'machine_role', 'backup_path', 'store_authority', 'code_globs']) {
-    assert.ok(
-      !text.includes(forbidden),
-      `'${forbidden}' must NEVER be allowlisted — these keys define H14's run_commands, H5/H18's test_globs, the store authority and the machine role; ` +
-        'admitting one is the two-step enforcement bypass the whole design exists to prevent'
-    );
-  }
-});
-// NAMED SABOTAGE (CS-12): append ONE benign-looking entry —
-// `'context_watch.mode'` — to CONFIG_SET_ALLOWLIST → the set-equality
-// assertion goes RED. It is the *benign* entry that matters: the forbidden-
-// fragment arm below would not have caught it, and no runtime pin exists for a
-// path nobody anticipated.
-// SECOND SABOTAGE: append 'store_guard.allow_scripts' → set-equality AND the
-// forbidden-fragment arm both fire (two layers, deliberately).
-// THIRD: delete an entry, e.g. drop 'delivery.*' → RED here only; CS-2/3/4
-// cannot see a MISSING entry at all, and CS-11's positive half would then fail
-// for a misleading reason ("delivery is not allowlisted"), which is why this
-// pin states the set rather than sampling it.
-// LOAD-BEARING NOTE: under the store_guard sabotage CS-2 also goes red — that
-// is defence in depth, not redundancy. The verdict this pin uniquely carries
-// is EVERY entry the runtime pins do not name.
-
-// ---------------------------------------------------------------------------
-// CS-2 / CS-3 / CS-4 — the negative arm of the allowlist. Each asserts THREE
-// things a generic "everything is refused" implementation would not satisfy
-// together: refusal, a message naming BOTH the offending path and the
-// allowlist, and byte-identical config bytes.
-// ---------------------------------------------------------------------------
-test('CS-2: store_guard.allow_scripts is refused naming the path and the allowlist — the file is byte-unchanged', () => {
-  const h = harness();
-  try {
-    const call = handler(h.tools);
-    const before = h.read();
-    const msg = refusalMessage(call, { path: 'store_guard.allow_scripts', value: ['scripts/evil.mjs'] });
-    assert.match(msg, /store_guard\.allow_scripts/, 'the refusal NAMES the offending path so the caller can self-correct');
-    assert.match(msg, /allowlist/i, 'the refusal names the ALLOWLIST as the reason — the positive-list rule, not a schema failure');
-    assert.equal(h.read(), before, 'a refused write leaves the config byte-identical');
-  } finally {
-    h.cleanup();
-  }
-});
-// NAMED SABOTAGE (CS-2): make the allowlist membership test pass through
-// (`if (false) refuse(...)`, or invert the predicate) → the refusal is gone,
-// refusalMessage's missing-exception assertion goes RED. The message-content
-// assertions are the second, independent guard: dropping the path from the
-// text (a bare "not permitted") leaves the throw intact and still goes RED.
-
-test('CS-3: toolchains.0.run_commands is refused naming the path and the allowlist — the file is byte-unchanged', () => {
-  const h = harness();
-  try {
-    const call = handler(h.tools);
-    const before = h.read();
-    const msg = refusalMessage(call, { path: 'toolchains.0.run_commands', value: ['node --test dist/**/*.test.js'] });
-    assert.match(msg, /toolchains\.0\.run_commands/, 'the refusal names the indexed path verbatim');
-    assert.match(msg, /allowlist/i, 'refused BY THE ALLOWLIST — run_commands defines H14\'s executable allowance');
-    assert.equal(h.read(), before, 'nothing written');
-  } finally {
-    h.cleanup();
-  }
-});
-// NAMED SABOTAGE (CS-3): make membership a LOOSE match instead of an exact
-// key-path match — `allowlist.some((entry) => path.includes(entry.split('.')[0]))`
-// (the [unanchored-substring-allowlist-in-command-guard] shape, one line) →
-// 'toolchains.0.run_commands' contains no allowlisted first segment today, so
-// harden the sabotage to the equivalent inverse: `allowlist.some((entry) =>
-// entry.split('.')[0].length > 0)`, i.e. any non-empty allowlist admits every
-// path → the refusal is lost and this pin goes RED on the missing exception.
-// SECOND, INDEPENDENT: normalise indexed segments away before matching
-// (`path.replace(/\.\d+\./g, '.')`, a plausible array-path convenience) →
-// 'toolchains.run_commands' is still not allowlisted so the throw survives,
-// but the message then quotes the NORMALISED path and the
-// /toolchains\.0\.run_commands/ assertion goes RED alone — a refusal that
-// misquotes what the caller sent.
-
-test('CS-4: an unknown key (frobnicate.x) is refused naming the path and the allowlist — the file is byte-unchanged', () => {
-  const h = harness();
-  try {
-    const call = handler(h.tools);
-    const before = h.read();
-    const msg = refusalMessage(call, { path: 'frobnicate.x', value: 1 });
-    assert.match(msg, /frobnicate\.x/, 'the refusal names the unknown path');
-    assert.match(
-      msg,
-      /allowlist/i,
-      'an unknown key is refused by the POSITIVE list (fails closed when the schema gains a key) — not by the schema'
-    );
-    assert.equal(h.read(), before, 'nothing written');
-  } finally {
-    h.cleanup();
-  }
-});
-// NAMED SABOTAGE (CS-4): replace the positive allowlist with a blacklist of
-// gate-defining keys (the rejected alternative) → 'frobnicate.x' is no longer
-// in the deny set, the call proceeds, and this pin goes RED on the missing
-// exception. CS-2/CS-3 would stay GREEN under that sabotage — this pin is the
-// one that discriminates positive-list from blacklist.
-
-// ---------------------------------------------------------------------------
 // CS-5 — sparring_partner.model. The CONTROL establishes, through the
 // canonical schema's own parser, that '' is a legal value (empty = CLI
 // default) BEFORE the pin reads config_set's verdict; if that control fails,
@@ -726,72 +584,55 @@ test('CS-10: config_set is served on the MCP tool surface, and its params are ST
 // only the unrecognized-key assertions go RED.
 
 // ---------------------------------------------------------------------------
-// CS-11 — the two refusal CAUSES must stay distinguishable. delivery.* is
-// allowlisted as a NAMESPACE, so an unknown delivery leaf sails past the
-// allowlist and must be stopped further in.
-// MECHANISM RULED (review round 2, and it CHANGED): the leaf is refused by a
-// KNOWN-DELIVERY-KEY MEMBERSHIP CHECK IN THE TOOL — not by a strict schema.
-// The schema must stay permissive so a newer machine's config.json still
-// parses on an older clone (pinned as CS-20), which leaves strictness
-// unavailable as the mechanism here. CS-19 pins the message content that
-// ruling implies: the refusal ENUMERATES the known delivery keys.
-// This pin keeps the verdict + the distinct cause; CS-19 carries the wording.
+// CS-11 — UNKNOWN DELIVERY LEAVES NOW LAND (decision
+// scale-down-enforcement-rules-and-locks-are-friction, 2026-09-19, knowledge_get
+// 38c9e860): the positive allowlist is gone and no known-delivery-key
+// membership check replaces it, so `delivery.*` behaves like every other
+// namespace — any leaf is accepted, and the schema already tolerates it
+// (CS-20). This pin is the UNIT-SURFACE half; CS-19 repeats the shape through
+// the served wire.
 // ---------------------------------------------------------------------------
-test('CS-11: a known delivery key is written; an UNKNOWN delivery leaf is refused by the tool\'s known-key check, not by the allowlist (the causes stay distinct)', () => {
+test('CS-11: an unknown delivery leaf LANDS — no allowlist and no known-key check refuse it; a second write reports the first as previous_value', () => {
   const h = harness();
   try {
-    // CONTROL, opposite reason: the schema really does define this leaf.
-    let probe: unknown;
-    let probeErr: unknown;
-    try {
-      probe = parseConfig({ delivery: { payload_char_cap: 4321 } });
-    } catch (e) {
-      probeErr = e;
-    }
-    assert.equal(
-      probeErr,
-      undefined,
-      'CONTROL: the canonical config schema must define delivery.payload_char_cap (decision 1dc3f9aa names it). ' +
-        `parseConfig threw: ${String(probeErr instanceof Error ? probeErr.message : probeErr).replace(/\s+/g, ' ')}`
-    );
-    assert.equal(
-      (probe as { delivery?: { payload_char_cap?: unknown } }).delivery?.payload_char_cap,
-      4321,
-      'CONTROL: the value survives parsing, so delivery.payload_char_cap is a real settable key'
-    );
-
     const call = handler(h.tools);
-    const okReceipt = call({ path: 'delivery.payload_char_cap', value: 4321 });
-    assert.equal(okReceipt.value, 4321, 'an allowlisted delivery.<defined key> is written');
-    assert.equal(
-      (JSON.parse(h.read()) as { delivery: { payload_char_cap: unknown } }).delivery.payload_char_cap,
-      4321,
-      'and it lands on disk'
+    const beforeText = h.read();
+    assert.ok(
+      !beforeText.includes('not_a_real_delivery_key'),
+      'FIXTURE: the seed does not carry this leaf yet, so a landed value cannot be mistaken for a pre-existing one'
     );
-    const allowedMsgFree = h.read();
 
-    const msg = refusalMessage(call, { path: 'delivery.not_a_real_delivery_key', value: 1 });
-    assert.match(msg, /not_a_real_delivery_key/, 'the refusal names the offending leaf');
-    assert.doesNotMatch(
-      msg,
-      /allowlist/i,
-      "delivery.* IS allowlisted — this refusal must come from the tool's KNOWN-DELIVERY-KEY check, and its message must not blame the allowlist " +
-        '(two causes, two messages: a caller told "not allowlisted" would stop trying delivery keys altogether)'
+    const first = call({ path: 'delivery.not_a_real_delivery_key', value: 1 });
+    assert.equal(first.value, 1, 'the write succeeds — an unmodeled delivery leaf is no longer refused');
+    assert.equal(first.previous_value, undefined, 'the leaf did not exist before this write');
+    assert.equal(
+      (JSON.parse(h.read()) as { delivery: Record<string, unknown> }).delivery.not_a_real_delivery_key,
+      1,
+      'and the key is on disk, under delivery, not merely accepted in memory'
     );
-    assert.equal(h.read(), allowedMsgFree, 'the unknown-key refusal wrote nothing — the prior valid write is intact');
+    assert.equal(
+      first.digest,
+      sha256(readFileSync(h.configPath)),
+      'the receipt digest is sha256 of the bytes actually written'
+    );
+
+    const second = call({ path: 'delivery.not_a_real_delivery_key', value: 2 });
+    assert.equal(second.previous_value, 1, 'the second write reads the FIRST write back off disk');
+    assert.equal(second.value, 2, 'and lands the new value');
+    assert.equal(
+      (JSON.parse(h.read()) as { delivery: Record<string, unknown> }).delivery.not_a_real_delivery_key,
+      2,
+      'confirmed on disk'
+    );
+    assert.equal(second.digest, sha256(readFileSync(h.configPath)), 'and the digest tracks the second write\'s bytes');
   } finally {
     h.cleanup();
   }
 });
-// NAMED SABOTAGE (CS-11): delete the known-delivery-key membership check and
-// rely on the schema (which CS-20 pins as permissive) → the unknown leaf is
-// written, RED on the missing exception. SECOND, INDEPENDENT: refuse it from
-// the allowlist arm instead (enumerate delivery leaves IN
-// CONFIG_SET_ALLOWLIST and report 'allowlist') → the throw stays, the first
-// half of this pin stays green, and only the doesNotMatch(/allowlist/i)
-// assertion goes RED — the cause-conflation this pin exists to catch. Note
-// that second sabotage ALSO reddens CS-12 (the set would no longer equal the
-// decision's); the verdict CS-11 uniquely carries is the MESSAGE'S CAUSE.
+// NAMED SABOTAGE (CS-11): reintroduce a known-delivery-key membership check
+// (`if (!KNOWN_DELIVERY_KEYS.includes(leaf)) refuse(...)`) → the first `call`
+// throws instead of returning a receipt, and this pin goes RED on the very
+// first assertion (a throw where a value was expected).
 
 const SKIP_SYMLINK =
   process.platform === 'win32'
@@ -884,11 +725,14 @@ test('CS-14: an omitted / undefined `value` is refused — the addressed key sta
 // only the first assertion.
 
 // ---------------------------------------------------------------------------
-// CS-15 — review_ledger: ONE allowlisted leaf beside a FORBIDDEN sibling
-// under the same parent. Value validation and allowlist scope are different
-// axes and this pin exercises both on one object.
+// CS-15 — review_ledger: a MODELED leaf that still validates its value
+// (stale_days is z.number(), so a schema violation is still refused — the
+// allowlist is gone, whole-document validation is not) beside a PASSTHROUGH
+// sibling that now lands unconditionally (code_globs has no allowlist gate
+// left, and the schema field is `.passthrough()`, so nothing validates its
+// shape either).
 // ---------------------------------------------------------------------------
-test('CS-15: review_ledger.stale_days validates its value (30 lands, \'ten\' refused) while its sibling review_ledger.code_globs stays allowlist-refused', () => {
+test('CS-15: review_ledger.stale_days still validates its value (30 lands, \'ten\' refused by the schema) while its passthrough sibling review_ledger.code_globs now LANDS', () => {
   const h = harness();
   try {
     const call = handler(h.tools);
@@ -897,16 +741,24 @@ test('CS-15: review_ledger.stale_days validates its value (30 lands, \'ten\' ref
     const badValue = refusalMessage(call, { path: 'review_ledger.stale_days', value: 'ten' });
     assert.match(badValue, /stale_days/, 'the refusal names the key');
     assert.match(badValue, /number|invalid_type/i, 'and carries the zod issue');
-    assert.doesNotMatch(badValue, /allowlist/i, 'this leaf IS allowlisted — blaming the allowlist would misreport the cause');
-    assert.equal(h.read(), before, 'nothing written');
+    assert.doesNotMatch(badValue, /allowlist/i, 'the allowlist is gone — the cause is schema validation, never an allowlist');
+    assert.equal(h.read(), before, 'nothing written for the invalid value');
 
-    // Same parent, NON-allowlisted leaf: review_ledger.code_globs governs which
-    // commits the merge gate treats as code-touching — gate-defining, excluded
-    // by decision 1dc3f9aa.
-    const forbidden = refusalMessage(call, { path: 'review_ledger.code_globs', value: ['**/*.ts'] });
-    assert.match(forbidden, rx('review_ledger.code_globs'), 'the refusal names the path');
-    assert.match(forbidden, /allowlist/i, 'and blames the ALLOWLIST — a different cause from the value refusal above');
-    assert.equal(h.read(), before, 'nothing written');
+    // Same parent, PASSTHROUGH leaf: review_ledger.code_globs is unmodeled in
+    // the schema (`.passthrough()`), and with the allowlist removed nothing
+    // else gates it either — it lands like any other unmodeled key.
+    const globsReceipt = call({ path: 'review_ledger.code_globs', value: ['**/*.ts'] });
+    assert.deepEqual(globsReceipt.value, ['**/*.ts'], 'the write succeeds — no allowlist and no shape check refuse it');
+    assert.deepEqual(
+      (JSON.parse(h.read()) as { review_ledger: { code_globs: unknown } }).review_ledger.code_globs,
+      ['**/*.ts'],
+      'and it lands on disk under review_ledger'
+    );
+    assert.equal(
+      globsReceipt.digest,
+      sha256(readFileSync(h.configPath)),
+      'the receipt digest is sha256 of the bytes actually written'
+    );
 
     const receipt = call({ path: 'review_ledger.stale_days', value: 30 });
     assert.equal(receipt.previous_value, 14, 'the seed value is reported back');
@@ -920,13 +772,16 @@ test('CS-15: review_ledger.stale_days validates its value (30 lands, \'ten\' ref
     h.cleanup();
   }
 });
-// NAMED SABOTAGE (CS-15): allowlist the PARENT namespace instead of the leaf
-// (`'review_ledger.*'`) → the code_globs arm loses its refusal, RED on the
-// missing exception, and CS-12's set-equality fires too (defence in depth).
-// A sabotage RED ONLY HERE: skip validation when the value is a primitive
-// (`if (typeof value !== 'object') writeWithoutValidating()`) → 'ten' lands,
-// this pin's first arm goes red while CS-6 (also a primitive) goes red too —
-// so the arm unique to this pin is the sibling-leaf discrimination.
+// NAMED SABOTAGE (CS-15): reintroduce an allowlist-style gate that refuses any
+// path not in a fixed set (a leftover from the old mechanism) → the
+// `globsReceipt` call throws instead of returning a receipt, RED on the very
+// first assertion of the second arm, while the first arm (still schema-gated)
+// stays green — the arm unique to this pin is that removal, not validation.
+// SECOND, INDEPENDENT: drop the whole-document zod validation entirely (write
+// the mutated object straight out with no parse) → 'ten' now lands too, RED
+// on the FIRST arm's missing-exception assertion, while CS-6 (also a
+// primitive on a different key) goes red identically — proving stale_days
+// still routes through the same whole-document check as every other leaf.
 // NOT PINNED: `stale_days: -1`. Whether the schema constrains it to a
 // positive integer is unverifiable from behind the H4 read wall; 'ten' is a
 // certain type violation. If -1 should be refused, that is schema hardening
@@ -1057,45 +912,57 @@ test('CS-18: a symlinked .sterling DIRECTORY is refused — nothing is written i
 // lstat. Flagged to the conductor as a spec extension, not an inference.
 
 // ---------------------------------------------------------------------------
-// CS-19 — THE REFUSAL TEACHES. Because the unknown delivery leaf is stopped
-// by an in-tool membership check (CS-11's ruling) rather than by the schema,
-// the tool is the only thing that knows the legal set — so it must SAY it.
+// CS-19 — CS-11's shape repeated through the SERVED wire, not the unit
+// surface: the allowlist removal must hold at the boundary a real caller
+// actually uses (the served MCP tool), not only against the SterlingTools
+// class directly. Mirrors CS-10/CS-22's wire-harness pattern.
 // ---------------------------------------------------------------------------
-test('CS-19: the unknown-delivery-leaf refusal ENUMERATES the known delivery keys and never says \'allowlist\'', () => {
-  const h = harness();
+test('CS-19: an unknown delivery leaf LANDS through the SERVED config_set tool too — the receipt returns over the wire and the value is on disk', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-config-set-delivery-wire-'));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  const configPath = join(dir, '.sterling', 'config.json');
+  writeFileSync(configPath, JSON.stringify(seedDoc(), null, 2));
+  const { server, store } = createSterlingServer(join(dir, '.sterling', 'sterling.db'));
+  const client = new Client({ name: 'config-set-delivery-wire-client', version: '0.0.1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
-    const call = handler(h.tools);
-    const before = h.read();
-    const msg = refusalMessage(call, { path: 'delivery.not_a_real_delivery_key', value: 1 });
-
-    assert.match(msg, /not_a_real_delivery_key/, 'the refusal names what was asked for');
-    assert.match(
-      msg,
-      /payload_char_cap/,
-      'and ENUMERATES the known delivery keys — the caller cannot discover them from the schema (CS-20: unknown keys parse fine), ' +
-        'so a refusal that does not list them leaves the caller guessing'
+    const result = await client.callTool({
+      name: 'config_set',
+      arguments: { path: 'delivery.not_a_real_delivery_key', value: 1 },
+    });
+    assert.notEqual(
+      result.isError,
+      true,
+      `an unknown delivery leaf must be ACCEPTED over the wire — got: ${JSON.stringify((result.content as { text: string }[] | undefined)?.[0]?.text)}`
     );
-    assert.match(msg, /injection_rung/, 'the enumeration is the real set, not one example key');
-    assert.doesNotMatch(
-      msg,
-      /allowlist/i,
-      'delivery.* IS allowlisted — naming the allowlist here would send the caller to a decision record instead of to the key list'
+    const receipt = JSON.parse((result.content as { text: string }[])[0].text) as Receipt;
+    assert.equal(receipt.value, 1, 'the receipt carries the written value');
+    assert.equal(
+      (JSON.parse(readFileSync(configPath, 'utf8')) as { delivery: Record<string, unknown> }).delivery
+        .not_a_real_delivery_key,
+      1,
+      'and the key actually landed on disk, not only in the response envelope'
     );
-    assert.equal(h.read(), before, 'nothing written');
+    assert.equal(
+      receipt.digest,
+      sha256(readFileSync(configPath)),
+      'the receipt digest matches the bytes now on disk'
+    );
   } finally {
-    h.cleanup();
+    await client.close();
+    await server.close();
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
-// NAMED SABOTAGE (CS-19): shorten the refusal to
-// `unknown delivery key '<leaf>'` (drop the enumeration) → the throw and the
-// leaf-naming assertion stay GREEN and only the two enumeration assertions go
-// RED. That is the whole verdict this pin carries; CS-11 covers the refusal
-// itself and the cause, and stays green under this sabotage.
-// ASSUMPTION STATED: `payload_char_cap` and `injection_rung` are named as
-// delivery keys by decision 1dc3f9aa and by CLAUDE.md's delivery section
-// respectively. If the schema has since renamed one, this pin repoints to the
-// shipped names — it is asserting THAT the set is enumerated, using two keys
-// known from the spec as the probe.
+// NAMED SABOTAGE (CS-19): reintroduce a known-delivery-key membership check
+// (as CS-11's sabotage) → the wire call returns `isError: true` instead of a
+// receipt, and the `notEqual(result.isError, true)` assertion goes RED. This
+// pin is the one that would catch a fix applied only at the class surface
+// (e.g. a leftover check in the MCP registration wrapper) while CS-11 stayed
+// green — that is exactly why it repeats the shape at the served boundary
+// instead of trusting the unit pin to cover both.
 
 // ---------------------------------------------------------------------------
 // CS-21 — the atomic tmp+rename write must not silently RELAX permissions. A
@@ -1194,3 +1061,164 @@ test('CS-22: expected_digest is CAS over a read-then-write window — a matching
 // (a `now`-style hook between read and write) or an O_EXCL/flock write path;
 // both are implementation changes, and if either ships, replace this pin's
 // (b) arm with a real interleaving test rather than adding to it.
+
+// ---------------------------------------------------------------------------
+// CS-23 — machine_role LANDS as a bare 1-segment path (decision
+// scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
+// 38c9e860): the old allowlist named machine_role as one of the two-step-
+// bypass keys that could NEVER be admitted (CS-12's deleted forbidden-
+// fragment arm). With the allowlist gone, a 1-segment path is unremarkable —
+// it lands like any other, refused only if the resulting document fails the
+// schema's closed enum.
+// ---------------------------------------------------------------------------
+test('CS-23: machine_role="consumer" lands as a 1-segment path — no allowlist and no gate refuse it', () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    const before = h.read();
+    assert.ok(
+      !before.includes('machine_role'),
+      'FIXTURE: the seed carries no machine_role key (it is .optional() with no default)'
+    );
+
+    const receipt = call({ path: 'machine_role', value: 'consumer' });
+    assert.equal(receipt.value, 'consumer', 'the write succeeds');
+    assert.equal(receipt.previous_value, undefined, 'the key did not exist before this write');
+
+    const afterText = h.read();
+    assert.equal(
+      (JSON.parse(afterText) as { machine_role: unknown }).machine_role,
+      'consumer',
+      'and the key is on disk'
+    );
+    assert.equal(
+      receipt.digest,
+      sha256(readFileSync(h.configPath)),
+      'the receipt digest is sha256 of the bytes actually written'
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-23): reintroduce the old forbidden-key deny list
+// (`if (['store_guard','toolchains','machine_role','backup_path','store_authority','code_globs'].some(f => path.includes(f))) refuse()`,
+// the CS-12 defence-in-depth arm this file used to carry) → the `call` throws
+// instead of returning a receipt, RED on the very first assertion.
+
+// ---------------------------------------------------------------------------
+// CS-24 — a 3-segment path CREATES its intermediate objects when they are
+// entirely absent. This pin's seed deletes context_watch outright (not just
+// omits it from the parseConfig input — seedDoc() itself would refill it via
+// the schema's own .default(), so the fixture is built by deleting the key
+// from the ALREADY-PARSED document, never by omitting it upstream), so a
+// setter requiring its parents to pre-exist has nothing to walk.
+// ---------------------------------------------------------------------------
+test('CS-24: context_watch.windows.<model> lands as a 3-segment path, creating context_watch and windows from nothing', () => {
+  const doc = seedDoc();
+  delete doc.context_watch;
+  const seedText = JSON.stringify(doc, null, 2);
+  const h = harness(seedText);
+  try {
+    const before = h.read();
+    assert.ok(!before.includes('context_watch'), 'FIXTURE: the seed carries no context_watch key at all');
+
+    const call = handler(h.tools);
+    const receipt = call({ path: 'context_watch.windows.claude-fable-5-1', value: 1000000 });
+    assert.equal(receipt.value, 1000000, 'the write succeeds through two absent intermediate levels');
+    assert.equal(receipt.previous_value, undefined, 'nothing existed at this path before');
+
+    const after = JSON.parse(h.read()) as { context_watch?: { windows?: Record<string, unknown> } };
+    assert.ok(after.context_watch !== undefined, 'context_watch was CREATED, not required to pre-exist');
+    assert.ok(after.context_watch?.windows !== undefined, 'and windows was created beneath it');
+    assert.equal(
+      after.context_watch?.windows?.['claude-fable-5-1'],
+      1000000,
+      'the leaf itself lands at the addressed path'
+    );
+    assert.deepEqual(
+      Object.keys(after.context_watch as Record<string, unknown>),
+      ['windows'],
+      'ONLY the addressed branch is created — no sibling context_watch default (warn_pct, block_pct, mode, conductor) is ' +
+        "materialized alongside it, matching CS-1's no-defaults-injected ruling"
+    );
+    assert.deepEqual(
+      Object.keys(after.context_watch?.windows as Record<string, unknown>),
+      ['claude-fable-5-1'],
+      'and only the addressed leaf exists under windows — no sibling default key either'
+    );
+    assert.equal(
+      receipt.digest,
+      sha256(readFileSync(h.configPath)),
+      'the receipt digest is sha256 of the bytes actually written'
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-24): implement the dotted-path setter as a plain walk
+// that REQUIRES each intermediate object to already exist
+// (`let o = doc; for (const s of segs.slice(0,-1)) o = o[s];` with no
+// `o[s] ??= {}` creation step) → `o` is `undefined` at the second segment and
+// the call throws a TypeError instead of returning a receipt — RED on the
+// very first assertion of this pin.
+
+// ---------------------------------------------------------------------------
+// CS-25 — store_guard.allow_scripts LANDS. This was the single most
+// deliberately forbidden path under the old allowlist (CS-12's deleted
+// forbidden-fragment arm named it explicitly as a two-step enforcement
+// bypass key). The ruling that removed the allowlist removes that gate too —
+// this pin exists so the removal is PINNED, not merely inferred from the
+// deleted CS-12/CS-2 tests.
+// ---------------------------------------------------------------------------
+test('CS-25: store_guard.allow_scripts lands — the key the old allowlist singled out as never-admissible is no longer gated', () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    const receipt = call({ path: 'store_guard.allow_scripts', value: ['scripts/x.mjs'] });
+    assert.deepEqual(receipt.value, ['scripts/x.mjs'], 'the write succeeds');
+
+    const after = JSON.parse(h.read()) as { store_guard: { allow_scripts: unknown } };
+    assert.deepEqual(after.store_guard.allow_scripts, ['scripts/x.mjs'], 'and the new array is on disk');
+    assert.equal(
+      receipt.digest,
+      sha256(readFileSync(h.configPath)),
+      'the receipt digest is sha256 of the bytes actually written'
+    );
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-25): reintroduce a hardcoded refusal for this one path
+// (`if (path.startsWith('store_guard.')) refuse('two-step bypass')`, the
+// literal shape CS-12's forbidden-fragment arm used to enforce at the
+// allowlist layer) → the `call` throws instead of returning a receipt, RED on
+// the first assertion.
+
+// ---------------------------------------------------------------------------
+// CS-26 — A DEEP PATH NEVER WALKS INTO A NON-OBJECT (Terra review 2026-09-19,
+// MEDIUM). With the allowlist gone, `a.b` on a config where `a` is a scalar or
+// an array must be REFUSED, not silently replace `a` with `{ b: value }` —
+// that would discard forward-compatible data the schema does not model.
+test('CS-26: a deep path whose intermediate exists as a scalar or an array is refused — the file is byte-unchanged', () => {
+  const h = harness();
+  try {
+    const call = handler(h.tools);
+    call({ path: 'zz_probe_scalar', value: 7 });
+    call({ path: 'zz_probe_list', value: [1, 2] });
+    call({ path: 'zz_probe_null', value: null });
+    const before = h.read();
+    const scalarMsg = refusalMessage(call, { path: 'zz_probe_scalar.child', value: true });
+    assert.match(scalarMsg, rx('zz_probe_scalar'), 'the refusal names the intermediate it would have replaced');
+    assert.match(scalarMsg, /number/, 'and says what it is');
+    const listMsg = refusalMessage(call, { path: 'zz_probe_list.0', value: 9 });
+    assert.match(listMsg, /array/, 'an array intermediate is refused the same way');
+    const nullMsg = refusalMessage(call, { path: 'zz_probe_null.child', value: true });
+    assert.match(nullMsg, /zz_probe_null/, 'an existing null is a value, not an absence — refused too (Sol review 2026-09-19)');
+    assert.equal(h.read(), before, 'neither refusal wrote anything');
+  } finally {
+    h.cleanup();
+  }
+});
+// NAMED SABOTAGE (CS-26): restore the `existingIsObject ? {...existing} : {}`
+// walk (create-or-replace) → `zz_probe_scalar.child` lands and `zz_probe_scalar`
+// becomes `{child:true}` → RED on the missing refusal.

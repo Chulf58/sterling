@@ -666,6 +666,8 @@ for (const a of agentReport) {
   const map = {
     installed: { status: 'created', detail: 'installed with version/hash header' },
     refreshed: { status: 'refreshed', detail: 'clean install, newer template — regenerated' },
+    header_repaired: { status: 'refreshed', detail: 'Sterling header repaired in place — content unchanged' },
+    machine_rebaked: { status: 'refreshed', detail: 'machine-specific paths re-baked for this host (node/hooks dir), template unchanged' },
     up_to_date: { status: 'matches', detail: 'template hash + content hash match' },
     locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
     refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },

@@ -1,0 +1,194 @@
+// Pins for H15's ONE rule (decision sterling-claude-code-scale-down-boundary,
+// 2026-09-19): only the store DATABASE is sealed from every tool but the MCP
+// server; every other file under .sterling/ is freely readable and writable.
+// The suite spawns the SOURCE hook as a child process with a hook-shaped stdin.
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const HOOK = join(root, 'scripts', 'hooks', 'h15-store-guard.mjs');
+
+function runRaw(stdin, cwd) {
+  const r = spawnSync(process.execPath, [HOOK], {
+    input: stdin,
+    encoding: 'utf8',
+    cwd,
+    timeout: 60_000,
+    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
+  });
+  return { code: r.status, stderr: r.stderr ?? '' };
+}
+function run(tool_name, tool_input, cwd = project) {
+  return runRaw(JSON.stringify({ tool_name, tool_input, cwd }), cwd);
+}
+
+let project;
+before(() => {
+  project = mkdtempSync(join(tmpdir(), 'h15-db-seal-'));
+  mkdirSync(join(project, '.sterling', 'transient'), { recursive: true });
+  writeFileSync(join(project, '.sterling', 'config.json'), '{}\n');
+});
+after(() => rmSync(project, { recursive: true, force: true }));
+
+// ── structured channel: the database is sealed ──────────────────────────────
+test('Write to .sterling/sterling.db is denied', () => {
+  const r = run('Write', { file_path: join(project, '.sterling', 'sterling.db'), content: 'x' });
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /store database/);
+});
+test('Edit to .sterling/sterling.db-wal is denied', () => {
+  const r = run('Edit', { file_path: join(project, '.sterling', 'sterling.db-wal') });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Write to a sterling.db.* backup inside .sterling/ is denied', () => {
+  const r = run('Write', { file_path: join(project, '.sterling', 'sterling.db.pre-v2-2026-08-22.backup.db') });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('relative .sterling/sterling.db resolved against cwd is denied', () => {
+  const r = run('MultiEdit', { file_path: '.sterling/sterling.db', edits: [] });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('NotebookEdit into the database is denied', () => {
+  const r = run('NotebookEdit', { notebook_path: join(project, '.sterling', 'sterling.db') });
+  assert.equal(r.code, 2, r.stderr);
+});
+
+// ── structured channel: everything else under .sterling/ is free ────────────
+test('Edit to .sterling/config.json is ALLOWED (the friction this rebuild removes)', () => {
+  const r = run('Edit', { file_path: join(project, '.sterling', 'config.json'), old_string: 'a', new_string: 'b' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Write to .sterling/transient/x.json is allowed', () => {
+  const r = run('Write', { file_path: join(project, '.sterling', 'transient', 'x.json'), content: '{}' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Write to .sterling/review-ledger.json is allowed', () => {
+  const r = run('Write', { file_path: join(project, '.sterling', 'review-ledger.json'), content: '{}' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('a file named sterling.db OUTSIDE any .sterling directory is allowed', () => {
+  const r = run('Write', { file_path: join(project, 'fixtures', 'sterling.db'), content: '' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('an ordinary project file is allowed', () => {
+  const r = run('Edit', { file_path: join(project, 'src', 'index.ts') });
+  assert.equal(r.code, 0, r.stderr);
+});
+
+// ── structured channel: fail closed on unusable input ───────────────────────
+test('Write with no file_path is denied (fail closed)', () => {
+  const r = run('Write', { content: 'x' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('relative path with no cwd is denied (fail closed)', () => {
+  const r = runRaw(JSON.stringify({ tool_name: 'Write', tool_input: { file_path: '.sterling/sterling.db' } }), project);
+  assert.equal(r.code, 2, r.stderr);
+});
+test('malformed stdin is denied (fail closed)', () => {
+  const r = runRaw('not json', project);
+  assert.equal(r.code, 2, r.stderr);
+});
+test('a tool this hook is not registered for is allowed', () => {
+  const r = run('Read', { file_path: join(project, '.sterling', 'sterling.db') });
+  assert.equal(r.code, 0, r.stderr);
+});
+
+// ── shell channel: literal seal on the database, nothing else ───────────────
+test('Bash: cat .sterling/config.json is allowed', () => {
+  const r = run('Bash', { command: 'cat .sterling/config.json' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: echo into .sterling/config.json is allowed (no verb classification)', () => {
+  const r = run('Bash', { command: 'echo "{}" > .sterling/config.json && ls -la ~/.sterling/domains' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: redirect into sterling.db is denied', () => {
+  const r = run('Bash', { command: 'echo x > .sterling/sterling.db' });
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /sterling\.db/);
+});
+test('Bash: sqlite3 against sterling.db is denied even for a SELECT', () => {
+  const r = run('Bash', { command: 'sqlite3 .sterling/sterling.db "select count(*) from records"' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('PowerShell: Remove-Item on sterling.db is denied', () => {
+  const r = run('PowerShell', { command: 'Remove-Item .sterling\\sterling.db -Force' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: a Sterling script taking --store <db> is allowed', () => {
+  const r = run('Bash', { command: 'node /mnt/c/Users/x/sterling-main/scripts/migrate-stores.mjs --store .sterling/sterling.db' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: the TUI bundle taking --store <db> is allowed', () => {
+  const r = run('Bash', { command: 'node packages/tui/bundle/sterling-tui.mjs --store "$PWD/.sterling/sterling.db"' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: a command with no store mention is allowed', () => {
+  const r = run('Bash', { command: 'git status --short' });
+  assert.equal(r.code, 0, r.stderr);
+});
+// Open-world shell arm (user-ruled 2026-09-19: stop destruction, nothing more). Terra and
+// Sol reviews the same day: no exemption exists, every fragment is judged on its own shape.
+test('Bash: sqlite3 in a later fragment is denied whatever came before it', () => {
+  const r = run('Bash', { command: 'node scripts/init.mjs --label ok; sqlite3 .sterling/sterling.db "select 1"' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: a redirect into the database is denied even when a script is mentioned', () => {
+  const r = run('Bash', { command: 'cat scripts/x.mjs > .sterling/sterling.db' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: rm / cp / mv / dd / truncate naming the database are denied', () => {
+  for (const command of [
+    'rm -f .sterling/sterling.db',
+    'cp backup.db .sterling/sterling.db',
+    'mv .sterling/sterling.db /tmp/x.db',
+    'dd if=/dev/zero of=.sterling/sterling.db bs=1 count=1',
+    'cd /x && truncate -s 0 .sterling/sterling.db',
+    'sudo rm .sterling/sterling.db-wal',
+    'echo x | tee .sterling/sterling.db',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: in-place sed/perl on the database is denied', () => {
+  for (const command of ['sed -i s/a/b/ .sterling/sterling.db', 'perl -0pi -e "s/a/b/" .sterling/sterling.db']) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('PowerShell: Set-Content / Copy-Item on the database are denied', () => {
+  for (const command of ['Set-Content .sterling\\sterling.db "x"', 'Copy-Item x.db .sterling\\sterling.db']) {
+    const r = run('PowerShell', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: reads and mere mentions of the database are allowed', () => {
+  for (const command of [
+    'ls -la .sterling/sterling.db',
+    'grep -c records .sterling/sterling.db',
+    'stat .sterling/sterling.db && du -h .sterling/sterling.db',
+    'echo "the store is at .sterling/sterling.db"',
+    "cat > mcp-servers.json <<'EOF'\n{ \"args\": [\"--store\", \"${CLAUDE_PROJECT_DIR}/.sterling/sterling.db\"] }\nEOF",
+    'sqlite3 --version',
+    'rm -rf node_modules/.cache',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: node with flags and a quoted absolute script path taking --store <db> is allowed', () => {
+  const r = run('Bash', {
+    command: 'node --disable-warning=ExperimentalWarning "C:/Users/x/sterling-main/scripts/migrate-stores.mjs" --store .sterling/sterling.db',
+  });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: a Sterling script invoked after cd && is allowed', () => {
+  const r = run('Bash', { command: 'cd /mnt/c/x && node scripts/init.mjs --store .sterling/sterling.db' });
+  assert.equal(r.code, 0, r.stderr);
+});

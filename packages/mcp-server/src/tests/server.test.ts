@@ -89,10 +89,13 @@ const SERVED_TOOLS = [
   'maintenance_remove',
   'handoff_write',
   'handoff_read',
-  // The one sanctioned in-session config write: a positive allowlist of key
-  // paths, whole-document schema validation, CAS on the file digest — the raw
-  // Edit/Write denial on every .sterling file STAYS for both channels
-  // (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays).
+  // The one sanctioned in-session config write: any dotted key path is
+  // accepted (the positive allowlist was REMOVED — decision
+  // scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
+  // 38c9e860), still gated by whole-document schema validation and CAS on
+  // the file digest — the raw Edit/Write denial on every .sterling file
+  // STAYS for both channels (decision config-writes-get-a-config-set-mcp-
+  // tool-with-positive-key-allowlist-raw-edit-denial-stays).
   'config_set',
 ];
 

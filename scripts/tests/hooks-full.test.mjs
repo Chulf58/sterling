@@ -1159,129 +1159,6 @@ test('H10: an internal throw (corrupt config) degrades loud via check_skipped, n
 
 // --------------------------- H15 ---------------------------
 
-// FIXTURE RE-CUT 2026-09-05 — ACTIVE-PLUGIN-ROOT PROVENANCE SHIPPED (decision
-// 5b82e94f `h15-realpath-binding-active-plugin-root-provenance`; re-cut
-// discipline per decision 77c5b85a — state the old and new premise, never bend
-// an assertion until it goes green).
-//   OLD PREMISE (the three "sanctioned script passes" assertions below): the
-//     SPELLING of the executable word was the grant. H15 compared that word to a
-//     shipped `allow_scripts` entry by string equality, so this tmpdir fixture
-//     needed no file at `scripts/dispose-run.mjs` and no plugin root at all.
-//   NEW PREMISE: spelling grants NOTHING. The word must canonicalize
-//     (realpathSync.native) to a REGULAR FILE contained under the canonicalized,
-//     LAYOUT-VALIDATED active plugin root, at a clone-relative POSIX path equal
-//     to an entry — no bare-name fallback (anti_pattern caecf8a6, block).
-//   HOW IT IS RE-CUT: the fixture project is made into a valid active plugin root
-//     (the three layout markers + a real file at each sanctioned path it invokes)
-//     and the STERLING_PLUGIN_ROOT test seam names it, with the agent-settable
-//     CLAUDE_PLUGIN_ROOT scrubbed. EVERY COMMAND STRING IS BYTE-IDENTICAL.
-//   CLAIMS UNCHANGED: store references are denied naming the §10 tools; a
-//     sanctioned script passes; unrelated commands are untouched.
-//   NOTE ON WHAT WENT RED: only the FIRST sanctioned assertion (dispose-run) was
-//     reported red, because an early assertion masks every later one in the same
-//     test (anti_pattern f1d66bef) — the init and TUI-launcher assertions two
-//     lines below were failing behind it and are covered by the same re-cut.
-test('H15 store guard: shell references to the store are denied naming the §10 tools; sanctioned scripts and unrelated commands pass', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    // The active plugin root this test's sanctioned invocations must resolve
-    // into. The project IS the root here — the SELF-HOSTED shape (decision
-    // a206a529: a relative word resolves against the PROJECT CWD, the way the
-    // shell resolves it). The consumer shape, where a planted
-    // `<project>/scripts/init.mjs` must DENY, is pinned separately and
-    // exhaustively in scripts/tests/h15-active-root-provenance.test.mjs (PV-5).
-    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
-    writeFileSync(join(dir, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'sterling', version: '0.0.0-fixture' }));
-    mkdirSync(join(dir, 'hooks'), { recursive: true });
-    writeFileSync(join(dir, 'hooks', 'hooks.json'), JSON.stringify({ hooks: {} }));
-    for (const rel of ['scripts/dispose-run.mjs', 'scripts/init.mjs', 'packages/tui/bundle/sterling-tui.mjs']) {
-      const abs = join(dir, ...rel.split('/'));
-      mkdirSync(dirname(abs), { recursive: true });
-      writeFileSync(abs, '// fixture script — never executed by this test\n');
-    }
-
-    // Spawned from the seam bundle, not scripts/hooks/ (95c2c109 F2 — see H15_SEAM above).
-    const run = (command) =>
-      runHookAt(H15_SEAM.hookPath, hookInput(dir, { hook_event_name: 'PreToolUse', tool_name: 'PowerShell', tool_input: { command } }), dir, {
-        // CLAUDE_PLUGIN_ROOT is AGENT-SETTABLE and is never provenance (5b82e94f
-        // step 1) — dropped so an ambient live-session value cannot decide these
-        // verdicts (an `undefined` value is omitted from the child env by
-        // node:child_process, which is how the provenance suite scrubs it too).
-        STERLING_PLUGIN_ROOT: dir,
-        CLAUDE_PLUGIN_ROOT: undefined,
-      });
-
-    const nodeWrite = run(`node -e "import('.../store/dist/index.js').then(s => new s.SterlingStore('.sterling/sterling.db'))"`);
-    assert.equal(nodeWrite.code, 2, 'ad-hoc node script against the store is denied');
-    // This command names '.sterling/sterling.db', which matches the DB-seal's raw
-    // command-text matcher (sterling\.db) — it takes the DB seal's OWN dedicated
-    // disclosure message, not the generic store-guard phrasing this assertion used
-    // to expect ('§10 MCP tool surface'). Per decision fd9e96e0
-    // (h15-db-seal-residual-discharged-by-disclosure, board 3edfb9fd), the DB seal
-    // is a raw command-text matcher whose residual is discharged by DISCLOSURE —
-    // naming the matched substring and its offset — not by narrowing the matcher.
-    // The old expectation was stale (pre-dates the dedicated wording); re-aimed at
-    // the discriminator the DB-seal path actually produces.
-    assert.match(nodeWrite.stderr, /MCP tool surface/, 'the DB-seal denial still teaches the right path (MCP tool surface)');
-    assert.match(nodeWrite.stderr, /Matched substring: .+ at offset \d+ in the command text\./, 'the DB-seal denial discloses the matched substring and its offset (fd9e96e0)');
-    assert.doesNotMatch(nodeWrite.stderr, /maintenance_enqueue/, 'the retired wire tool is no longer taught (decision 6269b714)');
-    assert.match(nodeWrite.stderr, /board_remove/, 'the deny message teaches the live write surface');
-    assert.match(nodeWrite.stderr, /RESTART THE SESSION/);
-
-    assert.equal(run('sqlite3 .sterling/sterling.db "SELECT * FROM records"').code, 2, 'reads are denied too — use knowledge_query');
-    assert.equal(run('Get-Content .sterling\\config.json').code, 2, 'backslash store paths are caught');
-
-    // bare `.sterling` — the whole-store command class (audit finding 4/43, board 1aba8ace)
-    assert.equal(run('rm -rf .sterling').code, 2, 'whole-store delete names no separator but is still gated');
-    assert.equal(run('mv .sterling .sterling.bak').code, 2, 'whole-store rename is gated');
-    assert.equal(run('tar czf x.tgz .sterling').code, 2, 'whole-store archive is gated');
-    assert.equal(run('rm -rf .sterling-backups').code, 0, 'suffixed sibling names stay out of the gate');
-    assert.equal(run('echo .sterlingfoo').code, 0, 'word-joined mentions stay out of the gate');
-
-    assert.equal(run('node scripts/dispose-run.mjs r-0001 --store .sterling/sterling.db').code, 0, 'sanctioned script passes');
-    assert.equal(run('node scripts/init.mjs --backup-path .sterling/backups').code, 0, 'init passes');
-    assert.equal(run('node packages/tui/bundle/sterling-tui.mjs --store .sterling/sterling.db').code, 0, 'TUI launcher passes');
-    assert.equal(run('npm test').code, 0, 'unrelated commands untouched');
-    assert.equal(run('git status').code, 0);
-
-    // Superseded pin (decision 0b4d3c8c, user-decided 2026-08-20): the gate now
-    // judges per fragment and per VERB, so a read-only git command whose prose
-    // merely MENTIONS the store is allowed — the old deny-any-mention breadth
-    // (a8bec43f's wording fix rode on it) blocked legitimate read-only work.
-    const prose = run('git commit -F - <<EOF\nchore: teach the .sterling guard to explain itself\nEOF');
-    assert.equal(prose.code, 0, 'a read-only git command mentioning the store in prose is no longer denied (0b4d3c8c)');
-    assert.match(nodeWrite.stderr, /rm|fragment|\.sterling/, 'a write denial names what it matched, not just the rule');
-
-    // malformed config: the gate FAILS CLOSED on the protected branch (review finding)
-    writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
-    const broken = run('sqlite3 .sterling/sterling.db ".tables"');
-    assert.equal(broken.code, 2, 'unreadable config denies rather than voiding the gate');
-    assert.match(broken.stderr, /fails closed/);
-    assert.doesNotMatch(broken.stderr, /THIS GATE MATCHES COMMAND TEXT/, 'the fail-closed path keeps its own distinct message');
-  } finally {
-    cleanup();
-  }
-  // outside a Sterling project: silent pass-through (P1)
-  const bare = mkdtempSync(join(tmpdir(), 'sterling-bare-'));
-  try {
-    const r = runHook(
-      'h15-store-guard.mjs',
-      hookInput(bare, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'sqlite3 .sterling/sterling.db ".tables"' } }),
-      bare
-    );
-    assert.equal(r.code, 0, 'no ceremony outside Sterling projects');
-  } finally {
-    rmSync(bare, { recursive: true, force: true });
-  }
-});
-
-// Project-root resolution from a SUBDIRECTORY cwd (board 51b1e2c0). The platform
-// hands a hook the SHELL's working directory, which follows a Bash `cd` — every
-// hook test before this one passed cwd = the project root, which is exactly why
-// 538 green tests never caught it. A `cd` into any subdirectory used to make H3
-// fail closed on 'no Sterling store' while H7/H9/H13/H15/H16/H19 went SILENTLY
-// inert. lib/common.mjs readStdin now normalizes cwd to the nearest ancestor
-// holding .sterling/sterling.db.
 test('hook cwd: a SUBDIRECTORY resolves to the project root; a bare .sterling dir is NOT a root', () => {
   const { dir, cleanup } = makeProject();
   try {
@@ -1324,7 +1201,7 @@ test('hook cwd: a SUBDIRECTORY resolves to the project root; a bare .sterling di
       hookInput(sub, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'sqlite3 .sterling/sterling.db ".tables"' } }),
       sub
     );
-    assert.equal(r.code, 0, 'a bare .sterling directory must not be mistaken for a project root');
+    assert.equal(r.code, 2, 'H15 seals the database by PATH SHAPE, project or not (2026-09-19 one-rule rebuild: ~/.sterling/domains/*/sterling.db is exactly what this protects) — the bare-.sterling-is-not-a-root rule is pinned by the H3 arm above');
   } finally {
     rmSync(trap, { recursive: true, force: true });
   }

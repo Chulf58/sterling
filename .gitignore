@@ -11,3 +11,4 @@ sterling-launch.sh
 sterling-windows.bat
 .claude-plugin/sterling-mcp-win.json
 sterling-update.bat
+sterling-check.mjs

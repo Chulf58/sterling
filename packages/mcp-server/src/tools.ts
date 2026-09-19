@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
-import { ZodError, type ZodIssue, type ZodTypeAny, type ZodRawShape } from 'zod';
+import { ZodError, type ZodIssue } from 'zod';
 import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, signalSchema, SIGNALS, SIGNAL_PAYLOADS, parseConfig, configSchema, RECORD_TYPES, REVIEWER_ROLES, handoffSchema, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type RunRecord, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
@@ -1208,127 +1208,19 @@ function elementOwnsScalar(el: unknown, key: string): el is Record<string, unkno
 }
 
 // -----------------------------------------------------------------------
-// config_set (decision config-writes-get-a-config-set-mcp-tool-with-positive-
-// key-allowlist-raw-edit-denial-stays). H15's structured-write arm denies a
-// raw Edit/Write into ANY .sterling file, including config.json — this is the
-// one sanctioned in-session route around that denial for a fixed, reviewed
-// set of tunable keys. Module-level (not on the class) so the allowlist is
-// policy data any reader can find beside the tool, per the decision's own
-// framing ("one exported constant CONFIG_SET_ALLOWLIST beside the tool").
+// config_set (decision scale-down-enforcement-rules-and-locks-are-friction,
+// user-stated 2026-09-19). The positive key allowlist that used to gate this
+// tool was REMOVED 2026-09-19 under the scale-down ruling — config_set now
+// accepts ANY dotted config.json key path; the schema validation of the
+// resulting whole document (below) is what still refuses a value that would
+// break config.json, not a fixed key list.
 //
-// CONDUCTOR-RUN BY DESIGN (review item 10): no agent-templates/*.md grants
-// this tool. That is INTENTIONAL, not an oversight to fix — the decision is
-// explicit that this server authenticates no caller, so keeping config_set
-// off every roster grant is what keeps posture knobs (tdd.enabled,
-// delegation.max_concurrent, …) and review_ledger.stale_days out of a
-// subagent's reach even though nothing in the wire protocol itself would
-// stop a caller that HELD the tool from flipping one.
+// CONDUCTOR-RUN, UNCHANGED: no agent-templates/*.md grants this tool. This
+// server authenticates no caller, so keeping config_set off every roster
+// grant is what keeps every config.json key out of a subagent's reach even
+// though nothing in the wire protocol itself would stop a caller that HELD
+// the tool from flipping one.
 // -----------------------------------------------------------------------
-
-/**
- * The positive allowlist of dotted config.json key paths config_set may
- * write. Two entries are FAMILIES (`models.<key>`, `delivery.<key>`) — the
- * concrete `<key>` is validated at call time against the canonical schema's
- * own `models`/`delivery` object shape (configSetFamilyKeys below), never
- * hand-duplicated here, so a schema addition (a new agent-model key, a new
- * delivery tunable) is admitted without touching this list. Every other
- * entry is matched by exact string equality. Anything not covered here —
- * store_guard.*, toolchains.*, machine_role, backup_path, store_authority,
- * review_ledger.code_globs, and every unknown key — is refused naming this
- * list (decision statement, "WHAT SHIPS").
- */
-export const CONFIG_SET_ALLOWLIST = [
-  'models.<key>',
-  'tdd.enabled',
-  'mutation_verification.enabled',
-  'sparring_partner.enabled',
-  'sparring_partner.model',
-  'delegation.max_concurrent',
-  'maintenance_queue.deep_threshold',
-  'delivery.<key>',
-  'dispatch_register.stale_minutes',
-  'review_ledger.stale_days',
-] as const;
-
-const CONFIG_SET_EXACT_PATHS = new Set<string>(CONFIG_SET_ALLOWLIST.filter((p) => !p.includes('<key>')));
-const CONFIG_SET_FAMILIES = ['models', 'delivery'] as const;
-type ConfigSetFamily = (typeof CONFIG_SET_FAMILIES)[number];
-
-/**
- * Unwrap a ZodDefault-wrapped ZodObject field down to its raw shape's key
- * set — mirrors the unwrap loop `objectShapeFor` (packages/schemas/src/
- * records.ts) already uses for record-type schemas, applied here to a plain
- * config.ts field instead of a RECORD_TYPES entry (that function is keyed by
- * registered record type name, not reusable for a config sub-schema).
- */
-function configSetFamilyKeys(family: ConfigSetFamily): string[] {
-  let schema: unknown = (configSchema.shape as Record<string, ZodTypeAny>)[family];
-  for (let i = 0; i < 5 && schema && typeof schema === 'object'; i++) {
-    const shape = (schema as { shape?: ZodRawShape }).shape;
-    if (shape) return Object.keys(shape);
-    const inner = (schema as { _def?: { innerType?: unknown; schema?: unknown } })._def;
-    schema = inner?.innerType ?? inner?.schema;
-  }
-  return [];
-}
-
-/**
- * Verdict for one dotted `path` against CONFIG_SET_ALLOWLIST. `family` is
- * set whenever `path` matches a family's PREFIX shape (`<family>.<one
- * segment>`); `leaf_unknown` (vs the default "not on the allowlist" cause)
- * is set when the shape matches a family but the concrete key is not one the
- * schema defines for it.
- *
- * BOTH FAMILIES ARE MEMBERSHIP-CHECKED THE SAME WAY (review fix, item 1 —
- * reverting an earlier asymmetric design): `models.<key>` and
- * `delivery.<key>` both check the concrete key against the canonical
- * schema's own object shape (configSetFamilyKeys). Making `delivery`'s zod
- * object `.strict()` so an unknown leaf failed WHOLE-DOCUMENT VALIDATION
- * instead was REJECTED — that turns any unmodeled on-disk delivery key
- * (a forward-shipped field, a hand-edit) into a startup failure of
- * parseConfig itself (server.ts boot) with no config_set available to fix
- * it, because the server that would serve the tool never comes up. The two
- * refusal CAUSES still stay distinguishable (packages/mcp-server/src/tests/
- * config-set.test.ts CS-11 pins delivery specifically): an unknown key
- * inside an allowlisted family is refused by `configSetFamilyLeafDenial`,
- * which never says "allowlist" — the caller should keep trying delivery
- * keys, just not that one.
- */
-function configSetAllowlistVerdict(path: string): { allowed: boolean; family?: ConfigSetFamily; leaf_unknown?: boolean } {
-  if (CONFIG_SET_EXACT_PATHS.has(path)) return { allowed: true };
-  for (const family of CONFIG_SET_FAMILIES) {
-    const prefix = `${family}.`;
-    if (!path.startsWith(prefix)) continue;
-    const rest = path.slice(prefix.length);
-    if (!rest || rest.includes('.')) return { allowed: false, family };
-    if (configSetFamilyKeys(family).includes(rest)) return { allowed: true, family };
-    return { allowed: false, family, leaf_unknown: true };
-  }
-  return { allowed: false };
-}
-
-function configSetAllowlistDenial(path: string, family?: ConfigSetFamily): string {
-  const hint = family ? ` (${family} keys currently defined: ${configSetFamilyKeys(family).join(', ') || '<none>'})` : '';
-  return (
-    `config_set: '${path}' is not on the allowlist${hint} — allowed paths: ${CONFIG_SET_ALLOWLIST.join(', ')}. ` +
-    'Nothing was written (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays).'
-  );
-}
-
-/**
- * The DISTINCT refusal for "the family namespace is allowlisted, but this
- * concrete leaf is not one the schema defines" — deliberately never uses the
- * word "allowlist" (pin CS-11): that word means "this whole path is denied
- * by the positive-list rule", which is not true here — delivery.* and
- * models.* stay allowlisted namespaces, only this one leaf is unrecognized.
- */
-function configSetFamilyLeafDenial(path: string, family: ConfigSetFamily): string {
-  const keys = configSetFamilyKeys(family).join(', ') || '<none>';
-  return (
-    `config_set: '${path}' is not a defined ${family} setting — known ${family} keys: ${keys}. ` +
-    'Nothing was written.'
-  );
-}
 
 // Prototype-pollution guard (review fix, item 2): `categoryObj[key] = value`
 // further down uses bracket assignment on a PLAIN object built by spreading
@@ -1338,15 +1230,14 @@ function configSetFamilyLeafDenial(path: string, family: ConfigSetFamily): strin
 // from the file — a false action claim) while still mutating the live
 // object's prototype chain in-process. `constructor`/`prototype` are refused
 // for the same class of reason. Checked against EVERY dotted segment of the
-// caller's raw path, before the allowlist verdict even runs, so no future
-// family or exact entry can reopen this by accident.
+// caller's raw path before any write is attempted.
 const CONFIG_SET_FORBIDDEN_SEGMENTS = new Set(['__proto__', 'constructor', 'prototype']);
 
 /**
  * The implementation behind SterlingTools.configSet, kept as a standalone
- * function (rather than inline in the class method) so the module-level
- * allowlist helpers above stay the only things it touches — no dependency on
- * `this`, beyond the repoRoot the caller already resolved.
+ * function (rather than inline in the class method) so the prototype-
+ * pollution guard above stays the only module-level thing it touches — no
+ * dependency on `this`, beyond the repoRoot the caller already resolved.
  *
  * THE WHOLE DOCUMENT IS ROUND-TRIPPED AS A PLAIN JS OBJECT, never through
  * parseConfig's own `.parse()` output: configSchema is a non-strict
@@ -1378,7 +1269,7 @@ function configSetImpl(
     throw new Error(`config_set: no project root is known to this server, so .sterling/config.json cannot be resolved.`);
   }
   if (typeof path !== 'string' || !path.trim()) {
-    throw new Error(`config_set: 'path' is required — a dotted key path from CONFIG_SET_ALLOWLIST.`);
+    throw new Error(`config_set: 'path' is required — a dotted key path (e.g. 'tdd.enabled').`);
   }
   // P5: an omitted `value` is refused BEFORE anything else (review item 3) —
   // JSON.stringify drops an object property whose value is `undefined`, so
@@ -1392,17 +1283,13 @@ function configSetImpl(
     );
   }
   // Prototype-pollution guard (review item 2), checked against EVERY dotted
-  // segment before the allowlist verdict runs at all.
+  // segment. This is the only path-shape refusal left — the positive key
+  // allowlist was removed 2026-09-19 (decision
+  // scale-down-enforcement-rules-and-locks-are-friction); any other dotted
+  // path is accepted here and lives or dies on the schema validation below.
   if (path.split('.').some((seg) => CONFIG_SET_FORBIDDEN_SEGMENTS.has(seg))) {
     throw new Error(
       `config_set: '${path}' contains a forbidden path segment — __proto__ / constructor / prototype are refused anywhere in a dotted path (prototype-pollution guard). Nothing was written.`
-    );
-  }
-
-  const verdict = configSetAllowlistVerdict(path);
-  if (!verdict.allowed) {
-    throw new Error(
-      verdict.family && verdict.leaf_unknown ? configSetFamilyLeafDenial(path, verdict.family) : configSetAllowlistDenial(path, verdict.family)
     );
   }
 
@@ -1490,22 +1377,42 @@ function configSetImpl(
     raw = parsed as Record<string, unknown>;
   }
 
-  // Every allowlisted path is exactly two dotted segments (category.key) —
-  // verified above by configSetAllowlistVerdict (an exact match is a fixed
-  // two-segment literal; a family match requires exactly one segment past
-  // the family prefix).
-  const dot = path.indexOf('.');
-  const category = path.slice(0, dot);
-  const key = path.slice(dot + 1);
-
-  const existingCategory = raw[category];
-  const categoryIsObject = !!existingCategory && typeof existingCategory === 'object' && !Array.isArray(existingCategory);
-  const previousValue = categoryIsObject ? (existingCategory as Record<string, unknown>)[key] : undefined;
-
+  // The path can be ANY depth now the allowlist is gone — a bare root key
+  // (`machine_role`, 0 dots) or a path several segments deep
+  // (`context_watch.windows.claude-fable-5-1`, 2 dots) alike. Walk the
+  // segments, shallow-cloning each existing object level so unrelated
+  // siblings at every depth survive byte-for-byte, and create a plain
+  // object for any intermediate segment that is ABSENT. An intermediate
+  // that exists but is not a plain object (a scalar, an array) is REFUSED:
+  // walking into it would silently replace forward-compatible data the
+  // schema does not model (Terra review 2026-09-19, MEDIUM).
+  const segments = path.split('.');
   const mutated: Record<string, unknown> = { ...raw };
-  const categoryObj: Record<string, unknown> = categoryIsObject ? { ...(existingCategory as Record<string, unknown>) } : {};
-  categoryObj[key] = value;
-  mutated[category] = categoryObj;
+  let cursor: Record<string, unknown> = mutated;
+  let previousValue: unknown;
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    if (i === segments.length - 1) {
+      previousValue = cursor[seg];
+      cursor[seg] = value;
+    } else {
+      const existing = cursor[seg];
+      if (existing === undefined) {
+        const next: Record<string, unknown> = {};
+        cursor[seg] = next;
+        cursor = next;
+      } else if (existing !== null && typeof existing === 'object' && !Array.isArray(existing)) {
+        const next: Record<string, unknown> = { ...(existing as Record<string, unknown>) };
+        cursor[seg] = next;
+        cursor = next;
+      } else {
+        const walked = segments.slice(0, i + 1).join('.');
+        throw new Error(
+          `config_set: '${path}' walks into '${walked}', which exists and is ${Array.isArray(existing) ? 'an array' : `a ${typeof existing}`}, not an object — refusing to replace it. Set '${walked}' itself if that is what you intend. Nothing was written.`
+        );
+      }
+    }
+  }
 
   const validation = configSchema.safeParse(mutated);
   if (!validation.success) {
@@ -8237,7 +8144,7 @@ export class SterlingTools {
     return { pending: detail, at };
   }
 
-  // -- config_set (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays) ------
+  // -- config_set (allowlist removed 2026-09-19, decision scale-down-enforcement-rules-and-locks-are-friction; conductor-run) ------
 
   configSet(args: { path: string; value: unknown; expected_digest?: string }): { path: string; previous_value: unknown; value: unknown; digest: string } {
     return configSetImpl(this.repoRoot, args?.path, args?.value, args?.expected_digest);
