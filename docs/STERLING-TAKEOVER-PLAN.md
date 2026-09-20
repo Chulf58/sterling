@@ -91,7 +91,7 @@ Pre-commit review: Sol review 1 requested changes (4 CRITICAL, 4 HIGH, 1 MEDIUM)
 
 ### Slice 3b — knowledge delivery migration
 
-IN PROGRESS. Decision `92088a62` (`knowledge-delivery-target-design-no-delayed-delivery`) adopts Astra's full review: delete delayed delivery—the prompt rung, drain, queue, lock and cached fallback; use explicit emission metadata rather than scanning text for IDs, avoiding a persistent false `delivered` mark; distinguish discovery from substance marks; keep hazards whole with an honest three-per-package limit; charge final context; and give Codex lanes no automatic delivery, so briefs carry records by hand. Step 1 checkpoint is DONE (`8df86a6`). Step 2 removes delayed producers (board `7b4d9f3a`, IN PROGRESS on Terra); step 3 adds the assembler contract and marks (board `4c32af48`); steps 4–5 settle timing/context ownership, run WSL probes, then delete dead machinery (board `8a3948a7`).
+COMPLETE. The migration implements decision `knowledge-delivery-target-design-no-delayed-delivery`: Step 1 established the checkpoint (`8df86a6`); Step 2 deleted delayed delivery—the prompt rung, knowledge queue, drain recipes and lock (`1fe2f32`); Step 3 added the pure assembler, revision-keyed substance/discovery marks and transport ceiling (`55c2a0f`); Step 4 implemented the session-keyed guard that expires on context loss, as settled by decision `delivery-guard-is-session-keyed-and-expires-on-context-loss` (`4f1ba97`); and Step 5 deleted porch convergence and the deny remnants (`10acec1`).
 
 ### Slice 4 — touches from git, gauge with the right window
 
