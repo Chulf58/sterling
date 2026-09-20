@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent } from '../lib/update.mjs';
+import { readCurrency, refusalFor, currencyLine, gitFrom, defaultExec, runUpdate, stampConsumerRoleIfAbsent, UPDATE_MARKER_RELATIVE_PATH } from '../lib/update.mjs';
 import { ensureUpdateLauncher, renderUpdateLauncher, updateTemplateName, UPDATE_LAUNCHER_NAME } from '../lib/update-launcher.mjs';
 
 const GIT_ID = ['-c', 'user.email=t@sterling.test', '-c', 'user.name=sterling test'];
@@ -198,7 +198,7 @@ test('describe surfaces an annotated tag as the human-legible version; no tags s
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 
-function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, contractStatus = 0 } = {}) {
+function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, contractStatus = 0, head = HEAD_A } = {}) {
   const calls = [];
   let merged = false;
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -210,7 +210,7 @@ function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = n
       const a = args.join(' ');
       if (a === 'rev-parse --git-dir') return ok('.git');
       if (a === 'rev-parse --abbrev-ref HEAD') return ok('main');
-      if (a === 'rev-parse HEAD') return ok(merged ? HEAD_B : HEAD_A);
+      if (a === 'rev-parse HEAD') return ok(merged ? HEAD_B : head);
       if (a.startsWith('describe')) return ok('v0.2.0');
       if (a === 'remote') return ok('origin');
       if (a.startsWith('symbolic-ref')) return ok('origin/main');
@@ -244,6 +244,14 @@ function scratchCwd() {
   return mkdtempSync(join(tmpdir(), 'sterling-update-cwd-'));
 }
 
+/** Seed a completed-update marker as if a prior run finished IN FULL at `sha` —
+ *  the only way "Already current" is a legitimate shortcut rather than a lie. */
+function seedUpdateMarker(cwd, sha) {
+  const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString() }));
+}
+
 test('refusal path mutates nothing: no merge, no npm, exit 2', async () => {
   const cwd = scratchCwd();
   try {
@@ -263,6 +271,10 @@ test('refusal path mutates nothing: no merge, no npm, exit 2', async () => {
 test('already current: fetches, reports, and runs no build or sync (exit 0)', async () => {
   const cwd = scratchCwd();
   try {
+    // A legitimate shortcut requires proof the LAST run completed in full at
+    // this exact head — without it, behind===0 alone must resume instead
+    // (board 2b37272a claim A; see the halted-run/rerun tests below).
+    seedUpdateMarker(cwd, HEAD_A);
     const { exec, calls } = fakeExec({ behind: 0 });
     const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
 
@@ -477,6 +489,119 @@ test('a per-project sync refusal surfaces as exit 2 without stopping the other p
   }
 });
 
+// ── board 2b37272a claim B: one sibling's store migration must not abort the
+//    rest of the fan-out ────────────────────────────────────────────────────
+
+test('a sibling project whose store migration fails: later projects still processed, agent sync still reached, exit non-zero with that project named', async () => {
+  const cwd = scratchCwd();
+  const projA = mkdtempSync(join(tmpdir(), 'sterling-update-proj-'));
+  const projB = mkdtempSync(join(tmpdir(), 'sterling-update-proj-'));
+  try {
+    const storeA = join(projA, '.sterling', 'sterling.db');
+    const storeB = join(projB, '.sterling', 'sterling.db');
+    legacyStoreAt(storeA);
+    legacyStoreAt(storeB);
+    // `failing` matches on substring, and mkdtemp gives each project a unique
+    // absolute path, so this fails ONLY ProjA's migration call.
+    const { exec, calls } = fakeExec({ behind: 1, failing: storeA });
+    const report = await runUpdate({
+      cwd,
+      exec,
+      log: () => {},
+      projects: [
+        { name: 'ProjA', repo_path: projA },
+        { name: 'ProjB', repo_path: projB },
+      ],
+      opts: {},
+    });
+
+    assert.notEqual(report.exit, 0, 'a migration failure must surface as a non-zero exit, never be swallowed');
+    assert.ok(calls.some((c) => c.includes('migrate-stores.mjs') && c.includes(storeA)), 'ProjA migration was attempted');
+    assert.ok(calls.some((c) => c.includes('migrate-stores.mjs') && c.includes(storeB)), 'ProjB migration was attempted too — the failure did not abort the loop');
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 2, 'agent sync still reached for BOTH projects');
+    const failed = report.migrations.find((m) => m.name === 'ProjA');
+    const okOne = report.migrations.find((m) => m.name === 'ProjB');
+    assert.ok(failed && failed.ok === false, 'the failing project is named in the report');
+    assert.ok(okOne && okOne.ok === true, 'the succeeding project is named too');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(projA, { recursive: true, force: true });
+    rmSync(projB, { recursive: true, force: true });
+  }
+});
+
+// ── board 2b37272a claim A: "Already current" must prove the LAST run
+//    completed the post-merge sequence, not merely that git is current ──────
+
+test('a halted post-merge run leaves no completion marker, so a rerun at behind=0 resumes into the full sequence instead of reporting Already current', async () => {
+  const cwd = scratchCwd();
+  try {
+    const first = fakeExec({ behind: 1, failing: 'npm run build' });
+    const firstReport = await runUpdate({ cwd, exec: first.exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+    assert.equal(firstReport.exit, 1, 'the halted run reports failure');
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'a halted run must not leave a completion marker');
+
+    const lines = [];
+    // The halted run already fast-forwarded HEAD to HEAD_B before failing
+    // (board 2b37272a claim A) — the rerun sees that as its current head.
+    const second = fakeExec({ behind: 0, head: HEAD_B });
+    const secondReport = await runUpdate({ cwd, exec: second.exec, log: (m) => lines.push(m), projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+
+    assert.equal(secondReport.exit, 0);
+    assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')), 'a resumed run must never report Already current');
+    assert.ok(lines.some((l) => /resuming/i.test(l)), 'the resume must announce itself loudly (P5)');
+    assert.ok(second.calls.includes('npm run build'), 'the rerun reaches the build step');
+    assert.ok(second.calls.includes('npm run check'));
+    assert.ok(second.calls.includes('npm test'));
+    assert.equal(second.calls.filter((c) => c.includes('sync-agents')).length, 1, 'and reaches agent sync');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('a completed run followed by a rerun with no new commits still reports Already current — the happy path is unaffected', async () => {
+  const cwd = scratchCwd();
+  try {
+    const first = fakeExec({ behind: 1 });
+    const firstReport = await runUpdate({ cwd, exec: first.exec, log: () => {}, projects: [], opts: {} });
+    assert.equal(firstReport.exit, 0, 'the first run completes cleanly');
+    assert.equal(
+      JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8')).sha,
+      HEAD_B,
+      'a clean run stamps the sha it finished at'
+    );
+
+    const lines = [];
+    const second = fakeExec({ behind: 0, head: HEAD_B });
+    const secondReport = await runUpdate({ cwd, exec: second.exec, log: (m) => lines.push(m), projects: [], opts: {} });
+
+    assert.equal(secondReport.exit, 0);
+    assert.ok(lines.some((l) => l.includes('Already current — nothing to do')), 'the marker matches HEAD, so the shortcut is legitimate');
+    assert.equal(second.calls.filter((c) => c.startsWith('npm')).length, 0, 'no rebuild when the marker matches HEAD');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('a corrupt/unreadable completion marker degrades to a full resume, never to Already current, and announces the degradation', async () => {
+  const cwd = scratchCwd();
+  try {
+    mkdirSync(join(cwd, '.sterling'), { recursive: true });
+    writeFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), '{ not valid json');
+
+    const lines = [];
+    const { exec, calls } = fakeExec({ behind: 0, head: HEAD_B });
+    const report = await runUpdate({ cwd, exec, log: (m) => lines.push(m), projects: [], opts: {} });
+
+    assert.equal(report.exit, 0);
+    assert.ok(!lines.some((l) => l.includes('Already current — nothing to do')), 'a corrupt marker must never be trusted as proof of completion');
+    assert.ok(lines.some((l) => /corrupt\/unreadable/i.test(l)), 'the degradation is announced loudly, never silent');
+    assert.ok(calls.includes('npm run build'), 'a corrupt marker degrades to a full resume, not a skip');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test('the init ensure pass runs only when the clone is itself initialized', async () => {
   const withConfig = scratchCwd();
   const without = scratchCwd();
@@ -609,6 +734,9 @@ test('runUpdate does not stamp when the update is a no-op (already current) — 
     mkdirSync(join(dir, '.sterling'), { recursive: true });
     const configPath = join(dir, '.sterling', 'config.json');
     writeFileSync(configPath, JSON.stringify({}));
+    // Same reason as the "already current" test above: the shortcut is only
+    // legitimate with a marker proving the last run finished at this head.
+    seedUpdateMarker(dir, HEAD_A);
 
     const { exec } = fakeExec({ behind: 0 });
     const report = await runUpdate({ cwd: dir, exec, log: () => {}, projects: [], opts: {} });

@@ -18,7 +18,7 @@
 // refusal matrix and the step ordering are unit-testable without a network, an
 // npm install, or a 90-second test battery. scripts/update.mjs is the thin CLI.
 import { spawnSync } from 'node:child_process';
-import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 // builtins-only module — safe at load time on an unbuilt clone (see the
@@ -280,6 +280,46 @@ export function currencyLine(c) {
   return `sterling: ${id} on ${c.branch} · ${c.upstream ?? 'no upstream'} · ${gap}`;
 }
 
+// The on-disk proof that a PREVIOUS run's post-merge sequence (build through
+// agent sync, :495-634) finished IN FULL, not merely that git itself is
+// current. Board 2b37272a claim A: the ff-merge runs BEFORE build/check/test/
+// sync, so a run that halts anywhere in that sequence has already advanced
+// HEAD — the next run then sees `behind === 0` from git alone and cannot tell
+// a halted run from a fully-synced one. This marker closes that gap. Under
+// `.sterling/` deliberately (invariant 5 seals only sterling.db; every other
+// file there, .gitignore already covers the whole directory).
+export const UPDATE_MARKER_RELATIVE_PATH = join('.sterling', 'update-complete.json');
+
+/**
+ * The sha a prior COMPLETE run left behind, or null when there is nothing to
+ * trust. Absent is the ordinary first-run/never-completed shape and stays
+ * silent; present-but-corrupt is a DEGRADATION and must announce itself
+ * (P5) — both return null so the caller resumes either way, but only the
+ * corrupt case logs.
+ */
+function readUpdateMarker(cwd, log) {
+  const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  if (!existsSync(p)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    if (typeof parsed?.sha !== 'string' || !parsed.sha) throw new Error('missing or invalid "sha" field');
+    return parsed.sha;
+  } catch (err) {
+    log(`\n⚠ update marker '${p}' is corrupt/unreadable — degrading to a full resume rather than trusting a marker that cannot be verified: ${err?.message ?? err}`);
+    return null;
+  }
+}
+
+/** Written ONLY once runUpdate reaches its clean end with report.exit === 0 —
+ *  see the call site. A halted or failed run must never leave a marker that
+ *  makes the NEXT run believe "Already current" without the sequence having
+ *  actually finished. */
+function writeUpdateMarker(cwd, sha) {
+  const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString() }, null, 2) + '\n');
+}
+
 /** Existing project + domain stores, without opening any database connection. */
 function machineStores(cwd) {
   const stores = [join(cwd, '.sterling', 'sterling.db')];
@@ -321,7 +361,7 @@ function probeSchemaVersion(dbPath) {
 export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
-  const report = { exit: 0, currency: null, steps: [], projects: [], refusal: null };
+  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
@@ -457,22 +497,36 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   };
 
   if (before.behind === 0 && !opts.force) {
-    // FULLY NONFATAL: resolving the registry can throw (open/list failure). An
-    // already-current update has already succeeded by the time we get here, so a
-    // registry failure must NOT reject the update or leave a half-applied state
-    // — log and continue to the success return.
-    try {
-      const noopProjectList =
-        opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
-      // The blind spot this reports is INDEPENDENT of clone lag — an
-      // already-current clone with two unregistered projects is the measured
-      // 2026-08-28 state exactly — so the report belongs on this path too.
-      await reportCoverage(noopProjectList);
-    } catch (err) {
-      log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+    const markerSha = readUpdateMarker(cwd, log);
+    if (markerSha === before.head) {
+      // FULLY NONFATAL: resolving the registry can throw (open/list failure). An
+      // already-current update has already succeeded by the time we get here, so a
+      // registry failure must NOT reject the update or leave a half-applied state
+      // — log and continue to the success return.
+      try {
+        const noopProjectList =
+          opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+        // The blind spot this reports is INDEPENDENT of clone lag — an
+        // already-current clone with two unregistered projects is the measured
+        // 2026-08-28 state exactly — so the report belongs on this path too.
+        await reportCoverage(noopProjectList);
+      } catch (err) {
+        log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+      }
+      log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
+      return report;
     }
-    log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
-    return report;
+    // Git is current, but nothing on disk proves the LAST post-merge sequence
+    // (build through agent sync, below) ever finished at this sha — a halted
+    // run already advanced HEAD before failing (board 2b37272a claim A), so
+    // "behind === 0" alone can never mean "fully synced". Resume the sequence
+    // — from here straight into the build step below — instead of reporting
+    // done; a halt could have happened anywhere in it.
+    log(
+      markerSha
+        ? `\n▸ git is current at ${before.head_short}, but the last completed-update marker points elsewhere (${markerSha.slice(0, 7)}) — a previous run may have halted partway through. Resuming the full post-merge sequence (build onward) instead of reporting "Already current".`
+        : `\n▸ git is current at ${before.head_short}, but no completed-update marker was found — resuming the full post-merge sequence (build onward) instead of reporting "Already current".`
+    );
   }
 
   const from = before.head;
@@ -574,6 +628,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // those projects never run /sterling:update themselves. Migrate them here,
   // where the registry is finally resolvable; a refusal stops the update
   // loudly, same contract as the machine-store loop.
+  // CONTINUE-ON-FAILURE, matching the agent-sync loop below (board 2b37272a
+  // claim B): a `return` here used to make one sibling's migration failure
+  // skip every unprocessed project AND the entire agent-sync loop — the
+  // originally-reported trigger is migrate-stores.mjs's own pre-mutation
+  // verification refusal. `tolerate: true` keeps `step()` from setting
+  // report.exit or returning on our behalf, so we can log per-project, record
+  // it in report.migrations, and move on — continue-on-failure must still
+  // surface non-zero overall, never swallow it.
   if (opts.projects !== false && projectList.length) {
     for (const p of projectList) {
       const projStore = join(p.repo_path, '.sterling', 'sterling.db');
@@ -582,12 +644,20 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       try {
         projVersion = probeSchemaVersion(projStore);
       } catch (err) {
-        log(`\n✗ store schema probe FAILED for '${projStore}' — stopping. The fast-forward stands; ${err?.message ?? err}`);
-        report.exit = 1;
-        return report;
+        log(`\n✗ store schema probe FAILED for '${projStore}' (${p.name}) — this project's migration is SKIPPED; continuing with the remaining projects and the agent-sync fan-out below. ${err?.message ?? err}`);
+        report.migrations.push({ name: p.name, repo_path: p.repo_path, ok: false, error: err?.message ?? String(err) });
+        report.exit = report.exit === 0 ? 1 : report.exit;
+        continue;
       }
       if (projVersion < 2) {
-        if (!step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
+        const migrated = step(`migrate store schema v${projVersion} → v2 (${projStore})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', projStore, '--invoked-by', 'update-sweep'], { show: true, tolerate: true });
+        if (!migrated.ok) {
+          log(`  ✗ ${p.name}: store migration FAILED — this project's store stays unmigrated; continuing with the remaining projects and the agent-sync fan-out below.`);
+          report.migrations.push({ name: p.name, repo_path: p.repo_path, ok: false });
+          report.exit = report.exit === 0 ? 1 : report.exit;
+          continue;
+        }
+        report.migrations.push({ name: p.name, repo_path: p.repo_path, ok: true });
         log(`  ▸ migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough — MCP servers survive it) before it can write again`);
       }
     }
@@ -658,5 +728,20 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         : '') +
       'RESTART THE SESSION before working — that means EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough, MCP servers survive it): the MCP server and every project subagent load at CLI start, so the code now on disk is not the code running.'
   );
+
+  // Stamp completion ONLY on a clean exit (board 2b37272a claim A) — a
+  // per-project sync refusal or migration failure already left report.exit
+  // non-zero above, and writing the marker anyway would make the NEXT
+  // behind-0 run report "Already current" while that failure is still
+  // unresolved. Never fatal: the update itself already succeeded by the time
+  // this runs.
+  if (report.exit === 0) {
+    try {
+      writeUpdateMarker(cwd, after.head);
+    } catch (err) {
+      log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
+    }
+  }
+
   return report;
 }
