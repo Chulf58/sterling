@@ -103,7 +103,11 @@ CLOSED — landed in `8df86a6`, together with Slice 8. The roster is implementor
 
 ### Slice 6 — /sterling:update reaches agent sync on consumers
 
-NOT STARTED. After the commit/sync/restart, make update reach agent sync on consumers, with continuation/reporting that prevents a skipped or sibling-blocked Dome Farmer sync from claiming it is current.
+COMPLETE (`4912d15`). Re-verified first: the item's evidence was pinned to pre-cut `1ef128a2`, so each claim was re-measured at HEAD before any fix. Claim A (a halted run later reports "Already current") and Claim B (one sibling's failure aborts the whole fan-out) were both ALIVE; Claim C ("14 failing expect-RED tests") did not survive scrutiny — only 3 `expect RED` tests remain, all in `h1-plugin-root-sites.test.mjs`, and all three PASS: "RED" names a still-present security defect, not a failing test.
+
+The fix, per decision `already-current-requires-a-completion-marker-not-git-currency` (`knowledge_get 0f614b30`): "Already current" now requires git currency AND `.sterling/update-complete.json` {sha, completed_at} matching HEAD, written only on `report.exit === 0`; a missing, non-matching or corrupt marker resumes the full post-merge sequence and announces why (P5). The per-project migration loop's `return report` became a `continue` mirroring the already-correct sync loop 5 lines below it, recording each project in `report.migrations` and setting a non-zero exit without overwriting a worse code. 52/52 in `scripts/tests/update.test.mjs`, `npm run check` exit 0. One-time cost: no existing clone has a marker, so the first update after this lands resumes the full sequence once even when git is current.
+
+Not closed by this slice: the acceptance run itself. The fix is verified by tests, not yet by a real `/sterling:update` on Dome Farmer and SpaceExplorer.
 
 ### Slice 7 — Dome Farmer defects that survive the cut
 
@@ -134,4 +138,8 @@ DISAGREED, conductor call stands: H29 consult-result checking is not rebuilt bec
 
 ## Next order
 
-Complete knowledge-delivery migration steps 2 → 3 → 4/5; then Slice 6; then the Dome Farmer acceptance session; then Slice 7, including board `01fbe880` and I-01 at `h10-direct-capture.mjs:1761`. Take board `f72e5982` (article coverage) whenever capacity permits. The remaining Slice 1 domain-store action stays open.
+Slices 3b and 6 are closed. Next is the **Dome Farmer acceptance session** — a real `/sterling:update` run on Dome Farmer and SpaceExplorer, which is now both Slice 6's acceptance and Slice 2's (Astra's round-1 ask: acceptance = a working consumer session on the real thing). Then Slice 7, including board `01fbe880` and I-01 at `h10-direct-capture.mjs:1761`.
+
+Article coverage is now three boarded gaps of one class — `f72e5982` (extensible-set registries), `0dca9d42` (`packages/mcp-server`, `packages/store`) and `b0e8325a` (the `/sterling:update` surface, found during Slice 6's reconcile: `matched_filter:0`, no owning article at all) — best taken in one authoring pass rather than three. The remaining Slice 1 domain-store action stays open.
+
+Carried, unruled by the user: the dead `caps` residue (~30 test-file fixtures, `hooks-full.test.mjs:78`, and the stale comment at `packages/schemas/src/config.ts:3`) — no store record still assumes `caps`, confirmed by a full-set `min_score` query; the re-arm test proves the touch COUNT but not WHICH touch, whose only discriminator is the rendered `since HH:MM` and nothing in the suite pins `TZ`; and `reference_material 7ef71ac6` owns `docs/drafts/slice-2-removal-map.md`, absent from the tree.
