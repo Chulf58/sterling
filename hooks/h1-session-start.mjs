@@ -6201,6 +6201,16 @@ var SterlingStore = class _SterlingStore {
       if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
         throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
       }
+      const removedRelation = opts.remove_relation === void 0 ? void 0 : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === "supersedes") {
+        throw new Error(`${op}: rel 'supersedes' cannot be removed as a raw edge \u2014 it is the authoritative carrier of a lifecycle transition. Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`);
+      }
+      if (removedRelation) {
+        const exists = this.db.prepare("SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists \u2014 nothing was written; re-read the record and retry.`);
+        }
+      }
       const candidate = buildPatch(current);
       candidate.id = id;
       candidate.type = current.type;
@@ -6242,6 +6252,12 @@ var SterlingStore = class _SterlingStore {
       }
       for (const link of validated.links)
         this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        const deleted = this.db.prepare("DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
+        }
+      }
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)

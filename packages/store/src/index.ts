@@ -370,6 +370,14 @@ export const DEFAULT_QUERY_CAP = 20;
 export interface RecordWriteOptions {
   expected_version?: number;
   resolves?: string[];
+  /**
+   * An explicit removal from the authoritative relation graph. This is kept
+   * separate from the record body because links[] updates are deliberately
+   * additive: a normal content write must never silently drop an edge.
+   * Supersedes is excluded in applyInPlace; lifecycle transitions remain owned
+   * by supersede()/retireInFavorOf().
+   */
+  remove_relation?: { rel: string; target_id: string };
 }
 
 export interface QueryOptions {
@@ -1905,6 +1913,28 @@ export class SterlingStore {
         );
       }
 
+      // An edge removal is an explicit operation, not an implication of the
+      // candidate's links[] body. Parse it here (inside the write transaction)
+      // and reserve lifecycle edges for their specialized transitions.
+      const removedRelation = opts.remove_relation === undefined ? undefined : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === 'supersedes') {
+        throw new Error(
+          `${op}: rel 'supersedes' cannot be removed as a raw edge — it is the authoritative carrier of a lifecycle transition. ` +
+            `Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`
+        );
+      }
+      if (removedRelation) {
+        const exists = this.db
+          .prepare('SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?')
+          .get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(
+            `${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists — ` +
+              `nothing was written; re-read the record and retry.`
+          );
+        }
+      }
+
       const candidate = buildPatch(current);
       // Identity is server-owned: pin it to the stored record rather than
       // trusting a caller's (possibly stale) copy.
@@ -1993,10 +2023,24 @@ export class SterlingStore {
       for (const path of new Set(entry.fileKeys(stored))) {
         this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
       }
-      // Additive on relations: an edge named in the patch is ensured, never
-      // silently dropped — removing an edge is knowledge_unlink's business, not
-      // a side effect of a content update.
+      // Additive on relations: an edge named in a content patch is ensured,
+      // never silently dropped. Only opts.remove_relation, supplied by the
+      // explicit knowledge_array_remove path, may delete one.
       for (const link of validated.links) this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        // Exact source + relation type + target identity: target alone can name
+        // several semantically distinct edges. This runs in the same transaction
+        // as the snapshot, version bump and activity row above.
+        const deleted = this.db
+          .prepare('DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?')
+          .run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(
+            `${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal — ` +
+              `the transaction was rolled back; re-read and retry.`
+          );
+        }
+      }
       // EXACTLY ONE records_fts row per id, current version only (contract 7):
       // the row is replaced, so the prior generation's text stops ranking.
       this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);

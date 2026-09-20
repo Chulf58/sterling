@@ -4491,8 +4491,24 @@ export class SterlingTools {
     // elements are the same object references in their original order, so
     // nothing is reordered, renormalised, or re-serialised on the way through.
     const nextArr = arr.filter((e) => e !== el);
+    // links[] is materialized from record_relations, not from the JSON body.
+    // Keep the ordinary update path additive, and pass this one explicit graph
+    // deletion through its versioned transaction instead. Crucially, do NOT
+    // re-resolve surviving links here: a legacy dangling edge must be removable.
+    const relationRemoval =
+      base === 'links'
+        ? { rel: (el as { rel: string }).rel, target_id: (el as { target_id: string }).target_id }
+        : undefined;
     const { record, claims_check } = this.splitSameSubject(
-      this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, expectedVersion, 'knowledge_array_remove')
+      this.knowledgeUpdate(
+        old.id,
+        relationRemoval ? {} : { [base]: nextArr },
+        resolves,
+        expectedVersion,
+        'knowledge_array_remove',
+        undefined,
+        relationRemoval
+      )
     );
     return {
       record,
@@ -5754,12 +5770,9 @@ export class SterlingTools {
    * `target_id: z.string().uuid()` schema check BEFORE anything resolved it,
    * so an 8-char prefix or a slug failed validation outright and never got
    * near resolveRecordId; the measured workaround was dropping the edge
-   * entirely and keeping only a prose citation. Only a NON-full-uuid string is
-   * routed through the ladder — an already-full-uuid target_id is left
-   * untouched (existence is not re-checked here, preserving today's tolerance
-   * for a dangling-but-well-formed target, the same shape the migration
-   * classifier already expects to see) — so this only widens what resolves,
-   * never what refuses. An ambiguous prefix/slug refuses naming the
+   * entirely and keeping only a prose citation. Every string target, including
+   * a full uuid, routes through the ladder so each newly admitted edge names a
+   * record in the project store or a mounted domain. An ambiguous prefix/slug refuses naming the
    * candidates, exactly as knowledge_get does; worst case here is a
    * recoverable wrong edge, unlike the destroying paths (board_remove,
    * maintenance_remove) whose exact-id rule is untouched by this change.
@@ -5769,7 +5782,7 @@ export class SterlingTools {
     return links.map((link) => {
       if (!link || typeof link !== 'object') return link;
       const targetId = (link as { target_id?: unknown }).target_id;
-      if (typeof targetId !== 'string' || SterlingTools.FULL_UUID_RE.test(targetId)) return link;
+      if (typeof targetId !== 'string') return link;
       const resolved = this.resolveRecordId(targetId, toolName, 'target record');
       return { ...(link as Record<string, unknown>), target_id: resolved.id };
     });
@@ -6885,7 +6898,9 @@ export class SterlingTools {
     appendJoin?: {
       appendedPaths: string[];
       retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[];
-    }
+    },
+    /** Internal-only: knowledge_array_remove's exact authoritative graph deletion. */
+    relationRemoval?: { rel: string; target_id: string }
   ): DurableRecord & {
     same_subject?: SameSubjectEntry[];
     previous_version?: number;
@@ -6991,6 +7006,24 @@ export class SterlingTools {
       updated_at: ts,
       ...(replaced ? { status: 'active', superseded_by: null } : {}),
     };
+    if (relationRemoval) {
+      // The relation row is authoritative, but keep the stored body honest as
+      // well. This removes only the selected existing edge and deliberately
+      // does not call resolveLinksTargets over surviving legacy entries.
+      const links = next.links;
+      if (!Array.isArray(links)) {
+        throw new Error(`${toolName}: internal relation removal reached a non-array links field; nothing was written.`);
+      }
+      next.links = links.filter(
+        (link) =>
+          !(
+            link &&
+            typeof link === 'object' &&
+            (link as { rel?: unknown }).rel === relationRemoval.rel &&
+            (link as { target_id?: unknown }).target_id === relationRemoval.target_id
+          )
+      );
+    }
     // History rotation (board 0697c6bd): bound the stored history to genesis +
     // newest entries. The middle is dropped from the version being written —
     // the PRIOR body, archived whole in record_versions by this same write,
@@ -7122,6 +7155,7 @@ export class SterlingTools {
         updated = this.store.updateRecord(old.id, next, {
           ...(cas !== undefined ? { expected_version: cas } : {}),
           ...(claims.length ? { resolves: claims.map((claim) => claim.id) } : {}),
+          ...(relationRemoval ? { remove_relation: relationRemoval } : {}),
         });
       }
     } catch (err) {

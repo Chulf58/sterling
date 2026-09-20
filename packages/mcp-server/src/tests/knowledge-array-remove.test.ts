@@ -49,6 +49,7 @@
 // record is UNCHANGED afterward, not merely that the call threw.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -57,6 +58,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { SterlingStore } from '@sterling/store';
 import { createSterlingServer } from '../server.js';
 import { SterlingTools } from '../tools.js';
+import { harnessMounted } from './test-helpers/mounted-harness.js';
 
 const NOW = '2026-08-30T12:00:00.000Z';
 
@@ -1646,5 +1648,188 @@ test('SD6: a selector key that is NULL on one element is REFUSED the same way as
     assert.equal(trueAfter.version, trueBefore.version, 'no version minted by the refused call');
   } finally {
     h.cleanup();
+  }
+});
+
+function reverseRelationTraversal(store: SterlingStore, targetId: string): string[] {
+  const db = store as unknown as {
+    db: { prepare(sql: string): { all(...args: unknown[]): { source_id: string }[] } };
+  };
+  return db.db
+    .prepare('SELECT source_id FROM record_relations WHERE target_id = ? ORDER BY rowid')
+    .all(targetId)
+    .map((row) => row.source_id);
+}
+
+function mkDecision(tools: SterlingTools, title: string, extra: Loose = {}): Loose {
+  return tools.knowledgeCreate('decision', {
+    title,
+    statement: 'the decision statement',
+    alternatives_rejected: [],
+    rationale: 'the decision rationale',
+    ...extra,
+  }).record as unknown as Loose;
+}
+
+test('links[] removal deletes the exact authoritative relation: receipt, fresh read, and reverse graph traversal agree', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const goodTarget = mkDecision(tools, 'good relation target');
+    const template = mkDecision(tools, 'legacy relation source template');
+    const danglingId = '2ad87dd1-0000-0000-0000-000000000000';
+    const source = store.create({
+      ...template,
+      id: randomUUID(),
+      slug: 'legacy-dangling-relation-source',
+      links: [
+        { rel: 'informed_by', target_id: danglingId },
+        { rel: 'informed_by', target_id: goodTarget.id as string },
+      ],
+    } as never) as unknown as Loose;
+
+    const receipt = remover(tools).knowledgeArrayRemove(
+      source.id as string,
+      `links[target_id=${danglingId}]`,
+      source.version as number
+    ).record;
+    assert.ok(
+      !(receipt.links as Loose[]).some((link) => link.target_id === danglingId),
+      'write receipt does not claim the removed edge remains'
+    );
+
+    const fresh = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    assert.ok(
+      !(fresh.links as Loose[]).some((link) => link.target_id === danglingId),
+      'a fresh materialized read no longer serves the deleted edge'
+    );
+    assert.ok(
+      (fresh.links as Loose[]).some((link) => link.rel === 'informed_by' && link.target_id === goodTarget.id),
+      'the sibling edge survives exact removal'
+    );
+    assert.deepEqual(reverseRelationTraversal(store, danglingId), [], 'reverse graph traversal finds no source for the deleted relation');
+    assert.deepEqual(
+      reverseRelationTraversal(store, goodTarget.id as string),
+      [source.id as string],
+      'reverse graph traversal still reaches the sibling edge'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('ordinary content update keeps existing links additive', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const target = mkDecision(tools, 'additive update target');
+    const source = mkDecision(tools, 'additive update source', { links: [{ rel: 'cites', target_id: target.id }] });
+
+    const updated = tools.knowledgeUpdate(source.id as string, { statement: 'changed content only' }) as unknown as Loose;
+    assert.ok(
+      (updated.links as Loose[]).some((link) => link.rel === 'cites' && link.target_id === target.id),
+      'content-write receipt preserves the existing edge'
+    );
+    const fresh = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    assert.ok(
+      (fresh.links as Loose[]).some((link) => link.rel === 'cites' && link.target_id === target.id),
+      'fresh read preserves the existing edge'
+    );
+    assert.deepEqual(reverseRelationTraversal(store, target.id as string), [source.id as string], 'the graph relation remains traversable');
+  } finally {
+    cleanup();
+  }
+});
+
+test('legacy dangling links remain removable, while supersedes stays lifecycle-owned', () => {
+  const { store, tools, cleanup } = harness();
+  try {
+    const danglingId = '2ad87dd1-0000-0000-0000-000000000000';
+    const template = mkDecision(tools, 'repairable dangling template');
+    const repairable = store.create({
+      ...template,
+      id: randomUUID(),
+      slug: 'repairable-dangling-source',
+      links: [{ rel: 'informed_by', target_id: danglingId }],
+    } as never) as unknown as Loose;
+
+    assert.doesNotThrow(
+      () => remover(tools).knowledgeArrayRemove(repairable.id as string, `links[target_id=${danglingId}]`, repairable.version as number),
+      'removal validates no surviving legacy edges, so the dangling edge itself is repairable'
+    );
+
+    const original = mkDecision(tools, 'lifecycle original');
+    const replacement = tools.knowledgeSupersede(original.id as string, {
+      title: 'lifecycle replacement',
+      statement: 'replacement ruling',
+      alternatives_rejected: [],
+      rationale: 'replacement rationale',
+    }) as unknown as Loose;
+    const before = tools.knowledgeGet(replacement.id as string) as unknown as Loose;
+    assert.throws(
+      () => remover(tools).knowledgeArrayRemove(replacement.id as string, 'links[rel=supersedes]', before.version as number),
+      /supersedes.*lifecycle transition|lifecycle transition.*supersedes/i,
+      'generic array removal cannot sever a lifecycle relation'
+    );
+    assert.ok(
+      ((tools.knowledgeGet(replacement.id as string) as unknown as Loose).links as Loose[]).some(
+        (link) => link.rel === 'supersedes' && link.target_id === original.id
+      ),
+      'the refusal leaves the lifecycle relation intact'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('create, update, and supersede reject a well-formed unknown full-uuid link target', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const missingCreate = '2ad87dd1-0000-0000-0000-000000000001';
+    assert.throws(
+      () => mkDecision(tools, 'unknown full uuid create', { links: [{ rel: 'informed_by', target_id: missingCreate }] }),
+      new RegExp(missingCreate),
+      'knowledge_create names the unknown full uuid it refuses'
+    );
+
+    const source = mkDecision(tools, 'unknown full uuid update');
+    const missingUpdate = '2ad87dd1-0000-0000-0000-000000000002';
+    assert.throws(
+      () => tools.knowledgeUpdate(source.id as string, { links: [{ rel: 'informed_by', target_id: missingUpdate }] }),
+      new RegExp(missingUpdate),
+      'knowledge_update names the unknown full uuid it refuses'
+    );
+    assert.equal((tools.knowledgeGet(source.id as string) as unknown as Loose).version, source.version, 'refused update does not version-bump');
+
+    const missingSupersede = '2ad87dd1-0000-0000-0000-000000000003';
+    assert.throws(
+      () =>
+        tools.knowledgeSupersede(source.id as string, {
+          title: 'unknown full uuid supersede',
+          statement: 'replacement statement',
+          alternatives_rejected: [],
+          rationale: 'replacement rationale',
+          links: [{ rel: 'informed_by', target_id: missingSupersede }],
+        }),
+      new RegExp(missingSupersede),
+      'knowledge_supersede names the unknown full uuid it refuses'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('a full-uuid link target resolves through a mounted domain store', () => {
+  const { tools, cleanup } = harnessMounted(['node'], { now: NOW, prefix: 'sterling-link-target-domain-' });
+  try {
+    const target = mkDecision(tools, 'domain full uuid target', { scope: 'domain:node' });
+    const source = mkDecision(tools, 'project source linked to domain', {
+      links: [{ rel: 'informed_by', target_id: target.id }],
+    });
+    const fresh = tools.knowledgeGet(source.id as string) as unknown as Loose;
+    assert.ok(
+      (fresh.links as Loose[]).some((link) => link.rel === 'informed_by' && link.target_id === target.id),
+      'the exact full uuid was resolved across the mount fan and admitted'
+    );
+  } finally {
+    cleanup();
   }
 });
