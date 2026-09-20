@@ -32,14 +32,18 @@ import {
   writeGuard,
   extractCommandPathCandidates,
   bashPointerBlock,
-  joinPointerBlock,
   BASH_POINTER_PATH_CAP,
   budgetKnownGaps,
   isGapDelivered,
   markGapDelivered,
-  capPointerBlock,
   resolveTotalCap,
-  isDelivered,
+  isSubstanceDelivered,
+  isDiscoveryDelivered,
+  markSubstanceDelivered,
+  markDiscoveryDelivered,
+  recordRevision,
+  hazardParts,
+  assembleDelivery,
   claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
@@ -134,22 +138,64 @@ function main(input) {
   // is what makes delivery once-per-session, so writing it before the delivery
   // happens turns any failure into permanent silent loss — nothing retries,
   // because the next touch sees the paths already marked.
-  // POINTER-VERIFY recipe (decision db3392db part 2, v2 per fixer F1): the block
-  // keeps the fixed two-sentence header plus one {id, line} per record. Gap
-  // substance rides the same per-owner entry (see bashPointerBlock).
-  // Dedup (one line per record; none for a record a Read already delivered
-  // this session — same guard ledger) and the per-delivery total cap keep the
-  // direct pointer payload bounded.
-  const deliveredIds = new Set(entries.flatMap((e) => [...e.owners, ...e.hazards]).filter((r) => isDelivered(guard, r)).map((r) => r.id));
-  const block = capPointerBlock(bashPointerBlock(entries, { gapsByOwner }), resolveTotalCap(input.cwd), {
-    skip: (id) => deliveredIds.has(id),
-  });
-  if (!block.lines.length) {
+  //
+  // ONE ASSEMBLER (decision 92088a62 item 2/4): a hazard now renders WHOLE —
+  // via the SAME `hazardParts`/`renderHazards` the Read rung uses, pinned and
+  // unbudgeted (decision 301d8a0a) — and earns a SUBSTANCE mark; an owner
+  // still renders as a one-line POINTER (this hook's whole reason to exist,
+  // see the header) and earns a DISCOVERY mark. Both are built as assembler
+  // parts and composed through ONE `assembleDelivery` call so the total cap is
+  // charged on the FINAL composed context, never two separately-capped
+  // strings glued together after the fact. `aggregateLabel` keeps this rung's
+  // established "+N more pointer line(s) held back…" overflow wording, which
+  // predates the assembler and several tests already pin verbatim.
+  const alreadyDelivered = (r) =>
+    r.type === 'anti_pattern' ? isSubstanceDelivered(guard, r) : isSubstanceDelivered(guard, r) || isDiscoveryDelivered(guard, r);
+
+  const ownerById = new Map();
+  const hazardById = new Map();
+  for (const e of entries) {
+    for (const o of e.owners) if (!ownerById.has(o.id)) ownerById.set(o.id, o);
+    for (const h of e.hazards) if (!hazardById.has(h.id)) hazardById.set(h.id, h);
+  }
+
+  const rawOwnerLines = bashPointerBlock(entries, { gapsByOwner, includeHazardLines: false }).lines;
+  const seenOwnerIds = new Set();
+  const ownerParts = [];
+  for (const l of rawOwnerLines) {
+    if (!l?.id || seenOwnerIds.has(l.id)) continue;
+    seenOwnerIds.add(l.id);
+    const rec = ownerById.get(l.id);
+    if (!rec || alreadyDelivered(rec)) continue; // already delivered elsewhere this session
+    const full = [l.line, ...(l.gapLines ?? [])].join('\n');
+    ownerParts.push({
+      kind: 'ordinary', contentClass: 'discovery', identity: rec.id, revision: recordRevision(rec),
+      text: full, pointer: l.line,
+    });
+  }
+
+  const eligibleHazards = [...hazardById.values()].filter((h) => !alreadyDelivered(h));
+  const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel) });
+
+  if (!ownerParts.length && !hzParts.length) {
     if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
     return allow();
   }
-  // MARK ONLY WHAT ACTUALLY RENDERED (fixer round LOW finding, mirrors the
-  // cappedHazards precedent: a hazard/decision capped OUT of a payload is
+
+  const totalCap = resolveTotalCap(input.cwd);
+  const headerPart = { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: bashPointerBlock([]).header };
+  // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): folded in as
+  // a leading pinned-but-charged part — see h19-knowledge-delivery.mjs's
+  // identical comment — instead of being string-prepended AFTER assembly,
+  // which let its bytes escape the total cap entirely.
+  const migrationNoticePart = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
+  const assembled = assembleDelivery([...migrationNoticePart, headerPart, ...hzParts, ...ownerParts], totalCap, {
+    aggregateLabel: (n) => `  (+${n} more pointer line(s) held back by the ${totalCap}-byte delivery cap — knowledge_query the command's governed paths)`,
+  });
+
+  // MARK ONLY WHAT ACTUALLY RENDERED — the assembler's own returned sets,
+  // never a re-scan of the composed text (fixer round LOW finding, mirrors
+  // the cappedHazards precedent: a hazard/owner capped OUT of a payload is
   // never marked delivered, so it can surface on a later touch instead of
   // vanishing). An owner whose ENTIRE gap allocation lost the shared budget
   // this touch (info.shown.length === 0, e.g. a later owner in a delivery
@@ -157,21 +203,26 @@ function main(input) {
   // one shot at this seam's dedup — a subsequent probe of its territory
   // should still get a real chance to show its gaps, not a permanently
   // suppressed "0 of N" repeat.
-  const shownIds = new Set(block.lines.map((l) => l.id));
+  const shownIds = new Set([...assembled.emittedSubstance, ...assembled.emittedDiscovery].map((e) => e.identity));
   const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
   const emittedPaths = new Set();
   for (const entry of entries) {
-    const eligible = [...entry.owners, ...entry.hazards].filter((r) => !deliveredIds.has(r.id));
+    const eligible = [...entry.owners, ...entry.hazards].filter((r) => !alreadyDelivered(r));
     if (eligible.length && eligible.every((r) => shownIds.has(r.id))) emittedPaths.add(entry.rel);
   }
   const recordDelivered = () => {
     guard.pointer_files.push(...emittedPaths);
     if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
+    markSubstanceDelivered(guard, assembled.emittedSubstance);
+    markDiscoveryDelivered(guard, assembled.emittedDiscovery);
     writeGuard(gPath, guard);
   };
-  const payload = joinPointerBlock(block);
+  // migrationNotice is already folded into `assembled.text` above (as a
+  // leading, charged chrome part — fix-round HIGH 4), so it is not
+  // re-prepended here.
+  const payload = assembled.text;
   return exitAfterWrite(
-    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: `${migrationNotice ? `${migrationNotice}\n\n` : ''}${payload}` } }),
+    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
     0,
     { onWritten: recordDelivered }
   );

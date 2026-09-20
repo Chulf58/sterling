@@ -139,57 +139,138 @@ export function guardPath(cwd, agentId) {
   return join(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : 'guard-conductor.json');
 }
 
+/** GUARD SCHEMA VERSION 2 (decision 92088a62, delivery-migration step 3): the
+ *  flat `records`/`slugs` ledger is replaced by TWO revision-keyed ledgers,
+ *  `substance` and `discovery` (each `[{id, revision}]`) — a record shown only
+ *  as a pointer/discovery must still qualify for a later FULL delivery, and a
+ *  record whose content changed (a forward-fix `knowledge_update`, which bumps
+ *  `updated_at` without minting a new id) must qualify again rather than
+ *  staying silently suppressed by a stale lineage mark. This is a BUMP, not a
+ *  migration: an old-shape guard on disk simply resets to empty (see
+ *  `readGuard`) — a lost mark this session costs at most one duplicate
+ *  delivery, which decision 92088a62 rules acceptable; a false 'delivered'
+ *  mark is not. */
+export const DELIVERY_GUARD_VERSION = 2;
+
 /** The guard's declared shape. `pointer_files` is a SEPARATE namespace from
- *  `records` on purpose: a Bash pointer must never consume the record's
- *  full-article guard entry, or pointing at a path would silently suppress the
- *  real delivery on a later Read of it — a pointer would then COST knowledge
- *  instead of adding it. Pointers dedupe per FILE; articles dedupe per RECORD.
- *  `gap_articles` (board f1489964) is a THIRD, independent namespace: the
- *  bash/probe-output seam's own known_gaps re-emission dedup, keyed per
- *  ARTICLE (mirrors `slugs`' lineage keying) and deliberately separate from
- *  both `pointer_files` (would starve the pointer line itself) and
- *  `records`/`slugs` (the full-article Read-path guard — riding it would
- *  either silently suppress the bash re-emission after an unrelated Read, or
- *  vice versa; the board asks for this seam's OWN bounded dedup). */
+ *  `substance`/`discovery` on purpose: a Bash pointer must never consume the
+ *  record's full-article guard entry, or pointing at a path would silently
+ *  suppress the real delivery on a later Read of it — a pointer would then
+ *  COST knowledge instead of adding it. Pointers dedupe per FILE; records
+ *  dedupe per (id, revision). `gap_articles` (board f1489964) is a FOURTH,
+ *  independent namespace: the bash/probe-output seam's own known_gaps
+ *  re-emission dedup, keyed per ARTICLE lineage (see `lineageKey`) and
+ *  deliberately separate from `pointer_files` (would starve the pointer line
+ *  itself) and from `substance`/`discovery` (the Read-path record guard —
+ *  riding it would either silently suppress the bash re-emission after an
+ *  unrelated Read, or vice versa; the board asks for this seam's OWN bounded
+ *  dedup). */
 export function emptyDeliveryGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
 }
 
 /** The lineage key for a record: its slug when it has one (feature_article,
  *  reference_material — stable across a knowledge_update supersede, which
  *  mints a NEW id for the SAME slug), else its id (decision/anti_pattern have
  *  no slug, so id-churn IS lineage-churn for them — a genuinely different
- *  record, not a reconcile of the same one). */
+ *  record, not a reconcile of the same one). Used ONLY by the gap_articles
+ *  seam now — the substance/discovery ledgers key on (id, revision) instead,
+ *  see `recordRevision`. */
 export function lineageKey(record) {
   return record?.slug ?? record?.id;
 }
 
-/** Delivered if EITHER the exact id was guarded (today's behavior, still
- *  correct for slug-less types) OR the record's lineage was already delivered
- *  under a since-superseded id (board 5a807e68 — an edited record must not
- *  re-deliver as "fresh"). */
-export function isDelivered(guard, record) {
-  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+/** THE REVISION a record carries for guard-keying purposes (decision 92088a62
+ *  STATE clause) — a forward-fix (`knowledge_update` in place, same id,
+ *  CLAUDE.md's documented "fix forward" pattern) must re-qualify the record
+ *  for delivery rather than staying silently suppressed by a mark minted
+ *  against the wrong content.
+ *
+ *  KEYED PRIMARILY ON `version` (fix-round HIGH 3): every record — not only
+ *  feature_article, whose zod schema happens to also expose it as a BODY
+ *  field — carries a STORE-MANAGED `version` integer column (`records.version`
+ *  DEFAULT 1, packages/store/src/index.ts), bumped by exactly 1 on every
+ *  `updateRecord`/`knowledge_update` (`nextVersion = identity.version + 1`)
+ *  and mirrored into the body `decodeLiveRecordRow` returns — so `record.
+ *  version` is populated and strictly monotonic for EVERY type (measured:
+ *  `store.create({type:'anti_pattern', ...})` returns `version: 1` with no
+ *  `version` field in that type's own schema). `updated_at`, by contrast, is
+ *  NOT store-stamped on an update — the row's `updated_at` "comes from the
+ *  CANDIDATE BODY" (store/src/index.ts:1872), so a caller that resubmits or
+ *  backdates a timestamp on an in-place edit can still match the PRIOR (id,
+ *  updated_at) mark and suppress the corrected content, exactly the collision
+ *  HIGH 3 reports. `updated_at` is kept only as a legacy fallback for the
+ *  pathological case where `version` is somehow absent; `id` last, so every
+ *  record always has SOME revision to key on. */
+export function recordRevision(record) {
+  return record?.version ?? record?.updated_at ?? record?.id;
 }
 
-/** Mark a batch of records delivered: both the exact id (today's key, kept for
- *  slug-less types and as a fast id-based check) and the lineage key (so a
- *  later supersede of the same slug is recognised as already-seen), each
- *  deduped against what is already guarded. */
-export function markDelivered(guard, records) {
-  for (const r of records) {
-    if (!guard.records.includes(r.id)) guard.records.push(r.id);
-    const key = lineageKey(r);
-    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+/** Was this exact (id, revision) already marked delivered in `list`? */
+function revisionDelivered(list, record) {
+  const rev = recordRevision(record);
+  return (list ?? []).some((e) => e?.id === record?.id && e?.revision === rev);
+}
+
+/** Add each `{identity, revision}` entry (the assembler's OWN returned shape —
+ *  see `assembleDelivery`) to `list`, deduped on (id, revision). Never takes a
+ *  raw record: callers persist ONLY what the assembler says actually rendered
+ *  (decision 92088a62's ONE ASSEMBLER CONTRACT — "callers persist only the
+ *  returned sets, after successful output"). An entry with no identity is
+ *  silently skipped (chrome/framing carries none, by construction). */
+function markRevisionDelivered(list, entries) {
+  for (const e of entries ?? []) {
+    if (!e?.identity) continue;
+    if (!list.some((x) => x.id === e.identity && x.revision === e.revision)) {
+      list.push({ id: e.identity, revision: e.revision ?? null });
+    }
   }
 }
 
+/** Was this record already delivered as full SUBSTANCE this session (at this
+ *  exact revision)? A record shown only as `discovery` (a pointer) does NOT
+ *  count here — it must still qualify for a later substance delivery
+ *  (decision 92088a62: "a record shown as discovery still qualifies for
+ *  substance later"). This is the ONE check that guards against the false-
+ *  'delivered' trap: it is never satisfied by a record's id merely APPEARING
+ *  in rendered text, only by the assembler's own returned emittedSubstance
+ *  set having been persisted here. */
+export function isSubstanceDelivered(guard, record) {
+  return revisionDelivered(guard.substance, record);
+}
+
+/** Was this record already delivered as a DISCOVERY pointer this session (at
+ *  this exact revision)? Independent of `isSubstanceDelivered` — see there. */
+export function isDiscoveryDelivered(guard, record) {
+  return revisionDelivered(guard.discovery, record);
+}
+
+/** Either ledger — the conservative "have we shown this at all" check used to
+ *  pre-filter CANDIDATES before a surface decides which content class each
+ *  will render as (H20's mixed hazard/decision/article/prior-answer pool). */
+export function isKnownDelivered(guard, record) {
+  return isSubstanceDelivered(guard, record) || isDiscoveryDelivered(guard, record);
+}
+
+/** Persist the assembler's `emittedSubstance` set — and ONLY that set, and
+ *  ONLY after the corresponding stdout write has actually succeeded (the
+ *  side-effect-first-guard-second rule every caller already follows). */
+export function markSubstanceDelivered(guard, emittedSubstance) {
+  markRevisionDelivered(guard.substance, emittedSubstance);
+}
+
+/** Persist the assembler's `emittedDiscovery` set — see `markSubstanceDelivered`. */
+export function markDiscoveryDelivered(guard, emittedDiscovery) {
+  markRevisionDelivered(guard.discovery, emittedDiscovery);
+}
+
 /** Bash/probe-output-seam known_gaps dedup (board f1489964) — its OWN bounded
- *  register, mirroring isDelivered/markDelivered's lineage-keyed mechanism but
- *  reading/writing the separate `gap_articles` namespace above. Never consult
- *  or populate `records`/`slugs` here: this seam re-emits gap substance
- *  independently of whether the article's full body was ever delivered via
- *  the Read/Edit path (the high-signal exception the board item names). */
+ *  register, keyed by `lineageKey` (the same lineage handle used before the
+ *  guard split), reading/writing the separate `gap_articles` namespace above.
+ *  Never consult or populate `substance`/`discovery` here: this seam re-emits
+ *  gap substance independently of whether the article's full body was ever
+ *  delivered via the Read/Edit path (the high-signal exception the board item
+ *  names). */
 export function isGapDelivered(guard, record) {
   return guard.gap_articles.includes(lineageKey(record));
 }
@@ -206,9 +287,19 @@ export function readGuard(path) {
   // delivery) instead of disabling delivery for the rest of the session.
   try {
     if (!existsSync(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync(path, 'utf8'));
+    // SCHEMA BUMP, NOT MIGRATION (decision 92088a62): a guard minted under a
+    // prior version (missing entirely on the old flat `records`/`slugs` shape,
+    // or a future version this build cannot read) resets to empty rather than
+    // being coerced — coercing `records: [id, ...]` into `substance:
+    // [{id,revision}, ...]` cannot recover the revision each id was shown at,
+    // and guessing one risks exactly the false-negative-turned-false-positive
+    // this rebuild exists to close. Reset costs at most one duplicate
+    // delivery this session, which the decision rules acceptable.
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
     // Tolerate a guard written before a field existed (mid-session upgrade):
     // a missing array must read as empty, never as undefined.
-    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync(path, 'utf8')) };
+    return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} — reset to empty\n`);
     return emptyDeliveryGuard();
@@ -797,12 +888,6 @@ function pointerLine(store, kind, slug) {
   return `  → ${kind} [[${slug}]]: ${head}${annotation}`;
 }
 
-/** Budget for the untestable_because reason clip, same class as
- *  DECISION_REJECTED_CLIP: a beneath-the-headline annotation, not the primary
- *  field — an unbounded reason would land uncapped in H19's injected payload
- *  (S4b fixer pass). */
-export const UNTESTABLE_REASON_CLIP = 140;
-
 /** Oversize-body guard (board 725299c8). Rendering a large what_it_does inline
  *  overflowed the RECEIVING agent's tool-result view: the real 'knowledge-
  *  delivery' article's own what_it_does is ~15k chars and its full block
@@ -826,6 +911,34 @@ export const ARTICLE_DIGEST_EXCERPT = 1200;
  *  unchanged while a pathological slug can no longer breach the delivery ceiling. */
 export const ARTICLE_SLUG_CLIP = 256;
 
+/** Did `renderArticle` take the DIGEST branch for this article (fix-round
+ *  HIGH 2)? A digest is an explicitly bounded, explicitly disclosed PARTIAL
+ *  view — never the complete record — so a caller must tag its assembler
+ *  part `contentClass:'discovery'`, not `'substance'`: crediting a digest as
+ *  fully-emitted substance is the same false-mark shape as a pointer counted
+ *  as delivery. Callers check this BEFORE calling `renderArticle`, from the
+ *  same `body.length > ARTICLE_BODY_FLOOR` condition it uses internally, so
+ *  the two never drift apart. */
+export function isArticleDigested(article) {
+  return String(article?.what_it_does ?? '').length > ARTICLE_BODY_FLOOR;
+}
+
+/** Will this owner ONLY EVER render as a discovery pointer — never as full
+ *  substance (fix-round MEDIUM 3, decision 92088a62)? A `reference_material`
+ *  owner is always `renderReference` (a one-line pointer, never a body); an
+ *  oversize `feature_article` always takes `renderArticle`'s DIGEST branch
+ *  while it stays oversize. The ONE definition callers must consult BEFORE
+ *  freshness filtering (which ledger — substance or discovery — decides
+ *  "already delivered") AND when tagging the rendered part's `contentClass`,
+ *  so the two never drift apart: filtering an owner against the WRONG ledger
+ *  is exactly how a discovery-only owner that can never earn a substance mark
+ *  re-delivered on every single touch, forever — a deterministic failure of
+ *  the once-per-context guard, not the acceptable duplicate a lost concurrent
+ *  guard write can cause. */
+export function isOwnerDiscoveryOnly(record) {
+  return record?.type === 'reference_material' || isArticleDigested(record);
+}
+
 // ---------------------------------------------------------------------------
 // KNOWN_GAPS INLINE DELIVERY (decision db3392db Part 3, ship-ruled by decision
 // 53fd6f62 known-gaps-inline-ships-with-probe-seam-boarded; board 3dbbdb35).
@@ -844,10 +957,11 @@ export const ARTICLE_SLUG_CLIP = 256;
 // (the schema has no path/scope field on a gap yet) — every known_gaps entry
 // on a delivered article is eligible for the budget.
 //
-// DEDUP rides the EXISTING per-article lineage/session guard (isDelivered/
-// markDelivered above): an article that does not re-render this session
-// (already guarded) never reaches renderArticle again, so its gaps never
-// re-render either — there is no separate per-gap ledger to maintain.
+// DEDUP rides the EXISTING per-record session guard (isSubstanceDelivered/
+// markSubstanceDelivered above): an article that does not re-render this
+// session (already guarded at its current revision) never reaches
+// renderArticle again, so its gaps never re-render either — there is no
+// separate per-gap ledger to maintain.
 //
 // THE BASH/PROBE-OUTPUT SEAM (board f1489964, closing what this section used
 // to describe as an accepted exclusion — decision known-gaps-inline-ships-
@@ -858,7 +972,7 @@ export const ARTICLE_SLUG_CLIP = 256;
 // gap substance (budget, normalization, WRONG-ON-PURPOSE prefix, cap
 // disclosure) beside its pointer line, through its OWN bounded dedup
 // (guard.gap_articles, see isGapDelivered/markGapDelivered above) — never the
-// records/slugs guard the paragraph above describes, which stays the
+// substance/discovery guard the paragraph above describes, which stays the
 // Read/Edit path's alone.
 // ---------------------------------------------------------------------------
 
@@ -1006,7 +1120,7 @@ export function renderKnownGapsLines(article, info) {
  *  one-hop pointers; P6 filter-first-capped). `gaps` (optional) is one entry
  *  of budgetKnownGaps's returned Map, keyed by this article's id — inlined
  *  per the known_gaps section above when present. */
-export function renderArticle(store, article, charCap, { gaps } = {}) {
+export function renderArticle(store, article, { gaps } = {}) {
   // slug/concept_family are clipped (outside-family review, board 725299c8): they
   // are the only unbounded inputs to the digest block below, so without this a
   // pathological slug/family could push the digested block past the ~8192-byte
@@ -1037,10 +1151,20 @@ export function renderArticle(store, article, charCap, { gaps } = {}) {
       ...gapLines,
     ].join('\n');
   }
+  // COMPLETE TEXT, NOT PRE-CLIPPED (fix-round HIGH 2, decision 92088a62's ONE
+  // ASSEMBLER CONTRACT: "structured inputs {..., complete text}"): this used
+  // to `clip(body, charCap)`/`clip(intended_behavior, charCap)` HERE, before
+  // the assembler ever saw the field — a body between charCap (2400) and
+  // ARTICLE_BODY_FLOOR (4096) was silently cut with no disclosure and no
+  // pointer, yet the assembler still credited it as fully emitted (it had no
+  // way to know otherwise). The assembler owns degradation now: it receives
+  // the whole field and, if it does not fit the caller's cap, clips it itself
+  // via the part's `suffix`/`pointer` — and, exactly because it did the
+  // clipping, correctly WITHHOLDS the substance mark for a clipped result.
   const lines = [
     header,
-    `WHAT IT DOES: ${clip(body, charCap)}`,
-    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
+    `WHAT IT DOES: ${body}`,
+    `INTENDED BEHAVIOR: ${String(article.intended_behavior ?? '')}`,
     // The oversize branch above already carries a knowledge_get pointer; this
     // branch (small/normal articles) did not, so a reader could not cite the
     // record by id without a second lookup (decision 2e8c30e4).
@@ -1056,9 +1180,16 @@ export function renderArticle(store, article, charCap, { gaps } = {}) {
       `ACCEPTANCE CRITERIA: ${article.current_ac
         .map((a) => {
           const u = a.untestable_because;
-          const suffix = u
-            ? ` [untestable: ${clip(u.reason, UNTESTABLE_REASON_CLIP)} — blocking ${String(u.blocking_record_id).slice(0, 8)}]`
-            : '';
+          // COMPLETE TEXT, NOT PRE-CLIPPED (fix-round HIGH 2 remainder): this
+          // used to `clip(u.reason, UNTESTABLE_REASON_CLIP)` HERE, before the
+          // assembler ever saw the field — the same silent-pre-truncation
+          // shape already fixed for WHAT IT DOES/INTENDED BEHAVIOR. A reason
+          // over 140 chars was cut with no disclosure, yet the whole article
+          // part still earned a substance mark. The assembler owns
+          // degradation now: it gets the whole field and, if the ENCLOSING
+          // part does not fit its cap, clips the part itself — correctly
+          // withholding the mark when it does.
+          const suffix = u ? ` [untestable: ${u.reason} — blocking ${String(u.blocking_record_id).slice(0, 8)}]` : '';
           return `${a.ac_id}: ${a.text}${suffix}`;
         })
         .join(' | ')}`
@@ -1160,6 +1291,42 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
     blocks.push(`… ${dropped} more hazard(s) NOT shown (cap ${cap}) — ${widen} for the full set`);
   }
   return blocks;
+}
+
+/** Hazard blocks as ASSEMBLER PARTS (decision 92088a62), paired 1:1 with the
+ *  records that produced them: each SHOWN hazard (the same `cappedHazards`
+ *  selection `renderHazards` uses internally, called here with the identical
+ *  args so the two never diverge) is `kind:'hazard'` (pinned, unbudgeted —
+ *  decision 301d8a0a) and `contentClass:'substance'` — a WHOLE hazard IS
+ *  substance, never a mere pointer, on every surface that renders one
+ *  (item 4: Bash now included). The trailing '+N more' disclosure line, if
+ *  any, carries no identity and `contentClass:'chrome'`, so it can never earn
+ *  a delivery mark for a hazard the reader never actually saw. */
+export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  return blocks.map((text, i) =>
+    i < shown.length
+      ? {
+          kind: 'hazard', contentClass: 'substance', identity: shown[i].id, revision: recordRevision(shown[i]), text,
+          // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+          // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+          // the hard transport ceiling degrades to this bare notice — never a
+          // partial trigger/right_way (the HAZARDS clause: "each whole") —
+          // and the assembler then correctly withholds its substance mark.
+          pointer: hazardOverflowPointer(shown[i]),
+        }
+      : { kind: 'hazard', contentClass: 'chrome', text }
+  );
+}
+
+/** The degraded notice a hazard renders as when its own whole block cannot
+ *  fit the hard transport ceiling — see `hazardParts`. Distinct wording from
+ *  the ordinary "held back by the delivery cap" pointers: this is never our
+ *  own configured cap turning it away (hazards are exempt from that), only
+ *  the platform's transport boundary. */
+export function hazardOverflowPointer(record) {
+  return `⚠ ANTI-PATTERN [${(record?.severity ?? 'warn').toUpperCase()}] for this path — TOO LARGE to show in full (exceeds the transport limit) · knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 
 /** Complete hazard blocks in the porch's indented presentation. */
@@ -1870,7 +2037,7 @@ export function renderPorch(
     fileKeys = [],
   } = {}
 ) {
-  if (!Number.isFinite(budget) || budget <= 0) return { text: '', hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
+  if (!Number.isFinite(budget) || budget <= 0) return { text: '', hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id), parts: [] };
   // ACCEPTED (Codex review, item C): a touch whose only fresh knowledge is
   // decision pointers (zero hazards, zero owners) gets no porch — a decision-
   // pointer block is a handful of capped one-line pointers (DECISION_POINTER_
@@ -1879,7 +2046,7 @@ export function renderPorch(
   // builds a porch when freshOwners.length || freshHazards.length ||
   // freshDecisions.length is true, so this branch IS reachable (a decision-
   // only touch) — it is a real, intended no-op, not dead code.
-  if (!hazards?.length && !owners?.length) return { text: '', hazardsRendered: false, deferred_hazard_ids: [] };
+  if (!hazards?.length && !owners?.length) return { text: '', hazardsRendered: false, deferred_hazard_ids: [], parts: [] };
 
   // MISCONFIGURED BUDGET (Codex review, HIGH item B, first half): a budget
   // below the structural minimum can never host even the smallest real
@@ -1895,7 +2062,7 @@ export function renderPorch(
     } catch {
       /* a failed stderr write must not change the already-decided outcome */
     }
-    return { text: '', hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
+    return { text: '', hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id), parts: [] };
   }
 
   const shownHazards = cappedHazards(hazards ?? []);
@@ -1961,12 +2128,25 @@ export function renderPorch(
   // pass can never add bytes the skeleton did not already count — at worst
   // the skeleton over-reserves by 3 bytes for an owner whose final digest
   // happens to clip to nothing, which is conservative, never an overrun.
+  // RETURNS THE EMBEDDING DECISION AS METADATA, NOT AS TEXT TO RE-SCAN LATER
+  // (fix-round MEDIUM 6, decision 92088a62: "no class inferred from rendered
+  // lines"). `wholeIds` names exactly which hazards got their COMPLETE block
+  // at this budget — the SAME classification the fit-check below already
+  // makes per hazard, just also recorded rather than thrown away. The caller
+  // used to re-derive this by scanning the ASSEMBLED porch string for each
+  // hazard's complete block substring (`finalPorch.includes(...)`), which
+  // reconstructs hazard identity from rendered text and — because it is a
+  // substring search — could misattribute a match if one hazard's rendered
+  // block ever contained another's as a substring.
   function hazardSectionAt(perHazardTextBudget) {
+    const wholeIds = [];
     const blocks = shownHazards.map((hazard) => {
       const whole = completePorchHazards([hazard])[0];
-      return porchByteLen(whole) <= perHazardTextBudget
-        ? whole
-        : `⚠ HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
+      if (porchByteLen(whole) <= perHazardTextBudget) {
+        wholeIds.push(hazard.id);
+        return whole;
+      }
+      return `⚠ HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
     });
     if (hazardOverflow > 0) {
       // THE SAME OVERFLOW DISCLOSURE renderHazards EMITS (consolidation,
@@ -1985,7 +2165,7 @@ export function renderPorch(
       const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
       blocks.push(`… ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) — ${widen} for the full set`);
     }
-    return blocks;
+    return { blocks, wholeIds };
   }
   function ownerSectionAt(admitted, ownerLines, overflowLine, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
     const blocks = admitted.map((owner, i) => {
@@ -2016,7 +2196,7 @@ export function renderPorch(
     const overflowLine = ownerOverflow > 0 ? `  … +${ownerOverflow} owners below` : '';
     const skeletonBody = [
       header,
-      ...hazardSectionAt(0),
+      ...hazardSectionAt(0).blocks,
       ...ownerSectionAt(admitted, ownerLines, overflowLine, 0, { reserveDigestSeparator: true }),
     ].join('\n\n');
     const skeletonBytes = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
@@ -2084,9 +2264,10 @@ export function renderPorch(
       } catch {
         /* a failed stderr write must not change the clamp outcome */
       }
-      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
+      const clamped = clipToBytes(minimalPorch, budget);
+      return { text: clamped, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: 'ordinary', contentClass: 'chrome', text: clamped }] };
     }
-    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
+    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: 'ordinary', contentClass: 'chrome', text: minimalPorch }] };
   }
 
   // 60/40 hazards/digests, redistributed toward the hazard floor first (borrow
@@ -2112,8 +2293,29 @@ export function renderPorch(
 
   const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
   const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
-  const hazardBlocks = hazardSectionAt(perHazard);
+  const { blocks: hazardBlocks, wholeIds: embeddedHazardIds } = hazardSectionAt(perHazard);
+  const embeddedHazardIdSet = new Set(embeddedHazardIds);
   const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
+
+  // STRUCTURED PARTS, BUILT FROM THE SAME METADATA AS `body` (fix-round
+  // MEDIUM 6) — `hazardSectionAt` already knows, per hazard, whether IT
+  // produced the whole block or the "continues in full below" placeholder;
+  // zipping that against `shownHazards` by ARRAY POSITION (both built by the
+  // SAME `.map` over the SAME array) is how the caller learns which porch
+  // spans are hazard substance, replacing a post-hoc scan of the ASSEMBLED
+  // porch string for each hazard's rendered substring (`partitionPorchHazards`,
+  // dropped from both H19 callers) — "no class inferred from rendered lines"
+  // (decision 92088a62). The trailing element beyond `shownHazards.length`,
+  // when present, is the "+N more hazard(s)" overflow disclosure line, which
+  // names no single record and stays chrome.
+  const hazardBlockParts = hazardBlocks.map((text, i) => {
+    if (i >= shownHazards.length) return { kind: 'ordinary', contentClass: 'chrome', text };
+    const hazard = shownHazards[i];
+    return embeddedHazardIdSet.has(hazard.id)
+      ? { kind: 'hazard', contentClass: 'substance', identity: hazard.id, revision: recordRevision(hazard), text }
+      : { kind: 'ordinary', contentClass: 'chrome', text };
+  });
+  const ownerBlockParts = ownerBlocks.map((text) => ({ kind: 'ordinary', contentClass: 'chrome', text }));
 
   const body = [header, ...hazardBlocks, ...ownerBlocks].join('\n\n');
 
@@ -2159,10 +2361,22 @@ export function renderPorch(
     } catch {
       /* a failed stderr write must not change the clamp outcome */
     }
-    return { text: clipToBytes(finalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
+    const clampedFinal = clipToBytes(finalPorch, budget);
+    return { text: clampedFinal, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: 'ordinary', contentClass: 'chrome', text: clampedFinal }] };
   }
-  const deferred_hazard_ids = shownHazards.filter((hazard, index) => !finalPorch.includes(completePorchHazards([hazard])[0])).map((hazard) => hazard.id);
-  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids };
+  // FROM METADATA, NOT A RE-SCAN (fix-round MEDIUM 6): `embeddedHazardIdSet`
+  // (built above, from `hazardSectionAt(perHazard)`'s own return) is exactly
+  // what decided `body`/`finalPorch`'s hazard content; re-deriving the same
+  // fact by searching the assembled string for each hazard's rendered
+  // substring is dropped.
+  const deferred_hazard_ids = shownHazards.filter((hazard) => !embeddedHazardIdSet.has(hazard.id)).map((hazard) => hazard.id);
+  const parts = [
+    { kind: 'ordinary', contentClass: 'chrome', text: header },
+    ...hazardBlockParts,
+    ...ownerBlockParts,
+    { kind: 'ordinary', contentClass: 'chrome', text: porchEndLine(String(count), endMeta) },
+  ];
+  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids, parts };
 }
 
 /** The owned-territory header line — factored out (was inlined in
@@ -2171,28 +2385,64 @@ export function renderPorch(
  *  copied string the two could drift apart on. */
 // ---------------------------------------------------------------------------
 // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, decision
-// sterling-claude-code-scale-down-boundary). payload_char_cap bounds one FIELD;
-// nothing bounded a delivery as a whole, and one governed Read measured
-// 13-17KB. Every delivery surface (H19 tool-time, Bash pointers, dispatch
-// staging, H20) now assembles its blocks through capDeliveryParts: hazard
-// blocks are PINNED (verbatim, never cut, but they do spend the budget);
-// everything else is kept whole while it fits, then clipped at a line
-// boundary with a pointer suffix, then reduced to its pointer. Nothing is
-// dropped silently: a part with no pointer that cannot fit is counted in a
-// trailing omission line.
+// sterling-claude-code-scale-down-boundary; assembler contract, decision
+// 92088a62). payload_char_cap bounds one FIELD; nothing bounded a delivery as
+// a whole, and one governed Read measured 13-17KB. Every delivery surface
+// (H19 tool-time, H19 Bash, dispatch staging, H20) now assembles its blocks
+// through assembleDelivery: hazard blocks are PINNED and UNCHARGED against
+// the CONFIGURED cap (never cut by `total_cap_bytes`, and their bytes do not
+// spend that budget) — but, since fix-round HIGH 1/4, NEITHER hazards NOR
+// pinned chrome are unconditionally whole against the separate, unwaivable
+// TRANSPORT ceiling (DELIVERY_TRANSPORT_VISIBLE_BYTES): chrome degrades
+// through the ordinary excerpt/pointer/omission path like any other part,
+// and a hazard that still cannot fit degrades to its OWN bare "TOO LARGE to
+// show" notice (never a partial trigger/right_way) — see `tryDegradeHazard`
+// and the omitted-aggregate loop's own hazard-degrade fallback below for
+// exactly when each is reached. Everything else (plain ordinary content) is
+// kept whole while it fits, then clipped at a line boundary with a pointer
+// suffix, then reduced to its pointer. Nothing is dropped silently: a part
+// with no pointer that cannot fit is counted in a trailing omission line,
+// which is itself never allowed to vanish — and nothing that degraded, in
+// any of these ways, ever earns a delivery mark (see assembleDelivery's own
+// doc).
 // ---------------------------------------------------------------------------
 
 /** Default total cap in UTF-8 bytes; config.delivery.total_cap_bytes overrides
  *  it (0 = no total cap). */
 export const DELIVERY_TOTAL_CAP_DEFAULT = 3000;
 
+/** THE HARD TRANSPORT CEILING (decision 92088a62 NOT GUARANTEED clause,
+ *  fix-round HIGH 1/4): "Claude Code persists hook output over 10,000 chars
+ *  and previews about 2,000; oversized hidden substance is a degraded notice
+ *  and is not marked delivered." This is NOT `config.delivery.total_cap_bytes`
+ *  — it is the platform's own hard boundary, and unlike the configured cap it
+ *  is NEVER disabled (0 for `total_cap_bytes` means "no CONFIGURED cap", never
+ *  "ignore the transport too"). Measured in UTF-8 bytes here (as every other
+ *  cap in this file is) as a conservative proxy for the documented ~10,000
+ *  CHARS — bytes >= chars for any text, so bounding by bytes never UNDER-
+ *  protects the transport boundary. */
+export const DELIVERY_TRANSPORT_VISIBLE_BYTES = 10000;
+
 /** Smallest clipped excerpt worth emitting ahead of a pointer. */
 export const DELIVERY_EXCERPT_MIN_BYTES = 160;
+
+/** SCHEMA MINIMUM (decision 92088a62 item 7): the smallest positive
+ *  `total_cap_bytes` this build will actually use. A tiny or misconfigured
+ *  positive value (say `1`) would still let hazards and pinned chrome render
+ *  in full — those are never subject to this cap — but it would squeeze every
+ *  ordinary record down to nothing while the pinned parts alone still spend
+ *  bytes, which is a degrade users almost certainly did not intend. `0`
+ *  remains the documented, UNCLAMPED "no cap at all" sentinel — a deliberate
+ *  disable, not a misconfiguration — so it is the one value this floor never
+ *  touches. */
+export const DELIVERY_TOTAL_CAP_MIN = 500;
 
 export function resolveTotalCap(cwd) {
   try {
     const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
-    return typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+    if (!(typeof v === 'number' && Number.isInteger(v) && v >= 0)) return DELIVERY_TOTAL_CAP_DEFAULT;
+    if (v === 0) return 0; // explicit disable — never clamped
+    return Math.max(v, DELIVERY_TOTAL_CAP_MIN);
   } catch {
     return DELIVERY_TOTAL_CAP_DEFAULT;
   }
@@ -2215,31 +2465,125 @@ function clipLinesToBytes(text, maxBytes) {
 }
 
 /**
- * Decision 301d8a0a: each delivery part is either HAZARD (a complete
- * anti-pattern block) or ORDINARY (everything else). Hazards are whole and
- * unbudgeted; every ordinary byte, including separators and disclosures, is
- * within capBytes. This intentionally does not promise a total payload cap
- * when hazards exist, nor complete ordinary context.
+ * THE ONE ASSEMBLER (decision 92088a62 knowledge-delivery-target-design-no-
+ * delayed-delivery, ONE ASSEMBLER CONTRACT clause): structured parts →
+ * `{text, emittedSubstance, emittedDiscovery, omitted, omittedCount,
+ * degraded}`. PURE — no I/O, no guard access, no clock. Every caller persists
+ * ONLY `emittedSubstance`/`emittedDiscovery`, and only after its stdout write
+ * has actually succeeded; nothing else may ever mark a record delivered. This
+ * is the fix for the false-'delivered' trap both the UUID-scanning design
+ * (the deleted UUID-scanning-the-rendered-text helper) and a "mark what was
+ * SELECTED" design share: a
+ * record dropped for cap, or shown only as a degraded excerpt/pointer, must
+ * spend no mark at all, and stay eligible for a later, real delivery.
+ *
+ * A part is `{text, kind, contentClass, pinned, identity, revision,
+ * identities, pointer, suffix}`. "PINNED" below means exempt from the
+ * ordinary excerpt-then-pointer CLIPPING path — it is NOT a guarantee of
+ * unconditional wholeness (fix-round HIGH 1/4 correction: pinned parts
+ * used to be described as "always whole", which stopped being true once
+ * the hard transport ceiling below could still force them down to a bare
+ * pointer, an omission, or — for the omitted-count disclosure specifically —
+ * force an already-embedded hazard to give up its own room):
+ *  - `kind: 'hazard'` — PINNED and UNCHARGED against `capBytes` (decision
+ *    301d8a0a): never clipped to a partial excerpt, and its bytes do NOT
+ *    count against the CONFIGURED cap (hazards can push the ordinary total
+ *    over `capBytes` by design). It is NOT exempt from the separate, hard
+ *    TRANSPORT ceiling, though: a hazard whose own whole block cannot fit
+ *    that ceiling degrades to a bare "TOO LARGE to show" notice instead
+ *    (`tryDegradeHazard`), and an already-embedded hazard can be pushed down
+ *    to that same notice, after the fact, purely to keep the omitted-count
+ *    disclosure itself from being silently dropped (see the aggregate loop
+ *    below) — either way it earns no substance mark once degraded.
+ *  - `kind: 'ordinary'` (default) with `pinned: true` — PINNED but CHARGED:
+ *    tried whole first, and its bytes DO count against `capBytes` so it
+ *    reduces the room left for clippable ordinary parts (item 6: "pass
+ *    envelope/posture/chrome to the assembler as parts so they are charged"
+ *    — the total cap is charged on the FINAL composed context, not the
+ *    knowledge payload alone). If it still does not fit EITHER budget it
+ *    degrades through the SAME excerpt/pointer/omission path as unpinned
+ *    ordinary content — this is how envelope/posture/return-contract CHROME
+ *    is charged, and it is not exempt from ever being clipped.
+ *  - `kind: 'ordinary'`, not pinned — the clippable default: whole while it
+ *    fits, then a byte-safe excerpt + `suffix`, then a bare `pointer`, then
+ *    folded into one trailing '+N more records' aggregate line.
+ *
+ * `contentClass` is `'substance' | 'discovery' | 'chrome'`, the caller's own
+ * declaration of what the part conveys — the assembler never infers it.
+ * `identity`/`revision` (or, for a part whose text speaks for SEVERAL records
+ * at once — e.g. one joined decision-pointer block — the plural
+ * `identities: [{identity, revision}, ...]`) name the record(s) the part is
+ * about; a part with none (chrome framing) never earns a mark regardless of
+ * how it renders. A record earns a mark in `emittedSubstance`/
+ * `emittedDiscovery` ONLY when its part's FULL text survived un-clipped —
+ * never for an excerpt, a bare pointer, or an aggregated omission (decision
+ * 92088a62: "Omitted, pointer-only, unavailable and transport-overflow
+ * content never consumes a substance-delivery mark").
  */
-export function capDeliveryParts(parts, capBytes, { sep = '\n\n' } = {}) {
-  const items = (parts ?? []).filter((part) => part && typeof part.text === 'string' && part.text).map((part) => ({ ...part, kind: part.kind === 'hazard' ? 'hazard' : 'ordinary' }));
-  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
-  const bytes = (text) => porchByteLen(text);
-  const hazards = new Set(items.filter((part) => part.kind === 'hazard'));
-  const selected = new Map();
-  const omitted = [];
-  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
-  const ordinaryBytes = () => {
-    const text = output().join(sep);
-    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
+export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel } = {}) {
+  const items = (parts ?? [])
+    .filter((part) => part && typeof part.text === 'string' && part.text)
+    .map((part) => ({
+      ...part,
+      kind: part.kind === 'hazard' ? 'hazard' : 'ordinary',
+      contentClass: part.contentClass ?? 'chrome',
+      pinned: part.kind === 'hazard' ? true : !!part.pinned,
+    }));
+
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const dedupeEntries = (entries) => {
+    const seen = new Set();
+    const out = [];
+    for (const e of entries) {
+      if (!e?.identity) continue;
+      const key = `${e.identity}\u0000${e.revision}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ identity: e.identity, revision: e.revision });
+    }
+    return out;
   };
-  const fits = () => ordinaryBytes() <= capBytes;
+  const creditsFor = (survivors) => {
+    const emittedSubstance = [];
+    const emittedDiscovery = [];
+    for (const part of survivors) {
+      if (part.contentClass !== 'substance' && part.contentClass !== 'discovery') continue;
+      const bucket = part.contentClass === 'substance' ? emittedSubstance : emittedDiscovery;
+      for (const entry of idsOf(part)) {
+        if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
+      }
+    }
+    return { emittedSubstance, emittedDiscovery };
+  };
+
+  const bytes = (text) => porchByteLen(text);
+  const isHazard = (part) => part.kind === 'hazard';
+  const isChrome = (part) => part.kind !== 'hazard' && part.pinned;
+
+  // TWO BUDGETS, ALWAYS BOTH ACTIVE (fix-round HIGH 1/4, decision 92088a62 NOT
+  // GUARANTEED clause): `ordinaryCeiling` is OUR configured cap — hazards stay
+  // exempt from it (301d8a0a) — but `DELIVERY_TRANSPORT_VISIBLE_BYTES` is
+  // Claude Code's OWN hard boundary and applies to the FINAL composed string
+  // as a whole, with NO exemptions — including hazards, including a disabled
+  // (`0`) configured cap. `0` only ever meant "no CONFIGURED cap"; it never
+  // meant "the platform transport limit does not apply either".
+  const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
+
+  const selected = new Map(); // part -> { text, full }
+  const omitted = [];
+  const output = () => items.flatMap((part) => (selected.has(part) ? [selected.get(part).text] : []));
+  const totalBytes = () => bytes(output().join(sep));
+  const hazardBytesUsed = () =>
+    [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
+  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
+  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || '';
 
-  for (const part of items) {
-    if (part.kind === 'hazard') continue;
-    selected.set(part, part.text);
-    if (fits()) continue;
+  // ORDINARY/CHROME DEGRADE: whole while it fits both budgets, then a
+  // byte-safe excerpt + `suffix`, then a bare `pointer`, then full omission.
+  const tryDegradeOrdinary = (part, fitsFn) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsFn()) return;
     selected.delete(part);
 
     const suffix = part.suffix || pointerFor(part);
@@ -2249,73 +2593,164 @@ export function capDeliveryParts(parts, capBytes, { sep = '\n\n' } = {}) {
       let best = '';
       for (const line of lines) {
         const candidate = clipped ? `${clipped}\n${line}` : line;
-        selected.set(part, `${candidate}\n${suffix}`);
-        if (!fits()) {
-          break;
-        }
+        selected.set(part, { text: `${candidate}\n${suffix}`, full: false });
+        if (!fitsFn()) break;
         clipped = candidate;
         best = `${candidate}\n${suffix}`;
       }
       if (best) {
-        selected.set(part, best);
-        continue;
+        selected.set(part, { text: best, full: false });
+        return;
       }
       selected.delete(part);
-      selected.set(part, pointerFor(part));
-      if (pointerFor(part) && fits()) continue;
+      selected.set(part, { text: pointerFor(part), full: false });
+      if (pointerFor(part) && fitsFn()) return;
       selected.delete(part);
     }
     omitted.push(part);
-  }
+  };
+
+  // HAZARD DEGRADE: WHOLE OR A BARE POINTER ONLY — never a partial excerpt
+  // (decision 92088a62 HAZARDS clause: "each whole"; a hazard that cannot fit
+  // the transport ceiling becomes a "degraded notice", per the NOT GUARANTEED
+  // clause, rather than a truncated trigger/right_way).
+  const tryDegradeHazard = (part) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsTransport()) return;
+    selected.delete(part);
+    const ptr = pointerFor(part);
+    if (ptr) {
+      selected.set(part, { text: ptr, full: false });
+      if (fitsTransport()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+
+  // PROCESSING ORDER decides who wins scarce budget when both are tight; it
+  // is independent of the FINAL TEXT order, which `output()` always takes
+  // from `items`' original (caller-supplied) order. Chrome goes first — it is
+  // small, structural, and "bound pinned chrome before ordinary selection" is
+  // literal (fix-round HIGH 4) — then hazards (the priority SUBSTANCE, and
+  // the realistic source of transport overflow, per HIGH 1's own reproduction
+  // of an oversized single hazard), then ordinary.
+  for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
+  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
 
   if (omitted.length) {
-    const aggregatePart = { kind: 'ordinary', text: '' };
+    const aggregatePart = { kind: 'ordinary', contentClass: 'chrome', text: '' };
     items.push(aggregatePart);
+    // `aggregateLabel(count, ids)` (optional) lets a caller with its OWN
+    // established overflow wording (e.g. the Bash rung's "+N more pointer
+    // line(s) held back by the M-byte delivery cap") keep it verbatim instead
+    // of the generic '+N more records' line below — purely presentational,
+    // never a behavior change: the credit rules (an omitted part earns no
+    // mark) are identical either way.
+    // IDS FOR THE DISCLOSURE COME FROM PART METADATA FIRST (item 7 —
+    // "aggregate from record metadata"): `identity`/`identities` is the SAME
+    // structured field the assembler already uses to credit an emitted mark,
+    // so a part the caller tagged has its id(s) surface here without any text
+    // scan. A part with NO identity (bare chrome, or a caller that has not
+    // been migrated onto the tagged shape) falls back to the old regex scan
+    // of its own pointer/text — cosmetic only, never a delivery mark, and
+    // scoped to exactly the omitted part being described.
+    const idsForDisclosure = (part) => {
+      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+      if (tagged.length) return tagged;
+      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+    };
+    // COUNT BY IDENTITY, DEDUPED (fix-round MEDIUM 7): one omitted part
+    // naming several records (a joined decision-pointer block) must disclose
+    // ALL of them, not read as "+1" — matching the returned `omittedCount`
+    // computed the same way below. Falls back to the PART count only when
+    // NOTHING omitted carries any identity at all (pure chrome/framing —
+    // never "+0 more records" over content that visibly vanished).
     const aggregate = () => {
-      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
-      const prefix = `+${omitted.length} more records: knowledge_query`;
+      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
+      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      if (aggregateLabel) {
+        let line = aggregateLabel(count, ids);
+        while (ids.length && bytes(line) > ordinaryCeiling) {
+          ids.pop();
+          line = aggregateLabel(count, ids);
+        }
+        return line;
+      }
+      const prefix = `+${count} more records: knowledge_query`;
       let line = ids.length ? `${prefix}; knowledge_get ${ids.join(' ')}` : `${prefix}; knowledge_get`;
-      while (ids.length && bytes(line) > capBytes) {
+      while (ids.length && bytes(line) > ordinaryCeiling) {
         ids.pop();
         line = ids.length ? `${prefix}; knowledge_get ${ids.join(' ')}` : `${prefix}; knowledge_get`;
       }
       return line;
     };
+    // THE DISCLOSURE ITSELF MUST NEVER SILENTLY VANISH (fix-round HIGH 1,
+    // decision 92088a62 HAZARDS clause: "with the omitted count stated" — a
+    // cap that drops the "+N more" line is the exact silent-omission failure
+    // the disclosure exists to prevent, even when the thing crowding it out
+    // is a legitimately whole, unbudgeted hazard). Priority for what gives up
+    // room, in order: (1) evict an already-selected ORDINARY/chrome part —
+    // never a hazard, first pass, preserving 301d8a0a's "hazards are never
+    // cut by the [CONFIGURED] cap"; (2) if nothing ordinary is left, degrade
+    // the LAST already-whole hazard down to its OWN transport notice (never a
+    // partial excerpt — the same whole-or-pointer rule `tryDegradeHazard`
+    // enforces) — this is the aggregate's own final resort against the HARD
+    // transport ceiling, not the configured cap, so it does not contradict
+    // 301d8a0a; (3) if truly nothing can be freed (no ordinary content, no
+    // hazard has a pointer fallback), accept the aggregate line even though
+    // it overruns — stating the count imperfectly beats not stating it.
     while (true) {
-      aggregatePart.text = aggregate();
-      selected.set(aggregatePart, aggregatePart.text);
-      if (fits()) break;
+      const text = aggregate();
+      aggregatePart.text = text;
+      selected.set(aggregatePart, { text, full: false });
+      // Captured BEFORE deleting the aggregate below: `fitsTransport()` on
+      // its OWN, post-delete, reports the state WITHOUT the disclosure line
+      // at all — which fits almost by definition (that is exactly the
+      // problem) — so the branch beneath must judge whether the COMBINATION
+      // (already-selected content + this disclosure) fit, not the emptier
+      // state deleting it produces.
+      const ordinaryOk = fitsOrdinaryCap();
+      const transportOk = fitsTransport();
+      if (ordinaryOk && transportOk) break;
       selected.delete(aggregatePart);
-      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
-      if (!last) break;
-      selected.delete(last);
-      omitted.push(last);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      if (last) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
+      // Only reach for a hazard when the HARD TRANSPORT CEILING itself is
+      // what still fails to fit — never for the CONFIGURED cap alone
+      // (`fitsOrdinaryCap`, decision 301d8a0a): a pathologically tiny
+      // `total_cap_bytes` with nothing ordinary left to evict must fall
+      // straight to the final "accept the overrun" resort below, not start
+      // shrinking whole hazard substance the configured cap was never
+      // allowed to touch in the first place.
+      const degradable = !transportOk
+        ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part))
+        : null;
+      if (degradable) {
+        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        continue;
+      }
+      selected.set(aggregatePart, { text, full: false });
+      break;
     }
   }
-  return output();
-}
 
-/** Split a porch only when its rendered hazard substrings are complete. */
-export function partitionPorchHazards(text, hazardBlocks) {
-  const blocks = (hazardBlocks ?? []).filter(Boolean);
-  let cursor = 0;
-  const parts = [];
-  for (const block of blocks) {
-    const at = text.indexOf(block, cursor);
-    if (at < 0) return null;
-    if (at > cursor) parts.push({ kind: 'ordinary', text: text.slice(cursor, at) });
-    parts.push({ kind: 'hazard', text: block });
-    cursor = at + block.length;
-  }
-  if (cursor < text.length) parts.push({ kind: 'ordinary', text: text.slice(cursor) });
-  return parts;
-}
-
-/** Records whose FULL id appears in the emitted text — the only ones a caller
- *  may mark delivered (never mark delivered what the reader was not shown). */
-export function recordsShownIn(text, records) {
-  const t = String(text ?? '');
-  return (records ?? []).filter((r) => r?.id && t.includes(r.id));
+  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
+  return {
+    text: output().join(sep),
+    emittedSubstance,
+    emittedDiscovery,
+    omitted: omittedEntries,
+    omittedCount: omittedEntries.length,
+    degraded: omitted.length > 0 || partial,
+  };
 }
 
 /** The capped-delivery pointer for an owning record: its rendered header line
@@ -2443,7 +2878,7 @@ export function extractCommandPathCandidates(command) {
  *  MED finding): an owner reachable via two candidate paths in the same
  *  command must not render its gap block twice. `gapAttached` tracks that
  *  across the whole `entries` loop, not per-path. */
-export function bashPointerBlock(entries, { gapsByOwner } = {}) {
+export function bashPointerBlock(entries, { gapsByOwner, includeHazardLines = true } = {}) {
   const header = [
     'STERLING KNOWLEDGE POINTERS (H19) — governed paths named in a Bash command.',
     'This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here.',
@@ -2451,7 +2886,13 @@ export function bashPointerBlock(entries, { gapsByOwner } = {}) {
   const lines = [];
   const gapAttached = new Set();
   for (const e of entries) {
-    for (const h of e.hazards) {
+    // `includeHazardLines: false` (delivery-migration step 3, decision
+    // 92088a62 item 4): the h19-bash-delivery.mjs caller now renders hazards
+    // as WHOLE blocks via `hazardParts` — a hazard is substance, not a
+    // pointer, on every surface — so this one-line-per-hazard form is
+    // skipped there. Kept default-on for any other caller (there is none
+    // today) so the function's own contract does not silently change shape.
+    if (includeHazardLines) for (const h of e.hazards) {
       const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : (h.title ?? h.slug ?? h.id);
       lines.push({
         id: h.id,

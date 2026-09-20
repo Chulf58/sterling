@@ -476,6 +476,14 @@ const subagentStart = (dir, transcriptPath, extra = {}) => ({
 const FILLER = 'zzz filler prose that carries no anchor words at all here. ';
 const longBody = (n) => FILLER.repeat(Math.ceil(n / FILLER.length)).slice(0, n);
 
+// FULL-FIELD reconstruction of seedHazards' own trigger/right_way text
+// (2026-09-20, decision knowledge-delivery-target-design-no-delayed-delivery)
+// — for a FULL-FIELD-EQUALITY assertion, not merely a leading-marker
+// occurrence count: `ctx.includes(expectedTrigger(i))` proves the ENTIRE
+// field arrived, not just that its first token survived whatever followed it.
+const expectedTrigger = (i, tail = 600) => `TRG${i} first ${longBody(tail)}`;
+const expectedRightWay = (i, tail = 600) => `RW${i} first ${longBody(tail)}`;
+
 function seedOwners(store, count, { slugPad = 0, body = 1600 } = {}) {
   const slugs = [];
   for (let i = 0; i < count; i += 1) {
@@ -713,6 +721,13 @@ test('A1: every hazard is named in the bounded porch and its complete trigger/ri
       assert.ok(prefix.includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} is not reachable from the bounded porch; prefix=${prefix}`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger must be whole exactly once`);
       assert.equal(occurrences(s.ctx, `RW${i}`), 1, `hazard ${i} right way must be whole exactly once`);
+      // FULL-FIELD EQUALITY (2026-09-20, strengthened per decision knowledge-
+      // delivery-target-design-no-delayed-delivery): the marker-occurrence
+      // checks above prove the leading token survived, not the whole field —
+      // this proves the COMPLETE trigger/right_way text arrived, not a
+      // truncated prefix ending right after the marker.
+      assert.ok(s.ctx.includes(expectedTrigger(i)), `hazard ${i} trigger is not present IN FULL — a prefix would still satisfy the marker check above`);
+      assert.ok(s.ctx.includes(expectedRightWay(i)), `hazard ${i} right_way is not present IN FULL`);
     }
   } finally {
     s.cleanup();
@@ -834,6 +849,11 @@ test('A7: hazards appear ONCE in full context and the porch contains their ids o
       assert.ok(porchOf(s.ctx).includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} is absent from the porch`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger text appears ${occurrences(s.ctx, `TRG${i}`)} times; it must appear exactly once`);
       assert.equal(occurrences(s.ctx, `RW${i}`), 1, `hazard ${i} right_way text appears ${occurrences(s.ctx, `RW${i}`)} times; it must appear exactly once`);
+      // FULL-FIELD EQUALITY (2026-09-20 strengthening, see A1) — the
+      // occurrence checks above cannot tell a whole field from a truncated
+      // prefix ending right after the marker.
+      assert.ok(s.ctx.includes(expectedTrigger(i)), `hazard ${i} trigger is not present IN FULL`);
+      assert.ok(s.ctx.includes(expectedRightWay(i)), `hazard ${i} right_way is not present IN FULL`);
     }
   } finally {
     s.cleanup();
@@ -866,13 +886,21 @@ const bothChannels = () =>
   stage({
     budget: DEFAULT_BUDGET,
     lock: false,
-    // Raised so the fixture control (every record rendered) holds; the
-    // accounting under the DEFAULT cap is pinned in h19-delivery-total-cap C8.
+    // Raised so the fixture control (every record rendered) holds against the
+    // CONFIGURED cap; the accounting under the DEFAULT cap is pinned in
+    // h19-delivery-total-cap C8. 2026-09-20 (fix-round HIGH 1/4): raising
+    // `total_cap_bytes` no longer buys unlimited room by itself — the hard,
+    // unwaivable transport ceiling (DELIVERY_TRANSPORT_VISIBLE_BYTES, 10,000
+    // bytes) now clamps it, exactly the bug this fix round closes. Owner/
+    // hazard bodies are sized DOWN from the suite's usual 1600/600-char
+    // defaults so "every record rendered in full" is still achievable under
+    // that real ceiling — the fixture's PURPOSE (both channels actually
+    // deliver) is unchanged, only its size.
     totalCap: 20000,
     prompt: `Go work on src/a.mjs and report back. Separately: ${SUBJ_PROMPT}`,
     seed: (store, facts) => {
-      facts.slugs = seedOwners(store, 4);
-      facts.tokens = seedHazards(store, 3);
+      facts.slugs = seedOwners(store, 4, { body: 150 });
+      facts.tokens = seedHazards(store, 3, { tail: 150 });
       seedRulings(store, 2);
       seedSubjectChannel(store);
     },
@@ -1003,14 +1031,32 @@ test('B2: budget 0 — the hazards are still rendered (delivery is not silenced 
 // budget 0 drops hazards altogether — this pin goes red. 0 disables the
 // PORCH, never the delivery.
 
-test('B3: budget 0 — renderArticle headers still carry the (id8) that all six probes asked for (Part 2 is independent of the porch)', () => {
+// Order-agnostic since 2026-09-20 (decision knowledge-delivery-target-design-
+// no-delayed-delivery item 6): the total cap now also charges dispatch
+// staging's own chrome (TDD posture line, return contract) IN, not after —
+// exactly the fix for the cap-escaping bug Sol reproduced — so which specific
+// owner(s) still fit under a fixed budget shifted by that chrome's byte cost.
+// Superseded assertion: `assert.match(s.ctx, new RegExp("▸ article 'own-0'
+// \\(" + OWNER_IDS[0].slice(0, 8) + "\\) \\("), ...)` — hardcoded to
+// owner index 0, which this fixture's file_keys-join ordering (id DESC) now
+// puts LAST in line for the shrunk budget. The id8 CONTRACT this test pins
+// (Part 2, "on every surface") does not depend on WHICH owner survives.
+// Strengthened 2026-09-20 (fix-round test-integrity requirement): "at least
+// one owner survives" was too weak a control for what this pin exists to
+// prove — Part 2's id8 change applies on EVERY emitted header, not just
+// whichever owner happens to fit the reduced (chrome-charged) budget. This
+// now checks every article header actually present, not merely that one
+// exists.
+test('B3: budget 0 — EVERY emitted article header carries its OWN correct (id8) (Part 2 is independent of the porch)', () => {
   const s = stage({ budget: 0 });
   try {
-    assert.match(
-      s.ctx,
-      new RegExp(`▸ article 'own-0' \\(${OWNER_IDS[0].slice(0, 8)}\\) \\(`),
-      `expected the id8-bearing article header with the porch disabled; ctx head=${bytePrefix(s.ctx, 1500)}`
-    );
+    const headerRe = /▸ article '(own-\d+)' \(([0-9a-f]{8})\) \(/g;
+    const matches = [...s.ctx.matchAll(headerRe)];
+    assert.ok(matches.length > 0, `expected at least one article header with the porch disabled; ctx head=${bytePrefix(s.ctx, 1500)}`);
+    for (const [, slug, id8] of matches) {
+      const i = Number(slug.replace('own-', ''));
+      assert.equal(id8, OWNER_IDS[i].slice(0, 8), `article header '${slug}' carries the WRONG id8 (${id8}), expected ${OWNER_IDS[i].slice(0, 8)}`);
+    }
   } finally {
     s.cleanup();
   }
@@ -1083,6 +1129,9 @@ test('C4: a tight porch sacrifices ordinary owners, names every hazard, and emit
     for (let i = 0; i < 3; i += 1) {
       assert.ok(porch.includes(HAZARD_IDS[i].slice(0, 8)), `hazard ${i} was not named in the tight porch; porch=${porch}`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} was not emitted whole exactly once`);
+      // FULL-FIELD EQUALITY (2026-09-20 strengthening, see A1).
+      assert.ok(s.ctx.includes(expectedTrigger(i)), `hazard ${i} trigger is not present IN FULL under budget pressure`);
+      assert.ok(s.ctx.includes(expectedRightWay(i)), `hazard ${i} right_way is not present IN FULL under budget pressure`);
     }
   } finally {
     s.cleanup();
@@ -1166,6 +1215,9 @@ test('D2: multibyte hazard ids reach the porch and full multibyte substance arri
     for (let i = 0; i < 3; i += 1) {
       assert.ok(porch.includes(HAZARD_IDS[i].slice(0, 8)), `multibyte hazard ${i} missing from the porch; porch=${porch}`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `multibyte hazard ${i} substance is not whole exactly once`);
+      // FULL-FIELD EQUALITY (2026-09-20 strengthening, see A1) — reconstructs
+      // seedMultibyte's own trigger text (`TRG${i} ▸ ${cjkBody(400)}`).
+      assert.ok(s.ctx.includes(`TRG${i} ▸ ${cjkBody(400)}`), `multibyte hazard ${i} trigger is not present IN FULL`);
     }
     const ptrs = ownerPointerLines(porch);
     assert.ok(ptrs.length > 0, `expected at least one owner pointer line on the multibyte fixture; porch=${porch}`);
@@ -1332,6 +1384,11 @@ test('P3b: BOUNDED SKELETON keeps ordinary porch lines bounded while the oversiz
     assert.match(line, /precedence/i, `the porch-end line lost its precedence clause: ${JSON.stringify(line)}`);
     assert.ok(!porch.includes(HUGE_CJK_SLUG), 'the full 1000-char slug must never be interpolated raw in the ordinary porch');
     assert.equal(occurrences(s.ctx, HUGE_CJK_SLUG), 1, 'the complete hazard is the only full-slug occurrence');
+    // FULL-FIELD EQUALITY (2026-09-20 strengthening, see A1) — "complete
+    // hazard below" in this test's own title was previously unverified for
+    // trigger/right_way specifically; reconstructs seedHugeHazard's own text.
+    assert.ok(s.ctx.includes(expectedTrigger(0)), 'the oversize hazard trigger is not present IN FULL below the porch');
+    assert.ok(s.ctx.includes(expectedRightWay(0)), 'the oversize hazard right_way is not present IN FULL below the porch');
   } finally {
     s.cleanup();
   }
@@ -1798,6 +1855,9 @@ test('F1d: the tool-time porch names each hazard, full substance follows once, a
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger must be whole exactly once`);
       assert.equal(occurrences(s.ctx, `RW${i}`), 1, `hazard ${i} right way must be whole exactly once`);
       assert.equal(occurrences(s.ctx, `TRG${i}`), 1, `hazard ${i} trigger text appears ${occurrences(s.ctx, `TRG${i}`)} times in the tool-time block; the porch IS the hazard rendering`);
+      // FULL-FIELD EQUALITY (2026-09-20 strengthening, see A1).
+      assert.ok(s.ctx.includes(expectedTrigger(i)), `hazard ${i} trigger is not present IN FULL on the tool-time block`);
+      assert.ok(s.ctx.includes(expectedRightWay(i)), `hazard ${i} right_way is not present IN FULL on the tool-time block`);
     }
     const ptrs = ownerPointerLines(porch);
     assert.ok(ptrs.length > 0, `the tool-time porch must give the owner a citable foothold inside the preview; porch=${porch}`);
@@ -1818,7 +1878,16 @@ test('F1d: the tool-time porch names each hazard, full substance follows once, a
 // sabotage: leave the tool-time hazard rendering in place BELOW the porch as
 // well — the occurrences-equal-1 assertions go red.
 
-test('F1e: the tool-time block still delivers the ARTICLE BODY below the porch, with its id8-bearing header and its FULL RECORD line', () => {
+// Order-agnostic since 2026-09-20 (fix-round HIGH 1/4, same rationale as B3
+// above): raising `total_cap_bytes` to 20000 no longer buys unlimited room —
+// the hard transport ceiling (10,000 bytes) now clamps it — so with the
+// suite's standard 4×1600-char owners, WHICH owner(s) still fit in full below
+// the porch depends on that ceiling, not just the configured cap. Superseded
+// assertion: `assert.match(below, new RegExp("▸ article 'own-0' \\(" +
+// OWNER_IDS[0].slice(0, 8) + "\\) \\("), ...)` hardcoded to owner index 0.
+// The test's own PURPOSE ("the porch is a preview, not a replacement") only
+// needs AT LEAST ONE full article body below the porch, not a specific one.
+test('F1e: the tool-time block still delivers AN ARTICLE BODY below the porch, with its id8-bearing header and its FULL RECORD line', () => {
   // Total cap raised: this pins "the porch is a preview, not a replacement".
   // Under the default cap the body degrades to header + FULL RECORD pointer
   // (pinned in h19-delivery-total-cap.test.mjs).
@@ -1827,12 +1896,10 @@ test('F1e: the tool-time block still delivers the ARTICLE BODY below the porch, 
     const end = porchEndCharIndex(s.ctx);
     assert.ok(end !== null, `no porch-end line on the tool-time block (see F1a); ctx head=${bytePrefix(s.ctx, 2400)}`);
     const below = s.ctx.slice(end);
-    assert.match(
-      below,
-      new RegExp(`▸ article 'own-0' \\(${OWNER_IDS[0].slice(0, 8)}\\) \\(`),
-      `the porch is a PREVIEW, not a replacement: the article body must still be rendered below it; below=${bytePrefix(below, 2000)}`
+    const anyFullBody = OWNER_IDS.slice(0, 4).some(
+      (id, i) => new RegExp(`▸ article 'own-${i}' \\(${id.slice(0, 8)}\\) \\(`).test(below) && below.includes(`own-${i} ::`)
     );
-    assert.ok(below.includes('own-0 ::'), `the article body's what_it_does must still arrive below the tool-time porch; below=${bytePrefix(below, 2000)}`);
+    assert.ok(anyFullBody, `the porch is a PREVIEW, not a replacement: AT LEAST ONE article body must still be rendered in full below it; below=${bytePrefix(below, 2000)}`);
   } finally {
     s.cleanup();
   }

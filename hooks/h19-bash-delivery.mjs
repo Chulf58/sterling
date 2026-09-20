@@ -7319,14 +7319,39 @@ function claimLegacyInjectionRungNotice(cwd, rawRung) {
 function guardPath(cwd, agentId) {
   return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
+var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
 }
 function lineageKey(record) {
   return record?.slug ?? record?.id;
 }
-function isDelivered(guard, record) {
-  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+function recordRevision(record) {
+  return record?.version ?? record?.updated_at ?? record?.id;
+}
+function revisionDelivered(list, record) {
+  const rev = recordRevision(record);
+  return (list ?? []).some((e) => e?.id === record?.id && e?.revision === rev);
+}
+function markRevisionDelivered(list, entries) {
+  for (const e of entries ?? []) {
+    if (!e?.identity) continue;
+    if (!list.some((x) => x.id === e.identity && x.revision === e.revision)) {
+      list.push({ id: e.identity, revision: e.revision ?? null });
+    }
+  }
+}
+function isSubstanceDelivered(guard, record) {
+  return revisionDelivered(guard.substance, record);
+}
+function isDiscoveryDelivered(guard, record) {
+  return revisionDelivered(guard.discovery, record);
+}
+function markSubstanceDelivered(guard, emittedSubstance) {
+  markRevisionDelivered(guard.substance, emittedSubstance);
+}
+function markDiscoveryDelivered(guard, emittedDiscovery) {
+  markRevisionDelivered(guard.discovery, emittedDiscovery);
 }
 function isGapDelivered(guard, record) {
   return guard.gap_articles.includes(lineageKey(record));
@@ -7340,7 +7365,9 @@ function markGapDelivered(guard, records) {
 function readGuard(path) {
   try {
     if (!existsSync3(path)) return emptyDeliveryGuard();
-    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync2(path, "utf8")) };
+    const parsed = JSON.parse(readFileSync2(path, "utf8"));
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
@@ -7452,9 +7479,72 @@ function renderKnownGapsLines(article, info) {
   }
   return lines;
 }
+var HAZARD_RANK = { block: 0, warn: 1, info: 2 };
+var HAZARD_CAP = 3;
+function cappedHazards(hazards, cap = HAZARD_CAP) {
+  return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
+}
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+  const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
+  const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+}
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const fullTotal = total ?? hazards.length;
+  const dropped = suppressed ?? hazards.length - shown.length;
+  const blocks = shown.map(
+    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
+  );
+  if (dropped > 0) {
+    const keys = fileKeys.map((k) => `"${k}"`).join(",");
+    const widen = remedy ?? `knowledge_query types:["anti_pattern"] file_keys:[${keys}] cap:${fullTotal}`;
+    blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
+  }
+  return blocks;
+}
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  return blocks.map(
+    (text, i) => i < shown.length ? {
+      kind: "hazard",
+      contentClass: "substance",
+      identity: shown[i].id,
+      revision: recordRevision(shown[i]),
+      text,
+      // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+      // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+      // the hard transport ceiling degrades to this bare notice — never a
+      // partial trigger/right_way (the HAZARDS clause: "each whole") —
+      // and the assembler then correctly withholds its substance mark.
+      pointer: hazardOverflowPointer(shown[i])
+    } : { kind: "hazard", contentClass: "chrome", text }
+  );
+}
+function hazardOverflowPointer(record) {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
+}
 var PORCH_BYTE_COUNT_RESERVE = "000000";
 function porchByteLen(s2) {
   return Buffer.byteLength(String(s2 ?? ""), "utf8");
+}
+function clipToBytes(text, maxBytes) {
+  const s2 = String(text ?? "");
+  if (maxBytes <= 0) return "";
+  if (porchByteLen(s2) <= maxBytes) return s2;
+  const ELLIPSIS = "\u2026";
+  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
+  let out = "";
+  let used = 0;
+  for (const ch of s2) {
+    const chBytes = porchByteLen(ch);
+    if (used + chBytes > room) break;
+    out += ch;
+    used += chBytes;
+  }
+  return room > 0 ? `${out}${ELLIPSIS}` : out;
 }
 function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
   return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
@@ -7479,13 +7569,169 @@ var PORCH_END_TEMPLATE_BYTES = porchByteLen(
 );
 var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
 var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+var DELIVERY_TRANSPORT_VISIBLE_BYTES = 1e4;
+var DELIVERY_TOTAL_CAP_MIN = 500;
 function resolveTotalCap(cwd) {
   try {
     const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
-    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+    if (!(typeof v === "number" && Number.isInteger(v) && v >= 0)) return DELIVERY_TOTAL_CAP_DEFAULT;
+    if (v === 0) return 0;
+    return Math.max(v, DELIVERY_TOTAL_CAP_MIN);
   } catch {
     return DELIVERY_TOTAL_CAP_DEFAULT;
   }
+}
+function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({
+    ...part,
+    kind: part.kind === "hazard" ? "hazard" : "ordinary",
+    contentClass: part.contentClass ?? "chrome",
+    pinned: part.kind === "hazard" ? true : !!part.pinned
+  }));
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const dedupeEntries = (entries) => {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const e of entries) {
+      if (!e?.identity) continue;
+      const key = `${e.identity}\0${e.revision}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ identity: e.identity, revision: e.revision });
+    }
+    return out;
+  };
+  const creditsFor = (survivors2) => {
+    const emittedSubstance2 = [];
+    const emittedDiscovery2 = [];
+    for (const part of survivors2) {
+      if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
+      const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
+      for (const entry of idsOf(part)) {
+        if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
+      }
+    }
+    return { emittedSubstance: emittedSubstance2, emittedDiscovery: emittedDiscovery2 };
+  };
+  const bytes = (text) => porchByteLen(text);
+  const isHazard = (part) => part.kind === "hazard";
+  const isChrome = (part) => part.kind !== "hazard" && part.pinned;
+  const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const selected = /* @__PURE__ */ new Map();
+  const omitted = [];
+  const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
+  const totalBytes = () => bytes(output().join(sep));
+  const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
+  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
+  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const pointerFor = (part) => part.pointer || "";
+  const tryDegradeOrdinary = (part, fitsFn) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsFn()) return;
+    selected.delete(part);
+    const suffix = part.suffix || pointerFor(part);
+    if (suffix) {
+      const lines = part.text.split("\n");
+      let clipped = "";
+      let best = "";
+      for (const line of lines) {
+        const candidate = clipped ? `${clipped}
+${line}` : line;
+        selected.set(part, { text: `${candidate}
+${suffix}`, full: false });
+        if (!fitsFn()) break;
+        clipped = candidate;
+        best = `${candidate}
+${suffix}`;
+      }
+      if (best) {
+        selected.set(part, { text: best, full: false });
+        return;
+      }
+      selected.delete(part);
+      selected.set(part, { text: pointerFor(part), full: false });
+      if (pointerFor(part) && fitsFn()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+  const tryDegradeHazard = (part) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsTransport()) return;
+    selected.delete(part);
+    const ptr = pointerFor(part);
+    if (ptr) {
+      selected.set(part, { text: ptr, full: false });
+      if (fitsTransport()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+  for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
+  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  if (omitted.length) {
+    const aggregatePart = { kind: "ordinary", contentClass: "chrome", text: "" };
+    items.push(aggregatePart);
+    const idsForDisclosure = (part) => {
+      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+      if (tagged.length) return tagged;
+      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+    };
+    const aggregate = () => {
+      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
+      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      if (aggregateLabel) {
+        let line2 = aggregateLabel(count, ids);
+        while (ids.length && bytes(line2) > ordinaryCeiling) {
+          ids.pop();
+          line2 = aggregateLabel(count, ids);
+        }
+        return line2;
+      }
+      const prefix = `+${count} more records: knowledge_query`;
+      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      while (ids.length && bytes(line) > ordinaryCeiling) {
+        ids.pop();
+        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      }
+      return line;
+    };
+    while (true) {
+      const text = aggregate();
+      aggregatePart.text = text;
+      selected.set(aggregatePart, { text, full: false });
+      const ordinaryOk = fitsOrdinaryCap();
+      const transportOk = fitsTransport();
+      if (ordinaryOk && transportOk) break;
+      selected.delete(aggregatePart);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      if (last) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
+      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
+      if (degradable) {
+        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        continue;
+      }
+      selected.set(aggregatePart, { text, full: false });
+      break;
+    }
+  }
+  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
+  return {
+    text: output().join(sep),
+    emittedSubstance,
+    emittedDiscovery,
+    omitted: omittedEntries,
+    omittedCount: omittedEntries.length,
+    degraded: omitted.length > 0 || partial
+  };
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
@@ -7512,7 +7758,7 @@ function extractCommandPathCandidates(command) {
   }
   return out;
 }
-function bashPointerBlock(entries, { gapsByOwner } = {}) {
+function bashPointerBlock(entries, { gapsByOwner, includeHazardLines = true } = {}) {
   const header = [
     "STERLING KNOWLEDGE POINTERS (H19) \u2014 governed paths named in a Bash command.",
     "This is a POINTER, not the article: the store owns these paths, so read the record before you design or edit here."
@@ -7520,7 +7766,7 @@ function bashPointerBlock(entries, { gapsByOwner } = {}) {
   const lines = [];
   const gapAttached = /* @__PURE__ */ new Set();
   for (const e of entries) {
-    for (const h of e.hazards) {
+    if (includeHazardLines) for (const h of e.hazards) {
       const hazardLabel = h.title && h.slug ? `${h.title} [${h.slug}]` : h.title ?? h.slug ?? h.id;
       lines.push({
         id: h.id,
@@ -7544,41 +7790,6 @@ function bashPointerBlock(entries, { gapsByOwner } = {}) {
     }
   }
   return { header, lines };
-}
-function capPointerBlock({ header, lines = [] } = {}, capBytes, { skip = () => false } = {}) {
-  const seen = /* @__PURE__ */ new Set();
-  const kept = [];
-  for (const l of lines) {
-    if (!l?.id || seen.has(l.id) || skip(l.id)) continue;
-    seen.add(l.id);
-    kept.push(l);
-  }
-  if (!capBytes || capBytes <= 0) return { header, lines: kept, tail: "" };
-  const lineBytes = (l) => [l.line, ...Array.isArray(l.gapLines) ? l.gapLines : []].reduce((n, x) => n + porchByteLen(x) + 1, 0);
-  const TAIL_RESERVE = 160;
-  let used = porchByteLen(header) + kept.filter((l) => l.hazard).reduce((n, l) => n + lineBytes(l), 0);
-  const out = [];
-  let held = 0;
-  for (const l of kept) {
-    if (l.hazard) {
-      out.push(l);
-      continue;
-    }
-    if (used + lineBytes(l) + TAIL_RESERVE <= capBytes) {
-      out.push(l);
-      used += lineBytes(l);
-    } else held++;
-  }
-  const tail = held ? `  (+${held} more pointer line(s) held back by the ${capBytes}-byte delivery cap \u2014 knowledge_query the command's governed paths)` : "";
-  return { header, lines: out, tail };
-}
-function joinPointerBlock({ header, lines = [], tail } = {}) {
-  const body = [];
-  for (const l of lines) {
-    body.push(l.line);
-    if (Array.isArray(l.gapLines)) body.push(...l.gapLines);
-  }
-  return [header, ...body, ...tail ? [tail] : []].filter((s2) => typeof s2 === "string" && s2).join("\n");
 }
 
 // scripts/hooks/h19-bash-delivery.mjs
@@ -7630,31 +7841,60 @@ function main(input2) {
       }
     }
     const gapsByOwner = budgetKnownGaps(gapOwners);
-    const deliveredIds = new Set(entries.flatMap((e) => [...e.owners, ...e.hazards]).filter((r) => isDelivered(guard, r)).map((r) => r.id));
-    const block = capPointerBlock(bashPointerBlock(entries, { gapsByOwner }), resolveTotalCap(input2.cwd), {
-      skip: (id) => deliveredIds.has(id)
-    });
-    if (!block.lines.length) {
+    const alreadyDelivered = (r) => r.type === "anti_pattern" ? isSubstanceDelivered(guard, r) : isSubstanceDelivered(guard, r) || isDiscoveryDelivered(guard, r);
+    const ownerById = /* @__PURE__ */ new Map();
+    const hazardById = /* @__PURE__ */ new Map();
+    for (const e of entries) {
+      for (const o of e.owners) if (!ownerById.has(o.id)) ownerById.set(o.id, o);
+      for (const h of e.hazards) if (!hazardById.has(h.id)) hazardById.set(h.id, h);
+    }
+    const rawOwnerLines = bashPointerBlock(entries, { gapsByOwner, includeHazardLines: false }).lines;
+    const seenOwnerIds = /* @__PURE__ */ new Set();
+    const ownerParts = [];
+    for (const l of rawOwnerLines) {
+      if (!l?.id || seenOwnerIds.has(l.id)) continue;
+      seenOwnerIds.add(l.id);
+      const rec = ownerById.get(l.id);
+      if (!rec || alreadyDelivered(rec)) continue;
+      const full = [l.line, ...l.gapLines ?? []].join("\n");
+      ownerParts.push({
+        kind: "ordinary",
+        contentClass: "discovery",
+        identity: rec.id,
+        revision: recordRevision(rec),
+        text: full,
+        pointer: l.line
+      });
+    }
+    const eligibleHazards = [...hazardById.values()].filter((h) => !alreadyDelivered(h));
+    const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel) });
+    if (!ownerParts.length && !hzParts.length) {
       if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: migrationNotice } }), 0);
       return allow();
     }
-    const shownIds = new Set(block.lines.map((l) => l.id));
+    const totalCap = resolveTotalCap(input2.cwd);
+    const headerPart = { kind: "ordinary", pinned: true, contentClass: "chrome", text: bashPointerBlock([]).header };
+    const migrationNoticePart = migrationNotice ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: migrationNotice }] : [];
+    const assembled = assembleDelivery([...migrationNoticePart, headerPart, ...hzParts, ...ownerParts], totalCap, {
+      aggregateLabel: (n) => `  (+${n} more pointer line(s) held back by the ${totalCap}-byte delivery cap \u2014 knowledge_query the command's governed paths)`
+    });
+    const shownIds = new Set([...assembled.emittedSubstance, ...assembled.emittedDiscovery].map((e) => e.identity));
     const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
     const emittedPaths = /* @__PURE__ */ new Set();
     for (const entry of entries) {
-      const eligible = [...entry.owners, ...entry.hazards].filter((r) => !deliveredIds.has(r.id));
+      const eligible = [...entry.owners, ...entry.hazards].filter((r) => !alreadyDelivered(r));
       if (eligible.length && eligible.every((r) => shownIds.has(r.id))) emittedPaths.add(entry.rel);
     }
     const recordDelivered = () => {
       guard.pointer_files.push(...emittedPaths);
       if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
+      markSubstanceDelivered(guard, assembled.emittedSubstance);
+      markDiscoveryDelivered(guard, assembled.emittedDiscovery);
       writeGuard(gPath, guard);
     };
-    const payload = joinPointerBlock(block);
+    const payload = assembled.text;
     return exitAfterWrite(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: `${migrationNotice ? `${migrationNotice}
-
-` : ""}${payload}` } }),
+      JSON.stringify({ hookSpecificOutput: { hookEventName: input2.hook_event_name, additionalContext: payload } }),
       0,
       { onWritten: recordDelivered }
     );

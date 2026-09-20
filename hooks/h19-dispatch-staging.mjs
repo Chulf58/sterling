@@ -8229,13 +8229,43 @@ function stripReviewTerritoryLine(text) {
 function guardPath(cwd, agentId) {
   return join5(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
+var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
+}
+function recordRevision(record) {
+  return record?.version ?? record?.updated_at ?? record?.id;
+}
+function revisionDelivered(list, record) {
+  const rev = recordRevision(record);
+  return (list ?? []).some((e) => e?.id === record?.id && e?.revision === rev);
+}
+function markRevisionDelivered(list, entries) {
+  for (const e of entries ?? []) {
+    if (!e?.identity) continue;
+    if (!list.some((x) => x.id === e.identity && x.revision === e.revision)) {
+      list.push({ id: e.identity, revision: e.revision ?? null });
+    }
+  }
+}
+function isSubstanceDelivered(guard, record) {
+  return revisionDelivered(guard.substance, record);
+}
+function isDiscoveryDelivered(guard, record) {
+  return revisionDelivered(guard.discovery, record);
+}
+function markSubstanceDelivered(guard, emittedSubstance) {
+  markRevisionDelivered(guard.substance, emittedSubstance);
+}
+function markDiscoveryDelivered(guard, emittedDiscovery) {
+  markRevisionDelivered(guard.discovery, emittedDiscovery);
 }
 function readGuard(path) {
   try {
     if (!existsSync5(path)) return emptyDeliveryGuard();
-    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
@@ -8299,10 +8329,15 @@ function pointerLine(store, kind, slug) {
   }
   return `  \u2192 ${kind} [[${slug}]]: ${head}${annotation}`;
 }
-var UNTESTABLE_REASON_CLIP = 140;
 var ARTICLE_BODY_FLOOR = 4096;
 var ARTICLE_DIGEST_EXCERPT = 1200;
 var ARTICLE_SLUG_CLIP = 256;
+function isArticleDigested(article) {
+  return String(article?.what_it_does ?? "").length > ARTICLE_BODY_FLOOR;
+}
+function isOwnerDiscoveryOnly(record) {
+  return record?.type === "reference_material" || isArticleDigested(record);
+}
 var GAP_GLOBAL_BUDGET = 3;
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
@@ -8335,7 +8370,7 @@ function renderKnownGapsLines(article, info) {
   }
   return lines;
 }
-function renderArticle(store, article, charCap, { gaps } = {}) {
+function renderArticle(store, article, { gaps } = {}) {
   const id8 = String(article.id ?? "").slice(0, 8);
   const header = `\u25B8 article '${clip(article.slug, ARTICLE_SLUG_CLIP)}' (${id8}) (${article.state}${article.concept_family ? `, concept family '${clip(article.concept_family, ARTICLE_SLUG_CLIP)}'` : ""})${statusAnnotation(article)}`;
   const body = String(article.what_it_does ?? "");
@@ -8350,8 +8385,8 @@ function renderArticle(store, article, charCap, { gaps } = {}) {
   }
   const lines = [
     header,
-    `WHAT IT DOES: ${clip(body, charCap)}`,
-    `INTENDED BEHAVIOR: ${clip(article.intended_behavior, charCap)}`,
+    `WHAT IT DOES: ${body}`,
+    `INTENDED BEHAVIOR: ${String(article.intended_behavior ?? "")}`,
     // The oversize branch above already carries a knowledge_get pointer; this
     // branch (small/normal articles) did not, so a reader could not cite the
     // record by id without a second lookup (decision 2e8c30e4).
@@ -8361,7 +8396,7 @@ function renderArticle(store, article, charCap, { gaps } = {}) {
     lines.push(
       `ACCEPTANCE CRITERIA: ${article.current_ac.map((a) => {
         const u = a.untestable_because;
-        const suffix = u ? ` [untestable: ${clip(u.reason, UNTESTABLE_REASON_CLIP)} \u2014 blocking ${String(u.blocking_record_id).slice(0, 8)}]` : "";
+        const suffix = u ? ` [untestable: ${u.reason} \u2014 blocking ${String(u.blocking_record_id).slice(0, 8)}]` : "";
         return `${a.ac_id}: ${a.text}${suffix}`;
       }).join(" | ")}`
     );
@@ -8402,6 +8437,28 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
     blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
+}
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  return blocks.map(
+    (text, i) => i < shown.length ? {
+      kind: "hazard",
+      contentClass: "substance",
+      identity: shown[i].id,
+      revision: recordRevision(shown[i]),
+      text,
+      // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+      // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+      // the hard transport ceiling degrades to this bare notice — never a
+      // partial trigger/right_way (the HAZARDS clause: "each whole") —
+      // and the assembler then correctly withholds its substance mark.
+      pointer: hazardOverflowPointer(shown[i])
+    } : { kind: "hazard", contentClass: "chrome", text }
+  );
+}
+function hazardOverflowPointer(record) {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 function completePorchHazards(hazards) {
   return cappedHazards(hazards ?? []).map((hazard) => [
@@ -8573,8 +8630,8 @@ function renderPorch(header, hazards, owners, budget, {
   subjectDecisionPointerCount = 0,
   fileKeys = []
 } = {}) {
-  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
-  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false, deferred_hazard_ids: [] };
+  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id), parts: [] };
+  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false, deferred_hazard_ids: [], parts: [] };
   if (budget < PORCH_MIN_BUDGET_BYTES) {
     try {
       process.stderr.write(
@@ -8583,7 +8640,7 @@ function renderPorch(header, hazards, owners, budget, {
       );
     } catch {
     }
-    return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id) };
+    return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id), parts: [] };
   }
   const shownHazards = cappedHazards(hazards ?? []);
   const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
@@ -8599,15 +8656,20 @@ function renderPorch(header, hazards, owners, budget, {
   const minOwnerCap = 0;
   const byteCountReserve = "0".repeat(String(budget).length);
   function hazardSectionAt(perHazardTextBudget) {
+    const wholeIds = [];
     const blocks = shownHazards.map((hazard) => {
       const whole = completePorchHazards([hazard])[0];
-      return porchByteLen(whole) <= perHazardTextBudget ? whole : `\u26A0 HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
+      if (porchByteLen(whole) <= perHazardTextBudget) {
+        wholeIds.push(hazard.id);
+        return whole;
+      }
+      return `\u26A0 HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
     });
     if (hazardOverflow > 0) {
       const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
       blocks.push(`\u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) \u2014 ${widen} for the full set`);
     }
-    return blocks;
+    return { blocks, wholeIds };
   }
   function ownerSectionAt(admitted2, ownerLines2, overflowLine2, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
     const blocks = admitted2.map((owner, i) => {
@@ -8629,7 +8691,7 @@ function renderPorch(header, hazards, owners, budget, {
     const overflowLine2 = ownerOverflow > 0 ? `  \u2026 +${ownerOverflow} owners below` : "";
     const skeletonBody = [
       header,
-      ...hazardSectionAt(0),
+      ...hazardSectionAt(0).blocks,
       ...ownerSectionAt(admitted2, ownerLines2, overflowLine2, 0, { reserveDigestSeparator: true })
     ].join("\n\n");
     const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
@@ -8666,9 +8728,10 @@ function renderPorch(header, hazards, owners, budget, {
         );
       } catch {
       }
-      return { text: clipToBytes(minimalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
+      const clamped = clipToBytes(minimalPorch, budget);
+      return { text: clamped, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: "ordinary", contentClass: "chrome", text: clamped }] };
     }
-    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
+    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: "ordinary", contentClass: "chrome", text: minimalPorch }] };
   }
   const haveHazards = shownHazards.length > 0;
   const haveDigests = admitted.length > 0;
@@ -8690,8 +8753,15 @@ function renderPorch(header, hazards, owners, budget, {
   }
   const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
   const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
-  const hazardBlocks = hazardSectionAt(perHazard);
+  const { blocks: hazardBlocks, wholeIds: embeddedHazardIds } = hazardSectionAt(perHazard);
+  const embeddedHazardIdSet = new Set(embeddedHazardIds);
   const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
+  const hazardBlockParts = hazardBlocks.map((text, i) => {
+    if (i >= shownHazards.length) return { kind: "ordinary", contentClass: "chrome", text };
+    const hazard = shownHazards[i];
+    return embeddedHazardIdSet.has(hazard.id) ? { kind: "hazard", contentClass: "substance", identity: hazard.id, revision: recordRevision(hazard), text } : { kind: "ordinary", contentClass: "chrome", text };
+  });
+  const ownerBlockParts = ownerBlocks.map((text) => ({ kind: "ordinary", contentClass: "chrome", text }));
   const body = [header, ...hazardBlocks, ...ownerBlocks].join("\n\n");
   let count = porchByteLen(body) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
   let finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
@@ -8710,38 +8780,78 @@ function renderPorch(header, hazards, owners, budget, {
       );
     } catch {
     }
-    return { text: clipToBytes(finalPorch, budget), hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id) };
+    const clampedFinal = clipToBytes(finalPorch, budget);
+    return { text: clampedFinal, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: "ordinary", contentClass: "chrome", text: clampedFinal }] };
   }
-  const deferred_hazard_ids = shownHazards.filter((hazard, index) => !finalPorch.includes(completePorchHazards([hazard])[0])).map((hazard) => hazard.id);
-  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids };
+  const deferred_hazard_ids = shownHazards.filter((hazard) => !embeddedHazardIdSet.has(hazard.id)).map((hazard) => hazard.id);
+  const parts = [
+    { kind: "ordinary", contentClass: "chrome", text: header },
+    ...hazardBlockParts,
+    ...ownerBlockParts,
+    { kind: "ordinary", contentClass: "chrome", text: porchEndLine(String(count), endMeta) }
+  ];
+  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids, parts };
 }
 var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+var DELIVERY_TRANSPORT_VISIBLE_BYTES = 1e4;
+var DELIVERY_TOTAL_CAP_MIN = 500;
 function resolveTotalCap(cwd) {
   try {
     const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
-    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+    if (!(typeof v === "number" && Number.isInteger(v) && v >= 0)) return DELIVERY_TOTAL_CAP_DEFAULT;
+    if (v === 0) return 0;
+    return Math.max(v, DELIVERY_TOTAL_CAP_MIN);
   } catch {
     return DELIVERY_TOTAL_CAP_DEFAULT;
   }
 }
-function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
-  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({ ...part, kind: part.kind === "hazard" ? "hazard" : "ordinary" }));
-  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
+function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({
+    ...part,
+    kind: part.kind === "hazard" ? "hazard" : "ordinary",
+    contentClass: part.contentClass ?? "chrome",
+    pinned: part.kind === "hazard" ? true : !!part.pinned
+  }));
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const dedupeEntries = (entries) => {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const e of entries) {
+      if (!e?.identity) continue;
+      const key = `${e.identity}\0${e.revision}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ identity: e.identity, revision: e.revision });
+    }
+    return out;
+  };
+  const creditsFor = (survivors2) => {
+    const emittedSubstance2 = [];
+    const emittedDiscovery2 = [];
+    for (const part of survivors2) {
+      if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
+      const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
+      for (const entry of idsOf(part)) {
+        if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
+      }
+    }
+    return { emittedSubstance: emittedSubstance2, emittedDiscovery: emittedDiscovery2 };
+  };
   const bytes = (text) => porchByteLen(text);
-  const hazards = new Set(items.filter((part) => part.kind === "hazard"));
+  const isHazard = (part) => part.kind === "hazard";
+  const isChrome = (part) => part.kind !== "hazard" && part.pinned;
+  const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const selected = /* @__PURE__ */ new Map();
   const omitted = [];
-  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
-  const ordinaryBytes = () => {
-    const text = output().join(sep);
-    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
-  };
-  const fits = () => ordinaryBytes() <= capBytes;
+  const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
+  const totalBytes = () => bytes(output().join(sep));
+  const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
+  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
+  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || "";
-  for (const part of items) {
-    if (part.kind === "hazard") continue;
-    selected.set(part, part.text);
-    if (fits()) continue;
+  const tryDegradeOrdinary = (part, fitsFn) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsFn()) return;
     selected.delete(part);
     const suffix = part.suffix || pointerFor(part);
     if (suffix) {
@@ -8751,69 +8861,101 @@ function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
       for (const line of lines) {
         const candidate = clipped ? `${clipped}
 ${line}` : line;
-        selected.set(part, `${candidate}
-${suffix}`);
-        if (!fits()) {
-          break;
-        }
+        selected.set(part, { text: `${candidate}
+${suffix}`, full: false });
+        if (!fitsFn()) break;
         clipped = candidate;
         best = `${candidate}
 ${suffix}`;
       }
       if (best) {
-        selected.set(part, best);
-        continue;
+        selected.set(part, { text: best, full: false });
+        return;
       }
       selected.delete(part);
-      selected.set(part, pointerFor(part));
-      if (pointerFor(part) && fits()) continue;
+      selected.set(part, { text: pointerFor(part), full: false });
+      if (pointerFor(part) && fitsFn()) return;
       selected.delete(part);
     }
     omitted.push(part);
-  }
+  };
+  const tryDegradeHazard = (part) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsTransport()) return;
+    selected.delete(part);
+    const ptr = pointerFor(part);
+    if (ptr) {
+      selected.set(part, { text: ptr, full: false });
+      if (fitsTransport()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+  for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
+  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   if (omitted.length) {
-    const aggregatePart = { kind: "ordinary", text: "" };
+    const aggregatePart = { kind: "ordinary", contentClass: "chrome", text: "" };
     items.push(aggregatePart);
+    const idsForDisclosure = (part) => {
+      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+      if (tagged.length) return tagged;
+      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+    };
     const aggregate = () => {
-      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
-      const prefix = `+${omitted.length} more records: knowledge_query`;
+      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
+      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      if (aggregateLabel) {
+        let line2 = aggregateLabel(count, ids);
+        while (ids.length && bytes(line2) > ordinaryCeiling) {
+          ids.pop();
+          line2 = aggregateLabel(count, ids);
+        }
+        return line2;
+      }
+      const prefix = `+${count} more records: knowledge_query`;
       let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
-      while (ids.length && bytes(line) > capBytes) {
+      while (ids.length && bytes(line) > ordinaryCeiling) {
         ids.pop();
         line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
       }
       return line;
     };
     while (true) {
-      aggregatePart.text = aggregate();
-      selected.set(aggregatePart, aggregatePart.text);
-      if (fits()) break;
+      const text = aggregate();
+      aggregatePart.text = text;
+      selected.set(aggregatePart, { text, full: false });
+      const ordinaryOk = fitsOrdinaryCap();
+      const transportOk = fitsTransport();
+      if (ordinaryOk && transportOk) break;
       selected.delete(aggregatePart);
-      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
-      if (!last) break;
-      selected.delete(last);
-      omitted.push(last);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      if (last) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
+      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
+      if (degradable) {
+        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        continue;
+      }
+      selected.set(aggregatePart, { text, full: false });
+      break;
     }
   }
-  return output();
-}
-function partitionPorchHazards(text, hazardBlocks) {
-  const blocks = (hazardBlocks ?? []).filter(Boolean);
-  let cursor = 0;
-  const parts = [];
-  for (const block of blocks) {
-    const at = text.indexOf(block, cursor);
-    if (at < 0) return null;
-    if (at > cursor) parts.push({ kind: "ordinary", text: text.slice(cursor, at) });
-    parts.push({ kind: "hazard", text: block });
-    cursor = at + block.length;
-  }
-  if (cursor < text.length) parts.push({ kind: "ordinary", text: text.slice(cursor) });
-  return parts;
-}
-function recordsShownIn(text, records) {
-  const t = String(text ?? "");
-  return (records ?? []).filter((r) => r?.id && t.includes(r.id));
+  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
+  return {
+    text: output().join(sep),
+    emittedSubstance,
+    emittedDiscovery,
+    omitted: omittedEntries,
+    omittedCount: omittedEntries.length,
+    degraded: omitted.length > 0 || partial
+  };
 }
 function ownerPointer(rendered, record) {
   const head = String(rendered ?? "").split("\n")[0];
@@ -8939,10 +9081,12 @@ async function main(input2) {
     if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish("");
     const gPath = guardPath(input2.cwd, input2.agent_id);
     const guard = readGuard(gPath);
-    const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-    const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
-    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !guard.records.includes(r.id)));
-    const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
+    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));
+    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
+    const freshSubject = subjectMatches.filter(
+      (x) => x.record.type === "anti_pattern" ? !isSubstanceDelivered(guard, x.record) : !isDiscoveryDelivered(guard, x.record)
+    );
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
     const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
     const rawPorchBudget = resolvePorchBudget(input2.cwd);
@@ -8956,6 +9100,13 @@ async function main(input2) {
     const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
     const totalCap = resolveTotalCap(input2.cwd);
     const cappedPorchBudget = totalCap > 0 ? Math.min(porchBudget, totalCap) : porchBudget;
+    const leadingChromeParts = activePlanLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: activePlanLine }] : [];
+    const trailingChromeParts = [
+      ...tddPostureLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: tddPostureLine }] : [],
+      ...unattributableLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: unattributableLine }] : [],
+      ...!EXEMPT_AGENT_TYPES.has(input2.agent_type) ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: RETURN_CONTRACT }] : []
+    ];
+    const leadingChromePrefixLen = leadingChromeParts.length ? leadingChromeParts[0].text.length + 2 : 0;
     const assemble = (counts2) => {
       const parts = [];
       let porchText = "";
@@ -8973,36 +9124,25 @@ async function main(input2) {
         const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(",")}] cap:${freshDecisions.length}`;
         porchText = porch.text;
         const ownerParts = freshOwners.map((r) => {
-          const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r, charCap);
-          return { kind: "ordinary", text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+          const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r);
+          const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
+          return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
         const decisionParts = freshDecisions.length ? [
           {
             kind: "ordinary",
+            contentClass: "discovery",
+            identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
             text: renderDecisionPointers(rels.join(", "), freshDecisions),
             pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
             suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
           }
         ] : [];
         const shownHazards = cappedHazards(freshHazards);
-        const fullHazards = renderHazards(shownHazards, Number.MAX_SAFE_INTEGER, { fileKeys: rels });
         const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
-        const porchHazards = completePorchHazards(shownHazards.filter((hazard) => !deferredHazardIds.has(hazard.id)));
-        const deferredHazards = fullHazards.filter((_, index) => deferredHazardIds.has(shownHazards[index]?.id)).map((text) => ({ kind: "hazard", text }));
-        let porchParts = porch.text ? partitionPorchHazards(porch.text, porchHazards) : null;
-        if (porch.text && !porchParts) {
-          porch = renderPorch(porchHeaderLine(rels), [], freshOwners, cappedPorchBudget, {
-            articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
-            referencePointerCount: referenceOwnersForPorch.length,
-            pathDecisionPointerCount: counts2.pathM,
-            hasSubjectChannel: true,
-            subjectHazardCount: counts2.subjN,
-            subjectDecisionPointerCount: counts2.subjP,
-            fileKeys: rels
-          });
-        }
+        const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)), { fileKeys: rels });
         parts.push(
-          ...porch.text ? porchParts ?? [{ kind: "ordinary", text: porch.text }] : [{ kind: "ordinary", text: payloadHeaderLine(rels.join(", ")) }, ...fullHazards.map((text) => ({ kind: "hazard", text }))],
+          ...porch.text ? porch.parts : [{ kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) }, ...hazardParts(freshHazards, { fileKeys: rels })],
           ...porch.text ? deferredHazards : [],
           ...porch.text ? [...decisionParts, ...ownerParts] : [...ownerParts, ...decisionParts]
         );
@@ -9017,12 +9157,15 @@ async function main(input2) {
         parts.push(
           {
             text: `STERLING MECHANISM-AXIS STAGING (H19) \u2014 the store holds records matching ${subjectLabel} (matched on: ${matched}; central to the record: ${central}), beyond any file the task names. Path-scoped delivery cannot find these \u2014 consult them before acting on the premise they govern.`,
-            kind: "ordinary"
+            kind: "ordinary",
+            contentClass: "chrome"
           },
-          ...renderHazards(subjectHazards, Number.MAX_SAFE_INTEGER, { remedy }).map((text) => ({ kind: "hazard", text })),
+          ...hazardParts(subjectHazards, { remedy }),
           ...subjectDecisions.length ? [
             {
               kind: "ordinary",
+              contentClass: "discovery",
+              identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
               text: renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy }),
               pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
               suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
@@ -9030,11 +9173,13 @@ async function main(input2) {
           ] : []
         );
       }
-      return { payload: capDeliveryParts(parts, totalCap).join("\n\n"), porchText };
+      const allParts = [...leadingChromeParts, ...parts, ...trailingChromeParts];
+      const assembled = assembleDelivery(allParts, totalCap);
+      return { payload: assembled.text, porchText, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
     };
     const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
     const actualCounts = (built2) => {
-      const below = built2.payload.slice(built2.porchText.length);
+      const below = built2.payload.slice(leadingChromePrefixLen + built2.porchText.length);
       return {
         pathM: shownPathDecisions.filter((r) => below.includes(r.id)).length,
         subjN: shownSubjectHazards.filter((r) => below.includes(r.id)).length,
@@ -9049,19 +9194,12 @@ async function main(input2) {
       counts = actual;
       built = assemble(counts);
     }
-    const payload = built.payload;
-    const fresh = [
-      ...freshOwners,
-      ...cappedHazards(freshHazards),
-      ...freshDecisions.slice(0, DECISION_POINTER_CAP),
-      ...shownSubjectHazards,
-      ...shownSubjectDecisions
-    ];
+    const out = built.payload;
     const recordStaged = () => {
-      guard.records.push(...recordsShownIn(payload, fresh).map((r) => r.id));
+      markSubstanceDelivered(guard, built.emittedSubstance);
+      markDiscoveryDelivered(guard, built.emittedDiscovery);
       writeGuard(gPath, guard);
     };
-    const out = combinedContext(payload);
     if (!out) {
       recordStaged();
       return allow();

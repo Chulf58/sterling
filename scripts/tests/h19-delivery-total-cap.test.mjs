@@ -282,11 +282,19 @@ function pendingPayloads(dir) {
   return JSON.parse(readFileSync(p, 'utf8'));
 }
 
-test('C5: a read-rung Bash command naming 8 governed paths injects its pointer block within the total cap, hazard lines all kept, the rest disclosed as a count', () => {
+// SUPERSEDED 2026-09-20 (pre-authorized, decision knowledge-delivery-target-
+// design-no-delayed-delivery item 4): a Bash hazard now renders WHOLE, through
+// the SAME renderHazards the Read rung uses — never a one-line pointer — and
+// is therefore capped at HAZARD_CAP (3), not "every hazard named, however
+// many". The old assertion was `for (const id of hazardIds)
+// assert.ok(payload.includes(id), 'hazard ${id} pointer is never capped
+// away')` over all 8 hazard ids; superseded by the HAZARD_CAP-bounded pair of
+// assertions below.
+test('C5: a read-rung Bash command naming 8 governed paths injects its pointer block within the total cap, exactly HAZARD_CAP hazards whole, the rest disclosed as a count', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const rels = [];
-    const hazardIds = [];
+    const hazards = [];
     for (let i = 1; i <= 8; i++) {
       const rel = `src/f${i}.mjs`;
       touch(dir, rel);
@@ -294,15 +302,22 @@ test('C5: a read-rung Bash command naming 8 governed paths injects its pointer b
       for (const k of ['alpha', 'beta']) {
         store.create(article(`owner-${k}-${i}-${'long-slug-segment-'.repeat(3)}`, [rel], { title: `Owner ${k} ${i} ${'with a long descriptive title '.repeat(2)}` }));
       }
-      hazardIds.push(store.create(antiPattern(`Hazard for f${i}`, 'trigger', 'right', [rel])).id);
+      hazards.push(store.create(antiPattern(`Hazard for f${i}`, 'trigger', 'right', [rel])));
     }
+    const hazardIds = hazards.map((h) => h.id);
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, `wc -l ${rels.join(' ')}`), dir);
     assert.equal(r.code, 0, oneLine(r.stderr));
     const payload = ctxOf(r);
     assert.match(payload, /STERLING KNOWLEDGE POINTERS/, 'CONTROL: one pointer block is injected at tool time');
     assert.equal(pendingPayloads(dir).length, 0, 'read-rung Bash does not wait for a prompt drain');
-    for (const id of hazardIds) assert.ok(payload.includes(id), `hazard ${id} pointer is never capped away`);
-    assert.ok(bytes(payload) <= DEFAULT_CAP, `bash pointer block must fit ${DEFAULT_CAP} bytes (was ${bytes(payload)})`);
+    for (const id of hazardIds.slice(0, 3)) assert.ok(payload.includes(id), `hazard ${id} renders whole — never capped away (HAZARD_CAP)`);
+    for (const id of hazardIds.slice(3)) assert.ok(!payload.includes(id), `hazard ${id} is beyond HAZARD_CAP — disclosed as a count, not shown`);
+    assert.match(payload, /more hazard\(s\) NOT shown \(cap 3\)/, 'the hazards beyond HAZARD_CAP are disclosed as a count');
+    // Hazards are pinned/unbudgeted (decision 301d8a0a) — only the ORDINARY
+    // (non-hazard) bytes are bound by the cap, same rule C2 pins for the Read
+    // rung.
+    const hazardBytes = bytes(renderHazards(hazards, Number.MAX_SAFE_INTEGER, { fileKeys: rels }).join('\n\n'));
+    assert.ok(bytes(payload) - hazardBytes <= DEFAULT_CAP, `ordinary (non-hazard) bytes must fit ${DEFAULT_CAP} bytes (was ${bytes(payload) - hazardBytes})`);
     assert.match(payload, /more pointer/i, 'the capped-away owner lines are disclosed as a count');
   } finally {
     cleanup();
@@ -374,9 +389,14 @@ test('C7: dispatch staging of a path owned by a large article plus 8 decisions k
     assert.equal(r.code, 0, oneLine(r.stderr));
     const ctx = ctxOf(r);
     assert.ok(ctx.includes(`knowledge_get ${a.id}`), 'CONTROL: the staged payload names the article');
-    // Strip the fixed chrome (return contract) — the cap governs the knowledge payload.
-    const knowledge = ctx.split('\n\nSTERLING DEFAULT RETURN CONTRACT')[0];
-    assert.ok(bytes(knowledge) <= DEFAULT_CAP, `staged knowledge must fit ${DEFAULT_CAP} bytes (was ${bytes(knowledge)})`);
+    // MEASURE THE FINAL COMPOSED CONTEXT, NOT THE KNOWLEDGE PAYLOAD ALONE
+    // (fix-round test-integrity requirement — decision 92088a62: "the cap is
+    // charged on the FINAL composed context string"). Stripping the fixed
+    // chrome (return contract) before measuring — the old body here — could
+    // never detect a cap failure caused BY that chrome (fix-round HIGH 4: the
+    // return contract used to be appended after capping, escaping the cap
+    // entirely; it is now a charged part of this same string).
+    assert.ok(bytes(ctx) <= DEFAULT_CAP, `the FULL staged context (knowledge + chrome) must fit ${DEFAULT_CAP} bytes (was ${bytes(ctx)})`);
   } finally {
     cleanup();
   }

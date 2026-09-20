@@ -7598,13 +7598,16 @@ function deliveryDir(cwd) {
 function guardPath(cwd, agentId) {
   return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
+var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
 }
 function readGuard(path) {
   try {
     if (!existsSync4(path)) return emptyDeliveryGuard();
-    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);

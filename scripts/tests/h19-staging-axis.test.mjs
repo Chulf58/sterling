@@ -35,6 +35,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { recordRevision } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -232,7 +233,15 @@ test('a. no path in the prompt, but the prompt matches a stored anti_pattern\'s 
     assert.ok(rec, 'fixture record recorded in the store');
     const guard = guardOf(dir, 'agent-1');
     assert.ok(guard, 'guard file written for the spawned agent');
-    assert.ok(guard.records.includes(rec.id), 'subject-matched record id appended to the guard');
+    // Guard schema v2 (decision 92088a62): a subject-matched anti_pattern
+    // still renders as a WHOLE hazard block (substance, never a pointer), so
+    // it earns a `guard.substance` mark, not a flat `guard.records` entry —
+    // keyed on the FULL (id, revision) pair, not id alone (fix-round test-
+    // integrity requirement).
+    assert.ok(
+      guard.substance.some((e) => e.id === rec.id && e.revision === recordRevision(rec)),
+      'subject-matched hazard earns a substance mark at its exact revision'
+    );
   } finally {
     cleanup();
   }

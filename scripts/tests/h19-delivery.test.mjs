@@ -9,7 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { renderHazards, capDeliveryParts, recordsShownIn } from '../hooks/lib/delivery.mjs';
+import { renderHazards, assembleDelivery } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -120,20 +120,46 @@ const preEdit = (dir, file, extra = {}) => ({
 
 
 
-// 2026-09-19 re-pointed from prompt-drain aggregation to the direct cap assembler.
+// 2026-09-19 re-pointed from prompt-drain aggregation to the direct cap
+// assembler; 2026-09-20 re-pointed AGAIN from the deleted UUID-scanning
+// helper (the rejected design, decision knowledge-delivery-target-design-no-
+// delayed-delivery) to the assembler's own returned emittedDiscovery set: a
+// record's id appearing in the composed text is no longer what marks it
+// delivered — only assembleDelivery saying the part survived WHOLE does.
 test('review H3: aggregate prefixes do not spend a record guard; the overflowed record can deliver in full later', () => {
   const id = '1e419452-1111-4111-8111-111111111111';
-  const record = { id };
-  const overflow = capDeliveryParts(Array.from({ length: 40 }, (_, i) => ({ kind: 'ordinary', text: `ordinary ${i} ${'x'.repeat(800)} knowledge_get ${i === 5 ? id : `${String(i).padStart(8, '0')}-1111-4111-8111-111111111111`}`, pointer: `knowledge_get ${i === 5 ? id : `${String(i).padStart(8, '0')}-1111-4111-8111-111111111111`}` })), 300).join('\n\n');
-  assert.match(overflow, /knowledge_get 1e419452/);
-  assert.doesNotMatch(overflow, new RegExp(id));
-  assert.deepEqual(recordsShownIn(overflow, [record]), [], 'a prefix is disclosure, not delivery');
-  const later = capDeliveryParts([{ kind: 'ordinary', text: `FULL RECORD knowledge_get ${id}` }], 3000).join('\n\n');
-  assert.deepEqual(recordsShownIn(later, [record]), [record], 'a later touch still delivers the full record id');
+  const otherId = (i) => `${String(i).padStart(8, '0')}-1111-4111-8111-111111111111`;
+  const parts = Array.from({ length: 40 }, (_, i) => {
+    const rid = i === 5 ? id : otherId(i);
+    return {
+      kind: 'ordinary',
+      contentClass: 'discovery',
+      identity: rid,
+      revision: 'r1',
+      text: `ordinary ${i} ${'x'.repeat(800)} knowledge_get ${rid}`,
+      pointer: `knowledge_get ${rid}`,
+    };
+  });
+  const overflow = assembleDelivery(parts, 300);
+  assert.match(overflow.text, /knowledge_get 1e419452/);
+  assert.doesNotMatch(overflow.text, new RegExp(id));
+  assert.ok(!overflow.emittedDiscovery.some((e) => e.identity === id), 'a prefix is disclosure, not delivery');
+  const later = assembleDelivery(
+    [{ kind: 'ordinary', contentClass: 'discovery', identity: id, revision: 'r1', text: `FULL RECORD knowledge_get ${id}` }],
+    3000
+  );
+  assert.deepEqual(later.emittedDiscovery, [{ identity: id, revision: 'r1' }], 'a later touch still delivers the full record id');
 });
 
-// Step 2 pointer contract only: full Bash hazard delivery is Step 3 work.
-test('review H3: Bash pointer package stays capped and identifies admitted hazards', () => {
+// Step 3 (decision knowledge-delivery-target-design-no-delayed-delivery,
+// item 4): Bash hazards now render WHOLE, through the SAME renderHazards the
+// Read rung uses, and are therefore capped at HAZARD_CAP (3) — never a
+// per-hazard pointer line, and never the 8-per-command owner-pointer count
+// this test pinned under the old Step 2 pointer-only contract. Superseded
+// 2026-09-20 (pre-authorized, see brief item 4 / C5): the old assertion was
+// `for (const hazard of hazards.slice(0, 8)) assert.match(ctx,
+// new RegExp(hazard.id), 'each admitted hazard has a direct pointer')`.
+test('review H3: Bash pointer package stays capped and admits exactly HAZARD_CAP whole hazards', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', total_cap_bytes: 3000 } }));
@@ -144,8 +170,17 @@ test('review H3: Bash pointer package stays capped and identifies admitted hazar
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, `wc -l ${hazards.map((_, i) => `src/${i}.mjs`).join(' ')}`), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.ok(Buffer.byteLength(ctx) <= 3000, 'the direct pointer payload stays within its cap');
-    for (const hazard of hazards.slice(0, 8)) assert.match(ctx, new RegExp(hazard.id), 'each admitted hazard has a direct pointer');
+    // BASH_POINTER_PATH_CAP (8) admits only the first 8 named paths as
+    // candidates at all, so only hazards[0..7] are ever in play here —
+    // HAZARD_CAP (3) then keeps the first 3 of THOSE.
+    const consideredHazards = hazards.slice(0, 8);
+    const hazardBytes = Buffer.byteLength(
+      renderHazards(consideredHazards, Number.MAX_SAFE_INTEGER, { fileKeys: consideredHazards.map((_, i) => `src/${i}.mjs`) }).join('\n\n')
+    );
+    assert.ok(Buffer.byteLength(ctx) - hazardBytes <= 3000, 'ordinary (non-hazard) bytes stay within the cap');
+    for (const hazard of hazards.slice(0, 3)) assert.match(ctx, new RegExp(hazard.id), 'each of the 3 admitted hazards renders whole, with its full trigger/right_way');
+    for (const hazard of hazards.slice(3)) assert.doesNotMatch(ctx, new RegExp(hazard.id), 'a hazard beyond HAZARD_CAP is disclosed as a count, not shown');
+    assert.match(ctx, /5 more hazard\(s\) NOT shown \(cap 3\)/, '5 of the 8 considered hazards are disclosed as an overflow count');
   } finally { cleanup(); }
 });
 test('review H3: a Read porch with a hazard and large article keeps ordinary bytes within the cap', () => {
@@ -880,11 +915,24 @@ test('H19 (S4b b): an AC without untestable_because renders unchanged — no [un
   }
 });
 
-test('H19 (S4b b): a very long untestable_because reason is CLIPPED on the AC line, not emitted whole', () => {
+// SUPERSEDED 2026-09-20 (fix-round HIGH 2 remainder): the old body pinned a
+// SILENT pre-clip — `clip(u.reason, UNTESTABLE_REASON_CLIP)` inside
+// renderArticle, before the assembler ever saw the field — as CORRECT. That
+// is precisely the false-substance-mark shape this whole step exists to
+// remove: a >140-char reason was cut with no disclosure, yet the enclosing
+// article part still earned a substance mark. Old assertions: `assert.ok(
+// !line.includes(longReason), 'the raw 500-char reason is not emitted whole
+// — clip() bounds it (P6 flood half)'); assert.ok(line.length <
+// longReason.length, ...)`. renderArticle now renders the field whole and
+// lets the assembler own degradation (matching WHAT IT DOES/INTENDED
+// BEHAVIOR, fixed earlier in this same step) — this test now pins the
+// OPPOSITE: the complete reason arrives, and P6 flood protection is still the
+// assembler's job (the total/transport caps), not a silent per-field clip.
+test('H19 (S4b b): a very long untestable_because reason arrives WHOLE on the AC line — no silent pre-clip', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
     const blockingId = randomUUID();
-    const longReason = 'x'.repeat(500);
+    const longReason = `REASON_START ${'x'.repeat(500)} REASON_END`;
     store.create(
       article('alpha', ['src/a.mjs'], {
         current_ac: [
@@ -897,8 +945,7 @@ test('H19 (S4b b): a very long untestable_because reason is CLIPPED on the AC li
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     const line = ctx.split('\n').find((l) => l.includes('AC1: alpha works'));
     assert.ok(line, 'the AC line renders');
-    assert.ok(!line.includes(longReason), 'the raw 500-char reason is not emitted whole — clip() bounds it (P6 flood half)');
-    assert.ok(line.length < longReason.length, 'the rendered line stays well short of the raw reason length');
+    assert.ok(line.includes(longReason), 'the complete reason arrives, start to end — no more silent per-field pre-clip');
   } finally {
     cleanup();
   }
@@ -1013,8 +1060,10 @@ test('H19: a one-hop pointer to a genuinely absent slug still says so', () => {
 // Read only, while surveying happens through grep/wc/git log — the net had a
 // hole exactly where the traffic is, and it was SILENT. These tests pin the
 // three deliberate differences from full delivery: pointer not article, always
-// enqueue (the Bash matcher is an unprobed injection cell), and silence on
-// unowned territory. AC7 still holds: no path may exit 2.
+// direct on its own PostToolUse (no enqueue/drain — that path was deleted in
+// delivery-migration step 2, decision knowledge-delivery-target-design-no-
+// delayed-delivery), and silence on unowned territory. AC7 still holds: no
+// path may exit 2.
 // ---------------------------------------------------------------------------
 
 const postBash = (dir, command, extra = {}) => ({
@@ -1111,7 +1160,12 @@ test('bash delivery: a directory argument never fans out across the files beneat
   }
 });
 
-test('bash delivery: hazards lead, and are pointed at even in unowned territory',()=>{const {dir,store,cleanup}=makeProject();try{mkdirSync(join(dir,'src'),{recursive:true});writeFileSync(join(dir,'src','h.mjs'),'x');store.create(antiPattern('never do the bad thing',['src/h.mjs']));const r=runHook('h19-bash-delivery.mjs',postBash(dir,'cat src/h.mjs'),dir);assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext,/⚠ HAZARD anti_pattern 'never do the bad thing'/);}finally{cleanup();}});
+// Superseded 2026-09-20 (Step 3, decision knowledge-delivery-target-design-
+// no-delayed-delivery item 4): a Bash hazard now renders WHOLE via the SAME
+// hazardHeaderLine every other surface uses, never the old one-line
+// "⚠ HAZARD anti_pattern '<title>'" pointer form — a whole hazard is
+// substance, never a mere pointer.
+test('bash delivery: hazards lead, and are rendered whole even in unowned territory',()=>{const {dir,store,cleanup}=makeProject();try{mkdirSync(join(dir,'src'),{recursive:true});writeFileSync(join(dir,'src','h.mjs'),'x');store.create(antiPattern('never do the bad thing',['src/h.mjs']));const r=runHook('h19-bash-delivery.mjs',postBash(dir,'cat src/h.mjs'),dir);const ctx=JSON.parse(r.stdout).hookSpecificOutput.additionalContext;assert.match(ctx,/⚠ ANTI-PATTERN \[WARN\] for this path — 'never do the bad thing'/);assert.match(ctx,/TRIGGER: /);assert.match(ctx,/RIGHT WAY: /);}finally{cleanup();}});
 // 2026-09-19 deliberate change (3): Bash pointers inject at the read rung,
 // rather than queueing for the next prompt.  The pointer/full separation remains.
 test('bash delivery: a pointer NEVER suppresses the later full-article delivery for that file', () => {

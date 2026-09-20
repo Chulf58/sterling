@@ -65,7 +65,6 @@ import {
   extractAxisTerms,
   axisHits,
   outgoingProposalText,
-  renderHazards,
   renderDecisionPointers,
   renderArticlePointers,
   ARTICLE_POINTER_CAP,
@@ -74,14 +73,15 @@ import {
   AXIS_MIN_DISCRIMINATING_HITS,
   hasRecordCentralityHit,
   recordCentralityHits,
-  HAZARD_CAP,
-  isDelivered,
-  markDelivered,
+  isKnownDelivered,
+  markSubstanceDelivered,
+  markDiscoveryDelivered,
+  hazardParts,
+  recordRevision,
   DENY_RULING_TYPES,
   subQuestionText,
-  capDeliveryParts,
+  assembleDelivery,
   resolveTotalCap,
-  recordsShownIn,
   decisionBlockPointer,
 } from './lib/delivery.mjs';
 
@@ -429,10 +429,23 @@ function main(input) {
     // reverse holds too (what H20 delivers, H19 will not repeat).
     const gPath = guardPath(input.cwd, input.agent_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter((x) => !isDelivered(guard, x.record));
+    // Conservative pre-filter: a candidate already shown at ALL this session
+    // (either ledger) is dropped from consideration here — the per-type
+    // render below (hazard=substance, everything else=discovery) is what
+    // actually earns the mark, but re-showing something already fully known
+    // is noise this stage need not risk (decision 92088a62's split still
+    // holds: an owner shown here as a mere article POINTER is untouched by
+    // this check's effect on H19, which guards SUBSTANCE independently).
+    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
     if (!fresh.length) return finish();
 
-    const hazards = fresh.filter((x) => x.record.type === 'anti_pattern').slice(0, HAZARD_CAP);
+    // NOT sliced to HAZARD_CAP here (fix-round MEDIUM 5): `hazardParts` below
+    // already applies the SAME cap internally (cappedHazards) and, crucially,
+    // DISCLOSES the omitted count — an early slice here would hand it an
+    // already-≤3 list and the "N more hazard(s) NOT shown" line would never
+    // fire even when the true match count was higher (decision 92088a62:
+    // "at most 3 per package... with the omitted count stated").
+    const hazards = fresh.filter((x) => x.record.type === 'anti_pattern');
     const decisions = fresh.filter((x) => x.record.type === 'decision').slice(0, MAX_DECISIONS);
     // NOT sliced here — renderArticlePointers itself caps at ARTICLE_POINTER_CAP
     // and discloses the overflow, the same shape as renderHazards/
@@ -481,20 +494,34 @@ function main(input) {
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
 
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
+    // Hazards render WHOLE here too (they always have, `renderHazards` at
+    // MAX_SAFE_INTEGER) — a whole hazard IS substance, on every surface that
+    // renders one (decision 92088a62 item 4). Decisions stay pointer-only —
+    // discovery.
+    const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
     const hazardDecisionBlocks = [
-      ...renderHazards(hazards.map((x) => x.record), Number.MAX_SAFE_INTEGER, {
+      ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
-      }).map((text) => ({ kind: 'hazard', text })),
+      }),
       ...(decisions.length
         ? [
             {
-              kind: 'ordinary', text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
+              kind: 'ordinary', contentClass: 'discovery',
+              identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+              text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
               pointer: decisionBlockPointer(decisions.length, decisionRemedy),
               suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
             },
           ]
         : []),
     ];
+    // Only the SHOWN (capped) article pointers are eligible for a discovery
+    // mark — same rule as cappedHazards: an article capped out of the payload
+    // was never actually read by the recipient, so it stays eligible for a
+    // later dispatch instead of being silently lost for the rest of the
+    // session (board a470046d slice 1's rule, now enforced by the assembler
+    // itself rather than a second hand-derived slice here).
+    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
     const articleBlocks = articles.length
       ? [
           renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
@@ -549,16 +576,34 @@ function main(input) {
     // matched article is never withheld either way (AC3) — only its POSITION
     // in the payload moves.
     const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
-    const asPart = (text, widen) => ({ kind: 'ordinary', text, pointer: `▸ held back by the delivery cap — ${widen}` });
-    const articleParts = articleBlocks.map((t) => asPart(t, `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`));
-    const priorParts = priorBlocks.map((t) =>
-      asPart(t, `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(',')}] cap:${priorAnswers.length}`)
+    const asPart = (text, widen, identities) => ({ kind: 'ordinary', contentClass: 'discovery', identities, text, pointer: `▸ held back by the delivery cap — ${widen}` });
+    const articleParts = articleBlocks.map((t) =>
+      asPart(
+        t,
+        `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
+        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a) }))
+      )
     );
-    // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, capDeliveryParts): the
-    // hazards are complete unbudgeted substance; header, decisions, prior
-    // answers and article pointers are ordinary and degrade under the cap.
+    const priorParts = priorBlocks.map((t) =>
+      asPart(
+        t,
+        `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(',')}] cap:${priorAnswers.length}`,
+        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record) }))
+      )
+    );
+    // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery — decision
+    // 92088a62's ONE ASSEMBLER): hazards are complete unbudgeted substance;
+    // header, decisions, prior answers and article pointers are ordinary and
+    // degrade under the cap. The codex model pin (if this is a consult) is
+    // folded in as a LEADING, PINNED-but-CHARGED chrome part (item 6) so it
+    // is charged on the FINAL composed context exactly like every other
+    // caller, rather than prepended after capping the way `envelopeFor`
+    // does for every OTHER call site in this file (none of which combine a
+    // pin with a capped carriage the way this one does).
+    const pin = modelPin();
+    const pinPart = pin?.line ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: pin.line }] : [];
     const blocks = [
-      { kind: 'ordinary', text: header },
+      { kind: 'ordinary', contentClass: 'chrome', text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
@@ -566,7 +611,8 @@ function main(input) {
         ? [...priorParts, ...articleParts, ...hazardDecisionBlocks]
         : [...hazardDecisionBlocks, ...priorParts, ...articleParts]),
     ];
-    const carriage = capDeliveryParts(blocks, resolveTotalCap(input.cwd)).join('\n\n');
+    const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input.cwd));
+    const carriage = assembled.text;
 
     // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19:
     // the guard is what makes delivery once-per-session, so writing it before the
@@ -578,8 +624,14 @@ function main(input) {
     // reporting a clean delivery.
     // Composed, not replaced: on a codex consult this envelope carries BOTH the
     // model pin and the carriage (board 7423f7a2 — the pin is on every output
-    // path, and this is the one that already had an envelope).
-    return emitEnvelope(carriage, {
+    // path) — but `carriage` above ALREADY contains the pin line (folded in as
+    // a charged part), so this uses the raw envelope shape directly rather
+    // than `emitEnvelope`/`envelopeFor`, which would prepend the pin a SECOND
+    // time.
+    const hookSpecificOutput = { hookEventName: input.hook_event_name };
+    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
+    if (carriage) hookSpecificOutput.additionalContext = carriage;
+    return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
         recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
         // POST-ENVELOPE BOOKKEEPING IS ITS OWN FAILURE DOMAIN (outside-family
@@ -591,13 +643,11 @@ function main(input) {
         // envelope was ALREADY WRITTEN, which is what distinguishes a
         // bookkeeping failure from one that prevented the delivery.
         try {
-          // Only the SHOWN (capped) article pointers are marked delivered — same rule
-          // as cappedHazards: an article capped out of the payload was never actually
-          // read by the recipient, so it stays eligible for a later dispatch instead
-          // of being silently lost for the rest of the session.
-          const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-          // Only records the capped carriage actually names by id.
-          markDelivered(guard, recordsShownIn(carriage, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]));
+          // Only what the assembler says it actually emitted — never a
+          // re-scan of the composed text (decision 92088a62's ONE ASSEMBLER
+          // CONTRACT).
+          markSubstanceDelivered(guard, assembled.emittedSubstance);
+          markDiscoveryDelivered(guard, assembled.emittedDiscovery);
           writeGuard(gPath, guard);
         } catch (e) {
           // Cheap failure vs expensive one: a lost guard write costs at most a repeat

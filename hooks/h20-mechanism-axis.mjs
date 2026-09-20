@@ -7602,26 +7602,46 @@ function outgoingProposalText(toolInput) {
 function guardPath(cwd, agentId) {
   return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
 }
+var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
 }
-function lineageKey(record) {
-  return record?.slug ?? record?.id;
+function recordRevision(record) {
+  return record?.version ?? record?.updated_at ?? record?.id;
 }
-function isDelivered(guard, record) {
-  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+function revisionDelivered(list, record) {
+  const rev = recordRevision(record);
+  return (list ?? []).some((e) => e?.id === record?.id && e?.revision === rev);
 }
-function markDelivered(guard, records) {
-  for (const r of records) {
-    if (!guard.records.includes(r.id)) guard.records.push(r.id);
-    const key = lineageKey(r);
-    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+function markRevisionDelivered(list, entries) {
+  for (const e of entries ?? []) {
+    if (!e?.identity) continue;
+    if (!list.some((x) => x.id === e.identity && x.revision === e.revision)) {
+      list.push({ id: e.identity, revision: e.revision ?? null });
+    }
   }
+}
+function isSubstanceDelivered(guard, record) {
+  return revisionDelivered(guard.substance, record);
+}
+function isDiscoveryDelivered(guard, record) {
+  return revisionDelivered(guard.discovery, record);
+}
+function isKnownDelivered(guard, record) {
+  return isSubstanceDelivered(guard, record) || isDiscoveryDelivered(guard, record);
+}
+function markSubstanceDelivered(guard, emittedSubstance) {
+  markRevisionDelivered(guard.substance, emittedSubstance);
+}
+function markDiscoveryDelivered(guard, emittedDiscovery) {
+  markRevisionDelivered(guard.discovery, emittedDiscovery);
 }
 function readGuard(path) {
   try {
     if (!existsSync4(path)) return emptyDeliveryGuard();
-    return { ...emptyDeliveryGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
@@ -7701,6 +7721,28 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
     blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
+}
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  return blocks.map(
+    (text, i) => i < shown.length ? {
+      kind: "hazard",
+      contentClass: "substance",
+      identity: shown[i].id,
+      revision: recordRevision(shown[i]),
+      text,
+      // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+      // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+      // the hard transport ceiling degrades to this bare notice — never a
+      // partial trigger/right_way (the HAZARDS clause: "each whole") —
+      // and the assembler then correctly withholds its substance mark.
+      pointer: hazardOverflowPointer(shown[i])
+    } : { kind: "hazard", contentClass: "chrome", text }
+  );
+}
+function hazardOverflowPointer(record) {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 var ARTICLE_POINTER_CAP = 3;
 function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
@@ -7783,32 +7825,65 @@ var PORCH_END_TEMPLATE_BYTES = porchByteLen(
 );
 var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
 var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+var DELIVERY_TRANSPORT_VISIBLE_BYTES = 1e4;
+var DELIVERY_TOTAL_CAP_MIN = 500;
 function resolveTotalCap(cwd) {
   try {
     const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
-    return typeof v === "number" && Number.isInteger(v) && v >= 0 ? v : DELIVERY_TOTAL_CAP_DEFAULT;
+    if (!(typeof v === "number" && Number.isInteger(v) && v >= 0)) return DELIVERY_TOTAL_CAP_DEFAULT;
+    if (v === 0) return 0;
+    return Math.max(v, DELIVERY_TOTAL_CAP_MIN);
   } catch {
     return DELIVERY_TOTAL_CAP_DEFAULT;
   }
 }
-function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
-  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({ ...part, kind: part.kind === "hazard" ? "hazard" : "ordinary" }));
-  if (!capBytes || capBytes <= 0) return items.map((part) => part.text);
+function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({
+    ...part,
+    kind: part.kind === "hazard" ? "hazard" : "ordinary",
+    contentClass: part.contentClass ?? "chrome",
+    pinned: part.kind === "hazard" ? true : !!part.pinned
+  }));
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const dedupeEntries = (entries) => {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const e of entries) {
+      if (!e?.identity) continue;
+      const key = `${e.identity}\0${e.revision}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ identity: e.identity, revision: e.revision });
+    }
+    return out;
+  };
+  const creditsFor = (survivors2) => {
+    const emittedSubstance2 = [];
+    const emittedDiscovery2 = [];
+    for (const part of survivors2) {
+      if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
+      const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
+      for (const entry of idsOf(part)) {
+        if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
+      }
+    }
+    return { emittedSubstance: emittedSubstance2, emittedDiscovery: emittedDiscovery2 };
+  };
   const bytes = (text) => porchByteLen(text);
-  const hazards = new Set(items.filter((part) => part.kind === "hazard"));
+  const isHazard = (part) => part.kind === "hazard";
+  const isChrome = (part) => part.kind !== "hazard" && part.pinned;
+  const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const selected = /* @__PURE__ */ new Map();
   const omitted = [];
-  const output = () => items.flatMap((part) => hazards.has(part) ? [part.text] : selected.has(part) ? [selected.get(part)] : []);
-  const ordinaryBytes = () => {
-    const text = output().join(sep);
-    return Math.max(0, bytes(text) - [...hazards].reduce((sum, part) => sum + bytes(part.text), 0));
-  };
-  const fits = () => ordinaryBytes() <= capBytes;
+  const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
+  const totalBytes = () => bytes(output().join(sep));
+  const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
+  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
+  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || "";
-  for (const part of items) {
-    if (part.kind === "hazard") continue;
-    selected.set(part, part.text);
-    if (fits()) continue;
+  const tryDegradeOrdinary = (part, fitsFn) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsFn()) return;
     selected.delete(part);
     const suffix = part.suffix || pointerFor(part);
     if (suffix) {
@@ -7818,55 +7893,101 @@ function capDeliveryParts(parts, capBytes, { sep = "\n\n" } = {}) {
       for (const line of lines) {
         const candidate = clipped ? `${clipped}
 ${line}` : line;
-        selected.set(part, `${candidate}
-${suffix}`);
-        if (!fits()) {
-          break;
-        }
+        selected.set(part, { text: `${candidate}
+${suffix}`, full: false });
+        if (!fitsFn()) break;
         clipped = candidate;
         best = `${candidate}
 ${suffix}`;
       }
       if (best) {
-        selected.set(part, best);
-        continue;
+        selected.set(part, { text: best, full: false });
+        return;
       }
       selected.delete(part);
-      selected.set(part, pointerFor(part));
-      if (pointerFor(part) && fits()) continue;
+      selected.set(part, { text: pointerFor(part), full: false });
+      if (pointerFor(part) && fitsFn()) return;
       selected.delete(part);
     }
     omitted.push(part);
-  }
+  };
+  const tryDegradeHazard = (part) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsTransport()) return;
+    selected.delete(part);
+    const ptr = pointerFor(part);
+    if (ptr) {
+      selected.set(part, { text: ptr, full: false });
+      if (fitsTransport()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+  for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
+  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   if (omitted.length) {
-    const aggregatePart = { kind: "ordinary", text: "" };
+    const aggregatePart = { kind: "ordinary", contentClass: "chrome", text: "" };
     items.push(aggregatePart);
+    const idsForDisclosure = (part) => {
+      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+      if (tagged.length) return tagged;
+      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+    };
     const aggregate = () => {
-      const ids = [...new Set(omitted.flatMap((part) => [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((match) => match[1].slice(0, 8))))];
-      const prefix = `+${omitted.length} more records: knowledge_query`;
+      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
+      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      if (aggregateLabel) {
+        let line2 = aggregateLabel(count, ids);
+        while (ids.length && bytes(line2) > ordinaryCeiling) {
+          ids.pop();
+          line2 = aggregateLabel(count, ids);
+        }
+        return line2;
+      }
+      const prefix = `+${count} more records: knowledge_query`;
       let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
-      while (ids.length && bytes(line) > capBytes) {
+      while (ids.length && bytes(line) > ordinaryCeiling) {
         ids.pop();
         line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
       }
       return line;
     };
     while (true) {
-      aggregatePart.text = aggregate();
-      selected.set(aggregatePart, aggregatePart.text);
-      if (fits()) break;
+      const text = aggregate();
+      aggregatePart.text = text;
+      selected.set(aggregatePart, { text, full: false });
+      const ordinaryOk = fitsOrdinaryCap();
+      const transportOk = fitsTransport();
+      if (ordinaryOk && transportOk) break;
       selected.delete(aggregatePart);
-      const last = [...items].reverse().find((part) => part !== aggregatePart && selected.has(part));
-      if (!last) break;
-      selected.delete(last);
-      omitted.push(last);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      if (last) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
+      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
+      if (degradable) {
+        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        continue;
+      }
+      selected.set(aggregatePart, { text, full: false });
+      break;
     }
   }
-  return output();
-}
-function recordsShownIn(text, records) {
-  const t = String(text ?? "");
-  return (records ?? []).filter((r) => r?.id && t.includes(r.id));
+  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
+  return {
+    text: output().join(sep),
+    emittedSubstance,
+    emittedDiscovery,
+    omitted: omittedEntries,
+    omittedCount: omittedEntries.length,
+    degraded: omitted.length > 0 || partial
+  };
 }
 function decisionBlockPointer(count, widen) {
   return `\u25B8 DECISIONS (${count}) held back by the delivery cap \u2014 ${widen}`;
@@ -8014,9 +8135,9 @@ function main(input2) {
     if (!scored.length) return finish();
     const gPath = guardPath(input2.cwd, input2.agent_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter((x) => !isDelivered(guard, x.record));
+    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
     if (!fresh.length) return finish();
-    const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
+    const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
     const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
     const articles = fresh.filter((x) => x.record.type === "feature_article");
     const priorAnswers = fresh.filter(
@@ -8031,19 +8152,23 @@ function main(input2) {
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
+    const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
     const hazardDecisionBlocks = [
-      ...renderHazards(hazards.map((x) => x.record), Number.MAX_SAFE_INTEGER, {
+      ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
-      }).map((text) => ({ kind: "hazard", text })),
+      }),
       ...decisions.length ? [
         {
           kind: "ordinary",
+          contentClass: "discovery",
+          identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
           text: renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
           pointer: decisionBlockPointer(decisions.length, decisionRemedy),
           suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
         }
       ] : []
     ];
+    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
     const articleBlocks = articles.length ? [
       renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
         remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
@@ -8075,25 +8200,41 @@ function main(input2) {
       ].join("\n")
     ] : [];
     const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
-    const asPart = (text, widen) => ({ kind: "ordinary", text, pointer: `\u25B8 held back by the delivery cap \u2014 ${widen}` });
-    const articleParts = articleBlocks.map((t) => asPart(t, `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`));
-    const priorParts = priorBlocks.map(
-      (t) => asPart(t, `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`)
+    const asPart = (text, widen, identities) => ({ kind: "ordinary", contentClass: "discovery", identities, text, pointer: `\u25B8 held back by the delivery cap \u2014 ${widen}` });
+    const articleParts = articleBlocks.map(
+      (t) => asPart(
+        t,
+        `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
+        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a) }))
+      )
     );
+    const priorParts = priorBlocks.map(
+      (t) => asPart(
+        t,
+        `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`,
+        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record) }))
+      )
+    );
+    const pin = modelPin();
+    const pinPart = pin?.line ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: pin.line }] : [];
     const blocks = [
-      { kind: "ordinary", text: header },
+      { kind: "ordinary", contentClass: "chrome", text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
       ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorParts, ...articleParts]
     ];
-    const carriage = capDeliveryParts(blocks, resolveTotalCap(input2.cwd)).join("\n\n");
-    return emitEnvelope(carriage, {
+    const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input2.cwd));
+    const carriage = assembled.text;
+    const hookSpecificOutput = { hookEventName: input2.hook_event_name };
+    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
+    if (carriage) hookSpecificOutput.additionalContext = carriage;
+    return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
         recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
         try {
-          const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-          markDelivered(guard, recordsShownIn(carriage, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]));
+          markSubstanceDelivered(guard, assembled.emittedSubstance);
+          markDiscoveryDelivered(guard, assembled.emittedDiscovery);
           writeGuard(gPath, guard);
         } catch (e) {
           process.stderr.write(

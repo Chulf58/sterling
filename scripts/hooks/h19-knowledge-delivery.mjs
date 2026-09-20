@@ -15,9 +15,9 @@ import {
   readGuard,
   writeGuard,
   renderArticle,
+  isOwnerDiscoveryOnly,
   renderReference,
   renderHazards,
-  completePorchHazards,
   cappedHazards,
   renderDecisionPointers,
   DECISION_POINTER_CAP,
@@ -28,13 +28,15 @@ import {
   porchHeaderLine,
   renderPorch,
   resolvePorchBudget,
-  isDelivered,
-  markDelivered,
+  isSubstanceDelivered,
+  isDiscoveryDelivered,
+  markSubstanceDelivered,
+  markDiscoveryDelivered,
   budgetKnownGaps,
-  capDeliveryParts,
-  partitionPorchHazards,
+  assembleDelivery,
+  hazardParts,
+  recordRevision,
   resolveTotalCap,
-  recordsShownIn,
   ownerPointer,
   ownerSuffix,
   decisionBlockPointer,
@@ -95,8 +97,24 @@ function main(input) {
     // article re-arms nothing (the article is in context); a new owning record
     // always delivers (scope-growth re-arm). Hazards and decisions share the one
     // ledger — their ids are ids like any other.
-    const freshOwners = owners.filter((r) => !isDelivered(guard, r));
-    const freshHazards = hazards.filter((r) => !isDelivered(guard, r));
+    // Hazards render as SUBSTANCE here (whole hazard block) — freshness
+    // checks ONLY the substance ledger, so a record shown elsewhere as a mere
+    // discovery pointer (H20, or the Bash rung's owner pointer line) still
+    // qualifies for its real delivery here (decision 92088a62: "a record
+    // shown as discovery still qualifies for substance later" — the
+    // regression case this closes is an H20 article POINTER suppressing the
+    // later full H19 article).
+    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    // OWNERS SPLIT BY WHAT THEY WILL ACTUALLY RENDER AS (fix-round MEDIUM 3):
+    // a reference_material or an oversize (digested) article NEVER renders as
+    // substance — filtering it against `isSubstanceDelivered` alone means
+    // that check is permanently false and the SAME pointer/digest re-delivers
+    // on every single touch, forever (a deterministic once-per-context guard
+    // failure, not the acceptable duplicate a lost guard write can cause).
+    // `isOwnerDiscoveryOnly` is the ONE place that decision is made — the
+    // SAME predicate `ownerPart` below uses for `contentClass`, so the two
+    // can never drift apart.
+    const freshOwners = owners.filter((r) => (isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r)));
     // RANKED ONCE, HERE, AND NOWHERE ELSE (board: H19 file-touch decision cap,
     // measured 2026-09-06). The store's file_keys join degenerates to newest-first
     // on a single path, so on a file carrying more decisions than
@@ -107,7 +125,9 @@ function main(input) {
     // re-sorting at any one of those three sites would mark one set delivered
     // while the payload showed another, which is the silent-loss shape the
     // "guard only what was actually rendered" note below exists to prevent.
-    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDelivered(guard, r)));
+    // Decisions render as DISCOVERY everywhere (a pointer line, never a full
+    // body) — freshness checks the discovery ledger.
+    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
     // The frontier signal stays once per file per session (grill answer: solve,
     // not accept), but it is now the payload HEADER rather than a separate
     // emission that returned early. That early return was why a hazard in UNOWNED
@@ -141,9 +161,9 @@ function main(input) {
     // decision cap below (board a470046d slice 1): a hazard capped out of this
     // payload must surface on a later touch, not vanish as 'delivered'.
     // The SHOWN slices are named once and reused for the guard, the line-suspect
-    // scan AND the render recipe (fixer F3): the recipe must carry exactly what the
-    // payload rendered, so re-deriving the slice in three places is how a record
-    // the reader never saw gets promoted into the drained payload.
+    // scan AND the assembler parts below: re-deriving the slice in more than one
+    // place is how a record the reader never saw gets promoted into a mark it
+    // never earned.
     const shownHazards = cappedHazards(freshHazards);
     const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
     const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
@@ -203,7 +223,7 @@ function main(input) {
     const blocks = [
       ...renderHazards(freshHazards, charCap, { fileKeys: [rel] }),
       ...freshOwners.map((r) =>
-        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) })
+        r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) })
       ),
       ...(freshDecisions.length ? [renderDecisionPointers(rel, freshDecisions)] : []),
       // joinSuspectBlock returns '' when no line survives; the filter keeps an
@@ -223,25 +243,46 @@ function main(input) {
     // notice's own header stays exactly as rendered by `payload` above in that
     // case, unmodified by this amendment.
     let injectPayload = payload;
+    let emittedSubstance = [];
+    let emittedDiscovery = [];
     if (mode === 'inject') {
-      // PER-DELIVERY TOTAL CAP (scale-down Slice 3c; see capDeliveryParts in
-      // lib/delivery.mjs). Hazards are complete, unbudgeted substance; owners, decisions and
-      // the line-suspect footnote share what remains of the cap, degrading to
-      // `knowledge_get <id>` pointers. Only the direct-inject payload is capped
-      // here; the enqueued payload above is rebuilt from its recipe at drain.
+      // PER-DELIVERY TOTAL CAP (scale-down Slice 3c; see assembleDelivery in
+      // lib/delivery.mjs — the ONE ASSEMBLER, decision 92088a62). Hazards are
+      // complete, unbudgeted substance; owners, decisions and the line-suspect
+      // footnote share what remains of the cap, degrading to `knowledge_get
+      // <id>` pointers. Only the assembler's OWN returned emittedSubstance/
+      // emittedDiscovery sets — never a UUID scan of the composed text — may
+      // ever be persisted to the guard below.
       const totalCap = resolveTotalCap(input.cwd);
+      // CONTENT CLASS BY WHAT WAS ACTUALLY RENDERED (fix-round HIGH 2 / MEDIUM
+      // 3): a reference_material owner renders ONLY a pointer (renderReference),
+      // and an oversize feature_article renders a DIGEST (renderArticle's own
+      // bounded, disclosed partial view, never the complete record) — neither
+      // is "complete text", so neither may spend a substance mark. Only a
+      // normal (non-digested) feature_article, now rendered WHOLE (no more
+      // pre-clip — see renderArticle), is substance. `isOwnerDiscoveryOnly` is
+      // the SAME predicate `freshOwners` above filters against, so the
+      // freshness ledger and the rendered contentClass can never disagree.
       const ownerPart = (r) => {
-        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap, { gaps: gapsByOwner.get(r.id) });
-        return { kind: 'ordinary', text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+        const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, { gaps: gapsByOwner.get(r.id) });
+        const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
+        return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
       };
       const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
       const ownerParts = freshOwners.map(ownerPart);
-      const suspectParts = [{ kind: 'ordinary', text: joinSuspectBlock(suspectBlock ?? {}) }];
+      const suspectParts = [{ kind: 'ordinary', contentClass: 'chrome', text: joinSuspectBlock(suspectBlock ?? {}) }];
+      // FRONT PORCH (decision 0050a536 §5 amendment): the bounded prefix
+      // stays ahead of the capped remainder on owned territory; it is ordinary
+      // content and spends the total cap like every non-hazard part.
+      // Gated on `!unowned`: the porch header claims owning knowledge.
+      const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
       const decisionParts = [
         ...(freshDecisions.length
           ? [
               {
-                kind: 'ordinary', text: renderDecisionPointers(rel, freshDecisions),
+                kind: 'ordinary', contentClass: 'discovery',
+                identities: shownPathDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+                text: renderDecisionPointers(rel, freshDecisions),
                 pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
                 suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
               },
@@ -249,13 +290,16 @@ function main(input) {
           : []),
       ];
       const tailParts = [...ownerParts, ...decisionParts, ...suspectParts];
-      const hazardParts = (list) => renderHazards(list, Number.MAX_SAFE_INTEGER, { fileKeys: [rel] }).map((text) => ({ kind: 'hazard', text }));
 
-      // FRONT PORCH (decision 0050a536 §5 amendment): the bounded prefix
-      // stays ahead of the capped remainder on owned territory; it is ordinary
-      // content and spends the total cap like every non-hazard part.
-      // Gated on `!unowned`: the porch header claims owning knowledge.
-      const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
+      // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): this used
+      // to be string-prepended AFTER assembly at the final stdout write, so
+      // its bytes escaped the total cap entirely — the same class of bug
+      // decision 92088a62 requires closing for every chrome source. Folded in
+      // as a LEADING pinned-but-charged part instead, exactly like the active-
+      // plan line in h19-dispatch-staging.mjs.
+      const migrationNoticeParts = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
+      const leadingChromePrefixLen = migrationNotice ? migrationNotice.length + 2 : 0;
+
       const assemble = (pathM) => {
       let porch = { text: '', hazardsRendered: false };
       if (!unowned) {
@@ -275,40 +319,47 @@ function main(input) {
       }
       // With a porch the owners' digests are already delivered, so decision
       // pointers take the remaining budget ahead of full article bodies.
+      // STRUCTURED PARTS FROM renderPorch DIRECTLY (fix-round MEDIUM 6): the
+      // porch itself now returns `parts` — including which hazard blocks it
+      // embedded whole, tagged with identity — so there is no assembled porch
+      // STRING left to re-parse (`partitionPorchHazards`, deleted) and no
+      // manual re-tagging pass zipping a separately-recomputed hazard list
+      // against it. `deferred_hazard_ids` still names exactly which shown
+      // hazards the porch could NOT embed, for the trailing whole-block
+      // rendering below.
       const shownHazards = cappedHazards(freshHazards);
       const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
-      const porchHazards = completePorchHazards(shownHazards.filter((hazard) => !deferredHazardIds.has(hazard.id)));
-      const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)));
-      const porchParts = porch.text ? partitionPorchHazards(porch.text, porchHazards) : null;
-      if (porch.text && !porchParts) {
-        porch = renderPorch(porchHeaderLine([rel]), [], freshOwners, porchBudget, {
-          articleBodiesCount: freshOwners.length - freshOwners.filter((r) => r.type === 'reference_material').length,
-          referencePointerCount: freshOwners.filter((r) => r.type === 'reference_material').length,
-          pathDecisionPointerCount: pathM, hasSubjectChannel: false, fileKeys: [rel],
-        });
-      }
+      const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)), { fileKeys: [rel] });
       const parts = porch.text
-        ? [...(porchParts ?? [{ kind: 'ordinary', text: porch.text }]), ...deferredHazards, ...decisionParts, ...ownerParts, ...suspectParts]
+        ? [...migrationNoticeParts, ...porch.parts, ...deferredHazards, ...decisionParts, ...ownerParts, ...suspectParts]
         : [
-            { kind: 'ordinary', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-            ...hazardParts(freshHazards),
+            ...migrationNoticeParts,
+            { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
+            ...hazardParts(freshHazards, { fileKeys: [rel] }),
             ...tailParts,
           ];
-      return { text: capDeliveryParts(parts, totalCap).join('\n\n'), porchText: porch.text };
+      const assembled = assembleDelivery(parts, totalCap);
+      return { text: assembled.text, porchText: porch.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
       };
       // PORCH SELF-REPORT = POST-CAP ACTUAL: the porch-end line states how many
       // decision pointers follow, and the cap decides that only after the porch
-      // is sized — re-render until the report matches what was emitted.
+      // is sized — re-render until the report matches what was emitted. The
+      // migration notice (if any) is a PINNED leading part, so it always
+      // renders in full ahead of the porch — skip exactly its own length +
+      // separator (fix-round HIGH 4: it is now a real, charged part of this
+      // same composed string).
       let pathM = shownPathDecisions.length;
       let built = assemble(pathM);
       for (let i = 0; i < 3; i++) {
-        const below = built.text.slice(built.porchText.length);
+        const below = built.text.slice(leadingChromePrefixLen + built.porchText.length);
         const actual = shownPathDecisions.filter((r) => below.includes(r.id)).length;
         if (actual === pathM) break;
         pathM = actual;
         built = assemble(pathM);
       }
       injectPayload = built.text;
+      emittedSubstance = built.emittedSubstance;
+      emittedDiscovery = built.emittedDiscovery;
     }
 
     // SIDE EFFECT FIRST, GUARD SECOND. The guard is what
@@ -342,14 +393,20 @@ function main(input) {
     // back to 'prompt' when the running session is not the probed cell — not
     // residue-on-inject, which would double-deliver every healthy payload to hedge it.
     const recordDelivered = () => {
-      // Inject path: guard only what the capped payload actually names by id.
-      markDelivered(guard, recordsShownIn(injectPayload, fresh));
+      // Inject path: guard only what the assembler says it actually emitted —
+      // never a re-scan of the composed text (decision 92088a62's ONE
+      // ASSEMBLER CONTRACT).
+      markSubstanceDelivered(guard, emittedSubstance);
+      markDiscoveryDelivered(guard, emittedDiscovery);
       if (frontierFresh) guard.frontier_files.push(rel);
       writeGuard(gPath, guard);
     };
 
+    // migrationNotice is already folded into injectPayload above (as a
+    // leading, charged chrome part — fix-round HIGH 4), so it is not
+    // re-prepended here.
     return exitAfterWrite(
-      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: `${migrationNotice ? `${migrationNotice}\n\n` : ''}${injectPayload}` } }),
+      JSON.stringify({ hookSpecificOutput: { hookEventName: event, additionalContext: injectPayload } }),
       0,
       { onWritten: recordDelivered }
     );

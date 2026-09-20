@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { recordRevision } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -247,8 +248,16 @@ test('prompt names a governed file: payload contains the article, the guard is w
 
     const guard = guardOf(dir, 'agent-1');
     assert.ok(guard, 'guard file written for the spawned agent');
-    const alphaId = store.query({ types: ['feature_article'], rank_terms: ['alpha'], cap: 5 }).find((a) => a.slug === 'alpha').id;
-    assert.ok(guard.records.includes(alphaId));
+    const alpha = store.query({ types: ['feature_article'], rank_terms: ['alpha'], cap: 5 }).find((a) => a.slug === 'alpha');
+    // Guard schema v2 (decision 92088a62): an owner renders as SUBSTANCE (the
+    // full article body), so it lands in `guard.substance`, not a flat
+    // `guard.records` array — keyed on the FULL (id, revision) pair, not id
+    // alone (fix-round test-integrity requirement: asserting on id alone
+    // pins the OLD flat-array shape rather than the actual v2 contract).
+    assert.ok(
+      guard.substance.some((e) => e.id === alpha.id && e.revision === recordRevision(alpha)),
+      'the delivered article earns a substance mark at its exact revision'
+    );
 
     // Re-running the same dispatch: the STAGING guard suppresses re-delivery of
     // the knowledge payload (nothing fresh to stage) — but the contract

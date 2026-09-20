@@ -11,12 +11,19 @@
 //       (guard-conductor.json) must survive intact. The pending queue MAY still
 //       clear (stale pending payloads were staged for a prompt that will never
 //       come now that the session turned over).
-//   (2) the guard keys delivered knowledge by record ID, and every knowledge_update
-//       (store.supersede) mints a new id for the same lineage/slug, so an edited
-//       record re-delivers as "fresh" on the next touch of the same file even
-//       though it is the same knowledge, just reconciled. A genuinely NEW record
-//       (different lineage) on the same path must still deliver (scope-growth
-//       re-arm, pinned already in h19-delivery.test.mjs and NOT to be broken here).
+//   (2) [SUPERSEDED 2026-09-20 by decision knowledge-delivery-target-design-no-
+//       delayed-delivery (92088a62), delivery-migration step 3 — this file's own
+//       AC3 test below is updated accordingly, see its header comment] the guard
+//       used to key delivered knowledge by LINEAGE (slug, surviving an id churn),
+//       which meant an edited record (knowledge_update / store.supersede, a new id
+//       for the same slug) stayed silently suppressed forever even though its
+//       CONTENT changed. Decision 92088a62's STATE clause rules the opposite way
+//       on purpose: the guard now keys on (id, revision) — "a re-versioned record
+//       qualifies again" — because a forward-fix (CLAUDE.md's "fix a wrong record
+//       FORWARD") must reach the reader, not be swallowed by a stale mark minted
+//       against the PRE-fix content. A genuinely NEW record (different lineage) on
+//       the same path still delivers exactly as before (scope-growth re-arm,
+//       pinned already in h19-delivery.test.mjs and NOT to be broken here).
 //
 // This file follows scripts/tests/h19-delivery.test.mjs's harness idiom (runHook /
 // article / envelope / makeProject / pendingOf / guard file paths under
@@ -211,12 +218,23 @@ test('AC2: with no rotation note present, SessionStart wipes delivery state exac
 });
 
 // ---------------------------------------------------------------------------
-// AC3 — id-churn survival: an edited (superseded) record must not re-deliver as
-// "fresh" on the next touch of the file it governs; a genuinely NEW record on
-// the same path must still deliver (scope-growth re-arm untouched).
+// AC3 — SUPERSEDED 2026-09-20 (decision knowledge-delivery-target-design-no-
+// delayed-delivery, 92088a62, delivery-migration step 3). The old assertion
+// here was `assert.equal(second.stdout, '', '2026-09-19: an edited version of
+// already-delivered knowledge must not re-deliver directly')` — lineage-keyed
+// (slug-based) suppression that silently swallowed a forward-fix's corrected
+// content forever. Decision 92088a62's STATE clause rules the opposite way:
+// the guard keys on (id, revision), so a record superseded by knowledge_update
+// (new id, bumped content) is NOT the same (id, revision) as what was marked
+// delivered, and DOES re-deliver — the reader must see the correction, not a
+// stale silence. (This is also, mechanically, just "scope growth": a
+// supersede mints a genuinely new id, indistinguishable at the guard from any
+// other new record on the same path — there is no special-case suppression to
+// preserve.) A genuinely NEW record on the same path still delivers too,
+// exactly as before.
 // ---------------------------------------------------------------------------
 
-test('AC3: a record superseded by knowledge_update (new id, same slug) does not re-deliver, but a genuinely new record on the same path still does', () => {
+test('AC3: a record superseded by knowledge_update (new id, same slug) DOES re-deliver its corrected content, and a genuinely new record on the same path still does too', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const alpha = store.create(article('alpha', ['src/a.mjs']));
@@ -240,13 +258,13 @@ test('AC3: a record superseded by knowledge_update (new id, same slug) does not 
       links: [],
     });
 
-    // Expected to FAIL today: the guard keys on the OLD id, which is now
-    // superseded and no longer returned by an owner query, so the NEW id looks
-    // never-delivered and re-enqueues — pending.length becomes 2 with the same
-    // (reconciled) knowledge the reader already saw.
+    // Decision 92088a62: a re-versioned record (new id here, since supersede
+    // always mints one) is NOT the (id, revision) pair the guard marked
+    // delivered — it re-delivers, carrying the RECONCILED content.
     const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
     assert.equal(second.code, 0, second.stderr);
-    assert.equal(second.stdout, '', '2026-09-19: an edited version of already-delivered knowledge must not re-deliver directly');
+    const secondPayload = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    assert.match(secondPayload, /alpha does the alpha thing, reconciled/, 'the forward-fixed content reaches the reader instead of staying silently suppressed');
 
     // Scope growth must still re-arm: a genuinely NEW article (different lineage)
     // added to the SAME path is new knowledge, not a re-delivery of old knowledge.
@@ -255,6 +273,43 @@ test('AC3: a record superseded by knowledge_update (new id, same slug) does not 
     assert.equal(third.code, 0, third.stderr);
     payload = JSON.parse(third.stdout).hookSpecificOutput.additionalContext; // 2026-09-19: direct read transport.
     assert.match(payload, /gamma does the gamma thing/);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// AC3b — SAME-ID revision case (fix-round test-integrity requirement, HIGH 3):
+// AC3 above only exercises supersede's NEW-id path. The load-bearing case per
+// decision 92088a62's STATE clause + fix-round HIGH 3 is a SAME-id in-place
+// forward-fix (`store.updateRecord`, the `knowledge_update` shape) — id does
+// NOT change, only `version` (store-managed, bumped by the store itself) —
+// and `recordRevision` must key PRIMARILY on that version, not `updated_at`
+// (which a caller can resubmit unchanged on an in-place edit).
+// ---------------------------------------------------------------------------
+
+test('AC3b: a record forward-fixed IN PLACE (same id, store-bumped version, UNCHANGED updated_at) DOES re-deliver its corrected content', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const alpha = store.create(article('alpha', ['src/a.mjs']));
+    const first = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(first.code, 0, first.stderr);
+    assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, /alpha does the alpha thing/);
+
+    // In-place update, SAME id, and `updated_at` deliberately left UNCHANGED
+    // (`updateRecord` takes a full body, not a diff — the store still bumps
+    // `version` itself regardless of what the caller passed for the clock).
+    // If revision keying fell back to `updated_at` first, this exact
+    // scenario would collide with the mark from `first` and stay silent.
+    const updated = store.updateRecord(alpha.id, { ...alpha, what_it_does: 'alpha does the alpha thing, reconciled in place', updated_at: alpha.updated_at });
+    assert.equal(updated.id, alpha.id, 'fixture control: same id, an in-place edit');
+    assert.equal(updated.updated_at, alpha.updated_at, 'fixture control: updated_at is UNCHANGED — version is the only signal that moved');
+    assert.ok(updated.version > alpha.version, 'fixture control: the store bumped version on its own');
+
+    const second = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
+    assert.equal(second.code, 0, second.stderr);
+    const secondPayload = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
+    assert.match(secondPayload, /alpha does the alpha thing, reconciled in place/, 'the SAME-id forward-fix reaches the reader — keyed on the bumped version, not an unchanged updated_at');
   } finally {
     cleanup();
   }
