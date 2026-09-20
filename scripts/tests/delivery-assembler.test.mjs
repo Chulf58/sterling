@@ -30,7 +30,9 @@ import {
   resolveTotalCap,
   DELIVERY_TOTAL_CAP_MIN,
   HAZARD_CAP,
-  renderPorch,
+  renderArticle,
+  ownerPointer,
+  hazardHeaderLine,
 } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -112,6 +114,27 @@ test('assembler: a hazard beyond 2,400 chars renders whole under a tiny cap — 
   assert.match(assembled.text, new RegExp(`${rwStart}[\\s\\S]*${rwEnd}`), 'the right_way field is present in full, start to end');
   assert.deepEqual(assembled.emittedSubstance, [{ identity: hazard.id, revision: recordRevision(hazard) }]);
   assert.equal(assembled.emittedDiscovery.length, 0);
+});
+
+// A dropped local `const ELLIPSIS` once made every truncating byte clip throw.
+// Hook catches swallowed that throw and lost the entire payload; node --check
+// cannot detect the missing runtime binding, so this pins the exported surface.
+test('clipToBytes regression: a truncating clip returns an ellipsis instead of throwing (the ELLIPSIS-not-defined class)', () => {
+  const ascii = ownerPointer(`${'A'.repeat(400)}\nrest`, { id: 'ascii-owner' });
+  const asciiHead = ascii.split('\n')[0];
+  assert.equal(typeof ascii, 'string', 'a truncating owner pointer returns a value');
+  assert.ok(asciiHead.endsWith('…'), 'the truncated ASCII owner line carries an ellipsis');
+
+  const cjk = ownerPointer(`${'漢'.repeat(400)}\nrest`, { id: 'cjk-owner' });
+  const cjkHead = cjk.split('\n')[0];
+  assert.equal(typeof cjk, 'string', 'a truncating CJK owner pointer returns a value');
+  assert.ok(!cjkHead.includes('�'), 'no replacement character — the clip never split a codepoint');
+  assert.ok(Buffer.byteLength(cjkHead, 'utf8') <= 300, 'the clip respects its byte budget');
+  assert.ok(cjkHead.endsWith('…'), 'the truncated CJK owner line carries an ellipsis');
+
+  const tinyBudgetHeader = hazardHeaderLine({ id: 'tiny', title: 'long title', severity: 'warn' }, { clipTitleBytes: Buffer.byteLength('…', 'utf8') });
+  assert.match(tinyBudgetHeader, /— '' \(full record:/, 'the ellipsis-sized title budget produces the original bare empty clip');
+  assert.doesNotMatch(tinyBudgetHeader, /…/, 'the original small-budget branch deliberately omits the ellipsis');
 });
 
 // ---------------------------------------------------------------------------
@@ -430,11 +453,8 @@ test('REGRESSION: an H20 article pointer does NOT suppress the later full H19 ar
 test('HIGH 2: an article body between payload_char_cap (2400) and ARTICLE_BODY_FLOOR (4096) delivers WHOLE and earns a real substance mark — no more silent pre-clip', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    // total_cap_bytes raised: the porch preview alone can spend up to 1800
-    // bytes of the DEFAULT 3000-byte total cap, which would otherwise clip
-    // the full-body rendering below it for reasons unrelated to what this
-    // test pins (the same "porch is a preview, not a replacement" concern
-    // h19-dispatch-porch.test.mjs's F1e/C7 raise their own cap for).
+    // total_cap_bytes is raised so this fixture can test complete field
+    // delivery rather than cap degradation.
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', total_cap_bytes: 8000 } }));
     const bodyEndSentinel = 'BODY_END_SENTINEL_7f3a2b';
     const body = `BODY_START_SENTINEL ${'w'.repeat(3400)} ${bodyEndSentinel}`;
@@ -455,9 +475,8 @@ test('HIGH 2: an article body between payload_char_cap (2400) and ARTICLE_BODY_F
 test('HIGH 2: an OVERSIZE article (past ARTICLE_BODY_FLOOR) renders as a DIGEST and earns a DISCOVERY mark, never substance', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    // total_cap_bytes raised — see the identical note in the mid-size-article
-    // test above (the porch preview competes for the same default 3000-byte
-    // cap and can otherwise crowd out even the bounded digest rendering).
+    // total_cap_bytes is raised — see the identical note in the mid-size-article
+    // test above.
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', total_cap_bytes: 8000 } }));
     const bigBody = `BODY_START ${'z'.repeat(5000)} BODY_END`;
     assert.ok(bigBody.length > 4096, 'fixture control: body exceeds ARTICLE_BODY_FLOOR');
@@ -539,16 +558,20 @@ test('MEDIUM 5: H20 subject-matched hazards beyond HAZARD_CAP (4) state the omit
   }
 });
 
-test('MEDIUM 5: dispatch staging (no-porch path channel) discloses hazards beyond HAZARD_CAP too', () => {
+test('MEDIUM 5: dispatch staging discloses hazards beyond HAZARD_CAP too', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    // Budget 0 forces the no-porch branch (see h19-dispatch-porch.test.mjs
-    // B1) — the exact branch that used to pass the already-capped
-    // `shownHazards` into hazardParts instead of the full candidate list.
-    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', preview_budget_bytes: 0 } }));
+    // hazardParts must receive the full candidate list, not a pre-capped slice.
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read' } }));
     const ids = [];
+    const expectedTriggers = [];
+    const expectedRightWays = [];
     for (let i = 0; i < 4; i++) {
-      ids.push(store.create(antiPattern(`hazard-${i}`, ['src/a.mjs'], { severity: 'warn' })).id);
+      const trigger = `TRG${i} first ${'t'.repeat(2501)} TRIGGER_END_${i}`;
+      const rightWay = `RW${i} first ${'r'.repeat(2501)} RIGHT_WAY_END_${i}`;
+      expectedTriggers.push(trigger);
+      expectedRightWays.push(rightWay);
+      ids.push(store.create(antiPattern(`hazard-${i}`, ['src/a.mjs'], { severity: 'warn', trigger, right_way: rightWay })).id);
     }
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
     const transcript = spawnSync(process.execPath, [join(HOOKS, 'h22-dispatch-register.mjs')], {
@@ -568,54 +591,122 @@ test('MEDIUM 5: dispatch staging (no-porch path channel) discloses hazards beyon
     assert.equal(r.code, 0, r.stderr);
     const ctx = r.stdout.trim() ? JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '' : '';
     const shownCount = ids.filter((id) => ctx.includes(id)).length;
-    assert.equal(shownCount, 3, `expected exactly HAZARD_CAP (3) path hazards rendered whole under the no-porch branch; ctx=${ctx}`);
+    assert.equal(shownCount, 3, `expected exactly HAZARD_CAP (3) path hazards selected and named on the staging surface; ctx=${ctx}`);
     assert.match(ctx, /1 more hazard\(s\) NOT shown \(cap 3\)/, 'the 4th path hazard is disclosed as an omitted count, not silently dropped');
+    // delivery-floor-and-transport-ceiling-constants: the 10,000-byte
+    // transport ceiling applies even when hazards are exempt from the configured
+    // cap. These >5KB whole hazards therefore cannot all coexist. Pin the
+    // behavior — at least one whole field pair, the rest named by a degraded
+    // pointer — rather than an incidental exact count that fixture sizes could
+    // change.
+    let admitted = 0;
+    for (let i = 0; i < 4; i++) {
+      if (!ctx.includes(ids[i])) continue;
+      if (ctx.includes(`TRG${i}`)) {
+        admitted += 1;
+        assert.equal(ctx.split(`TRG${i}`).length - 1, 1, `hazard ${i} trigger renders exactly once`);
+        assert.equal(ctx.split(`RW${i}`).length - 1, 1, `hazard ${i} right way renders exactly once`);
+        assert.ok(ctx.includes(expectedTriggers[i]), `hazard ${i} trigger arrives whole, beyond 2,400 chars`);
+        assert.ok(ctx.includes(expectedRightWays[i]), `hazard ${i} right way arrives whole, beyond 2,400 chars`);
+      } else {
+        assert.match(
+          ctx,
+          new RegExp(`TOO LARGE to show in full \\(exceeds the transport limit\\) · knowledge_get ${ids[i]}`),
+          `selected hazard ${i} is named by the transport-overflow pointer`
+        );
+        assert.ok(!ctx.includes(`TRG${i}`), `selected hazard ${i} never renders a partial trigger`);
+        assert.ok(!ctx.includes(`RW${i}`), `selected hazard ${i} never renders a partial right way`);
+      }
+    }
+    assert.ok(admitted >= 1, 'at least one >2,400-char hazard field pair arrives whole');
+    assert.ok(admitted < 3, 'the transport ceiling degrades at least one selected oversized hazard to a pointer');
+  } finally {
+    cleanup();
+  }
+});
+
+test('MEDIUM 5: dispatch staging delivers all HAZARD_CAP hazards whole when their combined fields fit the transport ceiling', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read' } }));
+    const expectedTriggers = [];
+    for (let i = 0; i < HAZARD_CAP; i++) {
+      const trigger = `WHOLE_TRG${i} first ${'t'.repeat(2501)} WHOLE_TRIGGER_END_${i}`;
+      expectedTriggers.push(trigger);
+      store.create(antiPattern(`whole-hazard-${i}`, ['src/a.mjs'], { severity: 'warn', trigger, right_way: `RW${i} short` }));
+    }
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
+    const transcript = spawnSync(process.execPath, [join(HOOKS, 'h22-dispatch-register.mjs')], {
+      input: JSON.stringify({
+        hook_event_name: 'PreToolUse', tool_name: 'Task', tool_use_id: `toolu_${randomUUID().slice(0, 8)}`,
+        tool_input: { subagent_type: 'general-purpose', prompt: 'Go work on src/a.mjs and report back.', description: 'x' },
+        session_id: 's1', cwd: dir, transcript_path: join(dir, 'no-such-transcript.jsonl'), prompt_id: 'p1',
+      }),
+      encoding: 'utf8', cwd: dir, timeout: 60_000,
+    });
+    assert.notEqual(transcript.status, 2, transcript.stderr);
+    const r = runHook(
+      'h19-dispatch-staging.mjs',
+      { hook_event_name: 'SubagentStart', session_id: 's1', agent_id: 'agent-1', agent_type: 'general-purpose', cwd: dir, transcript_path: join(dir, 'no-such-transcript.jsonl') },
+      dir
+    );
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = r.stdout.trim() ? JSON.parse(r.stdout).hookSpecificOutput?.additionalContext ?? '' : '';
+    assert.ok(Buffer.byteLength(ctx, 'utf8') < 10000, `fixture control: composed context fits the transport ceiling (${Buffer.byteLength(ctx, 'utf8')} bytes)`);
+    for (const trigger of expectedTriggers) assert.ok(ctx.includes(trigger), 'each >2,400-char trigger arrives whole');
+    assert.doesNotMatch(ctx, /TOO LARGE to show/, 'no hazard degrades when all three whole fields fit the transport ceiling');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// fix-round MEDIUM 6 — `renderPorch` used to classify porch content as
-// hazard-vs-ordinary by SCANNING the assembled porch STRING for each
-// candidate hazard's rendered substring (`finalPorch.includes(...)`), which
-// "infers class from rendered lines" (the exact thing decision 92088a62
-// forbids) and, being a substring search, has no structural defence against
-// one record's content containing another's. `renderPorch` now returns
-// `parts` built from `hazardSectionAt`'s OWN embed/defer decision, recorded
-// as metadata at the moment it is made — not re-derived from text at all.
+// The assembler credits structured part metadata, never UUIDs found in text.
 // ---------------------------------------------------------------------------
 
-test('MEDIUM 6: renderPorch classifies embedded vs deferred hazards from its OWN metadata, not a text scan — parts carry the correct identity', () => {
-  const mkHazard = (id, title, tail) => ({
-    id, title, slug: null, severity: 'warn',
-    trigger: `T ${'a'.repeat(tail)}`,
-    right_way: `R ${'b'.repeat(tail)}`,
-  });
-  // Two small hazards fit whole; one deliberately oversized hazard does not —
-  // a genuine embed/defer split within the NORMAL cascade (not the all-
-  // deferred MINIMAL-porch fallback h19-dispatch-porch.test.mjs's P5b pins).
-  const sm1 = mkHazard('11111111-1111-4111-8111-111111111111', 'SM1', 30);
-  const sm2 = mkHazard('22222222-2222-4222-8222-222222222222', 'SM2', 30);
-  const big = mkHazard('33333333-3333-4333-8333-333333333333', 'BIG', 5000);
-  const porch = renderPorch('header line', [sm1, sm2, big], [], 1500, {});
-  assert.deepEqual(porch.deferred_hazard_ids, [big.id], 'only the oversized hazard is deferred');
-  const hazardKindParts = porch.parts.filter((p) => p.kind === 'hazard');
+test('MEDIUM 6: hazardParts and assembleDelivery retain the source hazard identity when its rendered text names another record', () => {
+  const mentioned = '33333333-3333-4333-8333-333333333333';
+  const hazard = {
+    id: '11111111-1111-4111-8111-111111111111', title: 'SM1', slug: null, severity: 'warn',
+    trigger: `T references ${mentioned}`,
+    right_way: 'R',
+  };
+  const [part] = hazardParts([hazard]);
+  assert.equal(part.identity, hazard.id, 'the hazard part keeps its structured source identity');
+  const assembled = assembleDelivery([part], 0);
+  assert.match(assembled.text, new RegExp(mentioned), 'CONTROL: rendered hazard text contains a different record id');
   assert.deepEqual(
-    hazardKindParts.map((p) => p.identity).sort(),
-    [sm1.id, sm2.id].sort(),
-    'the parts array credits exactly the two ADMITTED hazards, by identity — never the deferred one'
+    assembled.emittedSubstance,
+    [{ identity: hazard.id, revision: recordRevision(hazard) }],
+    'only the structured source identity is credited; no rendered-text scan can credit the mentioned id'
   );
-  for (const p of hazardKindParts) {
-    assert.equal(p.contentClass, 'substance');
-    assert.equal(p.revision, recordRevision([sm1, sm2].find((h) => h.id === p.identity)));
+});
+
+test('non-porch: a disabled configured cap still renders whole hazards before owner bodies', () => {
+  const hazards = Array.from({ length: 3 }, (_, i) => antiPattern(`hazard-${i}`, ['src/a.mjs'], { trigger: `TRG${i}` }));
+  const owner = article('own-0', ['src/a.mjs']);
+  const assembled = assembleDelivery([
+    { kind: 'ordinary', contentClass: 'chrome', text: 'payload header' },
+    ...hazardParts(hazards, { fileKeys: ['src/a.mjs'] }),
+    { kind: 'ordinary', contentClass: 'substance', identity: owner.id, revision: recordRevision(owner), text: renderArticle(null, owner) },
+  ], 0);
+  for (let i = 0; i < 3; i += 1) assert.ok(assembled.text.includes(`TRG${i}`), `hazard ${i} remains delivered when cap is disabled`);
+  assert.ok(assembled.text.indexOf('TRG0') < assembled.text.indexOf("▸ article 'own-0'"), 'hazards stay ahead of owner bodies');
+});
+
+test('non-porch: every emitted article header carries that article’s own id8', () => {
+  const owners = Array.from({ length: 3 }, (_, i) => article(`own-${i}`, [`src/${i}.mjs`]));
+  const assembled = assembleDelivery(
+    owners.map((owner) => ({ kind: 'ordinary', contentClass: 'substance', identity: owner.id, revision: recordRevision(owner), text: renderArticle(null, owner) })),
+    0
+  );
+  const headers = [...assembled.text.matchAll(/▸ article '(own-\d+)' \(([0-9a-f]{8})\) \(/g)];
+  assert.equal(headers.length, owners.length, 'CONTROL: every owner header was emitted');
+  for (const [, slug, id8] of headers) {
+    const owner = owners.find((candidate) => candidate.slug === slug);
+    assert.equal(id8, owner.id.slice(0, 8), `article header '${slug}' carries its own id8`);
   }
-  // The deferred hazard's own id must not appear as a `kind:'hazard'` part —
-  // even though its short id-prefix legitimately appears elsewhere in the
-  // porch (the "continues in full below" placeholder names it) — proving
-  // classification is not being reconstructed from any text containing it.
-  assert.ok(!hazardKindParts.some((p) => p.identity === big.id));
-  assert.match(porch.text, new RegExp(big.id.slice(0, 8)), 'CONTROL: the deferred hazard is still named (as a placeholder), not silently dropped');
+  assert.match(renderArticle(null, owners[0]), new RegExp(`▸ FULL RECORD: knowledge_get ${owners[0].id}`), 'a normal article keeps its full-id citability line');
 });
 
 // ---------------------------------------------------------------------------
@@ -630,7 +721,7 @@ test('HIGH 4: the legacy injection_rung migration notice is charged on the total
   try {
     writeFileSync(
       join(dir, '.sterling', 'config.json'),
-      JSON.stringify({ delivery: { injection_rung: 'prompt', total_cap_bytes: 600, preview_budget_bytes: 0 } })
+      JSON.stringify({ delivery: { injection_rung: 'prompt', total_cap_bytes: 600 } })
     );
     store.create(article('notice-article', ['src/a.mjs'], { what_it_does: `A ${'w'.repeat(2000)}` }));
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
@@ -793,11 +884,8 @@ test('MEDIUM 3: an unchanged reference_material owner does not repeat on a secon
 test('MEDIUM 3: an owner that transitions from discovery (digest) to substance (shrunk below the floor) still delivers its FULL body — a prior discovery mark never suppresses it', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    // total_cap_bytes raised: the porch preview alone competes for the
-    // default 3000-byte cap and would otherwise clip the digest text itself
-    // down to its bare suffix — the same "porch is a preview, not a
-    // replacement" concern h19-dispatch-porch.test.mjs's own fixtures raise
-    // their cap for; unrelated to what THIS test pins.
+    // total_cap_bytes is raised so the digest transition, rather than ordinary
+    // cap degradation, is the behavior under test.
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', total_cap_bytes: 8000 } }));
     const a = store.create(article('transition-article', ['src/a.mjs'], { what_it_does: `BIG ${'z'.repeat(5000)}` }));
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');

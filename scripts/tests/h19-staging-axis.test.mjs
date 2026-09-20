@@ -434,8 +434,7 @@ test('g. no path candidates AND no subject match in the prompt: contract-only un
 // DISCLOSED, NOT GUESSED: §3 names the label but no exact rendered sentence,
 // so this pin asserts only the ABSENCE of the hedge (which the ruling states
 // directly) — the positive wording stays unpinned here rather than invented,
-// and is owned by the porch/header pins in
-// scripts/tests/h19-dispatch-porch.test.mjs.
+// and is owned by the H19 staging delivery assertions.
 test('h. parallel dispatch: a Start sees only ITS OWN prompt, so a long sibling prompt cannot dilute a short matching one to silence', () => {
   const { dir, store, cleanup } = makeProject();
   try {

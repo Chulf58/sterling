@@ -25,9 +25,6 @@ import {
   lineSuspectBlock,
   joinSuspectBlock,
   renderPayload,
-  porchHeaderLine,
-  renderPorch,
-  resolvePorchBudget,
   isSubstanceDelivered,
   isDiscoveryDelivered,
   markSubstanceDelivered,
@@ -232,16 +229,6 @@ function main(input) {
     ].filter((b) => typeof b === 'string' && b);
     const payload = renderPayload(rel, blocks, { unowned });
 
-    // FRONT PORCH — DIRECT-INJECT PATH ONLY (decision 0050a536 §5 amendment,
-    // 2026-09-08, evidence 5d2a527f; Codex thread 01a07f97). `payload` above is
-    // built ONCE ahead of the mode branch and is the fallback whenever the porch
-    // has nothing to add (budget 0, misconfiguration, or no porchable content).
-    //
-    // Gated on `!unowned`: the porch's header claims 'owning knowledge for
-    // <rel>' (porchHeaderLine), which is the wrong claim over unowned
-    // territory (a hazard can attach to a path no article owns) — the frontier
-    // notice's own header stays exactly as rendered by `payload` above in that
-    // case, unmodified by this amendment.
     let injectPayload = payload;
     let emittedSubstance = [];
     let emittedDiscovery = [];
@@ -271,10 +258,6 @@ function main(input) {
       const decisionWiden = `knowledge_query types:["decision"] file_keys:["${rel}"] cap:${freshDecisions.length}`;
       const ownerParts = freshOwners.map(ownerPart);
       const suspectParts = [{ kind: 'ordinary', contentClass: 'chrome', text: joinSuspectBlock(suspectBlock ?? {}) }];
-      // FRONT PORCH (decision 0050a536 §5 amendment): the bounded prefix
-      // stays ahead of the capped remainder on owned territory; it is ordinary
-      // content and spends the total cap like every non-hazard part.
-      // Gated on `!unowned`: the porch header claims owning knowledge.
       const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
       const decisionParts = [
         ...(freshDecisions.length
@@ -298,65 +281,17 @@ function main(input) {
       // as a LEADING pinned-but-charged part instead, exactly like the active-
       // plan line in h19-dispatch-staging.mjs.
       const migrationNoticeParts = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
-      const leadingChromePrefixLen = migrationNotice ? migrationNotice.length + 2 : 0;
-
-      const assemble = (pathM) => {
-      let porch = { text: '', hazardsRendered: false };
-      if (!unowned) {
-        const referenceOwnersForInject = freshOwners.filter((r) => r.type === 'reference_material');
-        const rawPorchBudget = resolvePorchBudget(input.cwd);
-        const porchBudget = totalCap > 0 ? Math.min(rawPorchBudget, totalCap) : rawPorchBudget;
-        porch =
-          porchBudget > 0
-            ? renderPorch(porchHeaderLine([rel]), freshHazards, freshOwners, porchBudget, {
-                articleBodiesCount: freshOwners.length - referenceOwnersForInject.length,
-                referencePointerCount: referenceOwnersForInject.length,
-                pathDecisionPointerCount: pathM,
-                hasSubjectChannel: false,
-                fileKeys: [rel],
-              })
-            : porch;
-      }
-      // With a porch the owners' digests are already delivered, so decision
-      // pointers take the remaining budget ahead of full article bodies.
-      // STRUCTURED PARTS FROM renderPorch DIRECTLY (fix-round MEDIUM 6): the
-      // porch itself now returns `parts` — including which hazard blocks it
-      // embedded whole, tagged with identity — so there is no assembled porch
-      // STRING left to re-parse (`partitionPorchHazards`, deleted) and no
-      // manual re-tagging pass zipping a separately-recomputed hazard list
-      // against it. `deferred_hazard_ids` still names exactly which shown
-      // hazards the porch could NOT embed, for the trailing whole-block
-      // rendering below.
-      const shownHazards = cappedHazards(freshHazards);
-      const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
-      const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)), { fileKeys: [rel] });
-      const parts = porch.text
-        ? [...migrationNoticeParts, ...porch.parts, ...deferredHazards, ...decisionParts, ...ownerParts, ...suspectParts]
-        : [
-            ...migrationNoticeParts,
-            { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
-            ...hazardParts(freshHazards, { fileKeys: [rel] }),
-            ...tailParts,
-          ];
+      const assemble = () => {
+      const parts = [
+        ...migrationNoticeParts,
+        { kind: 'ordinary', contentClass: 'chrome', text: renderPayload(rel, [], { unowned, substantiveCount: freshOwners.length + freshHazards.length + freshDecisions.length }) },
+        ...hazardParts(freshHazards, { fileKeys: [rel] }),
+        ...tailParts,
+      ];
       const assembled = assembleDelivery(parts, totalCap);
-      return { text: assembled.text, porchText: porch.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
+      return { text: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
       };
-      // PORCH SELF-REPORT = POST-CAP ACTUAL: the porch-end line states how many
-      // decision pointers follow, and the cap decides that only after the porch
-      // is sized — re-render until the report matches what was emitted. The
-      // migration notice (if any) is a PINNED leading part, so it always
-      // renders in full ahead of the porch — skip exactly its own length +
-      // separator (fix-round HIGH 4: it is now a real, charged part of this
-      // same composed string).
-      let pathM = shownPathDecisions.length;
-      let built = assemble(pathM);
-      for (let i = 0; i < 3; i++) {
-        const below = built.text.slice(leadingChromePrefixLen + built.porchText.length);
-        const actual = shownPathDecisions.filter((r) => below.includes(r.id)).length;
-        if (actual === pathM) break;
-        pathM = actual;
-        built = assemble(pathM);
-      }
+      const built = assemble();
       injectPayload = built.text;
       emittedSubstance = built.emittedSubstance;
       emittedDiscovery = built.emittedDiscovery;

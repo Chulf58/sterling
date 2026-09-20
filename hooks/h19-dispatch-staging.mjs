@@ -5064,30 +5064,12 @@ var configSchema = external_exports.object({
     // configs. Parsed configuration exposes only the surviving read rung.
     injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
     // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
     // "H19 gets a per-delivery total cap and cross-entry dedup across the
     // turn"): scripts/hooks/lib/delivery.mjs reads this at
     // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
     // absent/invalid value falls back to the same default there, same
-    // three-state guard as preview_budget_bytes above.
+    // three-state guard used for other config-derived delivery values.
     total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
@@ -8304,21 +8286,6 @@ function writeGuard(path, guard) {
   writeFileSync3(tmp, JSON.stringify(guard));
   renameSync3(tmp, path);
 }
-var CITATION_BOILERPLATE_WORDS = [
-  "knowledge_get",
-  "anti_pattern",
-  "decisions",
-  "decision",
-  "rulings",
-  "ruling",
-  "overriding",
-  "overrides",
-  "override",
-  "ids",
-  "id"
-];
-var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
-var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
   const scope = record?.scope ?? "unknown";
@@ -8486,13 +8453,6 @@ function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, 
 function hazardOverflowPointer(record) {
   return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
-function completePorchHazards(hazards) {
-  return cappedHazards(hazards ?? []).map((hazard) => [
-    hazardHeaderLine(hazard),
-    `  TRIGGER: ${hazard.trigger ?? ""}`,
-    `  RIGHT WAY: ${hazard.right_way ?? ""}`
-  ].join("\n"));
-}
 var DECISION_POINTER_CAP = 8;
 var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
 var DECISION_AUTHORITY_UNSTATED = 1;
@@ -8531,292 +8491,25 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
   }
   return lines.join("\n");
 }
-var PORCH_OWNER_CAP = 3;
-var PORCH_HAZARD_FLOOR_BYTES = 90;
-var PORCH_OWNER_LABEL_CLIP_BYTES = 90;
-var PORCH_SLUG_CLIP_BYTES = 60;
-var PORCH_HEADER_PATH_CLIP_BYTES = 200;
-var PORCH_WIDENING_KEYS_CLIP_BYTES = 200;
-var PORCH_HAZARD_SHARE = 0.6;
-var PORCH_BYTE_COUNT_RESERVE = "000000";
-function porchByteLen(s2) {
+function byteLen(s2) {
   return Buffer.byteLength(String(s2 ?? ""), "utf8");
 }
 function clipToBytes(text, maxBytes) {
   const s2 = String(text ?? "");
   if (maxBytes <= 0) return "";
-  if (porchByteLen(s2) <= maxBytes) return s2;
+  if (byteLen(s2) <= maxBytes) return s2;
   const ELLIPSIS = "\u2026";
-  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const ellipsisBytes = byteLen(ELLIPSIS);
   const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
   let out = "";
   let used = 0;
   for (const ch of s2) {
-    const chBytes = porchByteLen(ch);
+    const chBytes = byteLen(ch);
     if (used + chBytes > room) break;
     out += ch;
     used += chBytes;
   }
   return room > 0 ? `${out}${ELLIPSIS}` : out;
-}
-function clippedFileKeysLiteral(keys, maxBytes) {
-  const list = keys ?? [];
-  const admitted = [];
-  let used = 2;
-  for (const k of list) {
-    const entry = JSON.stringify(String(k));
-    const sep = admitted.length ? 1 : 0;
-    const entryBytes = porchByteLen(entry) + sep;
-    if (used + entryBytes > Math.max(maxBytes, 2)) break;
-    admitted.push(entry);
-    used += entryBytes;
-  }
-  const omitted = list.length - admitted.length;
-  const literal = `[${admitted.join(",")}]`;
-  return omitted > 0 ? `${literal} (+${omitted} keys omitted)` : literal;
-}
-function porchOwnerLine(owner) {
-  const id8 = String(owner?.id ?? "").slice(0, 8);
-  if (owner?.type === "reference_material") {
-    return `\u25B8 reference '${clipToBytes(owner.title, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}) \u2014 knowledge_get ${owner.id}`;
-  }
-  return `\u25B8 article '${clipToBytes(owner?.slug, PORCH_OWNER_LABEL_CLIP_BYTES)}' (${id8}, ${owner?.state ?? "unknown"}) \u2014 knowledge_get ${owner?.id}`;
-}
-function rankOwnersForPorch(owners) {
-  return [...owners ?? []].sort((a, b) => {
-    const ta = a?.type === "feature_article" ? 0 : 1;
-    const tb = b?.type === "feature_article" ? 0 : 1;
-    if (ta !== tb) return ta - tb;
-    const ua = Date.parse(a?.updated_at ?? "");
-    const ub = Date.parse(b?.updated_at ?? "");
-    return (Number.isFinite(ub) ? ub : -Infinity) - (Number.isFinite(ua) ? ua : -Infinity);
-  });
-}
-function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
-  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
-}
-function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
-  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
-}
-function porchEndLine(byteCountText, meta) {
-  const { pathDecisionPointerCount } = meta;
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
-}
-function porchDeferredEndLine(byteCountText, hazardCount, budget, meta) {
-  const { pathDecisionPointerCount } = meta;
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 budget (${budget}) too small to preview ${hazardCount} hazard(s); deferred in full below. Followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. normal instruction precedence applies.`;
-}
-function porchHeaderLine(rels) {
-  const list = Array.isArray(rels) ? rels : [rels];
-  const full = list.join(", ");
-  if (porchByteLen(full) <= PORCH_HEADER_PATH_CLIP_BYTES) return payloadHeaderLine(full);
-  const kept = [];
-  let usedBytes = 0;
-  for (const r of list) {
-    const sepBytes = kept.length ? porchByteLen(", ") : 0;
-    const rBytes = porchByteLen(r);
-    if (usedBytes + sepBytes + rBytes > PORCH_HEADER_PATH_CLIP_BYTES) break;
-    kept.push(r);
-    usedBytes += sepBytes + rBytes;
-  }
-  const remainder = list.length - kept.length;
-  const clippedList = kept.length ? `${kept.join(", ")}${remainder > 0 ? ` \u2026 (+${remainder} paths)` : ""}` : clipToBytes(full, PORCH_HEADER_PATH_CLIP_BYTES);
-  return payloadHeaderLine(clippedList);
-}
-var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
-var PORCH_END_TEMPLATE_BYTES = porchByteLen(
-  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
-    articleBodiesCount: 99,
-    referencePointerCount: 99,
-    pathDecisionPointerCount: 99,
-    hasSubjectChannel: true,
-    subjectHazardCount: 99,
-    subjectDecisionPointerCount: 99
-  })
-);
-var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
-var PORCH_BUDGET_DEFAULT = 1800;
-function resolvePorchBudget(cwd) {
-  try {
-    const cfg = loadConfig(cwd);
-    if (cfg === null || typeof cfg !== "object" || Array.isArray(cfg)) return PORCH_BUDGET_DEFAULT;
-    const v = cfg?.delivery?.preview_budget_bytes;
-    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return PORCH_BUDGET_DEFAULT;
-    return v;
-  } catch {
-    return PORCH_BUDGET_DEFAULT;
-  }
-}
-function renderPorch(header, hazards, owners, budget, {
-  articleBodiesCount = 0,
-  referencePointerCount = 0,
-  pathDecisionPointerCount = 0,
-  hasSubjectChannel = false,
-  subjectHazardCount = 0,
-  subjectDecisionPointerCount = 0,
-  fileKeys = []
-} = {}) {
-  if (!Number.isFinite(budget) || budget <= 0) return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id), parts: [] };
-  if (!hazards?.length && !owners?.length) return { text: "", hazardsRendered: false, deferred_hazard_ids: [], parts: [] };
-  if (budget < PORCH_MIN_BUDGET_BYTES) {
-    try {
-      process.stderr.write(
-        `H19 porch: preview_budget_bytes=${budget} is below the structural minimum ${PORCH_MIN_BUDGET_BYTES} bytes \u2014 MISCONFIGURED, porch disabled for this touch (today's rendering applies)
-`
-      );
-    } catch {
-    }
-    return { text: "", hazardsRendered: false, deferred_hazard_ids: cappedHazards(hazards ?? []).map((hazard) => hazard.id), parts: [] };
-  }
-  const shownHazards = cappedHazards(hazards ?? []);
-  const hazardOverflow = (hazards?.length ?? 0) - shownHazards.length;
-  const rankedOwners = rankOwnersForPorch(owners);
-  const endMeta = {
-    articleBodiesCount,
-    referencePointerCount,
-    pathDecisionPointerCount,
-    hasSubjectChannel,
-    subjectHazardCount,
-    subjectDecisionPointerCount
-  };
-  const minOwnerCap = 0;
-  const byteCountReserve = "0".repeat(String(budget).length);
-  function hazardSectionAt(perHazardTextBudget) {
-    const wholeIds = [];
-    const blocks = shownHazards.map((hazard) => {
-      const whole = completePorchHazards([hazard])[0];
-      if (porchByteLen(whole) <= perHazardTextBudget) {
-        wholeIds.push(hazard.id);
-        return whole;
-      }
-      return `\u26A0 HAZARD ${clipToBytes(hazard.slug ?? hazard.title ?? hazard.id, PORCH_SLUG_CLIP_BYTES)} (${String(hazard.id).slice(0, 8)}) continues in full below`;
-    });
-    if (hazardOverflow > 0) {
-      const widen = `knowledge_query types:["anti_pattern"] file_keys:${clippedFileKeysLiteral(fileKeys, PORCH_WIDENING_KEYS_CLIP_BYTES)} cap:${hazards.length}`;
-      blocks.push(`\u2026 ${hazardOverflow} more hazard(s) NOT shown (cap ${HAZARD_CAP}) \u2014 ${widen} for the full set`);
-    }
-    return { blocks, wholeIds };
-  }
-  function ownerSectionAt(admitted2, ownerLines2, overflowLine2, perOwnerDigestBudget, { reserveDigestSeparator = false } = {}) {
-    const blocks = admitted2.map((owner, i) => {
-      const digestBudget = Math.max(0, perOwnerDigestBudget);
-      const digest = digestBudget > 0 ? clipToBytes(owner?.what_it_does, digestBudget) : "";
-      if (digest) return `${ownerLines2[i]}
-  ${digest}`;
-      return reserveDigestSeparator ? `${ownerLines2[i]}
-  ` : ownerLines2[i];
-    });
-    if (overflowLine2) blocks.push(overflowLine2);
-    return blocks;
-  }
-  let pick = null;
-  for (let cap = Math.min(PORCH_OWNER_CAP, rankedOwners.length); cap >= minOwnerCap; cap -= 1) {
-    const admitted2 = rankedOwners.slice(0, cap);
-    const ownerOverflow = rankedOwners.length - admitted2.length;
-    const ownerLines2 = admitted2.map(porchOwnerLine);
-    const overflowLine2 = ownerOverflow > 0 ? `  \u2026 +${ownerOverflow} owners below` : "";
-    const skeletonBody = [
-      header,
-      ...hazardSectionAt(0).blocks,
-      ...ownerSectionAt(admitted2, ownerLines2, overflowLine2, 0, { reserveDigestSeparator: true })
-    ].join("\n\n");
-    const skeletonBytes2 = porchByteLen(skeletonBody) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
-    const remaining2 = Math.max(0, budget - skeletonBytes2);
-    const fits = skeletonBytes2 <= budget;
-    pick = { admitted: admitted2, ownerOverflow, ownerLines: ownerLines2, overflowLine: overflowLine2, remaining: remaining2, skeletonBytes: skeletonBytes2 };
-    if (fits || cap === minOwnerCap) break;
-  }
-  const { admitted, ownerLines, overflowLine, remaining, skeletonBytes } = pick;
-  if (skeletonBytes > budget) {
-    let buildMinimal = function(hdr) {
-      const blocks = [hdr, allOwnersOverflow].filter(Boolean);
-      let cnt = blocks.reduce((sum, l) => sum + porchByteLen(l) + 2, 0) + porchByteLen(porchDeferredEndLine(byteCountReserve, shownHazards.length, budget, endMeta));
-      let text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
-      for (let i = 0; i < 5; i += 1) {
-        const actual = porchByteLen(text);
-        if (actual === cnt) break;
-        cnt = actual;
-        text = [...blocks, porchDeferredEndLine(String(cnt), shownHazards.length, budget, endMeta)].join("\n\n");
-      }
-      return text;
-    };
-    const allOwnersOverflow = rankedOwners.length > 0 ? `  \u2026 +${rankedOwners.length} owners below` : "";
-    let minimalPorch = buildMinimal(header);
-    if (porchByteLen(minimalPorch) > budget) {
-      const nonHeaderBytes = porchByteLen(minimalPorch) - porchByteLen(header);
-      minimalPorch = buildMinimal(clipToBytes(header, Math.max(0, budget - nonHeaderBytes)));
-    }
-    if (porchByteLen(minimalPorch) > budget) {
-      try {
-        process.stderr.write(
-          `H19 porch: accounting regression in the MINIMAL fallback \u2014 assembled ${porchByteLen(minimalPorch)} bytes against a ${budget}-byte budget \u2014 hard-clamping
-`
-        );
-      } catch {
-      }
-      const clamped = clipToBytes(minimalPorch, budget);
-      return { text: clamped, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: "ordinary", contentClass: "chrome", text: clamped }] };
-    }
-    return { text: minimalPorch, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: "ordinary", contentClass: "chrome", text: minimalPorch }] };
-  }
-  const haveHazards = shownHazards.length > 0;
-  const haveDigests = admitted.length > 0;
-  let hazardShare = 0;
-  let digestShare = 0;
-  if (haveHazards && haveDigests) {
-    hazardShare = Math.floor(remaining * PORCH_HAZARD_SHARE);
-    digestShare = remaining - hazardShare;
-    const neededFloor = shownHazards.length * PORCH_HAZARD_FLOOR_BYTES;
-    if (hazardShare < neededFloor) {
-      const borrow = Math.min(digestShare, neededFloor - hazardShare);
-      hazardShare += borrow;
-      digestShare -= borrow;
-    }
-  } else if (haveHazards) {
-    hazardShare = remaining;
-  } else if (haveDigests) {
-    digestShare = remaining;
-  }
-  const perHazard = shownHazards.length ? Math.floor(hazardShare / shownHazards.length) : 0;
-  const perOwner = admitted.length ? Math.floor(digestShare / admitted.length) : 0;
-  const { blocks: hazardBlocks, wholeIds: embeddedHazardIds } = hazardSectionAt(perHazard);
-  const embeddedHazardIdSet = new Set(embeddedHazardIds);
-  const ownerBlocks = ownerSectionAt(admitted, ownerLines, overflowLine, perOwner);
-  const hazardBlockParts = hazardBlocks.map((text, i) => {
-    if (i >= shownHazards.length) return { kind: "ordinary", contentClass: "chrome", text };
-    const hazard = shownHazards[i];
-    return embeddedHazardIdSet.has(hazard.id) ? { kind: "hazard", contentClass: "substance", identity: hazard.id, revision: recordRevision(hazard), text } : { kind: "ordinary", contentClass: "chrome", text };
-  });
-  const ownerBlockParts = ownerBlocks.map((text) => ({ kind: "ordinary", contentClass: "chrome", text }));
-  const body = [header, ...hazardBlocks, ...ownerBlocks].join("\n\n");
-  let count = porchByteLen(body) + 2 + porchByteLen(porchEndLine(byteCountReserve, endMeta));
-  let finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
-  for (let i = 0; i < 5; i += 1) {
-    const actual = porchByteLen(finalPorch);
-    if (actual === count) break;
-    count = actual;
-    finalPorch = [body, porchEndLine(String(count), endMeta)].join("\n\n");
-  }
-  const finalBytes = porchByteLen(finalPorch);
-  if (finalBytes > budget) {
-    try {
-      process.stderr.write(
-        `H19 porch: accounting regression \u2014 assembled porch is ${finalBytes} bytes against a ${budget}-byte budget (overrun ${finalBytes - budget} bytes); the cascade above should have made this unreachable \u2014 hard-clamping
-`
-      );
-    } catch {
-    }
-    const clampedFinal = clipToBytes(finalPorch, budget);
-    return { text: clampedFinal, hazardsRendered: false, deferred_hazard_ids: shownHazards.map((hazard) => hazard.id), parts: [{ kind: "ordinary", contentClass: "chrome", text: clampedFinal }] };
-  }
-  const deferred_hazard_ids = shownHazards.filter((hazard) => !embeddedHazardIdSet.has(hazard.id)).map((hazard) => hazard.id);
-  const parts = [
-    { kind: "ordinary", contentClass: "chrome", text: header },
-    ...hazardBlockParts,
-    ...ownerBlockParts,
-    { kind: "ordinary", contentClass: "chrome", text: porchEndLine(String(count), endMeta) }
-  ];
-  return { text: finalPorch, hazardsRendered: deferred_hazard_ids.length === 0, deferred_hazard_ids, parts };
 }
 var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
 var DELIVERY_TRANSPORT_VISIBLE_BYTES = 1e4;
@@ -8863,7 +8556,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     }
     return { emittedSubstance: emittedSubstance2, emittedDiscovery: emittedDiscovery2 };
   };
-  const bytes = (text) => porchByteLen(text);
+  const bytes = (text) => byteLen(text);
   const isHazard = (part) => part.kind === "hazard";
   const isChrome = (part) => part.kind !== "hazard" && part.pinned;
   const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
@@ -9114,63 +8807,38 @@ async function main(input2) {
       (x) => x.record.type === "anti_pattern" ? !isSubstanceDelivered(guard, x.record) : !isDiscoveryDelivered(guard, x.record)
     );
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish("");
-    const charCap = loadConfig(input2.cwd)?.delivery?.payload_char_cap ?? 2400;
-    const rawPorchBudget = resolvePorchBudget(input2.cwd);
-    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}
-
-`, "utf8") : 0;
-    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
+    loadConfig(input2.cwd);
     const subjectHazards = freshSubject.filter((x) => x.record.type === "anti_pattern").map((x) => x.record);
     const subjectDecisions = freshSubject.filter((x) => x.record.type === "decision").map((x) => x.record);
-    const shownSubjectHazards = cappedHazards(subjectHazards);
-    const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
     const totalCap = resolveTotalCap(input2.cwd);
-    const cappedPorchBudget = totalCap > 0 ? Math.min(porchBudget, totalCap) : porchBudget;
     const leadingChromeParts = activePlanLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: activePlanLine }] : [];
     const trailingChromeParts = [
       ...tddPostureLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: tddPostureLine }] : [],
       ...unattributableLine ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: unattributableLine }] : [],
       ...!EXEMPT_AGENT_TYPES.has(input2.agent_type) ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: RETURN_CONTRACT }] : []
     ];
-    const leadingChromePrefixLen = leadingChromeParts.length ? leadingChromeParts[0].text.length + 2 : 0;
-    const assemble = (counts2) => {
+    const assemble = () => {
       const parts = [];
-      let porchText = "";
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-        const referenceOwnersForPorch = freshOwners.filter((r) => r.type === "reference_material");
-        let porch = cappedPorchBudget > 0 ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, cappedPorchBudget, {
-          articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
-          referencePointerCount: referenceOwnersForPorch.length,
-          pathDecisionPointerCount: counts2.pathM,
-          hasSubjectChannel: true,
-          subjectHazardCount: counts2.subjN,
-          subjectDecisionPointerCount: counts2.subjP,
-          fileKeys: rels
-        }) : { text: "", hazardsRendered: false };
         const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(",")}] cap:${freshDecisions.length}`;
-        porchText = porch.text;
         const ownerParts = freshOwners.map((r) => {
           const text = r.type === "reference_material" ? renderReference(r) : renderArticle(store, r);
           const contentClass = isOwnerDiscoveryOnly(r) ? "discovery" : "substance";
           return { kind: "ordinary", contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
-        const decisionParts = freshDecisions.length ? [
-          {
-            kind: "ordinary",
-            contentClass: "discovery",
-            identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-            text: renderDecisionPointers(rels.join(", "), freshDecisions),
-            pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
-            suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
-          }
-        ] : [];
-        const shownHazards = cappedHazards(freshHazards);
-        const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
-        const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)), { fileKeys: rels });
+        const decisionParts = freshDecisions.length ? [{
+          kind: "ordinary",
+          contentClass: "discovery",
+          identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+          text: renderDecisionPointers(rels.join(", "), freshDecisions),
+          pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
+          suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionWiden}`
+        }] : [];
         parts.push(
-          ...porch.text ? porch.parts : [{ kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) }, ...hazardParts(freshHazards, { fileKeys: rels })],
-          ...porch.text ? deferredHazards : [],
-          ...porch.text ? [...decisionParts, ...ownerParts] : [...ownerParts, ...decisionParts]
+          { kind: "ordinary", contentClass: "chrome", text: payloadHeaderLine(rels.join(", ")) },
+          ...hazardParts(freshHazards, { fileKeys: rels }),
+          ...ownerParts,
+          ...decisionParts
         );
       }
       if (subjectHazards.length || subjectDecisions.length) {
@@ -9201,25 +8869,9 @@ async function main(input2) {
       }
       const allParts = [...leadingChromeParts, ...parts, ...trailingChromeParts];
       const assembled = assembleDelivery(allParts, totalCap);
-      return { payload: assembled.text, porchText, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
+      return { payload: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
     };
-    const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
-    const actualCounts = (built2) => {
-      const below = built2.payload.slice(leadingChromePrefixLen + built2.porchText.length);
-      return {
-        pathM: shownPathDecisions.filter((r) => below.includes(r.id)).length,
-        subjN: shownSubjectHazards.filter((r) => below.includes(r.id)).length,
-        subjP: shownSubjectDecisions.filter((r) => below.includes(r.id)).length
-      };
-    };
-    let counts = { pathM: shownPathDecisions.length, subjN: shownSubjectHazards.length, subjP: shownSubjectDecisions.length };
-    let built = assemble(counts);
-    for (let i = 0; i < 3; i++) {
-      const actual = actualCounts(built);
-      if (actual.pathM === counts.pathM && actual.subjN === counts.subjN && actual.subjP === counts.subjP) break;
-      counts = actual;
-      built = assemble(counts);
-    }
+    const built = assemble();
     const out = built.payload;
     const recordStaged = () => {
       markSubstanceDelivered(guard, built.emittedSubstance);
@@ -9242,4 +8894,4 @@ async function main(input2) {
     return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
   }
 }
-await main(input);
+main(input);

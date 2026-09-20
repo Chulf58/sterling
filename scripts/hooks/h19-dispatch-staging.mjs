@@ -54,14 +54,9 @@ import {
   renderArticle,
   isOwnerDiscoveryOnly,
   renderReference,
-  cappedHazards,
   renderDecisionPointers,
-  DECISION_POINTER_CAP,
   rankFileDecisionPointers,
   payloadHeaderLine,
-  porchHeaderLine,
-  renderPorch,
-  resolvePorchBudget,
   extractAxisTerms,
   axisHits,
   AXIS_MIN_HITS,
@@ -101,12 +96,6 @@ const RETURN_CONTRACT =
   'conclusion, not a work transcript: maximum ~250 words; no pasted diffs, raw ' +
   'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
   'relevant files/tests, and unresolved risks.';
-
-// PORCH BUDGET (config.delivery.preview_budget_bytes) — resolvePorchBudget is
-// now ONE shared resolver in lib/delivery.mjs (decision 0050a536 §5 amendment,
-// consolidation rule: the porch gained a second caller — h19-knowledge-
-// delivery.mjs's direct-inject rungs — so the resolver moved to the one file
-// both hooks already import from, rather than a second hand-copied reader).
 
 const input = readStdin();
 
@@ -346,7 +335,7 @@ async function main(input) {
     // RANKED ONCE, AT THE BIRTH POINT — the SAME defect and the same repair as
     // h19-knowledge-delivery.mjs (2026-09-06). This is the
     // PATH channel: the store's file_keys join degenerates to newest-first, so
-    // capping at DECISION_POINTER_CAP below evicted the older standing rulings on
+    // capping in the renderer below evicted the older standing rulings on
     // any file carrying more decisions than the cap. Ranking here — not at the
     // slice, not at the renderer — is what keeps the guard slice, the render call
     // and this array in ONE order; re-sorting at any of them would mark one set
@@ -363,32 +352,22 @@ async function main(input) {
     );
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish('');
 
-    const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+    // LOAD-BEARING, deliberately uncaught: a corrupt config.json must fail the
+    // staging payload shut under the shared-fate ruling pinned by
+    // h19-dispatch-staging.test.mjs:533 ("H19+H28 shared-fate"). Do not wrap
+    // this or replace it with an unused binding; the outer catch preserves the
+    // return contract while withholding knowledge delivery. Its POSITION is
+    // load-bearing too: throwing before dispatch resolution leaves its slot unbound.
+    loadConfig(input.cwd);
 
-    // PORCH BUDGET applies to the PREFIX OF THE COMPLETE additionalContext —
-    // combinedContext() places activePlanLine BEFORE the payload, so its bytes
-    // (plus the '\n\n' separator combinedContext joins with) are subtracted
-    // here rather than the porch being sized against the payload alone, which
-    // would silently overrun once a plan-lock line is present.
-    const rawPorchBudget = resolvePorchBudget(input.cwd);
-    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}\n\n`, 'utf8') : 0;
-    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
-
-    // SUBJECT CHANNEL RENDERED SLICES — computed HERE, ahead of the porch build
-    // below, so the porch-end line's subject counts are the RENDERED (post-cap)
-    // ACTUALS the ruling requires (decision 0050a536 §5 amendment), not the raw
-    // candidate counts freshSubject.length would give. Splitting subjectHazards/
-    // subjectDecisions out of freshSubject is unchanged from before — only the
-    // POSITION moved, so the "beyond any file the task names" block below reads
-    // identically off the same two arrays.
+    // Split subject matches by their delivery class. The “beyond any file the
+    // task names” block below reads from these same arrays.
     const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
     const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
-    const shownSubjectHazards = cappedHazards(subjectHazards);
-    const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
 
     // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery in
     // lib/delivery.mjs — decision 92088a62's ONE ASSEMBLER). Hazards are
-    // complete unbudgeted substance; the porch, article bodies, decisions,
+    // complete unbudgeted substance; article bodies, decisions,
     // and every other ordinary line share the cap and degrade to
     // `knowledge_get <id>` pointers. CHROME IS CHARGED TOO (item 6): the
     // active-plan line, TDD posture, unattributable-start disclosure and the
@@ -399,79 +378,35 @@ async function main(input) {
     // smaller cap escape by 12,888 B when this text was appended AFTER
     // capping (Sol's reproduction).
     const totalCap = resolveTotalCap(input.cwd);
-    const cappedPorchBudget = totalCap > 0 ? Math.min(porchBudget, totalCap) : porchBudget;
     const leadingChromeParts = activePlanLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: activePlanLine }] : [];
     const trailingChromeParts = [
       ...(tddPostureLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: tddPostureLine }] : []),
       ...(unattributableLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: unattributableLine }] : []),
       ...(!EXEMPT_AGENT_TYPES.has(input.agent_type) ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: RETURN_CONTRACT }] : []),
     ];
-    const leadingChromePrefixLen = leadingChromeParts.length ? leadingChromeParts[0].text.length + 2 : 0;
-    const assemble = (counts) => {
+    const assemble = () => {
       const parts = [];
-      let porchText = '';
       if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-        // The porch's own hazard cap mirrors renderHazards' (HAZARD_CAP,
-        // severity-sorted); porch.hazardsRendered decides whether the remainder
-        // renders hazards itself, so they appear exactly once.
-        const referenceOwnersForPorch = freshOwners.filter((r) => r.type === 'reference_material');
-        let porch =
-          cappedPorchBudget > 0
-          ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, cappedPorchBudget, {
-                articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
-                referencePointerCount: referenceOwnersForPorch.length,
-                pathDecisionPointerCount: counts.pathM,
-                hasSubjectChannel: true,
-                subjectHazardCount: counts.subjN,
-                subjectDecisionPointerCount: counts.subjP,
-                fileKeys: rels,
-              })
-            : { text: '', hazardsRendered: false };
         const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(',')}] cap:${freshDecisions.length}`;
-        porchText = porch.text;
-        // CONTENT CLASS BY WHAT WAS ACTUALLY RENDERED (fix-round HIGH 2 /
-        // MEDIUM 3) — see h19-knowledge-delivery.mjs's identical comment: a
-        // reference_material pointer and an oversize article's DIGEST are
-        // never "complete text", so neither may spend a substance mark.
-        // `isOwnerDiscoveryOnly` is the SAME predicate `freshOwners` above
-        // filters against.
         const ownerParts = freshOwners.map((r) => {
           const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r);
           const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
           return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
         });
         const decisionParts = freshDecisions.length
-          ? [
-              {
-                kind: 'ordinary', contentClass: 'discovery',
-                identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-                text: renderDecisionPointers(rels.join(', '), freshDecisions),
-                pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
-                suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
-              },
-            ]
+          ? [{
+              kind: 'ordinary', contentClass: 'discovery',
+              identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+              text: renderDecisionPointers(rels.join(', '), freshDecisions),
+              pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
+              suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
+            }]
           : [];
-        // STRUCTURED PARTS FROM renderPorch DIRECTLY (fix-round MEDIUM 6) —
-        // see h19-knowledge-delivery.mjs's identical comment: the porch
-        // returns `parts` (including identity-tagged embedded hazards)
-        // itself now, so there is no assembled porch STRING to re-parse
-        // (`partitionPorchHazards`, deleted) and no manual re-tagging pass.
-        const shownHazards = cappedHazards(freshHazards);
-        const deferredHazardIds = new Set(porch.deferred_hazard_ids ?? []);
-        const deferredHazards = hazardParts(shownHazards.filter((hazard) => deferredHazardIds.has(hazard.id)), { fileKeys: rels });
         parts.push(
-          // NOT `shownHazards` here (fix-round MEDIUM 5): that list is
-          // ALREADY capped to HAZARD_CAP for the porch-coordination logic
-          // above, so handing it to hazardParts would make its OWN internal
-          // cap a no-op and silently swallow the "N more hazard(s) NOT
-          // shown" disclosure whenever there were more than HAZARD_CAP path
-          // hazards and no porch to disclose it another way (h19-knowledge-
-          // delivery.mjs's equivalent branch already passes the full list).
-          ...(porch.text ? porch.parts : [{ kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) }, ...hazardParts(freshHazards, { fileKeys: rels })]),
-          ...(porch.text ? deferredHazards : []),
-          // With a porch the owners' digests are already delivered, so the
-          // decision pointers take the remaining budget before full bodies.
-          ...(porch.text ? [...decisionParts, ...ownerParts] : [...ownerParts, ...decisionParts])
+          { kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
+          ...hazardParts(freshHazards, { fileKeys: rels }),
+          ...ownerParts,
+          ...decisionParts
         );
       }
       if (subjectHazards.length || subjectDecisions.length) {
@@ -506,37 +441,13 @@ async function main(input) {
       }
       const allParts = [...leadingChromeParts, ...parts, ...trailingChromeParts];
       const assembled = assembleDelivery(allParts, totalCap);
-      return { payload: assembled.text, porchText, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
+      return { payload: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
     };
-    // PORCH SELF-REPORT = POST-CAP ACTUALS: the porch-end line states how many
-    // decision pointers and subject records follow it, and the cap decides that
-    // only after the porch is sized — so re-render until the report matches
-    // what was emitted (the porch changes only by digits; converges at once).
-    const shownPathDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
-    const actualCounts = (built) => {
-      // The leading chrome part (if any) is PINNED, so it always renders in
-      // full ahead of the porch — skip exactly its known length + separator
-      // (decision 92088a62 item 6: chrome is now a real, charged PART of this
-      // same composed string, so the porch no longer starts at offset 0).
-      const below = built.payload.slice(leadingChromePrefixLen + built.porchText.length);
-      return {
-        pathM: shownPathDecisions.filter((r) => below.includes(r.id)).length,
-        subjN: shownSubjectHazards.filter((r) => below.includes(r.id)).length,
-        subjP: shownSubjectDecisions.filter((r) => below.includes(r.id)).length,
-      };
-    };
-    let counts = { pathM: shownPathDecisions.length, subjN: shownSubjectHazards.length, subjP: shownSubjectDecisions.length };
-    let built = assemble(counts);
-    for (let i = 0; i < 3; i++) {
-      const actual = actualCounts(built);
-      if (actual.pathM === counts.pathM && actual.subjN === counts.subjN && actual.subjP === counts.subjP) break;
-      counts = actual;
-      built = assemble(counts);
-    }
     // `built.payload` is now the WHOLE composed context — chrome (plan line,
     // TDD posture, unattributable-start line, return contract) was assembled
     // IN, not appended after (item 6) — so there is no separate
     // combinedContext(payload) call left to make on this path.
+    const built = assemble();
     const out = built.payload;
 
     // Side effect first, guard second (the ordering rule
@@ -592,4 +503,4 @@ async function main(input) {
   }
 }
 
-await main(input);
+main(input);

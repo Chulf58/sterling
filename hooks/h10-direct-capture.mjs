@@ -5084,30 +5084,12 @@ var configSchema = external_exports.object({
     // configs. Parsed configuration exposes only the surviving read rung.
     injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800),
     // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
     // "H19 gets a per-delivery total cap and cross-entry dedup across the
     // turn"): scripts/hooks/lib/delivery.mjs reads this at
     // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
     // absent/invalid value falls back to the same default there, same
-    // three-state guard as preview_budget_bytes above.
+    // three-state guard used for other config-derived delivery values.
     total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
@@ -8052,52 +8034,8 @@ function publishNotice(cwd, text) {
   renameSync3(tmp, target);
   return target;
 }
-var CITATION_BOILERPLATE_WORDS = [
-  "knowledge_get",
-  "anti_pattern",
-  "decisions",
-  "decision",
-  "rulings",
-  "ruling",
-  "overriding",
-  "overrides",
-  "override",
-  "ids",
-  "id"
-];
-var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
-var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
-var PORCH_BYTE_COUNT_RESERVE = "000000";
-function porchByteLen(s2) {
-  return Buffer.byteLength(String(s2 ?? ""), "utf8");
-}
-function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
-  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
-}
-function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
-  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
-}
-function porchEndLine(byteCountText, meta) {
-  const { pathDecisionPointerCount } = meta;
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
-}
-var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
-var PORCH_END_TEMPLATE_BYTES = porchByteLen(
-  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
-    articleBodiesCount: 99,
-    referencePointerCount: 99,
-    pathDecisionPointerCount: 99,
-    hasSubjectChannel: true,
-    subjectHazardCount: 99,
-    subjectDecisionPointerCount: 99
-  })
-);
-var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
-function payloadHeaderLine(rel) {
-  return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
-}
 
 // scripts/hooks/h10-direct-capture.mjs
 async function computeDeadDispatchResidue(cwd, sessionId) {

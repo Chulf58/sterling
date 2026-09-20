@@ -397,13 +397,9 @@ function main(input) {
     // sterling-claude-code-scale-down-boundary, 2ad87dd1): H20 no longer
     // denies (exit 2) a first-attempt AskUserQuestion -- it is advisory-only
     // now, falling straight through to the loose STAGE 2 audit below, which
-    // still runs post-answer and warns non-blocking (decision 68332e4b's
-    // pre-ask deny is superseded; the deny ledger/override machinery this
-    // block owned -- denyLedgerPath, readDenyLedger, writeDenyLedger,
-    // denyIntentKey, renderDenyOnceMessage, stripCitations,
-    // extractAxisTermsUncapped, DELTA_TERMS_VERSION/DELTA_MIN_NEW_TERMS,
-    // STRICT_MIN_HITS/DENY_RULING_TYPES/hasFullNarrowCentralityCoverage -- is
-    // dead with it; see the audit below for what H20 still enforces).
+    // still runs post-answer and warns non-blocking. `DENY_RULING_TYPES` and
+    // `subQuestionText` remain imported from delivery.mjs for candidate
+    // selection above; see the audit below for what H20 enforces.
 
     // STAGE 2 — require precision against the NARROW fields (trigger/title, not
     // rationale). Stage 1's index spans long discursive fields, so an FTS hit is

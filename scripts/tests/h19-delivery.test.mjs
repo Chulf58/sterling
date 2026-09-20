@@ -185,7 +185,7 @@ test('review H3: Bash pointer package stays capped and admits exactly HAZARD_CAP
     assert.match(ctx, /5 more hazard\(s\) NOT shown \(cap 3\)/, '5 of the 8 considered hazards are disclosed as an overflow count');
   } finally { cleanup(); }
 });
-test('review H3: a Read porch with a hazard and large article keeps ordinary bytes within the cap', () => {
+test('review H3: a Read delivery with a hazard and large article keeps ordinary bytes within the cap', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: 'read', total_cap_bytes: 3000 } }));
@@ -195,7 +195,7 @@ test('review H3: a Read porch with a hazard and large article keeps ordinary byt
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     const hazardBytes = Buffer.byteLength(renderHazards([hazard], 2400, { fileKeys: ['src/read.mjs'] }).join('\n\n'));
-    assert.ok(Buffer.byteLength(ctx) - hazardBytes <= 3000, 'porch, article, and all other ordinary text stay within cap');
+    assert.ok(Buffer.byteLength(ctx) - hazardBytes <= 3000, 'article and all other ordinary text stay within cap');
     assert.match(ctx, /TRIGGER_END/);
     assert.match(ctx, /RIGHT_END/);
   } finally { cleanup(); }
