@@ -389,7 +389,7 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     // tune the config, edit the contract, modify an installed agent body
     const configPath = join(dir, '.sterling', 'config.json');
     const tuned = JSON.parse(readFileSync(configPath, 'utf8'));
-    tuned.caps.inner_loop_n = 7;
+    tuned.delegation.max_concurrent = 7;
     writeFileSync(configPath, JSON.stringify(tuned, null, 2));
     appendFileSync(join(dir, 'CLAUDE.md'), '\n## Local additions\n- the human wrote this\n');
     appendFileSync(join(dir, '.claude', 'agents', 'librarian.md'), '\nlocal tweak\n');
@@ -403,8 +403,8 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+differs\s+locally modified/m);
     assert.deepEqual(snapshot(dir), before, 'hand-edited files untouched');
     assert.equal(readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8'), agentBefore, 'modified agent untouched');
-    // tuned declarations still drive the run: caps came from the recorded config
-    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).caps.inner_loop_n, 7);
+    // tuned declarations still drive the run: delegation came from the recorded config
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).delegation.max_concurrent, 7);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -418,7 +418,7 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
     // simulate a project init'd by older code: strip the universal tag, AND tune a field
     const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
     cfg.stack_tags = cfg.stack_tags.filter((t) => t !== 'sterling'); // → ['node']
-    cfg.caps.inner_loop_n = 7; // a hand-tuning that MUST survive the managed add
+    cfg.delegation.max_concurrent = 7; // a hand-tuning that MUST survive the managed add
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     const rerun = init(dir); // flagless re-init
@@ -426,7 +426,7 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\s+added the universal 'sterling' domain/m);
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(after.stack_tags, ['node', 'sterling'], 'sterling appended; declared tag kept');
-    assert.equal(after.caps.inner_loop_n, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
+    assert.equal(after.delegation.max_concurrent, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

@@ -1403,9 +1403,13 @@ test('H10 no-capture duty: work arriving AFTER the declaration re-arms it — na
 
     const nag = stop();
     assert.equal(nag.code, 2, 'the touch AFTER the declaration re-arms the capture duty');
-    assert.match(nag.stderr, /touched 1 file/, 'only the post-declaration touch counts — the declared one does not');
-    assert.match(nag.stderr, /no-capture\.mjs/, 'the nag names the no-capture escape hatch');
-    assert.match(nag.stderr, /false declaration is drift/, 'and warns that a false declaration is drift');
+    // Wording tracks the compact one-line-per-duty format (commit bad0817:
+    // "Stop output gets SHORTER and FEWER") — explanatory clauses (the old
+    // per-command escape-hatch sentence and its "false declaration is drift"
+    // warning) were deliberately dropped in favor of an executable remedy
+    // token; CLAUDE.md/H1 carry the explanation now.
+    assert.match(nag.stderr, /capture · 1 file\(s\)/, 'only the post-declaration touch counts — the declared one does not');
+    assert.match(nag.stderr, /no_capture --reason/, 'the nag names the no-capture escape hatch');
 
     const release = stop();
     assert.equal(release.code, 0, 'second Stop releases');
