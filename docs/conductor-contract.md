@@ -63,7 +63,11 @@ The **session todo list** answers what is happening right now. It dies with the 
 
 At 50% of the model's real window H10 warns you to **finish the open work and commit it** — not stop, not clear (an unmapped model reports unreliable, no percentage; same warning). Land it, reconcile, commit, carry on.
 
-**A clear is USER-initiated — you never propose or run one.** When the user wants to `/clear`: commit first, then write the rotation note — `node <clone>/scripts/rotation-note.mjs --next-slice "<exact next slice>"` — so H1 injects and consumes it on the fresh session's `/clear`. Only in response to the user, never on your own initiative.
+**A clear is USER-initiated — you never propose or run one.** But the rotation note is NOT the clear: **write it automatically at every clean boundary** — a commit that closes a slice — without being asked, then say it is ready. `node <clone>/scripts/rotation-note.mjs --next-slice "<exact next slice>"`; H1 injects and consumes it on the fresh session's `/clear`. User-stated 2026-09-20, verbatim: *"Dont ask, just do it automatically when it is time"*, after the conductor offered to write one instead of writing it. The note's content, trigger and command are all settled, so asking spends the user's attention on a question with no alternatives — P1. Keep asking for genuine forks: irreversible actions, competing options with real trade-offs, anything needing authorization.
+
+**Say EXIT AND RELAUNCH, not just clear, when this session changed hook or MCP-server code.** A `/clear` does not reload it — the next session would run the OLD hooks against a tree containing the new ones, so any hook behaviour it verified would be measuring code no longer in the repo. The rotation note survives a relaunch, so the only cost is the restart. `rotation-note.mjs` prints this on every run; repeat it to the user when it applies.
+
+**Durable rules go in `CLAUDE.md` or this file — never into the harness's per-project memory directory.** User-stated 2026-09-20, verbatim: *"We dont use memories, we update the claude.md an other instructions"*. A memory file is invisible to every other machine, every subagent and every sibling project, and it splits the rule set into two places that drift; these two files ship with the clone and H1 injects them. Repo facts and conventions → `CLAUDE.md`; working posture → here; everything with currency or rationale → the store.
 
 ## A denied dispatch is a permission question
 
