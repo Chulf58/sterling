@@ -9,7 +9,7 @@ Sterling reviews **sparsely, and only before a commit** (user ruling, 2026-09-18
 
 ## Who reviews what — cross-family pairing, reviewer never the author
 
-- **Codex Sol** (`gpt-5.6-sol`) reviews Claude-executed work.
+- **Codex Sol** (`gpt-5.6-sol`) reviews Claude-executed work. Dispatch it through the `codex` MCP tool — never a shelled `codex exec` (user-ruled 2026-09-20) — setting `model`, `sandbox`, `approval-policy: never` and `config.model_reasoning_effort: "high"` at the call site. A review lane is `sandbox: read-only` — an enforced filesystem boundary, not a prose instruction.
 - **Claude Opus** reviews Terra-executed work.
 
 The reviewer is always the *other* family from whoever wrote the diff — never the same model checking its own output, and never routed through the agent that authored the change. This is a practice the conductor follows, not a hook or a merge gate that will catch a skipped review — which is exactly why it does not get skipped.

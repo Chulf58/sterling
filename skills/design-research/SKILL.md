@@ -52,7 +52,7 @@ Default bias: reuse what the store and repo already carry over building new mech
 3. **Gather local evidence** (repo, scout) — keep the returned context compact.
 4. **Gather external evidence** only if needed, with dates.
 5. **Separate the layers** (below) — never blur them.
-6. **For a non-trivial design, run the two-round Codex/Astra sparring pass** per CLAUDE.md before committing to a shape (shape round, then the concrete-mechanism round) — never for a routine change.
+6. **For a non-trivial design, run the two-round Codex/Astra sparring pass** per CLAUDE.md before committing to a shape (shape round, then the concrete-mechanism round) — never for a routine change, and dispatch it through the `codex` MCP tool at `model: gpt-6-astra`, `sandbox: read-only`, `approval-policy: never`, `config.model_reasoning_effort: "high"` — never a shelled `codex exec` (user-ruled 2026-09-20).
 7. **Recommend** with a clear adopt/extend/reuse/build call and the main risk, then capture the settled decision (see the `decision-records` skill).
 
 ## Evidence boundaries (non-negotiable)
