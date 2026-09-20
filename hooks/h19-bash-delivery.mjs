@@ -7316,8 +7316,32 @@ function claimLegacyInjectionRungNotice(cwd, rawRung) {
   const configured = rawRung == null ? "missing" : `'${rawRung}'`;
   return `\u24D8 STERLING: delivery.injection_rung ${configured} is obsolete and now behaves as 'read'.`;
 }
-function guardPath(cwd, agentId) {
-  return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
+}
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join3(deliveryDir(cwd), component);
+}
+function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join3(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -7363,6 +7387,7 @@ function markGapDelivered(guard, records) {
   }
 }
 function readGuard(path) {
+  if (!path) return emptyDeliveryGuard();
   try {
     if (!existsSync3(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync2(path, "utf8"));
@@ -7375,6 +7400,7 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
+  if (!path) return;
   mkdirSync2(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
@@ -7802,7 +7828,7 @@ function main(input2) {
   try {
     const rawRung = loadConfig(input2.cwd)?.delivery?.injection_rung;
     const migrationNotice = claimLegacyInjectionRungNotice(input2.cwd, rawRung);
-    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
     const entries = [];
     for (const candidate of extractCommandPathCandidates(command)) {

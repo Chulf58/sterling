@@ -1,23 +1,15 @@
-// H19 lifecycle — SessionStart clears the delivery state (P4): the
-// delivered-guard's TTL is the whole session, so a NEW session starts clean.
-//
-// EXCEPTION — a rotation-note continuation (board 5a807e68) is NOT a genuine
-// new session: the conductor deliberately /clear'd mid-campaign via
-// scripts/rotation-note.mjs, and H1 restores that context on this exact
-// SessionStart (source=clear). Wiping the guard there would re-deliver
-// everything the still-continuing work already saw. The note's presence is
-// the signal (H1 consumes it after this hook runs, so it is still here to
-// check).
-import { rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+// H19 lifecycle — delivery receipts expire when compacted context loses them.
+// A fresh startup or /clear receives a new session id and therefore a new,
+// empty directory; resume continues the same logical session and keeps it.
+// This is the delivery-guard sibling of H1's read-evidence clear block.
+import { rmSync } from 'node:fs';
 import { readStdin, allow } from './lib/common.mjs';
-import { deliveryDir } from './lib/delivery.mjs';
+import { deliverySessionDir } from './lib/delivery.mjs';
 
 const input = readStdin();
-const dir = deliveryDir(input.cwd);
-const rotationNotePath = join(input.cwd, '.sterling', 'transient', 'rotation-note.json');
-
-if (!existsSync(rotationNotePath) && existsSync(dir)) {
-  rmSync(dir, { recursive: true, force: true });
+if (input.source === 'compact') {
+  const dir = deliverySessionDir(input.cwd, input.session_id);
+  // A null directory means no session identity, so there is no safe target.
+  if (dir) rmSync(dir, { recursive: true, force: true });
 }
 allow();

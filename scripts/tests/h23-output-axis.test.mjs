@@ -132,7 +132,7 @@ function makeProject() {
 }
 
 const guardOf = (dir) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json');
+  const p = join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json');
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : { records: [], frontier_files: [] };
 };
 
@@ -141,6 +141,7 @@ const postRead = (dir, file, response, extra = {}) => ({
   tool_name: 'Read',
   tool_input: { file_path: join(dir, file) },
   tool_response: response,
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -150,6 +151,7 @@ const postBash = (dir, command, response, extra = {}) => ({
   tool_name: 'Bash',
   tool_input: { command },
   tool_response: response,
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });

@@ -90,7 +90,7 @@ function main(input) {
     const hazards = store.query({ types: ['anti_pattern'], file_keys: [rel], cap: 100 });
     const decisions = store.query({ types: ['decision'], file_keys: [rel], cap: 100 });
 
-    const gPath = guardPath(input.cwd, input.agent_id);
+    const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
     const guard = readGuard(gPath);
 
     // Dedup by record id, not by file: a new file owned by an already-delivered

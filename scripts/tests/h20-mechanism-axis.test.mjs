@@ -86,7 +86,7 @@ function makeProject() {
 }
 
 function dispatch(dir, prompt, subagent_type = 'coder') {
-  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, session_id: 's1', cwd: dir };
 }
 
 /** The AskUserQuestion surface — note it has NO prompt field at all. */
@@ -95,6 +95,7 @@ function askQuestion(dir, question, options = [], header = 'Choice') {
     hook_event_name: 'PreToolUse',
     tool_name: 'AskUserQuestion',
     tool_input: { questions: [{ question, header, multiSelect: false, options }] },
+    session_id: 's1',
     cwd: dir,
   };
 }

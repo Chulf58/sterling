@@ -6,8 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h19-clear-session.mjs
-import { rmSync, existsSync as existsSync2 } from "node:fs";
-import { join as join3 } from "node:path";
+import { rmSync } from "node:fs";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -5023,12 +5022,12 @@ var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
   if (!from) return null;
-  let dir2 = resolve(String(from));
+  let dir = resolve(String(from));
   for (; ; ) {
-    if (existsSync(join(dir2, ".sterling", "sterling.db"))) return dir2;
-    const parent = dirname(dir2);
-    if (parent === dir2) return null;
-    dir2 = parent;
+    if (existsSync(join(dir, ".sterling", "sterling.db"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
   }
 }
 function readStdin() {
@@ -5149,6 +5148,29 @@ import { join as join2, dirname as dirname2 } from "node:path";
 function deliveryDir(cwd) {
   return join2(cwd, ".sterling", "transient", "delivery");
 }
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
+}
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join2(deliveryDir(cwd), component);
+}
 var CITATION_BOILERPLATE_WORDS = [
   "knowledge_get",
   "anti_pattern",
@@ -5198,9 +5220,8 @@ function payloadHeaderLine(rel) {
 
 // scripts/hooks/h19-clear-session.mjs
 var input = readStdin();
-var dir = deliveryDir(input.cwd);
-var rotationNotePath = join3(input.cwd, ".sterling", "transient", "rotation-note.json");
-if (!existsSync2(rotationNotePath) && existsSync2(dir)) {
-  rmSync(dir, { recursive: true, force: true });
+if (input.source === "compact") {
+  const dir = deliverySessionDir(input.cwd, input.session_id);
+  if (dir) rmSync(dir, { recursive: true, force: true });
 }
 allow();

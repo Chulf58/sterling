@@ -8226,8 +8226,32 @@ var REVIEW_TERRITORY_LINE_RE = /^[ \t]*REVIEW-TERRITORY:[ \t]*\[[^\n]*\][ \t]*\r
 function stripReviewTerritoryLine(text) {
   return String(text ?? "").replace(REVIEW_TERRITORY_LINE_RE, "");
 }
-function guardPath(cwd, agentId) {
-  return join5(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
+}
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join5(deliveryDir(cwd), component);
+}
+function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join5(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -8261,6 +8285,7 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
   markRevisionDelivered(guard.discovery, emittedDiscovery);
 }
 function readGuard(path) {
+  if (!path) return emptyDeliveryGuard();
   try {
     if (!existsSync5(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync3(path, "utf8"));
@@ -8273,6 +8298,7 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
+  if (!path) return;
   mkdirSync4(dirname4(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync3(tmp, JSON.stringify(guard));
@@ -9079,7 +9105,7 @@ async function main(input2) {
     }
     subjectMatches.sort((a, b) => b.hits.length - a.hits.length);
     if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish("");
-    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
     const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
     const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));

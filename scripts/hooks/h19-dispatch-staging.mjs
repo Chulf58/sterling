@@ -330,7 +330,7 @@ async function main(input) {
     // second frontier surface).
     if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish('');
 
-    const gPath = guardPath(input.cwd, input.agent_id);
+    const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
     const guard = readGuard(gPath);
 
     // Hazards render as SUBSTANCE (whole hazard block) here; decisions and the

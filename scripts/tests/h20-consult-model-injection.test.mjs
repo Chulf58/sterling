@@ -103,7 +103,7 @@ function cfg({ enabled = true, model } = {}) {
 }
 
 function consult(dir, tool_input, tool_name = 'mcp__codex__codex') {
-  return { hook_event_name: 'PreToolUse', tool_name, tool_input, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name, tool_input, session_id: 's1', cwd: dir };
 }
 
 /**
@@ -609,7 +609,7 @@ test('M-10: a post-envelope bookkeeping failure (guard-file write EISDIR) never 
     seedMotivatingRecord(store);
     // Force the bookkeeping step's renameSync to throw EISDIR: plant a
     // DIRECTORY at the exact path the guard-file write targets.
-    mkdirSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), { recursive: true });
+    mkdirSync(join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json'), { recursive: true });
 
     const r = runHook(consult(dir, { prompt: M10_PROMPT }), dir);
 

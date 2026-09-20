@@ -12,7 +12,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const hook = join(root, 'scripts/hooks/h19-delivery-drain.mjs');
 const helper = join(root, 'scripts/hooks/lib/delivery.mjs');
 const project = () => { const dir = mkdtempSync(join(tmpdir(), 'sterling-step2-')); mkdirSync(join(dir, '.sterling'), { recursive: true }); return dir; };
-const drain = (cwd) => spawnSync(process.execPath, [hook], { cwd, input: JSON.stringify({ cwd }), encoding: 'utf8' });
+const drain = (cwd) => spawnSync(process.execPath, [hook], { cwd, input: JSON.stringify({ cwd, session_id: 's1' }), encoding: 'utf8' });
 
 test('step 2: legacy prompt parses and maps to read', () => {
   assert.equal(parseConfig({ delivery: { injection_rung: 'prompt' } }).delivery.injection_rung, 'read');

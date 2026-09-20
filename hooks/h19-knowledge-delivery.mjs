@@ -7329,8 +7329,32 @@ function claimLegacyInjectionRungNotice(cwd, rawRung) {
   const configured = rawRung == null ? "missing" : `'${rawRung}'`;
   return `\u24D8 STERLING: delivery.injection_rung ${configured} is obsolete and now behaves as 'read'.`;
 }
-function guardPath(cwd, agentId) {
-  return join3(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
+}
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join3(deliveryDir(cwd), component);
+}
+function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join3(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
@@ -7364,6 +7388,7 @@ function markDiscoveryDelivered(guard, emittedDiscovery) {
   markRevisionDelivered(guard.discovery, emittedDiscovery);
 }
 function readGuard(path) {
+  if (!path) return emptyDeliveryGuard();
   try {
     if (!existsSync3(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync2(path, "utf8"));
@@ -7376,6 +7401,7 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
+  if (!path) return;
   mkdirSync2(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
@@ -8152,7 +8178,7 @@ function main(input2) {
     const owners = store.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
     const hazards = store.query({ types: ["anti_pattern"], file_keys: [rel], cap: 100 });
     const decisions = store.query({ types: ["decision"], file_keys: [rel], cap: 100 });
-    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
     const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
     const freshOwners = owners.filter((r) => isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r));

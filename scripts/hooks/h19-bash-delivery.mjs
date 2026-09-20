@@ -61,7 +61,7 @@ function main(input) {
   const migrationNotice = claimLegacyInjectionRungNotice(input.cwd, rawRung);
 
   // No run gating: every context gets its own direct advisory.
-  const gPath = guardPath(input.cwd, input.agent_id);
+  const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
   const guard = readGuard(gPath);
 
   const entries = [];

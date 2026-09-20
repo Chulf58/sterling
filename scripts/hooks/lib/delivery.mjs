@@ -1,9 +1,8 @@
 // H19 knowledge-delivery plumbing (decision 6dfbe675, concept family
 // knowledge-delivery): guard ledger, notice state, payload rendering.
-// Transient, session-lifecycle-bound (P4): everything under
-// .sterling/transient/delivery/ is cleared by h19-clear-session at SessionStart
-// — the delivered-guard's TTL is the whole session by design (grill answer:
-// whole session, no expiry; re-arm rides per-file/per-record keying).
+// Transient, session-lifecycle-bound (P4): guard files live below a directory
+// named for their Claude session. h19-clear-session removes only the current
+// session's directory on compaction; a new session selects a new directory.
 import { readFileSync, writeFileSync, mkdirSync, existsSync, renameSync, openSync, closeSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { loadConfig } from './common.mjs';
@@ -132,11 +131,43 @@ export function outgoingProposalText(toolInput) {
 
 
 
-/** Per-agent guard: which record ids / frontier files were already delivered
- *  this session. The conductor (no agent_id) and every subagent get their own
- *  file — delivery is per-context, mirroring H13's per-agent read ledgers. */
-export function guardPath(cwd, agentId) {
-  return join(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : 'guard-conductor.json');
+/** A path component derived from an externally supplied Claude session id.
+ *  Percent encoding keeps separators and traversal syntax out of the
+ *  filesystem path; dot-only components are additionally encoded. */
+export function sanitizeSessionId(sessionId) {
+  // encodeURIComponent THROWS URIError on a lone surrogate. An unparseable id
+  // is an ABSENT id, not a crash: returning null routes it to the same
+  // disclosed no-dedup path as a missing one (P5 — degrade loud, not fatal).
+  let encoded;
+  try { encoded = encodeURIComponent(String(sessionId)); }
+  catch { return null; }
+  if (!encoded) return '%00';
+  return encoded === '.' ? '%2E' : encoded === '..' ? '%2E%2E' : encoded;
+}
+
+/** The per-session delivery directory, or null when there is no session
+ *  identity. There is deliberately NO flat-path fallback: sharing a guard
+ *  between sessions would restore the cross-session suppression defect. */
+export function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? '' : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write('H19: session_id missing — delivery deduplication disabled; guard will not be read or written\n');
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write('H19: session_id is not encodable — delivery deduplication disabled; guard will not be read or written\n');
+    return null;
+  }
+  return join(deliveryDir(cwd), component);
+}
+
+/** Per-agent guard: which records were delivered in this session and context.
+ *  The conductor (no agent_id) and every subagent get their own file below the
+ *  session directory, mirroring H13's per-agent read ledgers. */
+export function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join(dir, agentId ? `guard-agent-${agentId}.json` : 'guard-conductor.json') : null;
 }
 
 /** GUARD SCHEMA VERSION 2 (decision 92088a62, delivery-migration step 3): the
@@ -283,6 +314,9 @@ export function markGapDelivered(guard, records) {
 }
 
 export function readGuard(path) {
+  // A missing session id is an announced degraded mode (guardPath returns
+  // null): every read must start empty so this invocation cannot deduplicate.
+  if (!path) return emptyDeliveryGuard();
   // Self-healing: a torn/corrupt guard resets to empty (worst case a duplicate
   // delivery) instead of disabling delivery for the rest of the session.
   try {
@@ -307,6 +341,8 @@ export function readGuard(path) {
 }
 
 export function writeGuard(path, guard) {
+  // See readGuard: never create a shared fallback guard without a session id.
+  if (!path) return;
   mkdirSync(dirname(path), { recursive: true });
   // tmp+rename (torn-guard prevention, board 5e3d6ff4 fixer pass): NOT locked —
   // a lost update here costs at most one duplicate pointer/guard entry, and
@@ -427,11 +463,11 @@ export const DELTA_MIN_NEW_TERMS = 5;
  *  GENUINE v1 entry the original attempt's terms beyond the old 16-slot cap were
  *  never recorded and are unrecoverable, so the union re-seed cannot restore
  *  them and an attempt after the re-seed can reintroduce up to five of those
- *  lost words as "new". Exposure is bounded to the single session that spans a
- *  hook upgrade — the deny ledger is session-transient, cleared at SessionStart
- *  — and every entry seeded at v2 carries its full uncapped baseline, so the
- *  path is closed going forward; chasing the historical remainder would cost
- *  more machinery than the one-session window is worth. Related and likewise
+ *  lost words as "new". Exposure is bounded to surviving v1 entries after a
+ *  hook upgrade: their first re-ask re-seeds the ledger, and every entry seeded
+ *  at v2 carries its full uncapped baseline, so the path is closed going
+ *  forward; chasing the historical remainder would cost more machinery than
+ *  the one-upgrade transition is worth. Related and likewise
  *  accepted: a HAND-FRAGMENTED citation — the 8-char prefix plus the id's
  *  remaining hex groups written loose — still satisfies idCitedIn on the prefix
  *  while the loose groups survive stripCitations (they are neither a canonical

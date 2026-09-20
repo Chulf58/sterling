@@ -267,7 +267,7 @@ test('review H2: wholly held-back and partially served Bash paths remain retryab
     assert.ok(!payload.includes(held.id) && !payload.includes(rels[2]), 'last path has no printed record');
     assert.match(payload, /more pointer line/);
     assert.doesNotMatch(payload, /paths? (?:printed )?above/, 'the overflow remedy includes paths absent from the printed block');
-    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), 'utf8'));
+    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json'), 'utf8'));
     assert.ok(guard.pointer_files.includes(rels[0]));
     assert.ok(!guard.pointer_files.includes(rels[1]) && !guard.pointer_files.includes(rels[2]), 'partial and wholly omitted paths are unspent');
     const retry = ctxOf(runHook('h19-bash-delivery.mjs', postBash(dir, `cat ${rels[2]}`), dir));

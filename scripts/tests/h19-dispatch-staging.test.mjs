@@ -156,7 +156,7 @@ const subagentStart = (dir, transcriptPath, extra = {}) => ({
 });
 
 const guardOf = (dir, agentId) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', `guard-agent-${agentId}.json`);
+  const p = join(dir, '.sterling', 'transient', 'delivery', 's1', `guard-agent-${agentId}.json`);
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
 };
 

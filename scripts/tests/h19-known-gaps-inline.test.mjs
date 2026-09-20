@@ -114,6 +114,7 @@ const postRead = (dir, file, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Read',
   tool_input: { file_path: join(dir, file) },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -122,6 +123,7 @@ const postBash = (dir, command, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Bash',
   tool_input: { command },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });

@@ -101,6 +101,7 @@ const postRead = (dir, file, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Read',
   tool_input: { file_path: join(dir, file) },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -108,6 +109,7 @@ const preEdit = (dir, file, extra = {}) => ({
   hook_event_name: 'PreToolUse',
   tool_name: 'Edit',
   tool_input: { file_path: join(dir, file) },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -315,7 +317,7 @@ test('self-healing: corrupt guard resets and delivers directly', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const d = join(dir, '.sterling', 'transient', 'delivery'); mkdirSync(d, { recursive: true });
+    const d = join(dir, '.sterling', 'transient', 'delivery', 's1'); mkdirSync(d, { recursive: true });
     writeFileSync(join(d, 'guard-conductor.json'), '{not json');
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
     assert.equal(r.code, 0, r.stderr);
@@ -376,7 +378,7 @@ test('ordering: a delivery that FAILS leaves the guard unwritten, so the next to
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
-    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    const dDir = join(dir, '.sterling', 'transient', 'delivery', 's1');
     mkdirSync(join(dDir, 'guard-conductor.json'), { recursive: true });
 
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
@@ -399,7 +401,7 @@ test('ordering (frontier): a failed unowned-territory notice leaves the file unm
   const { dir, store, cleanup } = makeProject();
   try {
     // no owning article for src/orphan.mjs — the frontier path
-    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    const dDir = join(dir, '.sterling', 'transient', 'delivery', 's1');
     mkdirSync(join(dDir, 'guard-conductor.json'), { recursive: true });
 
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
@@ -416,14 +418,14 @@ test('ordering (frontier): a failed unowned-territory notice leaves the file unm
   }
 });
 
-test('h19-clear-session: SessionStart removes the delivery guard (whole-session TTL, P4)', () => {
+test('h19-clear-session: compact removes this session delivery guard (P4)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
     runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    const deliveryDir = join(dir, '.sterling', 'transient', 'delivery');
+    const deliveryDir = join(dir, '.sterling', 'transient', 'delivery', 's1');
     assert.ok(existsSync(deliveryDir));
-    const r = runHook('h19-clear-session.mjs', { hook_event_name: 'SessionStart', cwd: dir }, dir);
+    const r = runHook('h19-clear-session.mjs', { hook_event_name: 'SessionStart', source: 'compact', session_id: 's1', cwd: dir }, dir);
     assert.equal(r.code, 0);
     assert.ok(!existsSync(deliveryDir));
   } finally {
@@ -1070,6 +1072,7 @@ const postBash = (dir, command, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Bash',
   tool_input: { command },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });

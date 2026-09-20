@@ -93,12 +93,12 @@ function makeProject() {
 
 /** Same PreToolUse shape as a codex consult — tool_input carries `prompt` only, no subagent_type. */
 function consult(dir, prompt, tool_name = 'mcp__codex__codex') {
-  return { hook_event_name: 'PreToolUse', tool_name, tool_input: { prompt }, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name, tool_input: { prompt }, session_id: 's1', cwd: dir };
 }
 
 /** The existing Task dispatch shape, copied verbatim from h20-mechanism-axis.test.mjs's helper. */
 function dispatch(dir, prompt, subagent_type = 'coder') {
-  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, session_id: 's1', cwd: dir };
 }
 
 // The motivating fixture, copied verbatim from h20-mechanism-axis.test.mjs's
@@ -248,7 +248,7 @@ test('INERT: a codex tool_name with no prompt field at all draws NO relevance ca
   const { dir, store, cleanup } = makeProject();
   try {
     fileMotivatingRecord(store);
-    const r = runHook({ hook_event_name: 'PreToolUse', tool_name: 'mcp__codex__codex', tool_input: {}, cwd: dir }, dir);
+    const r = runHook({ hook_event_name: 'PreToolUse', tool_name: 'mcp__codex__codex', tool_input: {}, session_id: 's1', cwd: dir }, dir);
     assert.equal(r.code, 0, 'a prompt-less consult is never denied (decision ea68735d point 3 — advisory, never gating)');
     assert.notEqual(r.stdout.trim(), '', 'the model-pin envelope is emitted even on the shape that carries no relevance — the pin runs BEFORE the early exits (board 7423f7a2)');
 

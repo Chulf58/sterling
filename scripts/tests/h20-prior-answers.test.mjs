@@ -91,7 +91,7 @@ function makeProject() {
 }
 
 function dispatch(dir, prompt) {
-  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'debugger', prompt }, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'debugger', prompt }, session_id: 's1', cwd: dir };
 }
 
 // Same proven floor-clearing vocabulary idiom as the sibling h20 files.

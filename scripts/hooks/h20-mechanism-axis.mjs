@@ -427,7 +427,7 @@ function main(input) {
     // already delivered by file-touch is already in this context — re-injecting it
     // at dispatch is the duplicate H19's own guard exists to prevent, and the
     // reverse holds too (what H20 delivers, H19 will not repeat).
-    const gPath = guardPath(input.cwd, input.agent_id);
+    const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
     const guard = readGuard(gPath);
     // Conservative pre-filter: a candidate already shown at ALL this session
     // (either ledger) is dropped from consideration here — the per-type

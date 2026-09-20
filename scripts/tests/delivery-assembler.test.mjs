@@ -367,6 +367,8 @@ function makeProject() {
   return { dir, store, cleanup };
 }
 
+const conductorGuard = (dir) => join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json');
+
 test('REGRESSION: an H20 article pointer does NOT suppress the later full H19 article for the same record', () => {
   const { dir, store, cleanup } = makeProject();
   try {
@@ -408,7 +410,7 @@ test('REGRESSION: an H20 article pointer does NOT suppress the later full H19 ar
     const readCtx = JSON.parse(read.stdout).hookSpecificOutput.additionalContext;
     assert.match(readCtx, /quokkaburst widget subsystem handles quokkaburst widget rendering end to end/, 'the FULL article body still delivers — the H20 pointer did not suppress it');
 
-    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), 'utf8'));
+    const guard = JSON.parse(readFileSync(conductorGuard(dir), 'utf8'));
     assert.ok(guard.discovery.some((e) => e.id === a.id), 'H20 recorded a DISCOVERY mark for the article');
     assert.ok(guard.substance.some((e) => e.id === a.id), 'H19 recorded a SUBSTANCE mark for the article — the two ledgers are independent');
   } finally {
@@ -443,7 +445,7 @@ test('HIGH 2: an article body between payload_char_cap (2400) and ARTICLE_BODY_F
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, new RegExp(bodyEndSentinel), 'the tail of the body — past the OLD 2400-char clip point — must arrive: the field is no longer pre-truncated');
-    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), 'utf8'));
+    const guard = JSON.parse(readFileSync(conductorGuard(dir), 'utf8'));
     assert.ok(guard.substance.some((e) => e.id === a.id), 'the whole body earns a genuine substance mark');
   } finally {
     cleanup();
@@ -465,7 +467,7 @@ test('HIGH 2: an OVERSIZE article (past ARTICLE_BODY_FLOOR) renders as a DIGEST 
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, /digested — full body is/, 'CONTROL: the digest branch actually rendered');
-    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), 'utf8'));
+    const guard = JSON.parse(readFileSync(conductorGuard(dir), 'utf8'));
     assert.ok(!guard.substance.some((e) => e.id === a.id), 'a DIGEST is never substance — it is explicitly a partial, disclosed view');
     assert.ok(guard.discovery.some((e) => e.id === a.id), 'a digest earns a discovery mark instead');
   } finally {
@@ -491,7 +493,7 @@ test('HIGH 2: a reference_material owner (renderReference — a pointer only) ea
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, /▸ reference 'External API doc'/, 'CONTROL: the reference pointer actually rendered');
-    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), 'utf8'));
+    const guard = JSON.parse(readFileSync(conductorGuard(dir), 'utf8'));
     assert.ok(!guard.substance.some((e) => e.id === ref.id), 'a reference_material pointer is never substance');
     assert.ok(guard.discovery.some((e) => e.id === ref.id), 'a reference_material pointer earns a discovery mark instead');
   } finally {
@@ -685,7 +687,7 @@ test('guard-write-failure-leaves-marks-unspent: h19-bash-delivery.mjs — a fail
   try {
     const hazard = store.create(antiPattern('bash-fail-hazard', ['src/a.mjs']));
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
-    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    const dDir = join(dir, '.sterling', 'transient', 'delivery', 's1');
     mkdirSync(join(dDir, 'guard-conductor.json'), { recursive: true }); // collide: a directory where the guard FILE must go
     const r = runHook('h19-bash-delivery.mjs', { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'cat src/a.mjs' }, session_id: 's1', cwd: dir }, dir);
     assert.notEqual(r.code, 2, 'a delivery failure must never deny the tool call (AC7)');
@@ -709,7 +711,7 @@ test('guard-write-failure-leaves-marks-unspent: h20-mechanism-axis.mjs — a fai
     const hazard = store.create(antiPattern(title, [], { trigger }));
     const prompt =
       'Investigate why the boolean operation corrupts the mesh: check whether the modifier stack introduces non-manifold geometry that breaks downstream processing.';
-    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    const dDir = join(dir, '.sterling', 'transient', 'delivery', 's1');
     mkdirSync(join(dDir, 'guard-conductor.json'), { recursive: true });
     const dispatchInput = { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type: 'general-purpose', prompt, description: 'x' }, session_id: 's1', cwd: dir };
     const r = runHook('h20-mechanism-axis.mjs', dispatchInput, dir);
@@ -742,7 +744,7 @@ test('guard-write-failure-leaves-marks-unspent: h19-dispatch-staging.mjs — a f
       assert.notEqual(reg.status, 2, reg.stderr);
       return runHook('h19-dispatch-staging.mjs', { hook_event_name: 'SubagentStart', session_id: 's1', agent_id: 'agent-1', agent_type: 'general-purpose', cwd: dir, transcript_path: noTranscript }, dir);
     };
-    const dDir = join(dir, '.sterling', 'transient', 'delivery');
+    const dDir = join(dir, '.sterling', 'transient', 'delivery', 's1');
     mkdirSync(join(dDir, 'guard-agent-agent-1.json'), { recursive: true });
     const r = stage();
     assert.notEqual(r.code, 2, 'a delivery failure must never deny the tool call (AC7)');
@@ -811,7 +813,7 @@ test('MEDIUM 3: an owner that transitions from discovery (digest) to substance (
     assert.equal(second.code, 0, second.stderr);
     const secondCtx = JSON.parse(second.stdout).hookSpecificOutput.additionalContext;
     assert.match(secondCtx, /SMALL_BODY_SENTINEL now fits/, 'the FULL body now delivers — the earlier discovery mark did not suppress this substance rendering');
-    const guard = JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), 'utf8'));
+    const guard = JSON.parse(readFileSync(conductorGuard(dir), 'utf8'));
     assert.ok(guard.discovery.some((e) => e.id === a.id), 'the FIRST (digest) delivery is still recorded as discovery');
     assert.ok(guard.substance.some((e) => e.id === a.id), 'the SECOND (shrunk) delivery is recorded as substance — the two ledgers coexist');
   } finally {

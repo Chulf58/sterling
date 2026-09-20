@@ -177,7 +177,7 @@ try {
   if (!scored.length) allow();
 
   // OWN DEDUP NAMESPACE — guard.output_axis, never guard.records/pointer_files.
-  const gPath = guardPath(input.cwd, input.agent_id);
+  const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
   const guard = readGuard(gPath);
   const seen = new Set(guard.output_axis ?? []);
   const fresh = scored.filter((x) => !seen.has(x.record.id));

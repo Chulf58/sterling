@@ -7595,14 +7595,39 @@ import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
 }
-function guardPath(cwd, agentId) {
-  return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
+}
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join4(deliveryDir(cwd), component);
+}
+function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join4(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
 var DELIVERY_GUARD_VERSION = 2;
 function emptyDeliveryGuard() {
   return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
 }
 function readGuard(path) {
+  if (!path) return emptyDeliveryGuard();
   try {
     if (!existsSync4(path)) return emptyDeliveryGuard();
     const parsed = JSON.parse(readFileSync3(path, "utf8"));
@@ -7615,6 +7640,7 @@ function readGuard(path) {
   }
 }
 function writeGuard(path, guard) {
+  if (!path) return;
   mkdirSync3(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
@@ -7710,7 +7736,7 @@ try {
   if (!candidates.length) allow();
   const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped)).sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
-  const gPath = guardPath(input.cwd, input.agent_id);
+  const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
   const guard = readGuard(gPath);
   const seen = new Set(guard.output_axis ?? []);
   const fresh = scored.filter((x) => !seen.has(x.record.id));
