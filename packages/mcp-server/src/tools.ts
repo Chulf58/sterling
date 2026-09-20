@@ -72,10 +72,12 @@ export interface CreateResult {
  * exactly what was attested, so the operator can see that a durable claim about
  * live bytes was minted rather than a bare removal.
  *
- * `head_commit` is a COMMIT identity; `paths` were verified byte-identical
+ * `head_commit` is a COMMIT identity; present paths are verified byte-identical
  * between that commit's blobs and the working tree, and their sha256 is now the
- * article's baseline for them. `attested_at` is the real close time — NOT the
- * article's `updated_at`, which this write deliberately leaves where it was.
+ * article's baseline. `absence_paths`, when present, instead have a literal
+ * tree miss proven at that commit and carry no bytes or baseline. `attested_at`
+ * is the real close time — NOT the article's `updated_at`, which this write
+ * deliberately leaves where it was.
  */
 export interface BaselineAttestationReceipt {
   article_id: string;
@@ -84,6 +86,8 @@ export interface BaselineAttestationReceipt {
   head_commit: string;
   attested_at: string;
   paths: string[];
+  /** Present only when one or more paths were proven absent from HEAD's tree. */
+  absence_paths?: string[];
   note: string;
 }
 
@@ -1082,6 +1086,10 @@ interface DriftCheckContext {
    * skipping the hash.
    */
   attestedPaths?: ReadonlySet<string>;
+  /** Paths whose close proved an exact-name MISS in the close-time HEAD tree.
+   * They remain clean only while absent and drift again as soon as a path
+   * appears; absence has no content hash or fabricated baseline. */
+  absenceAttestedPaths?: ReadonlySet<string>;
 }
 
 /**
@@ -1179,6 +1187,8 @@ export const WRITE_REFUSED_FIELDS: readonly string[] = [
   // joins file_baselines here rather than becoming a field a caller can fabricate a
   // human's attestation into.
   'baseline_attestations',
+  // A separate, byte-free proof that HEAD had no exact tree entry for the path.
+  'absence_attestations',
 ];
 
 /**
@@ -2200,7 +2210,12 @@ export class SterlingTools {
         abstain('no_file_keys');
         continue;
       }
-      const baselines = (article as unknown as { file_baselines?: Record<string, string> }).file_baselines;
+      const detailedArticle = article as unknown as {
+        file_baselines?: Record<string, string>;
+        absence_attestations?: Record<string, unknown>;
+      };
+      const baselines = detailedArticle.file_baselines;
+      const absenceAttestedPaths = new Set(Object.keys(detailedArticle.absence_attestations ?? {}));
       const version = (article as unknown as { version?: number }).version ?? 0;
       const verdicts: DriftVerdict[] = [];
       for (const path of paths) {
@@ -2249,7 +2264,7 @@ export class SterlingTools {
         // pays the hash, bounded by the attempt and byte axes.
         const { verdict } = this.classifyOwnedFileDrift(
           path,
-          { mode: 'recheck', treeRoot: tree.root, baselines, baselinedAt: article.updated_at, honorMtimePrefilter: false },
+          { mode: 'recheck', treeRoot: tree.root, baselines, baselinedAt: article.updated_at, honorMtimePrefilter: false, absenceAttestedPaths },
           budget
         );
         budget.memo.set(key, verdict);
@@ -2476,6 +2491,9 @@ export class SterlingTools {
       return { verdict: { kind: 'unavailable', reason: `stat_failed_${String(code ?? 'unknown').toLowerCase()}` } };
     }
     if (!stat) {
+      // The affirmative absence proof settles this state. The stat remains
+      // necessary: its later success is what invalidates the historical miss.
+      if (ctx.absenceAttestedPaths?.has(rel)) return { verdict: { kind: 'clean' } };
       // MODE (1/2) — A MISSING FILE WITH NO BASELINE.
       // The mint asks whether the article's OWNERSHIP claim is still true, so an
       // absent owned path is a finding regardless of baselines (that is what
@@ -2510,6 +2528,9 @@ export class SterlingTools {
       return { verdict: { kind: 'reconcile', missing: true } };
     }
     const size = stat.size;
+    // A path that reappeared after an absence attestation is live drift before
+    // any mtime shortcut or generated-projection exemption can hide it.
+    if (ctx.absenceAttestedPaths?.has(rel)) return { verdict: { kind: 'reconcile', missing: false }, size };
     // MODE (2/2) — THE MTIME PREFILTER'S TERMINATING POWER.
     //
     // At the MINT the prefilter is unconditional and is the cheap half of the
@@ -2632,10 +2653,11 @@ export class SterlingTools {
     if (eligible.length === 0) return { status: 'unavailable:no_baselines', annotations };
     for (const rec of eligible) {
       const baselines = (rec.file_baselines as Record<string, string> | undefined) ?? {};
+      const absenceAttestedPaths = new Set(Object.keys((rec.absence_attestations as Record<string, unknown> | undefined) ?? {}));
       // The iterated set is the UNION of what was baselined and what the record
       // OWNS — iterating the baseline map alone could only ever re-check paths
       // that already had something to compare against (board edf13edf).
-      const paths = [...new Set([...Object.keys(baselines), ...ownedPaths(rec)])].sort();
+      const paths = [...new Set([...Object.keys(baselines), ...absenceAttestedPaths, ...ownedPaths(rec)])].sort();
       const changed: string[] = [];
       const unverifiable: string[] = [];
       // WHY each unverifiable path could not be settled, decided AT THE SITE
@@ -2663,6 +2685,13 @@ export class SterlingTools {
         for (const rel of paths) abstain(rel, baselines[rel] !== undefined);
       } else {
         for (const rel of paths) {
+          if (absenceAttestedPaths.has(rel)) {
+            const shape = classifyClaimPath(tree.root, rel);
+            if (shape === 'absent') continue;
+            if (shape === 'leaf' || shape === 'real_directory') changed.push(rel);
+            else abstain(rel, false);
+            continue;
+          }
           const baseline = baselines[rel];
           // An owned path with NOTHING to compare against is UNDETERMINED, never
           // drift: reporting it as changed would be a positive claim the record
@@ -2684,9 +2713,16 @@ export class SterlingTools {
       // write, so a reader can tell it from an absent file, an unreadable one
       // and one that simply has no baseline. Reads never refuse.
       const notes: string[] = [];
-      if (changed.length) {
+      const byteChanged = changed.filter((rel) => !absenceAttestedPaths.has(rel));
+      const absenceInvalidated = changed.filter((rel) => absenceAttestedPaths.has(rel));
+      if (byteChanged.length) {
         notes.push(
-          `⚠ ${changed.length} owned file(s) changed since this record's baseline (${changed.join(', ')}) — the baseline is the bytes this record was last content-reconciled against, or that an already-paid close explicitly attested it already describes, and they are no longer the bytes on disk, so re-read the code before trusting it`
+          `⚠ ${byteChanged.length} owned file(s) changed since this record's baseline (${byteChanged.join(', ')}) — the baseline is the bytes this record was last content-reconciled against, or that an already-paid close explicitly attested it already describes, and they are no longer the bytes on disk, so re-read the code before trusting it`
+        );
+      }
+      if (absenceInvalidated.length) {
+        notes.push(
+          `⚠ ${absenceInvalidated.length} path(s) previously attested ABSENT from HEAD now exist (${absenceInvalidated.join(', ')}) — the historical tree-miss proof no longer describes the working tree, so re-read the record before trusting it`
         );
       }
       if (unverifiable.length) {
@@ -3689,6 +3725,7 @@ export class SterlingTools {
           files?: { path: string; role?: string }[];
           file_baselines?: Record<string, string>;
           baseline_attestations?: Record<string, unknown>;
+          absence_attestations?: Record<string, unknown>;
         };
         const roleFor = (p: string) => (a.files ?? []).find((f) => f.path === p)?.role;
         // Paths whose baseline came from an ALREADY-PAID close rather than a
@@ -3696,6 +3733,7 @@ export class SterlingTools {
         // preserved by that write, so the mtime prefilter must not terminate on
         // them — see DriftCheckContext.attestedPaths.
         const attestedPaths = new Set(Object.keys(a.baseline_attestations ?? {}));
+        const absenceAttestedPaths = new Set(Object.keys(a.absence_attestations ?? {}));
         // Detached-working-tree resolution (comsoft-juiced 2026-07-17): a copy-
         // describing article's files are stat'd against ITS tree — resolving
         // against the project root produced false "out-of-band deletion" items
@@ -3729,6 +3767,7 @@ export class SterlingTools {
             baselinedAt: record.updated_at,
             honorMtimePrefilter: true,
             attestedPaths,
+            absenceAttestedPaths,
           });
           // Owned bytes that actually exist, for the state-honesty check below —
           // free, because the classifier already took the stat.
@@ -6998,6 +7037,7 @@ export class SterlingTools {
       // Clearing wholesale also drops, for free, any attestation on a path this
       // article has stopped owning.
       next.baseline_attestations = undefined;
+      next.absence_attestations = undefined;
     }
     const previousVersion = (old as unknown as { version?: number }).version;
     // EXPLICIT-RESOLVES CLOSURE (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1;
@@ -9368,37 +9408,33 @@ export class SterlingTools {
    * Measured in a consuming project 2026-09-05: 90 items drained by that rule,
    * five re-minted by the next commit, which touched none of their files.
    *
-   * THE SEMANTICS. The close IS the attestation — "the prose already describes
-   * these bytes" — so it re-stamps the baseline for EXACTLY the item's
-   * file_keys. A NAKED baseline write was rejected: three readers already read a
-   * matching baseline as "last CONTENT-RECONCILED against exactly this
-   * content", so a bare stamp would make all three lie. Hence the sibling
-   * `baseline_attestations` map, which records WHICH close made the claim, WHEN,
-   * and against WHICH COMMIT — the two provenances stay distinguishable per
-   * path, forever, and every reader can say "content-reconciled OR explicitly
-   * attested" and then look up which.
+   * THE SEMANTICS. A present regular-file close attests "the prose already
+   * describes these bytes" and re-stamps that path's baseline. A literal HEAD
+   * tree MISS instead records an `absence_attestations` entry — WHICH close,
+   * WHEN, and against WHICH COMMIT proved that exact name absent — with no hash,
+   * blob, read, or baseline. A NAKED baseline write was rejected: three readers
+   * already read a matching baseline as "last CONTENT-RECONCILED against exactly
+   * this content", so a bare stamp would make all three lie. The two sibling
+   * maps keep content, byte-attestation and absence-attestation provenance
+   * distinguishable per path forever.
    *
    * THE INVARIANT (decision
    * [attested-close-proves-buffer-equality-through-git-not-path-resolution]).
-   * For each attested path P: the baseline written is sha256(B), where B is a
+   * For each PRESENT path P: the baseline written is sha256(B), where B is a
    * byte buffer THIS PROCESS READ from the worktree at P, and the proof that B is
    * HEAD's content is made about B ITSELF — `git hash-object --path=P --stdin`
    * fed B prints exactly the blob id of P's regular-file entry in the tree of
-   * commit C. Membership, NAME and MODE come from `git ls-tree` against C with
-   * the returned name required to equal P byte-for-byte, so git's tree is the
-   * name authority and no filesystem-level alias (trailing dot, 8.3 short name,
-   * case) can ever match. Because the proof and the baseline are about the SAME
-   * buffer, no race between a filesystem check and a read can make the
-   * attestation lie — that is why there is no containment walk, no identity
-   * proxy, no second re-hash pass and no HEAD re-check here any more: those were
-   * five layers of guarding a hand-resolved PATH, and the path is no longer
-   * hand-resolved. See ./attestation-proof.ts, which owns the whole proof.
+   * commit C. For an ABSENT path, that same literal `git ls-tree` query proves
+   * no exact-name entry exists in C and the process performs no filesystem read.
+   * Membership, NAME and MODE come from `git ls-tree` against C with the returned
+   * name required to equal P byte-for-byte, so git's tree is the name authority
+   * and no filesystem-level alias (trailing dot, 8.3, case) can ever match.
    *
    * NOT GUARANTEED, stated plainly: that the worktree stays clean afterwards
-   * (read-time drift detection owns that, and an attested path is never
-   * mtime-short-circuited); anything about untracked, absent or non-regular
-   * paths, which are refused; and on Windows, where O_NOFOLLOW does not exist,
-   * the no-follow read is best-effort (lstat before open).
+   * (read-time drift detection owns that, and a byte-attested path is never
+   * mtime-short-circuited); whether an absence remains absent afterwards; any
+   * non-regular tree entry, which is refused; and on Windows, where O_NOFOLLOW
+   * does not exist, the no-follow read is best-effort (lstat before open).
    *
    * THE STATE TRANSITION, in this order:
    *   1. pre-lock: admission (exact full uuid, system source, reconcile_needed
@@ -9815,14 +9851,38 @@ export class SterlingTools {
       ...((article as unknown as { baseline_attestations?: Record<string, { attested_at: string; item_id: string; head_commit: string; sha256: string }> })
         .baseline_attestations ?? {}),
     };
+    const existingAbsenceAttestations =
+      (article as unknown as { absence_attestations?: Record<string, { attested_at: string; item_id: string; head_commit: string }> }).absence_attestations ?? {};
+    const absenceAttestations: Record<string, { attested_at: string; item_id: string; head_commit: string }> = { ...existingAbsenceAttestations };
+    const presentPaths: string[] = [];
+    const absencePaths: string[] = [];
     for (const rel of keys) {
-      const { sha256 } = prepared.evidence.perPath[rel]!;
-      baselines[rel] = sha256;
-      attestations[rel] = { attested_at: ts, item_id: itemId, head_commit: headBefore, sha256 };
+      const evidence = prepared.evidence.perPath[rel]!;
+      if (evidence.kind === 'present') {
+        baselines[rel] = evidence.sha256;
+        attestations[rel] = { attested_at: ts, item_id: itemId, head_commit: headBefore, sha256: evidence.sha256 };
+        delete absenceAttestations[rel];
+        presentPaths.push(rel);
+      } else {
+        // An absence has no bytes to baseline. Delete any prior byte claim for
+        // this path and retain only the distinct tree-miss provenance.
+        delete baselines[rel];
+        delete attestations[rel];
+        absenceAttestations[rel] = { attested_at: ts, item_id: itemId, head_commit: headBefore };
+        absencePaths.push(rel);
+      }
     }
     const updated = this.store.updateRecordMetadata(
       article.id,
-      { file_baselines: baselines, baseline_attestations: attestations },
+      {
+        file_baselines: baselines,
+        baseline_attestations: attestations,
+        // Do not add an empty new field to the present-file path. Write this
+        // map only when this close minted an absence or replaced one with bytes.
+        ...(absencePaths.length || keys.some((rel) => Object.hasOwn(existingAbsenceAttestations, rel))
+          ? { absence_attestations: absenceAttestations }
+          : {}),
+      },
       // CAS on the version THIS transaction read, and the real time for the
       // activity row — the body's updated_at is preserved by the primitive.
       { ...(article.version !== undefined ? { expected_version: article.version } : {}), activity_at: ts }
@@ -9832,6 +9892,28 @@ export class SterlingTools {
     //     `opts.resolves` — the write above would drain it inside the same
     //     transaction and doing BOTH would double-remove.
     this.store.remove(itemId, ts);
+    const note =
+      absencePaths.length === 0
+        ? `Closed as ALREADY-PAID: the ${ATTESTABLE_OWNER_NOUN}'s baseline for ${keys.length} path(s) was re-stamped and marked as an ATTESTATION ` +
+          `("the prose already describes these bytes"), not as a content reconcile — so H7 will not re-mint this item on the next touch ` +
+          `of the same bytes, and a reader can still tell the two apart (baseline_attestations). WHAT WAS ACTUALLY PROVEN, per path: ` +
+          `git's tree for commit ${headBefore.slice(0, 8)} was asked for an entry whose name equals the path BYTE-FOR-BYTE and whose ` +
+          `mode is a regular file (so a symlink, a submodule gitlink, a directory or any filesystem-level name alias is refused, not ` +
+          `resolved); the file was then read ONCE through ONE descriptor (lstat-checked, and opened with O_NOFOLLOW where the platform ` +
+          `has it — on Windows it does not, and the no-follow read is best-effort there); and \`git hash-object --path\` of THAT SAME ` +
+          `BUFFER printed exactly that tree entry's blob id. The stamped baseline is the sha256 of that same buffer, so the proof and ` +
+          `the baseline are about one set of bytes this process read — which is what makes the claim un-raceable, rather than merely ` +
+          `narrowly-timed. WHAT IS NOT CLAIMED: that the file stays unchanged afterwards. It may change a millisecond later, which is ` +
+          `why an attested path is ALWAYS re-hashed at read time rather than trusted on mtime. The record's updated_at was ` +
+          `deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files). ` +
+          `THE STANDING COST OF THAT, so it is not a surprise later: from now on EVERY knowledge_query that returns this record ` +
+          `re-reads and sha256s each of these ${keys.length} attested path(s) — the mint-side drift check has no byte budget, so the ` +
+          `always-hash rule is uncapped there — and the cost stands until a CONTENT reconcile (knowledge_update) clears ` +
+          `baseline_attestations wholesale.`
+        : `Closed as ALREADY-PAID: ${presentPaths.length ? `${presentPaths.length} path(s) were marked as BYTE ATTESTATIONS ("the prose already describes these bytes"), not as a content reconcile. ` : ''}` +
+          `${absencePaths.length} path(s) were marked as proven ABSENCE ATTESTATIONS: git's tree for commit ${headBefore.slice(0, 8)} has NO entry whose name equals the path BYTE-FOR-BYTE. No file was read, no blob or sha256 exists, and no baseline was stamped for those paths. ` +
+          `${presentPaths.length ? `For each byte attestation, git's tree for commit ${headBefore.slice(0, 8)} supplied an exact-name regular-file entry; the file was read ONCE through ONE descriptor (lstat-checked and opened with O_NOFOLLOW where available), and \`git hash-object --path\` of THAT SAME BUFFER printed that entry's blob id. The stamped baseline is the sha256 of that same buffer. ` : ''}` +
+          `WHAT IS NOT CLAIMED: that either state stays unchanged afterwards. A present attested path is ALWAYS re-hashed at read time; an absence-attested path reopens drift immediately if it appears. The record's updated_at was deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files).`;
     return {
       article_id: article.id,
       ...(article.slug ? { article_slug: article.slug } : {}),
@@ -9839,23 +9921,8 @@ export class SterlingTools {
       head_commit: headBefore,
       attested_at: ts,
       paths: keys,
-      note:
-        `Closed as ALREADY-PAID: the ${ATTESTABLE_OWNER_NOUN}'s baseline for ${keys.length} path(s) was re-stamped and marked as an ATTESTATION ` +
-        `("the prose already describes these bytes"), not as a content reconcile — so H7 will not re-mint this item on the next touch ` +
-        `of the same bytes, and a reader can still tell the two apart (baseline_attestations). WHAT WAS ACTUALLY PROVEN, per path: ` +
-        `git's tree for commit ${headBefore.slice(0, 8)} was asked for an entry whose name equals the path BYTE-FOR-BYTE and whose ` +
-        `mode is a regular file (so a symlink, a submodule gitlink, a directory or any filesystem-level name alias is refused, not ` +
-        `resolved); the file was then read ONCE through ONE descriptor (lstat-checked, and opened with O_NOFOLLOW where the platform ` +
-        `has it — on Windows it does not, and the no-follow read is best-effort there); and \`git hash-object --path\` of THAT SAME ` +
-        `BUFFER printed exactly that tree entry's blob id. The stamped baseline is the sha256 of that same buffer, so the proof and ` +
-        `the baseline are about one set of bytes this process read — which is what makes the claim un-raceable, rather than merely ` +
-        `narrowly-timed. WHAT IS NOT CLAIMED: that the file stays unchanged afterwards. It may change a millisecond later, which is ` +
-        `why an attested path is ALWAYS re-hashed at read time rather than trusted on mtime. The record's updated_at was ` +
-        `deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files). ` +
-        `THE STANDING COST OF THAT, so it is not a surprise later: from now on EVERY knowledge_query that returns this record ` +
-        `re-reads and sha256s each of these ${keys.length} attested path(s) — the mint-side drift check has no byte budget, so the ` +
-        `always-hash rule is uncapped there — and the cost stands until a CONTENT reconcile (knowledge_update) clears ` +
-        `baseline_attestations wholesale.`,
+      ...(absencePaths.length ? { absence_paths: absencePaths } : {}),
+      note,
     };
   }
 
@@ -9911,9 +9978,12 @@ export class SterlingTools {
   boardRemove(id: string): {
     removed: string;
     artifact_evidence?: Record<string, unknown>[];
-    note?: string;
-    check_skipped?: SkippedCheck[];
-    baseline_attestation?: BaselineAttestationReceipt;
+  note?: string;
+  check_skipped?: SkippedCheck[];
+  baseline_attestation?: BaselineAttestationReceipt;
+  /** Mirrored from baseline_attestation for an absence close, so callers of the
+   * removal tool can see the proven outcome without unpacking the receipt. */
+  absence_paths?: string[];
   } {
     const record = this.store.get(id);
     if (!record) throw this.removedItemError('board_remove', id);
@@ -9926,7 +9996,14 @@ export class SterlingTools {
     // other would re-mint on the next touch and the two tools would disagree
     // about what closing an already-paid item means.
     const attestation = this.attestAlreadyPaidClose('board_remove', record);
-    if (attestation) return { removed: record.id, ...evidence, baseline_attestation: attestation };
+    if (attestation) {
+      return {
+        removed: record.id,
+        ...evidence,
+        baseline_attestation: attestation,
+        ...(attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}),
+      };
+    }
     this.store.remove(record.id, this.now()); // system todos land in the §3.2.7 drain log
     return { removed: record.id, ...evidence };
   }
@@ -9956,8 +10033,10 @@ export class SterlingTools {
     artifact_evidence?: Record<string, unknown>[];
     note?: string;
     check_skipped?: SkippedCheck[];
-    already_drained?: boolean;
-    baseline_attestation?: BaselineAttestationReceipt;
+  already_drained?: boolean;
+  baseline_attestation?: BaselineAttestationReceipt;
+  /** Mirrored from baseline_attestation for an absence close. */
+  absence_paths?: string[];
   } {
     // EXACT FULL ID ONLY, for the same reason board_remove is — this tool
     // hard-deletes a row too (see boardRemove's doc comment for the reverted
@@ -9994,7 +10073,14 @@ export class SterlingTools {
     const evidence = this.removalArtifactEvidence(record);
     // R9: same attestation branch board_remove takes — see its parity note.
     const attestation = this.attestAlreadyPaidClose('maintenance_remove', record);
-    if (attestation) return { removed: record.id, ...evidence, baseline_attestation: attestation };
+    if (attestation) {
+      return {
+        removed: record.id,
+        ...evidence,
+        baseline_attestation: attestation,
+        ...(attestation.absence_paths ? { absence_paths: attestation.absence_paths, note: attestation.note } : {}),
+      };
+    }
     this.store.remove(record.id, this.now()); // logged to the §3.2.7 drain log, as every system removal is
     return { removed: record.id, ...evidence };
   }

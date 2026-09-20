@@ -18,8 +18,9 @@
 // EXPLICITLY NOT GUARANTEED:
 //   - that the worktree stays clean AFTERWARDS. Drift detection owns that; an
 //     attestation is a statement about one instant, not a lease.
-//   - anything about untracked, absent, or non-regular paths. They are refused,
-//     never guessed at.
+//   - anything about non-regular paths. They are refused, never guessed at.
+//   - whether a path PROVEN absent from this commit remains absent afterwards.
+//     An absence attestation is a historical tree fact, not a lease.
 //   - on Windows, where O_NOFOLLOW does not exist, the no-follow read is
 //     BEST-EFFORT: we lstat before opening and refuse a link, but the open
 //     itself cannot be told not to follow. No proxy for it is built here — a
@@ -51,12 +52,20 @@ export class AttestationRefusal extends Error {
   }
 }
 
-export interface PathEvidence {
+export interface PresentPathEvidence {
+  kind: 'present';
   /** sha256 of the exact buffer this process read from the worktree. */
   sha256: string;
   /** The git blob id of P in commit C — equal to `git hash-object --path=P` of that same buffer. */
   blob: string;
 }
+
+/** A tree-only result. No file was opened and no bytes or blob id exist. */
+export interface AbsencePathEvidence {
+  kind: 'absence';
+}
+
+export type PathEvidence = PresentPathEvidence | AbsencePathEvidence;
 
 export interface AttestationEvidence {
   head_commit: string;
@@ -120,8 +129,7 @@ interface TreeEntry {
  * the requested key byte-for-byte, which is what makes every filesystem-level
  * name alias unrepresentable here.
  */
-function headTreeEntries(root: string, commit: string, keys: string[]): Map<string, TreeEntry> {
-  const { stdout } = git(root, ['--literal-pathspecs', 'ls-tree', '-z', '--full-tree', commit, '--', ...keys]);
+function parseTreeEntries(stdout: Buffer): Map<string, TreeEntry> {
   const byName = new Map<string, TreeEntry>();
   const duplicates = new Set<string>();
   let start = 0;
@@ -145,9 +153,37 @@ function headTreeEntries(root: string, commit: string, keys: string[]): Map<stri
   return byName;
 }
 
-function blobIdFor(entries: Map<string, TreeEntry>, key: string, commit: string): string {
-  const entry = entries.get(key);
-  if (!entry) throw new AttestationRefusal(`no entry with this exact name in the tree of commit ${commit} (untracked, absent, or a name that only differs by an alias)`, key);
+function headTreeEntries(root: string, commit: string, keys: string[]): Map<string, TreeEntry> {
+  const { stdout } = git(root, ['--literal-pathspecs', 'ls-tree', '-z', '--full-tree', commit, '--', ...keys]);
+  return parseTreeEntries(stdout);
+}
+
+/** The alias guard needs every tree name, including recursive tree entries.
+ * It runs only after the unchanged exact-name lookup missed. */
+function allHeadTreeEntries(root: string, commit: string): Map<string, TreeEntry> {
+  const { stdout } = git(root, ['ls-tree', '-r', '-t', '-z', '--full-tree', commit]);
+  return parseTreeEntries(stdout);
+}
+
+/** The filesystem aliases R9 has to reject: case-folding and trailing-dot
+ * stripping on every component. The original literal lookup stays authoritative
+ * for a real match; this normalization is refusal-only, never resolution. */
+function aliasForm(path: string): string {
+  return path
+    .split('/')
+    .map((component) => component.replace(/\.+$/u, '').toLowerCase())
+    .join('/');
+}
+
+function isAliasOfTreeEntry(allEntries: Map<string, TreeEntry>, key: string): boolean {
+  const wanted = aliasForm(key);
+  for (const name of allEntries.keys()) {
+    if (name !== key && aliasForm(name) === wanted) return true;
+  }
+  return false;
+}
+
+function blobIdFor(entry: TreeEntry, key: string): string {
   if (entry.mode === '120000') throw new AttestationRefusal(`the tree entry is a symlink (mode 120000), not a regular file`, key);
   if (entry.mode === '160000') throw new AttestationRefusal(`the tree entry is a git submodule / gitlink (mode 160000), not a regular file`, key);
   if (entry.mode === '040000' || entry.mode === '40000' || entry.type === 'tree') throw new AttestationRefusal(`the tree entry is a directory (mode ${entry.mode}), not a regular file`, key);
@@ -254,11 +290,29 @@ export function collectAttestationEvidence(opts: CollectOptions): AttestationEvi
 
   const head = headCommit(root);
   const entries = headTreeEntries(root, head, keys);
+  // A literal miss is absence only after the tree proves no entry exists under
+  // an alias spelling. Do not consult the filesystem: an on-disk alias is
+  // exactly the shape this guard must refuse rather than resolve.
+  const allEntries = keys.some((key) => !entries.has(key)) ? allHeadTreeEntries(root, head) : undefined;
 
   const perPath: Record<string, PathEvidence> = {};
   let remaining = maxTotalBytes;
   for (const key of keys) {
-    const blob = blobIdFor(entries, key, head);
+    const entry = entries.get(key);
+    // The literal ls-tree query is the absence proof. Do not inspect the
+    // worktree here: an untracked file may exist on disk and cannot alter what
+    // HEAD's tree says about this exact byte-for-byte name.
+    if (!entry) {
+      if (allEntries && isAliasOfTreeEntry(allEntries, key)) {
+        throw new AttestationRefusal(
+          `no entry with this exact name in the tree of commit ${head} (untracked, absent, or a name that only differs by an alias)`,
+          key
+        );
+      }
+      perPath[key] = { kind: 'absence' };
+      continue;
+    }
+    const blob = blobIdFor(entry, key);
     const bytes = readOwnedFile(root, key, remaining, maxTotalBytes);
     remaining -= bytes.length;
     const actual = hashObjectOf(root, key, bytes);
@@ -268,7 +322,7 @@ export function collectAttestationEvidence(opts: CollectOptions): AttestationEvi
         key
       );
     }
-    perPath[key] = { sha256: createHash('sha256').update(bytes).digest('hex'), blob };
+    perPath[key] = { kind: 'present', sha256: createHash('sha256').update(bytes).digest('hex'), blob };
   }
   return { head_commit: head, perPath };
 }

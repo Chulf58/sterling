@@ -84,7 +84,11 @@ function tempStore() {
 }
 
 type MetaOpts = { expected_version?: number; activity_at?: string };
-type MetaFields = { file_baselines?: Record<string, string>; baseline_attestations?: Record<string, unknown> };
+type MetaFields = {
+  file_baselines?: Record<string, string>;
+  baseline_attestations?: Record<string, unknown>;
+  absence_attestations?: Record<string, unknown>;
+};
 
 // --- SPEC-ONLY adapters: named "not found" red, never a bare TypeError -----
 
@@ -122,22 +126,28 @@ function callGetRecordVersion(store: SterlingStore, id: string, version: number)
 // getRecordVersion read for the prior version returns undefined or the NEW
 // baseline instead of the old one.
 // ===========================================================================
-test('[R9-STORE-1] updateRecordMetadata with the correct expected_version writes file_baselines/baseline_attestations and bumps version; the PRIOR body is archived and readable by (id, version)', () => {
+test('[R9-STORE-1] updateRecordMetadata with the correct expected_version writes byte/absence attestation metadata and bumps version; the PRIOR body is archived and readable by (id, version)', () => {
   const { dir, store } = tempStore();
   try {
     const a = store.create(article());
     const startVersion = (a.version as number) ?? 1;
     const attestation = { attested_at: NOW, item_id: 'item-1', head_commit: 'a'.repeat(40), sha256: 'newhash' };
+    const absence = { attested_at: NOW, item_id: 'item-2', head_commit: 'b'.repeat(40) };
 
     const patched = callUpdateRecordMetadata(
       store,
       a.id as string,
-      { file_baselines: { 'src/a.ts': 'newhash' }, baseline_attestations: { 'src/a.ts': attestation } },
+      {
+        file_baselines: { 'src/a.ts': 'newhash' },
+        baseline_attestations: { 'src/a.ts': attestation },
+        absence_attestations: { 'src/gone.ts': absence },
+      },
       { expected_version: startVersion, activity_at: NOW }
     );
     assert.equal(patched.version, startVersion + 1, 'version bumped by exactly one');
     assert.deepEqual(patched.file_baselines, { 'src/a.ts': 'newhash' }, 'the new baseline landed');
     assert.deepEqual((patched.baseline_attestations as Loose)['src/a.ts'], attestation, 'the new attestation entry landed');
+    assert.deepEqual((patched.absence_attestations as Loose)['src/gone.ts'], absence, 'the byte-free absence attestation landed');
 
     const archived = callGetRecordVersion(store, a.id as string, startVersion);
     assert.ok(archived, 'the prior version is readable via (id, version)');
@@ -239,7 +249,7 @@ test('[R9-STORE-3] updateRecordMetadata PRESERVES the record\'s stored updated_a
 // unrelated 'src/b.ts' entry survives the content write and this test's
 // final assertion goes red.
 // ===========================================================================
-test('[R9-STORE-4] an ordinary content update (updateRecord) clears the WHOLE baseline_attestations map — including an entry for a path the update never mentions', () => {
+test('[R9-STORE-4] an ordinary content update (updateRecord) clears WHOLE byte and absence attestation maps — including entries the write never mentions', () => {
   const { dir, store } = tempStore();
   try {
     const a = store.create(article());
@@ -252,16 +262,22 @@ test('[R9-STORE-4] an ordinary content update (updateRecord) clears the WHOLE ba
           'src/a.ts': { attested_at: NOW, item_id: 'i1', head_commit: 'a'.repeat(40), sha256: 'h1' },
           'src/b.ts': { attested_at: NOW, item_id: 'i2', head_commit: 'a'.repeat(40), sha256: 'h2' },
         },
+        absence_attestations: {
+          'src/gone.ts': { attested_at: NOW, item_id: 'i3', head_commit: 'a'.repeat(40) },
+        },
       },
       { expected_version: startVersion }
     );
     assert.equal(Object.keys(attested.baseline_attestations as Loose).length, 2, 'precondition: two standing attestations, on two different paths');
+    assert.equal(Object.keys(attested.absence_attestations as Loose).length, 1, 'precondition: one standing absence attestation');
 
     // the ordinary patch never MENTIONS baseline_attestations at all — only a
     // real content field changes, exactly like a knowledge_update call would send.
     const updated = callUpdateRecord(store, a.id as string, { ...a, what_it_does: 'a real content change' }, { expected_version: attested.version as number });
     const map = (updated.baseline_attestations as Loose | undefined) ?? {};
     assert.equal(Object.keys(map).length, 0, 'the WHOLE map is cleared, not just one path — a content generation invalidates every standing attestation on the record');
+    const absenceMap = (updated.absence_attestations as Loose | undefined) ?? {};
+    assert.equal(Object.keys(absenceMap).length, 0, 'the WHOLE absence map is cleared too — a content generation supersedes every historical tree-miss claim');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

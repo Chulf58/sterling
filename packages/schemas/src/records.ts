@@ -170,6 +170,24 @@ const baselineAttestationsSchema = z
   )
   .optional();
 
+/**
+ * ABSENCE ATTESTATION PROVENANCE — deliberately separate from the byte
+ * attestation map. A tree miss proves no bytes, blob, or content hash; this
+ * shape therefore cannot be mistaken for an attestation of file content.
+ */
+const absenceAttestationsSchema = z
+  .record(
+    z.string(),
+    z
+      .object({
+        attested_at: z.string().min(1),
+        item_id: z.string().min(1),
+        head_commit: z.string().min(1),
+      })
+      .strict()
+  )
+  .optional();
+
 // §3.2.3 — versioned body + append-only history.
 export const featureArticleSchema = base
   .extend({
@@ -196,6 +214,7 @@ export const featureArticleSchema = base
     // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
     // above, which reference_material shares so the shape is defined once.
     baseline_attestations: baselineAttestationsSchema,
+    absence_attestations: absenceAttestationsSchema,
     // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
     // axis, subsuming concept_family's role there — concept_family itself is
     // untouched, kept for compatibility (see below).
@@ -368,6 +387,7 @@ export const referenceMaterialSchema = base
     // naked baseline whose provenance lied about which write produced it. Shape
     // shared with featureArticleSchema, never re-declared.
     baseline_attestations: baselineAttestationsSchema,
+    absence_attestations: absenceAttestationsSchema,
     // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
     // unchanged (field_baselines optional-field precedent); a catalog-bearing record
     // carries a validated modelsCatalogSchema payload.

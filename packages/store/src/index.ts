@@ -1761,7 +1761,7 @@ export class SterlingStore {
    * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
    * neither is ever caller-supplied.
    */
-  private static readonly METADATA_WRITE_FIELDS: readonly string[] = ['file_baselines', 'baseline_attestations'];
+  private static readonly METADATA_WRITE_FIELDS: readonly string[] = ['file_baselines', 'baseline_attestations', 'absence_attestations'];
 
   /**
    * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
