@@ -8423,14 +8423,19 @@ try {
       )
     );
   }
-  const clearRegisters = () => {
+  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
     if (deferredPaths.length || settlementFailed) {
       releaseTouchesClaim();
     } else {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync3(eventsPath, { force: true });
+      const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
+      if (pendingDeclarations.length) {
+        writeFileSync4(eventsPath, JSON.stringify(pendingDeclarations));
+      } else {
+        rmSync3(eventsPath, { force: true });
+      }
     }
     rmSync3(nagMarker, { force: true });
   };
@@ -8647,7 +8652,7 @@ try {
   const imageBinaryOnly = paths.length > 0 && paths.every((p) => IMAGE_BINARY_EXT.test(p));
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
     releaseWithPressure();
   }
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
@@ -8684,8 +8689,9 @@ try {
   const conceptSatisfied = unmetFamilies.length === 0;
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration });
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
@@ -8929,7 +8935,7 @@ ${parts.join("\n\n")}`;
     }
   }
   runSettlement();
-  clearRegisters();
+  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

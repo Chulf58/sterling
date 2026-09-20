@@ -1541,6 +1541,89 @@ test('H10 capture-pending: a write landing between Stops settles the duty cleanl
   }
 });
 
+test('H10 capture-pending: a declaration survives a quiet Stop and still defers later capture work', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [cpEvent('commit quiet-window — capture riding')]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    assert.equal(stop().code, 0, 'the declaration-only Stop releases');
+    assert.deepEqual(readSessionEvents(dir), [cpEvent('commit quiet-window — capture riding')], 'the still-effective declaration survives Stop N');
+    assert.equal(stop().code, 0, 'a quiet Stop does not consume the declaration');
+    assert.deepEqual(readSessionEvents(dir), [cpEvent('commit quiet-window — capture riding')], 'the declaration survives quiet Stop N+1');
+
+    writeTouchesAt(dir, [{ path: 'src/later.mjs', at: LATE_EVENT_AT }]);
+    assert.equal(stop().code, 0, 'the surviving declaration defers capture work arriving at Stop N+2');
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no premature debt while the declaration gets its first deferral');
+    assert.equal(existsSync(eventsPath(dir)), true, 'the outstanding pending declaration remains registered');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 research: a settled dispatch declaration is consumed so later research is not satisfied by its earlier capture', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    writeSessionEvents(dir, [aEvent('researcher', R_EVENT_AT)]);
+    researchFinding(store, CAPTURE_AT);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    assert.equal(stop().code, 0, 'the earlier research declaration is settled');
+    assert.equal(existsSync(eventsPath(dir)), false, 'settled work evidence is consumed rather than retained');
+    assert.equal(stop().code, 0, 'an intervening quiet Stop remains quiet');
+
+    writeSessionEvents(dir, [aEvent('researcher', LATE_EVENT_AT)]);
+    const later = stop();
+    assert.equal(later.code, 2, 'the earlier finding cannot satisfy research declared after it');
+    assert.match(later.stderr, /researcher/, 'the re-armed research duty names the new work');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: satisfied research does not consume a declaration with no capture work', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    writeSessionEvents(dir, [cpEvent('commit research-window — capture riding'), aEvent('researcher', R_EVENT_AT)]);
+    researchFinding(store, CAPTURE_AT);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    assert.equal(stop().code, 0, 'the satisfied research duty releases without capture work');
+    assert.deepEqual(readSessionEvents(dir), [cpEvent('commit research-window — capture riding')], 'only the still-effective capture declaration survives');
+
+    writeTouchesAt(dir, [{ path: 'src/deferred-target.mjs', at: LATE_EVENT_AT }]);
+    const later = stop();
+    assert.equal(later.code, 0, 'later capture work is deferred by the surviving declaration, not nagged');
+    assert.doesNotMatch(later.stderr, /capture ·/, 'the capture lane remains suppressed for its first pending Stop');
+    assert.equal(owed(store, 'capture_owed').length, 0, 'no capture debt is minted before the pending grace is spent');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H10 capture-pending: queued research does not consume a declaration with no capture work', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    seedEventsConfig(dir);
+    writeSessionEvents(dir, [cpEvent('commit queued-research — capture riding'), aEvent('researcher', R_EVENT_AT)]);
+    const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+
+    assert.equal(stop().code, 2, 'the unmet research duty receives its one soft-block');
+    assert.equal(stop().code, 0, 'the next Stop queues research debt and releases');
+    assert.equal(owed(store, 'research_owed').length, 1, 'research work is durably queued');
+    assert.deepEqual(readSessionEvents(dir), [cpEvent('commit queued-research — capture riding')], 'queueing research does not consume the forward capture declaration');
+
+    writeTouchesAt(dir, [{ path: 'src/queued-deferred-target.mjs', at: LATE_EVENT_AT }]);
+    const later = stop();
+    assert.equal(later.code, 0, 'later capture work is deferred by the surviving declaration');
+    assert.doesNotMatch(later.stderr, /capture ·/, 'the capture lane does not nag before pending grace is spent');
+  } finally {
+    cleanup();
+  }
+});
+
 test('H10 capture-pending: the deferral survives stop_hook_active — a prior hook block never costs the grace period (review finding 1)', () => {
   const { dir, store, cleanup } = makeProject();
   try {

@@ -794,7 +794,14 @@ try {
     );
   }
 
-  // Clear all three transient registers together (P4 — every terminal path).
+  // Clear the transient registers at the end of the work they represent (P4).
+  // INVARIANT: at a Stop, settled work may be consumed, durably queued work may
+  // be consumed, and outstanding work plus still-effective declarations MUST
+  // survive; `capture_pending` is still effective because it covers later
+  // capture work, whereas no_capture only discharges earlier work and
+  // research/dispatch events are work evidence. This does not guarantee that a
+  // later work item is satisfied by an earlier durable record, nor that a
+  // declaration survives a real session boundary, which H1 owns.
   // FAN-OUT DEFERRAL EXCEPTION (decision ec9eacaa, on the capture_pending
   // precedent bd594c03): while a live dispatch owns any touched file this
   // release is NOT terminal — clearing would delete the very touch entries
@@ -811,7 +818,7 @@ try {
   // pending Stop, destroying the grace bd594c03 deliberately built. Repeat nags
   // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
   // acceptable, silence is not.
-  const clearRegisters = () => {
+  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
     // F3/F4/R4 (board c198866d fixer round): the touches claim is RELEASED
     // (see releaseTouchesClaim above) rather than discarded whenever a live
     // dispatch still owns work OR this Stop's own settlement attempt failed —
@@ -825,7 +832,19 @@ try {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync(eventsPath, { force: true });
+      // A quiet Stop has consumed no capture work, so a capture_pending
+      // declaration remains live for work that arrives later in this session.
+      // Do not retain settled work evidence: research satisfaction anchors to
+      // the earliest remaining event, so that would let an earlier capture
+      // silently satisfy later research.
+      const pendingDeclarations = preservePendingDeclaration
+        ? sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail)
+        : [];
+      if (pendingDeclarations.length) {
+        writeFileSync(eventsPath, JSON.stringify(pendingDeclarations));
+      } else {
+        rmSync(eventsPath, { force: true });
+      }
     }
     rmSync(nagMarker, { force: true });
   };
@@ -1637,9 +1656,10 @@ try {
 
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     // No duties to enforce (e.g. only non-research dispatches recorded, or a
-    // no-capture declaration covered every touch/debug event) — settle, clear, release.
+    // no-capture declaration covered every touch/debug event). A pending
+    // capture declaration has forward scope, so retain it for later work.
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
     releaseWithPressure();
   }
 
@@ -1755,8 +1775,12 @@ try {
   // writes" boundary), clear registers, release.
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    // `captured` spends a pending declaration, but a vacuous capture
+    // satisfaction has consumed no capture work. Keep that declaration's
+    // forward scope while this independent duty settles.
+    const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration });
     releaseWithPressure();
   }
 
@@ -2215,7 +2239,9 @@ try {
   // items above; this is the last chance to settle before clearRegisters()
   // discards the claim, since no next Stop exists once the session ends here.
   runSettlement();
-  clearRegisters();
+  // Queueing a non-capture duty does not spend a pending declaration's forward
+  // scope; queueing capture work does, and `hasCaptureDuty` distinguishes them.
+  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {
