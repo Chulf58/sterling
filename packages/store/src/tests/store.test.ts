@@ -227,6 +227,274 @@ test('rank: bm25 over rank_terms orders matching records first; freeform questio
   }
 });
 
+// ---------------------------------------------------------------------------
+// COVERAGE RANKING (decision pull-ranking-at-scale-order-of-work-coverage-
+// before-columns-no-narrowing-ladder, step 2; mechanism 1 flooding,
+// research_finding why-dome-farmer-pull-cases-miss-mechanisms-september-2026).
+// query()'s rank_terms path orders the WHOLE OR/AND-eligible set by the
+// number of DISTINCT rank_terms expressions a record matches (FTS semantics
+// — a prefix or the term's own quoting counts as ONE expression, never a
+// substring count) BEFORE bm25, so a record repeating one generic term
+// cannot outrank a record that matches every term once. Eligibility
+// (records_fts MATCH) is untouched by this — same nonsense tokens as the
+// match_all fixture above so the proof is independent of real vocabulary.
+// ---------------------------------------------------------------------------
+
+const COV_A = 'zorbaline';
+const COV_B = 'quintavox';
+const COV_C = 'phentaris';
+
+// Fixed, opposing UUIDs for the bm25 tie-break pins below: with two records
+// tied on coverage AND on updated_at (both created at NOW), the ONLY thing
+// separating a correct bm25-driven order from an id-ASC fallback is whether
+// bm25 is actually in the ORDER BY. Random UUIDs (envelope()'s default) would
+// let such a pin pass by 50/50 luck if a future edit dropped bm25 entirely.
+// The record EXPECTED to win gets the id that would sort LAST under id ASC
+// (ID_HIGH); the expected loser gets ID_LOW — so a dropped-bm25 regression
+// flips the order and the assertion fails loudly instead of passing by luck.
+const ID_LOW = '00000000-0000-4000-8000-000000000001';
+const ID_HIGH = 'ffffffff-ffff-4fff-bfff-ffffffffffff';
+
+/**
+ * Reproduces mechanism 1 (flooding) FOR REAL, not by assertion: with only two
+ * candidate documents, bm25's IDF term already favors the multi-term match (a
+ * toy 2-record fixture never actually floods). What makes COV_B/COV_C common
+ * enough — and COV_A comparatively rare — for bm25 ALONE to let the repeated
+ * term win is a corpus of decoys carrying COV_B/COV_C but not COV_A, exactly
+ * the "generic OR terms over a wide set" shape research_finding
+ * why-dome-farmer-pull-cases-miss-mechanisms-september-2026 attributes it to.
+ * Verified empirically (scratch harness against the pre-fix build): with this
+ * fixture store.query() ranks 'flooded-one-term' above 'full-coverage' today.
+ */
+function seedFloodingFixture(store: SterlingStore) {
+  store.create(article({ slug: 'full-coverage', title: 'full coverage', what_it_does: `${COV_A} ${COV_B} ${COV_C} marker` }));
+  store.create(article({ slug: 'flooded-one-term', title: 'flooded one term', what_it_does: Array(5).fill(COV_A).join(' ') }));
+  for (let i = 0; i < 5; i += 1) {
+    store.create(
+      article({ slug: `decoy-${i}`, title: `decoy ${i}`, what_it_does: `distractor ${i} ${COV_B} ${COV_C} filler padding content` })
+    );
+  }
+}
+
+test('coverage ranking: a record matching 3-of-3 terms once each outranks a record flooding 1-of-3 many times', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedFloodingFixture(store);
+    const ranked = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_B, COV_C], cap: 50 });
+    assert.equal(ranked.length, 7, 'the decoys match COV_B/COV_C too — the OR-eligible set is unchanged by coverage ranking');
+    assert.equal(
+      (ranked[0] as { slug: string }).slug,
+      'full-coverage',
+      '3-of-3 coverage outranks a single term flooded 5 times, even though bm25 alone (verified pre-fix) favors the repeated term'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: ties on coverage fall to bm25 exactly as today', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(article({ id: ID_LOW, slug: 'sparse-both', title: 'sparse both', what_it_does: `${COV_A} ${COV_B} marker` }));
+    store.create(
+      article({ id: ID_HIGH, slug: 'dense-both', title: 'dense both', what_it_does: Array(10).fill(`${COV_A} ${COV_B}`).join(' ') })
+    );
+    const ranked = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_B], cap: 50 });
+    assert.equal(ranked.length, 2, 'both records match both terms — equal coverage');
+    assert.equal(
+      (ranked[0] as { slug: string }).slug,
+      'dense-both',
+      'equal coverage (2-of-2 both): the tie-break is bm25, which favors the denser match — same as pre-coverage ordering'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: a single rank term produces exactly today\'s bm25-only order (decoys still outrank the sparse owner)', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(article({ id: ID_LOW, slug: 'sparse-owner', title: 'sparse owner', what_it_does: `${COV_A} marker` }));
+    store.create(article({ id: ID_HIGH, slug: 'dense-decoy', title: 'dense decoy', what_it_does: Array(10).fill(COV_A).join(' ') }));
+    const ranked = store.query({ types: ['feature_article'], rank_terms: [COV_A], cap: 50 });
+    assert.equal(ranked.length, 2, 'both match the single term — coverage is uniformly 1, so order is bm25-only');
+    assert.equal((ranked[0] as { slug: string }).slug, 'dense-decoy', 'with only one rank term, coverage cannot differ between matches — bm25 alone decides, unchanged from before');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: match_all is unaffected — every matching row already has full coverage, order stays bm25', () => {
+  const { dir, store } = tempStore();
+  try {
+    store.create(article({ id: ID_LOW, slug: 'sparse-all', title: 'sparse all', what_it_does: `${COV_A} ${COV_B} ${COV_C} marker` }));
+    store.create(
+      article({
+        id: ID_HIGH,
+        slug: 'dense-all',
+        title: 'dense all',
+        what_it_does: Array(10).fill(`${COV_A} ${COV_B} ${COV_C}`).join(' '),
+      })
+    );
+    const ranked = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_B, COV_C], match_all: true, cap: 50 });
+    assert.equal(ranked.length, 2, 'match_all requires every term — both records qualify');
+    assert.equal(
+      (ranked[0] as { slug: string }).slug,
+      'dense-all',
+      'match_all rows all have full (3-of-3) coverage, so coverage cannot distinguish them — bm25 decides, same as pre-coverage ordering'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: a prefix term and a quoted term each count as ONE expression, not one per distinct token they match', () => {
+  const { dir, store } = tempStore();
+  try {
+    // 'zorb*' prefix-matches THREE distinct tokens in this record's text, but
+    // must still count as ONE rank_terms expression toward coverage.
+    store.create(
+      article({ slug: 'prefix-flood', title: 'prefix flood', what_it_does: 'zorbaline zorbanox zorbatide marker' })
+    );
+    // Matches the prefix once AND the second term — 2-of-2 distinct expressions.
+    store.create(article({ slug: 'prefix-plus-term', title: 'prefix plus term', what_it_does: `zorbaline ${COV_B} marker` }));
+    // Decoys carrying COV_B (not the prefix) so COV_B is common enough that
+    // bm25 ALONE (verified pre-fix) lets the 3-token prefix match win — the
+    // same flooding shape as seedFloodingFixture, applied to a prefix term.
+    for (let i = 0; i < 5; i += 1) {
+      store.create(article({ slug: `decoy-${i}`, title: `decoy ${i}`, what_it_does: `distractor ${i} ${COV_B} filler padding content` }));
+    }
+    const ranked = store.query({ types: ['feature_article'], rank_terms: ['zorb*', COV_B], cap: 50 });
+    assert.equal(ranked.length, 7, 'the decoys match COV_B too — the OR-eligible set is unchanged by coverage ranking');
+    assert.equal(
+      (ranked[0] as { slug: string }).slug,
+      'prefix-plus-term',
+      '2-of-2 expressions (prefix counted once) outranks a record whose prefix matches three tokens but still covers only 1 expression, even though bm25 alone (verified pre-fix) favors the 3-token match'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: cap applies AFTER coverage ordering over the whole eligible set', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedFloodingFixture(store);
+    const capped = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_B, COV_C], cap: 1 });
+    assert.equal(capped.length, 1);
+    assert.equal((capped[0] as { slug: string }).slug, 'full-coverage', 'the cap:1 window is the coverage-first winner, not the bm25-only winner (which — verified pre-fix — is flooded-one-term)');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: eligibility is unchanged — a record matching none of the OR terms is still excluded', () => {
+  const { dir, store } = tempStore();
+  try {
+    seedFloodingFixture(store);
+    store.create(article({ slug: 'no-match', title: 'no match', what_it_does: 'unrelated content entirely' }));
+    const ranked = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_B, COV_C], cap: 50 });
+    const slugs = (ranked as { slug: string }[]).map((r) => r.slug).sort();
+    assert.deepEqual(
+      slugs,
+      ['decoy-0', 'decoy-1', 'decoy-2', 'decoy-3', 'decoy-4', 'flooded-one-term', 'full-coverage'],
+      'the same eligible set as the plain OR match — coverage only reorders it, never narrows or widens it, and no-match stays excluded'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: a duplicate rank term does not inflate coverage — dedupe is on the COMPILED expression', () => {
+  const { dir, store } = tempStore();
+  try {
+    // Both records match exactly ONE distinct term — a genuine coverage tie
+    // (1-of-2) that should fall to bm25, same as any other tie. 'gamma-only'
+    // is denser so it wins that tie (fixed opposing ids per the tie-break
+    // pins above, so this doesn't pass by id luck either).
+    store.create(article({ id: ID_LOW, slug: 'alpha-only', title: 'alpha only', what_it_does: `${COV_A} marker` }));
+    store.create(
+      article({ id: ID_HIGH, slug: 'gamma-only-denser', title: 'gamma only denser', what_it_does: `${Array(5).fill(COV_C).join(' ')} marker` })
+    );
+    // rank_terms repeats COV_A: an undeduped implementation counts it TWICE
+    // toward 'alpha-only's coverage (2), wrongly beating 'gamma-only-denser's
+    // true 1-of-2 coverage — the exact defect this pin catches.
+    const withDup = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_A, COV_C], cap: 50 });
+    const deduped = store.query({ types: ['feature_article'], rank_terms: [COV_A, COV_C], cap: 50 });
+    assert.deepEqual(
+      (withDup as { slug: string }[]).map((r) => r.slug),
+      (deduped as { slug: string }[]).map((r) => r.slug),
+      'a duplicate term must not change the order relative to the already-deduped input'
+    );
+    assert.equal(
+      (withDup[0] as { slug: string }).slug,
+      'gamma-only-denser',
+      'both records have TRUE coverage 1-of-2 (a tie) — bm25 correctly picks the denser match, not the record that happens to repeat a query term'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: a case-variant duplicate ("Zorbaline" vs "zorbaline") is NOT merged, but ELIGIBILITY is still identical to the single term alone', () => {
+  const { dir, store } = tempStore();
+  try {
+    // Dedupe is on the EXACT compiled expression, not a JS case fold — a JS
+    // fold is not the same equivalence FTS5's unicode61 tokenizer uses, and
+    // a false JS merge could narrow OR eligibility or widen AND eligibility.
+    // The accepted consequence is a harmless double-count (asserted nowhere
+    // here, per design) — what MUST hold is that the returned id SET is
+    // unaffected by the case variance, because FTS5 itself case-folds at
+    // MATCH time regardless of what this dedupe does.
+    store.create(article({ slug: 'alpha-record', title: 'alpha record', what_it_does: `${COV_A} marker` }));
+    store.create(article({ slug: 'no-match', title: 'no match', what_it_does: 'unrelated content entirely' }));
+    const caseVariantDup = store.query({ types: ['feature_article'], rank_terms: ['Zorbaline', COV_A], cap: 50 });
+    const single = store.query({ types: ['feature_article'], rank_terms: [COV_A], cap: 50 });
+    assert.deepEqual(
+      (caseVariantDup as { id: string }[]).map((r) => r.id).sort(),
+      (single as { id: string }[]).map((r) => r.id).sort(),
+      'the id SET is identical whether or not the case-variant duplicate is present — eligibility never depends on whether the dedupe merged it'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('coverage ranking: countAboveScore shares the SAME dedupe as query() — a duplicate rank term must not inflate -bm25 past a threshold it would otherwise miss', () => {
+  const { dir, store } = tempStore();
+  try {
+    // One record matching ONLY COV_A. Empirically (against this exact fixture):
+    // -bm25 for rank_terms ['zorbaline','phentaris'] (already-deduped, matches
+    // this record on COV_A alone) is 0.000001; for the undeduped
+    // ['zorbaline','zorbaline','phentaris'] — bm25 sums a contribution per
+    // query-term OCCURRENCE — it doubles to 0.000002. minScore sits exactly
+    // between the two: the TRUE (deduped) score misses it, the INFLATED
+    // (undeduped) score would have crossed it.
+    store.create(article({ slug: 'alpha-only', title: 'alpha only', what_it_does: `${COV_A} marker` }));
+    const minScore = 0.0000015;
+    const deduped = store.countAboveScore({ types: ['feature_article'], rank_terms: [COV_A, COV_C] }, minScore);
+    const withDup = store.countAboveScore({ types: ['feature_article'], rank_terms: [COV_A, COV_A, COV_C] }, minScore);
+    assert.equal(deduped, 0, "CONTROL: the record's true score (0.000001) sits below minScore — nothing crosses it");
+    assert.equal(
+      withDup,
+      deduped,
+      'a duplicate rank term must not inflate the score countAboveScore thresholds by — it must agree with the already-deduped input, not silently count the record the undeduped score would have crossed'
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fallback rank without rank_terms: file-key overlap count, then updated_at desc (§3.4)', () => {
   const { dir, store } = tempStore();
   try {

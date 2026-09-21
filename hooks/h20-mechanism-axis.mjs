@@ -7070,16 +7070,70 @@ var SterlingStore = class _SterlingStore {
     return row.n;
   }
   /**
+   * The FTS5 match expression for a SINGLE rank term — quoted, with a
+   * trailing '*' recognized as an FTS5 prefix query ("stor*" matches
+   * "store"; the star must sit OUTSIDE the quoted token to act as the prefix
+   * operator). Shared by ftsMatchExpr's OR/AND join and by query()'s
+   * per-term coverage count, so a term's coverage can never mean something
+   * different than what it means for eligibility.
+   */
+  ftsTermExpr(term) {
+    return term.endsWith("*") && term.length > 1 ? `"${term.slice(0, -1).replace(/"/g, '""')}"*` : `"${term.replace(/"/g, '""')}"`;
+  }
+  /**
+   * The DISTINCT compiled FTS5 expressions rank_terms reduces to — the ONE
+   * dedupe point every rank_terms consumer (ftsMatchExpr's OR/AND join,
+   * query()'s coverage CTE arms, and therefore countAboveScore too, since it
+   * calls ftsMatchExpr) goes through, order-preserving on first occurrence.
+   *
+   * Dedupe key is the EXACT compiled expression string, NOT a case-folded
+   * one, even though FTS5's unicode61 tokenizer case-folds when MATCHING
+   * ("Alpha" and "alpha" hit the same rows at query time). A JS
+   * `toLowerCase()` fold is NOT the same equivalence as FTS5's unicode61
+   * folding (Unicode 6.1 tables plus diacritic removal) — a case where JS
+   * merges two terms FTS5 still distinguishes (e.g. Cherokee 'Ꭰ'/'ꭰ') would
+   * silently drop an OR arm (eligibility narrows) or an AND arm (eligibility
+   * widens), breaking the unchanged-eligibility requirement this whole
+   * mechanism exists to preserve. ACCEPTED CONSEQUENCE: a duplicate that
+   * differs only by case ("Alpha","alpha") is NOT merged, so its bm25
+   * contribution is still summed twice, exactly as it was before this
+   * dedupe existed — a harmless double-count on a real match, never a change
+   * to which rows are eligible. Exact-string dedupe still catches the common
+   * case (a caller literally repeating a term, or two rank_terms compiling
+   * to the identical quoted/prefix expression) and protects bm25(records_fts)
+   * from that: bm25 sums a contribution per query-term OCCURRENCE in the
+   * MATCH expression, so a byte-identical duplicate arm would otherwise
+   * inflate a matching row's score even though it changes no row's
+   * eligibility (OR/AND are both idempotent under a repeated arm) — dedupe
+   * has to happen before that string is built, not after.
+   */
+  distinctTermExprs(terms) {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const t of terms) {
+      const compiled = this.ftsTermExpr(t);
+      if (!seen.has(compiled)) {
+        seen.add(compiled);
+        out.push(compiled);
+      }
+    }
+    return out;
+  }
+  /**
    * The FTS5 MATCH expression rank_terms compiles to — shared by query() and
-   * countAboveScore() so the two can never rank two different match sets. A
-   * trailing '*' marks an FTS5 prefix query ("stor*" matches "store") — the
-   * star must sit OUTSIDE the quoted token to act as the prefix operator.
+   * countAboveScore() so the two can never rank two different match sets.
+   * Joins distinctTermExprs()'s DEDUPED list, not the raw terms: bm25(),
+   * which both callers score/threshold by, sums a contribution per
+   * query-term OCCURRENCE, so a duplicate arm here would inflate a matching
+   * row's score for query() AND countAboveScore identically (and silently)
+   * even though OR/AND are both idempotent under a repeated arm, so
+   * eligibility itself never depends on this dedupe.
    */
   ftsMatchExpr(terms, matchAll) {
     const joiner = matchAll ? " AND " : " OR ";
-    return terms.map((t) => t.endsWith("*") && t.length > 1 ? `"${t.slice(0, -1).replace(/"/g, '""')}"*` : `"${t.replace(/"/g, '""')}"`).join(joiner);
+    return this.distinctTermExprs(terms).join(joiner);
   }
-  /** Retrieval discipline (§3.4): filter → file-key join → rank (bm25 or mechanical fallback) → cap. */
+  /** Retrieval discipline (§3.4): filter → file-key join → rank (coverage, then bm25, then mechanical fallback) → cap. */
   query(opts = {}) {
     const cap = opts.cap ?? DEFAULT_QUERY_CAP;
     const { where, params, fileKeys } = this.baseFilter(opts);
@@ -7087,10 +7141,21 @@ var SterlingStore = class _SterlingStore {
       const terms = rankTerms.parse(opts.rank_terms);
       if (terms.length) {
         const match = this.ftsMatchExpr(terms, opts.match_all);
-        const sql2 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
+        const distinctTermMatches = this.distinctTermExprs(terms);
+        if (distinctTermMatches.length <= 1 || opts.match_all) {
+          const sql3 = `SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id
+            WHERE ${where.join(" AND ")} AND records_fts MATCH ?
+            ORDER BY bm25(records_fts) ASC, r.updated_at DESC, r.id ASC LIMIT ?`;
+          const rows3 = this.db.prepare(sql3).all(...params, match, cap);
+          return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows3));
+        }
+        const hitsArms = distinctTermMatches.map(() => "SELECT rowid FROM records_fts WHERE records_fts MATCH ?").join(" UNION ALL ");
+        const sql2 = `WITH hits(rowid) AS (${hitsArms}),
+          cov(rowid, coverage) AS (SELECT rowid, COUNT(*) FROM hits GROUP BY rowid)
+          SELECT r.body, r.scope FROM records r JOIN records_fts f ON f.record_id = r.id JOIN cov ON cov.rowid = f.rowid
           WHERE ${where.join(" AND ")} AND records_fts MATCH ?
-          ORDER BY bm25(records_fts) ASC, r.updated_at DESC LIMIT ?`;
-        const rows2 = this.db.prepare(sql2).all(...params, match, cap);
+          ORDER BY cov.coverage DESC, bm25(records_fts) ASC, r.updated_at DESC, r.id ASC LIMIT ?`;
+        const rows2 = this.db.prepare(sql2).all(...distinctTermMatches, ...params, match, cap);
         return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("query", rows2));
       }
     }
