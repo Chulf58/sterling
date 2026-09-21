@@ -664,16 +664,16 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     assert.equal(arts.find((r) => r.id === b.id)?.verify_before_use, true, 'deleted owned file flags the article');
     assert.match((reconciled('feat-b')[0] as { text: string }).text, /no longer exists/);
 
-    // DEDUP IS PER (reason, feature_link, FILE) — this assertion REVERSED on
-    // 2026-08-04 (board 2ded3b4b, decision 30d18443's sibling), deliberately.
-    // It used to assert that an open item on src/other.mjs SUPPRESSED a new item
-    // for src/c.mjs, on the reasoning that one article should present "one drain
-    // surface". That conflated one SURFACE (the queue) with one ITEM, and the
-    // conflation lost data: because knowledge_update re-baselines EVERY owned
-    // file, reconciling the seeded file absorbed c.mjs's drift into a fresh
-    // baseline, so the second finding neither queued nor survived. Two DIFFERENT
-    // files are two real obligations and get two items; the same file twice is
-    // the duplicate, and that still collapses (asserted below).
+    // DEDUP IS PER (reason, feature_link) FOR reconcile_needed, file_keys
+    // UNIONED IN — board b0bb9d96 / I-29 ("the mint storm"), superseding the
+    // 2026-08-04 per-file reading this assertion used to pin (board 2ded3b4b,
+    // decision 30d18443's sibling). That reading fixed a real silent-loss bug
+    // (a second drifting file was suppressed entirely), but its FIX — one item
+    // PER file — let a read-time singleton and a settlement grouped item for
+    // the SAME article coexist as duplicates, because the choke point's old key
+    // included the exact file_keys set. The data-loss concern still holds — see
+    // the union assertion below, which proves BOTH files survive — but they now
+    // survive as one item's file_keys, not two competing items.
     const cPath = join(dir, 'src', 'c.mjs');
     writeFileSync(cPath, 'v1');
     utimesSync(cPath, old, old);
@@ -684,11 +684,15 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     tools.knowledgeQuery({ types: ['feature_article'] });
     const cReason = (t: unknown) => (t as { feature_link?: string }).feature_link === c.id;
     let cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter(cReason);
-    assert.equal(cItems.length, 2, 'a DIFFERENT owned file is a distinct obligation, not a duplicate');
+    assert.equal(
+      cItems.length,
+      1,
+      'a DIFFERENT owned file on the SAME article WIDENS the existing item — SABOTAGE: reverting the fold-to-union makes this go RED (2 items)'
+    );
     assert.deepEqual(
-      cItems.map((t) => (t as { file_keys?: string[] }).file_keys?.[0]).sort(),
+      [...((cItems[0] as { file_keys?: string[] }).file_keys ?? [])].sort(),
       ['src/c.mjs', 'src/other.mjs'],
-      'and each item names the file it is about'
+      'no data lost: the union names both files, not just the one the read-time mint just found'
     );
 
     // The duplicate half: re-reading re-enqueues the SAME (reason, link, file)
@@ -698,7 +702,7 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     tools.knowledgeQuery({ types: ['feature_article'] });
     tools.knowledgeQuery({ types: ['feature_article'] });
     cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter(cReason);
-    assert.equal(cItems.length, 2, 'repeat reads of the same drift add nothing');
+    assert.equal(cItems.length, 1, 'repeat reads of the same drift add nothing');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });

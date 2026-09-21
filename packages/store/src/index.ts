@@ -378,6 +378,19 @@ export interface RecordWriteOptions {
    * by supersede()/retireInFavorOf().
    */
   remove_relation?: { rel: string; target_id: string };
+  /**
+   * OUT PARAMETER (board b0bb9d96 fix-round HIGH): when supplied, drainResolves
+   * pushes one snapshot per claimed item onto this array, read INSIDE the
+   * write's own transaction, immediately before that item's removal — the
+   * COMMITTED state at close time, never a pre-transaction validation read.
+   * Without this, a caller that built its own "what did resolves close"
+   * disclosure from an earlier read could describe an item's file_keys as they
+   * were when validated rather than as they were the instant they were
+   * deleted — and this lane's own fold can widen an item's file_keys between
+   * those two moments. The caller supplies an empty array and reads it back
+   * after the call returns.
+   */
+  resolvedReceipt?: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[];
 }
 
 export interface QueryOptions {
@@ -1000,6 +1013,25 @@ export class JournalDemotionRefusedError extends Error {
     );
     this.name = 'JournalDemotionRefusedError';
   }
+}
+
+/**
+ * THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), used by every
+ * minter — settlement.mjs's grouped mint AND enqueueSystemTodo's own
+ * fold-to-union below — so a surviving item's prose always names the FULL set
+ * of files it now covers, never just the first one a caller happened to pass.
+ * A pure function of its inputs: no store read, no clock, so it stays
+ * testable in isolation and safe to call from a standalone .mjs hook bundle
+ * (invariant 4 — hooks are dependency-light, bundled at build time). `owner`
+ * carries only what the two mintable record types expose for this purpose;
+ * an unresolvable owner (deleted concurrently) is the caller's problem to
+ * degrade, not this function's — it renders whatever it is given.
+ */
+export function buildReconcileText(owner: { type: 'feature_article' | 'reference_material'; slug?: string; title?: string }, fileKeys: string[]): string {
+  const files = [...fileKeys].sort();
+  return owner.type === 'reference_material'
+    ? `reconcile reference '${owner.title ?? ''}' — its document changed content in direct mode (settled): ${files.join(', ')}; refresh summary + source_date (§3.2.5)`
+    : `reconcile article '${owner.slug ?? ''}' — owned file(s) changed content in direct mode (settled): ${files.join(', ')}`;
 }
 
 export class SterlingStore {
@@ -2049,7 +2081,7 @@ export class SterlingStore {
       // activity row from it would place a write that happened NOW at the previous
       // write's instant.
       this.logActivity('updated', validated, internal.activityAt ?? (stored.updated_at as string) ?? now);
-      if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now);
+      if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
       // The echo goes through the SAME derivation get() serves, so a write
       // echo can never disagree with the next read of the same record.
       served = this.withDerivedReliedBy(this.hydrateAll([stored as DurableRecord])[0]);
@@ -2063,10 +2095,20 @@ export class SterlingStore {
    * already-closed claim throws, which rolls the ENTIRE write back — an
    * unclaimed write must never appear to succeed against a dead reference, and
    * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
    */
-  private drainResolves(op: string, ids: string[], at: string): void {
+  private drainResolves(op: string, ids: string[], at: string, receipt?: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[]): void {
     for (const claimed of new Set(ids)) {
-      const item = this.get(claimed);
+      const item = this.get(claimed) as (DurableRecord & { system_reason?: string; file_keys?: string[]; text?: string }) | undefined;
       if (!item) {
         throw new Error(
           `${op}: resolves claim '${claimed}' names no open item — it was never created, or it is already closed. ` +
@@ -2078,6 +2120,7 @@ export class SterlingStore {
           `${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) — the whole write rolled back`
         );
       }
+      if (receipt) receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
       this.remove(claimed, at);
     }
   }
@@ -2104,10 +2147,22 @@ export class SterlingStore {
    *      file absorbed the second file's drift into a fresh baseline: the finding
    *      neither queued nor survived.
    *
-   * The key is therefore (system_reason, feature_link, file_keys SET), and the
-   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
-   * concurrent caller blocks on the write lock and then SEES the committed row
-   * instead of racing it.
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
    *
    * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
    * severity — edited today, deleted tomorrow, both reconcile_needed, the first
@@ -2199,8 +2254,24 @@ export class SterlingStore {
       return strip(a) === strip(b);
     };
 
+    // ONE OPEN reconcile_needed ITEM PER feature_link (board b0bb9d96 / I-29):
+    // unlike every other lane, this identity is NOT the exact file_keys set —
+    // it is (system_reason, feature_link) alone, exactly like the state_review
+    // lane exception above but for a different reason (state_review has no
+    // meaningful file_keys at all; reconcile_needed's file_keys is real data
+    // that must be UNIONED, never discarded). Two un-coordinated minters
+    // (read-time per-file, settlement grouped-per-article) used to coexist as
+    // duplicates because the universal key included the exact file set; this
+    // relaxes the match for this lane only and folds the result below.
+    const isReconcileFold = candidate.system_reason === 'reconcile_needed' && !!candidate.feature_link;
+
     let existing: (DurableRecord & { text?: string; file_keys?: string[] }) | undefined;
     let textUpdated = false;
+    // Set ONLY by the zero-match multi-file canonicalization below (board
+    // b0bb9d96 fix-round MEDIUM) — the text this call ACTUALLY inserted, so
+    // the echo built after the transaction can agree with the row rather than
+    // silently reporting the caller's pre-canonicalization `candidate.text`.
+    let insertedText: string | undefined;
     this.tx(() => {
       // The read happens INSIDE the write transaction — that is the whole point.
       // Scanning open todos is cheap: the queue is small by design, and a queue
@@ -2208,6 +2279,106 @@ export class SterlingStore {
       const rows = this.db
         .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'")
         .all() as { body: string; scope: string }[];
+
+      if (isReconcileFold) {
+        const matches: (DurableRecord & { text?: string; file_keys?: string[] })[] = [];
+        for (const r of rows) {
+          const t = SterlingStore.decodeLiveRecord('enqueueSystemTodo', r) as DurableRecord & {
+            source?: string;
+            system_reason?: string;
+            feature_link?: string;
+            file_keys?: string[];
+            text?: string;
+          };
+          if (t.source !== 'system') continue;
+          if (t.system_reason !== 'reconcile_needed' || t.feature_link !== candidate.feature_link) continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          // CANONICALIZE A MULTI-FILE FIRST INSERT THROUGH buildReconcileText
+          // TOO (board b0bb9d96 fix-round MEDIUM): a caller can mint the FIRST
+          // item for an article already carrying more than one file in
+          // file_keys (settlement's grouped mint is exactly this shape) while
+          // its own caller-authored `text` names only one of them — nothing
+          // downstream widens this item to correct that, since there is no
+          // existing item to fold against. A SINGLE-file first insert keeps
+          // today's caller-authored text unchanged: that per-file wording
+          // (e.g. "no longer exists" vs "changed on disk", state_review's
+          // escalating phrasing) is real information a generic union
+          // rendering would flatten, and with exactly one file there is
+          // nothing for a union to be MORE truthful about.
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link as string) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+            const canonicalText = buildReconcileText(
+              owner
+                ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+                : { type: 'feature_article', slug: candidate.feature_link },
+              fileKeys
+            );
+            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord);
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate);
+          }
+          return;
+        }
+        // OLDEST open item keeps its id — anything already pointing at it
+        // (a citation, a prior resolves: claim in flight) must not break.
+        // created_at is a string ISO timestamp; a tie (same millisecond) is
+        // broken by id so the sort is total and deterministic either way.
+        matches.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set<string>(survivor.file_keys ?? []);
+        for (const f of folded) for (const k of f.file_keys ?? []) unionSet.add(k);
+        for (const k of candidate.file_keys ?? []) unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles = [...(survivor.file_keys ?? [])].sort();
+        const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(unionFiles);
+        // WIDENING (a real union — more than the survivor's own single file,
+        // or a legacy duplicate being folded in) demands the shared builder's
+        // truthful union text; it may not go on naming only the first file.
+        // A same-file re-report with NO folding keeps this lane's ordinary
+        // escalating-severity behaviour (decision 194f43e4) — same file,
+        // worse news, plain text equality decides whether it updates.
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? '';
+        if (widening) {
+          const owner = this.get(candidate.feature_link as string) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+          nextText = buildReconcileText(
+            owner
+              ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+              : { type: 'feature_article', slug: candidate.feature_link },
+            unionFiles
+          );
+        }
+        const textChanged = !textsEquivalent(survivor.text ?? '', nextText);
+        if (textChanged || filesChanged) {
+          // The versioned core, joining THIS transaction (tx is reentrant): version
+          // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
+          existing = this.applyInPlace(
+            'enqueueSystemTodo',
+            survivor.id,
+            (cur) => ({
+              ...(cur as unknown as Record<string, unknown>),
+              updated_at: candidate.updated_at,
+              ...(textChanged ? { text: nextText } : {}),
+              ...(filesChanged ? { file_keys: unionFiles } : {}),
+            }),
+            {}
+          ) as DurableRecord & { text?: string; file_keys?: string[] };
+          textUpdated = textChanged;
+        } else {
+          existing = survivor;
+        }
+        // Fold every OTHER open reconcile_needed item for this feature_link
+        // through the store's OWN removal path (never a bare DELETE), so the
+        // audit trail (queue_drain_log) is kept exactly as it is for any
+        // other closed system todo — union-then-remove, same transaction.
+        for (const f of folded) this.remove(f.id, candidate.updated_at);
+        return;
+      }
+
       for (const r of rows) {
         // Through the decoder like every other live materializing read: a match
         // here is RETURNED to the caller as the deduped record, so a drifted
@@ -2266,7 +2437,15 @@ export class SterlingStore {
     return existing
       ? { record: this.hydrateAll([existing as DurableRecord])[0], deduped: true, text_updated: textUpdated }
       : {
-          record: this.hydrateAll([SterlingStore.storableBody(candidate as unknown as Record<string, unknown>) as DurableRecord])[0],
+          // The echo must agree with the ROW this call actually inserted, not
+          // with the caller's pre-canonicalization `candidate` — see
+          // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+          record: this.hydrateAll([
+            SterlingStore.storableBody({
+              ...(candidate as unknown as Record<string, unknown>),
+              ...(insertedText !== undefined ? { text: insertedText } : {}),
+            }) as DurableRecord,
+          ])[0],
           deduped: false,
           text_updated: false,
         };

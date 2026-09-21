@@ -44,6 +44,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync, renameSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
+// THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), shared with
+// enqueueSystemTodo's own fold-to-union in packages/store — a pure function,
+// safe to pull in here despite the "no mcp-server at runtime" constraint
+// above (that constraint is about mcp-server specifically; @sterling/store
+// is already a workspace dependency hooks bundle at build time).
+import { buildReconcileText } from '@sterling/store';
 
 // MUTUAL EXCLUSION around touches.json's read-modify-write (R3 round-4
 // fixer, board c198866d): the earlier attempt to close the H7-vs-H7 race by
@@ -232,10 +238,7 @@ function buildReconcileItem(article, fileKeys, now) {
     links: [],
     scope: 'project',
     stack_tags: [],
-    text:
-      article.type === 'reference_material'
-        ? `reconcile reference '${article.title}' — its document changed content in direct mode (settled): ${fileKeys.join(', ')}; refresh summary + source_date (§3.2.5)`
-        : `reconcile article '${article.slug}' — owned file(s) changed content in direct mode (settled): ${fileKeys.join(', ')}`,
+    text: buildReconcileText(article, fileKeys),
     source: 'system',
     system_reason: 'reconcile_needed',
     file_keys: fileKeys,
@@ -251,23 +254,19 @@ function buildReconcileItem(article, fileKeys, now) {
  * against that article's CURRENT baseline. Paths owned by no article, or
  * showing no live drift, mint nothing.
  *
- * WIDEN-IN-PLACE, never a second item (F2, board c198866d fixer round):
- * grouping per article is a PRESENTATION choice the h7-settlement-minting
- * suite pins (AC5 — two changed paths under one article settle to ONE item),
- * so per-file items are not an option here without breaking that pin. But
- * enqueueSystemTodo dedups on the EXACT (reason, feature_link, file_keys)
- * SET (decision 194f43e4), so re-grouping the FULL current-candidate set on
- * every settlement pass would mint a NEW item every time the set's shape
- * changes (Stop-1 {A}, Stop-2 {A,B}, merge-backstop {A,B,C} — three open
- * items for one article, the moving-key pathology). Instead: find the
- * article's existing open item (if any); compute only the candidates NOT
- * already in its file_keys that are LIVE drift; if none, touch nothing (the
- * existing item already covers this article's live debt — this also means a
- * pre-existing item whose predicate has gone stale, e.g. AC6b's already-
- * reconciled row, is left untouched here, exactly as it was — direct-merge's
- * OWN isLiveReconcileDebt re-check is what excludes it from blocking, not a
- * removal performed during minting); otherwise WIDEN by removing the old
- * item and re-minting the union — one open item per article, always.
+ * PLAIN ENQUEUE PER OWNING RECORD (board b0bb9d96 / I-29): this used to
+ * hand-roll its own pre-read / widen-in-place / sweep-the-rest cycle here,
+ * duplicating exactly the identity logic enqueueSystemTodo's choke point now
+ * owns — the two coexisted as separate dedup definitions and that drift IS
+ * what let a read-time singleton and a settlement superset for the same
+ * (article, file) sit open as duplicates. The choke point now folds on
+ * (reason, feature_link) for this lane, unions file_keys in, keeps the OLDEST
+ * id and removes every other open duplicate through the store's own removal
+ * path — atomically, inside enqueueSystemTodo's own transaction — so this
+ * function only has to name what it can currently prove: which paths, for
+ * which owning record, are LIVE drift right now. AC5's grouping pin (two
+ * changed paths under one article settle to ONE item) still holds: it falls
+ * out of grouping candidates per owning record below, same as before.
  */
 export function mintSettlementReconcile(store, root, candidatePaths, now = new Date().toISOString()) {
   // Exempt paths are dropped from the candidate set UP FRONT (e1275166) — an
@@ -278,17 +277,6 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
   const exempt = loadGeneratedProjections(root);
   const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
   if (!paths.length) return [];
-
-  // Every OPEN reconcile_needed item, indexed by its owning article — only
-  // the FIRST one found per article is tracked; a pre-existing SECOND one for
-  // the same article (a legacy duplicate, or hand-created as in a fixture) is
-  // left untouched, and this pass never creates a third.
-  const openByArticle = new Map(); // article.id -> existing open item
-  for (const t of store.query({ types: ['todo'], cap: 1000 })) {
-    if (t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link && !openByArticle.has(t.feature_link)) {
-      openByArticle.set(t.feature_link, t);
-    }
-  }
 
   const byArticle = new Map(); // article.id -> { article, freshPaths: Set<string> }
   for (const rel of paths) {
@@ -303,41 +291,15 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
 
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
-    const existing = openByArticle.get(article.id);
-    const existingSet = new Set((existing?.file_keys ?? []).filter((k) => !exempt.has(k)));
-    // Candidates NOT already covered by the existing item, filtered to those
-    // showing LIVE drift right now (F1's deletion-is-drift folds in here too).
-    const newlyDrifted = [...freshPaths]
-      .filter((rel) => !existingSet.has(rel))
-      .filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
-    if (!newlyDrifted.length) continue; // nothing new — existing item (if any) already covers this article
-    if (!existing) {
-      const fileKeys = newlyDrifted.sort();
-      store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
-      minted.push({ article_id: article.id, paths: fileKeys });
-      continue;
-    }
-    const widened = [...new Set([...existingSet, ...newlyDrifted])].sort();
-    // R1 (board c198866d round-3 fixer): ENQUEUE the widened item FIRST, THEN
-    // sweep away the old one(s) — a crash between the two calls must leave
-    // the OLD item's debt readable, never nothing. The rows can momentarily
-    // coexist (their dedup keys differ, since file_keys differs), which is
-    // harmless redundancy, not data loss.
-    const { record: widenedRecord } = store.enqueueSystemTodo(buildReconcileItem(article, widened, now));
-    // SELF-HEALING SWEEP (micro-round fixer): remove EVERY OTHER open
-    // reconcile_needed item for THIS article, not just `existing` — if a
-    // prior settlement pass crashed after its enqueue but before its own
-    // remove, that stale duplicate is invisible to openByArticle's
-    // first-found tracking (it only ever surfaces ONE item as `existing`),
-    // so a bare store.remove(existing.id) alone could never clean it up and
-    // it would sit open forever. Sweeping by feature_link makes retry
-    // self-healing regardless of how many stale duplicates accumulated.
-    for (const t of store.query({ types: ['todo'], cap: 1000 })) {
-      if (t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link === article.id && t.id !== widenedRecord.id) {
-        store.remove(t.id, now);
-      }
-    }
-    minted.push({ article_id: article.id, paths: widened });
+    // LIVE drift right now (F1's deletion-is-drift folds in here too). A path
+    // already covered by an open item is harmless to re-offer — the choke
+    // point's union is idempotent on a key it already holds, so this never
+    // churns a version bump for nothing new.
+    const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
+    if (!drifted.length) continue;
+    const fileKeys = drifted.sort();
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
+    minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
   }
   return minted;
 }

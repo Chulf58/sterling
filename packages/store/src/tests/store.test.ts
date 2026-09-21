@@ -1169,12 +1169,151 @@ test('enqueueSystemTodo: the same (reason, link, file) returns the EXISTING item
   }
 });
 
-test('enqueueSystemTodo: a DIFFERENT file on the same article is a distinct obligation', () => {
+// ---------------------------------------------------------------------------
+// ONE OPEN reconcile_needed ITEM PER feature_link (board b0bb9d96 / I-29, "the
+// mint storm"): a read-time per-file minter and a settlement grouped-per-
+// article minter used to coexist as DUPLICATES for the same article, because
+// the universal key included the exact file_keys SET. This lane now folds on
+// (system_reason, feature_link) ALONE, unioning file_keys IN — the opposite
+// of the old test this block replaces, which pinned the two-item outcome as
+// "the silent-loss half of the bug". That was the defect, not a contract.
+// ---------------------------------------------------------------------------
+
+test('enqueueSystemTodo: reconcile_needed — a DIFFERENT file on the SAME article WIDENS the existing item instead of duplicating it (case a)', () => {
   const { store, cleanup } = storeHarness();
   try {
-    store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] }));
-    store.enqueueSystemTodo(sysTodo({ file_keys: ['src/b.ts'] }));
-    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 2, 'this is the silent-loss half of the bug');
+    const first = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] }));
+    assert.equal(first.deduped, false, 'baseline: first mint for this article');
+
+    const second = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts', 'src/b.ts'] }));
+    assert.equal(second.deduped, true, 'folded into the existing item, not a second one');
+    assert.equal(second.record.id, first.record.id, 'the surviving item is the FIRST one — SABOTAGE: replacing instead of unioning makes this go RED (a fresh id)');
+
+    const open = store.query({ types: ['todo'], cap: 100 });
+    assert.equal(open.length, 1, 'exactly one open reconcile_needed item for this article');
+    assert.deepEqual(
+      [...((open[0] as unknown as { file_keys: string[] }).file_keys)].sort(),
+      ['src/a.ts', 'src/b.ts'],
+      "keys are the UNION — SABOTAGE: replacing file_keys instead of unioning makes this go RED (drops 'src/a.ts')"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// DIRECT DESCENDANT of the historical silent-loss pin this fold replaced (the
+// old store.test.ts:1172/1349 and server.test.ts:687 asserted 2 items here,
+// each carrying its own guard text: "this is the silent-loss half of the
+// bug" / "silently re-introduces the exact silent-loss bug decision 194f43e4
+// fixed"). That earlier bug (board 2ded3b4b) kept the SAME shape this fold
+// now produces — one surviving item — but got there by keying dedup on
+// (reason, feature_link) WITHOUT the file at all: a genuinely NEW, DISJOINT
+// path enqueued for an article with an already-open item returned the
+// EXISTING item as deduped and never recorded the new path — silent data
+// loss, not a union. Case (a) above does not discriminate that regression
+// because its second call's own payload already carries BOTH files
+// (['src/a.ts','src/b.ts']), so even a "replace file_keys with the incoming
+// candidate's" mutation happens to pass it. This test enqueues a SECOND,
+// DISJOINT single-file payload — the second call names ONLY 'src/b.ts', never
+// 'src/a.ts' — so the union is the only way 'src/a.ts' can still be present
+// afterward.
+test('enqueueSystemTodo: reconcile_needed — a DISJOINT second file must not be silently lost (descendant of the pre-fold silent-loss pin, board 2ded3b4b/decision 194f43e4)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const first = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] }));
+    assert.equal(first.deduped, false, 'baseline: first mint for this article');
+
+    // The incoming payload names ONLY the new path — never the old one — so a
+    // "return the existing item, keys untouched" implementation (the
+    // historical bug) and a correct union are distinguishable by this call
+    // alone, unlike case (a)'s superset payload.
+    const second = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/b.ts'] }));
+    // enqueueSystemTodo's contract reports a matched-existing-item outcome as
+    // `deduped: true` regardless of whether the match's body needed a rewrite
+    // (see the sibling text-update/no-op tests above) — this fold is no
+    // exception: the caller gets back "this collapsed into an existing item",
+    // not a fresh insert, even though that existing item's file_keys just grew.
+    assert.equal(second.deduped, true, 'the second, disjoint enqueue still reports a fold onto the existing item, not a fresh insert');
+    assert.equal(second.record.id, first.record.id, 'the surviving item is the FIRST one — SABOTAGE: returning a fresh id makes this go RED');
+
+    const open = store.query({ types: ['todo'], cap: 100 });
+    assert.equal(open.length, 1, 'exactly one open item — SABOTAGE: silently dropping the union (the historical bug) still leaves exactly one item, so THIS assertion alone would not catch it — see the file_keys assertion below');
+    assert.deepEqual(
+      [...((open[0] as unknown as { file_keys: string[] }).file_keys)].sort(),
+      ['src/a.ts', 'src/b.ts'],
+      "file_keys is EXACTLY the union of both disjoint calls — SABOTAGE: the historical silent-loss bug (return the matched item unchanged, without folding the new path in) makes this go RED ('src/b.ts' missing)"
+    );
+    const text = (open[0] as unknown as { text: string }).text;
+    assert.match(text, /src\/a\.ts/, 'the surviving text still names the FIRST call\'s path');
+    assert.match(text, /src\/b\.ts/, 'and the surviving text names the SECOND, disjoint call\'s path — neither is silently dropped');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// drainResolves' resolvedReceipt OUT-PARAM (board b0bb9d96 fix-round HIGH):
+// a caller building a "what did resolves actually close" disclosure from an
+// EARLIER read (e.g. the pre-transaction validation a tool-layer caller did
+// before this write) can be lying by the time the drain actually runs, now
+// that this lane's own identity folds and widens an item in place. The fix
+// is to capture each claimed item's state INSIDE drainResolves, immediately
+// before its own removal — the COMMITTED state, not a stale earlier read —
+// and hand that back through `resolvedReceipt`.
+// ---------------------------------------------------------------------------
+
+test('drainResolves: resolvedReceipt reflects the COMMITTED state at removal, not an earlier stale read — proven by a SECOND real connection widening the item first (board b0bb9d96 fix-round HIGH)', () => {
+  const { dir, store } = tempStore();
+  try {
+    const target = store.create(decision());
+    const item = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] })).record;
+
+    // Simulate a caller's EARLIER validation read of the item — the shape a
+    // pre-transaction `claims` snapshot would have held. This value must NOT
+    // be what the receipt below echoes.
+    const staleRead = store.get(item.id) as unknown as { file_keys?: string[] };
+    assert.deepEqual(staleRead.file_keys, ['src/a.ts'], 'baseline: this is what an earlier reader would have seen');
+
+    // A SECOND, independent SterlingStore connection to the SAME db file
+    // widens the item for real — the production fold path (enqueueSystemTodo),
+    // exercised from a genuinely different connection rather than a re-read on
+    // this one, so this is not a same-connection-cache artifact.
+    const second = new SterlingStore(join(dir, 'sterling.db'));
+    try {
+      second.enqueueSystemTodo(sysTodo({ file_keys: ['src/b.ts'] })); // same feature_link (ART_1 default) — folds onto `item`
+    } finally {
+      second.close();
+    }
+
+    // Now drain `item` via an ordinary versioned write that never itself read
+    // the item beforehand — resolvedReceipt is the ONLY place this call gets
+    // to say what it closed.
+    const receipt: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[] = [];
+    store.updateRecord(target.id, { ...decision(), rationale: 'updated by the resolves-race test' }, { resolves: [item.id], resolvedReceipt: receipt });
+
+    assert.equal(receipt.length, 1, 'one snapshot for the one claimed id');
+    assert.equal(receipt[0].id, item.id);
+    assert.deepEqual(
+      [...(receipt[0].file_keys ?? [])].sort(),
+      ['src/a.ts', 'src/b.ts'],
+      "the receipt names the WIDENED, committed set — SABOTAGE: building resolvedReceipt from a pre-transaction/pre-widen read (the historical HIGH bug) makes this go RED (['src/a.ts'] only, 'src/b.ts' missing)"
+    );
+    assert.equal(store.get(item.id), undefined, 'and the item really is gone — the drain still happened');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('drainResolves: resolvedReceipt is undefined/omitted when no receipt array is supplied — an OUT-param, not a mandatory return', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const target = store.create(decision());
+    const item = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] })).record;
+    // No `resolvedReceipt` passed — must not throw, and must drain exactly as before.
+    const updated = store.updateRecord(target.id, { ...decision(), rationale: 'updated, no receipt requested' }, { resolves: [item.id] });
+    assert.ok(updated);
+    assert.equal(store.get(item.id), undefined, 'the item still drains with no receipt requested');
   } finally {
     cleanup();
   }
@@ -1271,7 +1410,12 @@ test('enqueueSystemTodo: file_keys ORDER does not create a false distinction', (
 // 194f43e4) that mints a fresh duplicate every time the shape shifts. The fix
 // gives state_review ONLY a lane-specific key of {system_reason, feature_link}
 // at the enqueueSystemTodo choke point. Every OTHER lane's per-file dedup
-// (decision 194f43e4) is explicitly UNCHANGED — pinned below as a control.
+// (decision 194f43e4) was UNCHANGED at the time this block was written and is
+// still pinned below as a control — EXCEPT reconcile_needed WITH a
+// feature_link, which board b0bb9d96 / I-29 later gave its own
+// {system_reason, feature_link} fold (unioning file_keys in, never keying on
+// them) for the same reason state_review needed one: see the section below
+// this one.
 // ---------------------------------------------------------------------------
 
 test('enqueueSystemTodo: state_review dedups on {system_reason, feature_link} ALONE — a DIFFERENT file_keys set for the SAME article is the SAME item', () => {
@@ -1325,16 +1469,162 @@ test('enqueueSystemTodo: state_review CONTROL — a genuinely DIFFERENT article 
   }
 });
 
-test('enqueueSystemTodo: reconcile_needed CONTROL — per-file dedup semantics (decision 194f43e4) are UNCHANGED by the state_review fix', () => {
+// ---------------------------------------------------------------------------
+// reconcile_needed's fold-to-union (board b0bb9d96 / I-29) SUPERSEDES the
+// per-file-SET reading of decision 194f43e4 for this one lane, but not its
+// underlying purpose: 194f43e4 existed to stop a second drifting file being
+// SILENTLY LOST when a first file's debt was reconciled. The fold does not
+// reopen that hole — every file stays named, just inside ONE item's unioned
+// file_keys instead of a second item. The exact-key reading of 194f43e4
+// still governs every OTHER lane, and reconcile_needed itself keeps it when
+// there is no feature_link to fold on (case e below).
+// ---------------------------------------------------------------------------
+
+test('enqueueSystemTodo: reconcile_needed — two legacy single-file duplicates are FOLDED into the oldest, union complete (case b)', () => {
   const { store, cleanup } = storeHarness();
   try {
-    store.enqueueSystemTodo(sysTodo({ system_reason: 'reconcile_needed', file_keys: ['src/a.ts'] }));
-    store.enqueueSystemTodo(sysTodo({ system_reason: 'reconcile_needed', file_keys: ['src/b.ts'] }));
+    // Simulate two items minted BEFORE this fix shipped (the old exact-key
+    // choke point would have inserted both) by seeding them directly through
+    // store.create — enqueueSystemTodo itself can no longer produce this
+    // shape, which is the point of the fix.
+    const older = store.create(
+      sysTodo({ id: randomUUID(), created_at: '2026-06-01T00:00:00.000Z', updated_at: '2026-06-01T00:00:00.000Z', file_keys: ['src/a.ts'] })
+    );
+    const newer = store.create(
+      sysTodo({ id: randomUUID(), created_at: '2026-06-05T00:00:00.000Z', updated_at: '2026-06-05T00:00:00.000Z', file_keys: ['src/b.ts'] })
+    );
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 2, 'baseline: two legacy duplicates exist');
+
+    const folded = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/c.ts'] }));
+
+    const open = store.query({ types: ['todo'], cap: 100 });
+    assert.equal(open.length, 1, 'both legacy duplicates plus the new enqueue settle to ONE item');
+    assert.equal(folded.record.id, older.id, 'the OLDEST id survives — SABOTAGE: keeping the newest or a fresh id makes this go RED');
+    assert.notEqual(folded.record.id, newer.id);
+    assert.deepEqual(
+      [...((open[0] as unknown as { file_keys: string[] }).file_keys)].sort(),
+      ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+      'union is complete across both folded duplicates plus the incoming enqueue'
+    );
+
+    // The folded-away duplicate went through the store's own removal path
+    // (P4), not a bare delete — its drain is visible in the audit log exactly
+    // like any other closed system todo.
+    assert.ok(store.drainLogEntry(newer.id), 'the folded duplicate is traced in queue_drain_log — removed through the normal path, audit trail kept');
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: reconcile_needed — the SAME file owned by two DIFFERENT articles is two legitimate items (case c)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ feature_link: ART_1, file_keys: ['src/shared.ts'] }));
+    store.enqueueSystemTodo(sysTodo({ feature_link: ART_2, file_keys: ['src/shared.ts'] }));
     assert.equal(
-      store.query({ types: ['todo'], cap: 100 }).filter((t) => (t as Record<string, unknown>).system_reason === 'reconcile_needed').length,
+      store.query({ types: ['todo'], cap: 100 }).length,
       2,
-      'CONTROL: the exception must be LANE-SPECIFIC to state_review — ' +
-        'SABOTAGE: widening it to drop file_keys from the key for every lane makes this go RED (silently re-introduces the exact silent-loss bug decision 194f43e4 fixed)'
+      'no cross-owner dedupe — one changed file owned by N articles is N legitimate items, never collapsed'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: a non-reconcile_needed reason keeps EXACT file_keys-set dedup, unchanged (case d)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'file_parked', file_keys: ['src/a.ts'] }));
+    store.enqueueSystemTodo(sysTodo({ system_reason: 'file_parked', file_keys: ['src/b.ts'] }));
+    assert.equal(
+      store.query({ types: ['todo'], cap: 100 }).length,
+      2,
+      'file_parked (and every other lane) is untouched by the reconcile_needed fold — still distinct per exact file_keys set'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('enqueueSystemTodo: reconcile_needed with NO feature_link keeps the old exact file_keys-set dedup, unchanged (case e)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    store.enqueueSystemTodo(sysTodo({ feature_link: undefined, file_keys: ['src/a.ts'], text: 'reconcile an unlinked file src/a.ts' }));
+    store.enqueueSystemTodo(sysTodo({ feature_link: undefined, file_keys: ['src/b.ts'], text: 'reconcile an unlinked file src/b.ts' }));
+    assert.equal(
+      store.query({ types: ['todo'], cap: 100 }).length,
+      2,
+      'the fold is keyed on feature_link — without one there is nothing to fold on, so this stays the old per-file behaviour ' +
+        '(the queue-truth-at-read read-time mint never omits feature_link in practice, but the choke point must not assume that)'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("enqueueSystemTodo: reconcile_needed — the surviving item's text names EVERY path in the union, not just the first (case f)", () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ slug: 'union-text-subject' }));
+    store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts'] }));
+    store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/b.ts'] }));
+    const widened = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/c.ts'] }));
+    const text = (widened.record as unknown as { text: string }).text;
+
+    assert.match(text, /src\/a\.ts/, 'names the first-folded path');
+    assert.match(text, /src\/b\.ts/, 'names the second-folded path');
+    assert.match(text, /src\/c\.ts/, 'names the incoming path');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// ZERO-MATCH INSERT CANONICALIZATION (board b0bb9d96 fix-round MEDIUM): the
+// FIRST enqueue for an article can already carry more than one file in
+// file_keys (settlement's grouped mint does exactly this) while its own
+// caller-authored text names only one of them — nothing widens this item
+// later to correct the prose, because there is no EXISTING item to fold
+// against. A multi-file first insert must be canonicalized through the same
+// buildReconcileText the fold uses. A single-file first insert is left
+// exactly as the caller wrote it — see the CONTROL below for why.
+// ---------------------------------------------------------------------------
+
+test('enqueueSystemTodo: reconcile_needed — a FIRST insert carrying MULTIPLE file_keys is canonicalized through buildReconcileText, not left with narrower caller text (board b0bb9d96 fix-round MEDIUM)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ slug: 'multi-first-insert' }));
+    const result = store.enqueueSystemTodo(
+      sysTodo({
+        feature_link: art.id,
+        file_keys: ['src/a.ts', 'src/b.ts'],
+        text: "reconcile article 'multi-first-insert' — src/a.ts changed on disk (out-of-band edit)",
+      })
+    );
+    assert.equal(result.deduped, false, 'this is genuinely the first item for this article — no fold happened');
+    const text = (result.record as unknown as { text: string }).text;
+    assert.match(text, /src\/a\.ts/, 'still names the first path');
+    assert.match(
+      text,
+      /src\/b\.ts/,
+      "and names the SECOND path too — SABOTAGE: inserting the caller's own narrower text unchanged on a zero-match insert makes this go RED (missing 'src/b.ts')"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("enqueueSystemTodo: reconcile_needed CONTROL — a FIRST insert carrying exactly ONE file_key keeps the caller's own text UNCHANGED", () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const callerText = "reconcile article 'x' — src/a.ts no longer exists (out-of-band deletion)";
+    const result = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'], text: callerText }));
+    assert.equal(
+      (result.record as unknown as { text: string }).text,
+      callerText,
+      "CONTROL: a single-file first insert is NOT rewritten through the generic union builder — its specific per-file wording " +
+        "('no longer exists' vs 'changed on disk', or state_review's escalating phrasing elsewhere) carries real information a generic " +
+        'rendering would flatten, and with exactly one file there is nothing a union could say more truthfully'
     );
   } finally {
     cleanup();

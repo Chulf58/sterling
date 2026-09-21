@@ -126,6 +126,33 @@ test('AC1: knowledge_update with a valid resolves id removes exactly that item, 
   }
 });
 
+// NO EXISTING TEST exercised resolved_items at all before this (board b0bb9d96
+// fix-round review finding) — this is the plain single-process case: an
+// ordinary resolves close reports what it closed.
+test("resolved_items (board b0bb9d96 / I-29): a resolves close reports the drained item's id, system_reason and file_keys", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: `reconcile 'thing'`,
+      file_keys: ['src/thing.ts'],
+      feature_link: article.id,
+    });
+
+    const result = tools.knowledgeUpdate(article.id, { what_it_does: 'reconciled' }, [item.id]) as unknown as {
+      resolved_items?: { id: string; system_reason?: string; file_keys?: string[] }[];
+    };
+
+    assert.equal(result.resolved_items?.length, 1, 'one entry for the one claimed item');
+    assert.equal(result.resolved_items?.[0].id, item.id);
+    assert.equal(result.resolved_items?.[0].system_reason, 'reconcile_needed');
+    assert.deepEqual(result.resolved_items?.[0].file_keys, ['src/thing.ts']);
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC2 (central regression pin): knowledge_update with NO resolves leaves a chain-linked open reconcile_needed item OPEN — the old implicit drain is dead — and the receipt warns naming it', () => {
   const { tools, cleanup } = harness();
   try {

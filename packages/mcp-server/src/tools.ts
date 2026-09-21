@@ -3746,8 +3746,13 @@ export class SterlingTools {
         // ARTICLE — so a second drifting file never got an item, and because
         // knowledge_update re-baselines EVERY owned file, reconciling the first
         // absorbed the second's drift into a fresh baseline. The finding neither
-        // queued nor survived. One item per FILE is also what makes an item
-        // actionable: it names the thing that changed.
+        // queued nor survived. Each call below still passes ONE file's worth of
+        // file_keys and its own specific per-file text (missing vs edited) — that
+        // is what makes each finding actionable and legible on its own — but the
+        // choke point (board b0bb9d96 / I-29) now FOLDS every reconcile_needed
+        // call sharing this article's feature_link into ONE stored item, unioning
+        // file_keys rather than minting a second item per file: "one item per
+        // FILE" describes this loop's calls, never the resulting queue depth.
         const drifts: { path: string; missing: boolean; neverTracked?: boolean }[] = [];
         const parkedFiles: { path: string; ref: string }[] = [];
         // Owned bytes that actually exist — the evidence for the state check below.
@@ -3794,12 +3799,17 @@ export class SterlingTools {
           // has to disclose it).
         }
         if (drifts.length) {
-          // NO PRE-CHECK: enqueueSystemTodo is atomic and keyed
-          // (reason, feature_link, file), so re-enqueueing an already-open item
-          // returns it instead of duplicating it. The old pre-check keyed on the
-          // ARTICLE, which is exactly what suppressed a second file's finding —
-          // and doing it here as well as in the store would put the dedup rule in
-          // two places, which is how the four copies drifted apart to begin with.
+          // NO PRE-CHECK: enqueueSystemTodo is atomic. For reconcile_needed
+          // with a feature_link (this lane), identity is (reason,
+          // feature_link) ALONE — file_keys is NOT part of the key — so
+          // re-enqueueing here folds into the one open item for this
+          // article, unioning this call's file_keys into it, rather than
+          // duplicating or suppressing. The old pre-check keyed on the
+          // ARTICLE alone and DISCARDED a second file's finding; the choke
+          // point's fold keeps it, just inside the same item — and doing a
+          // pre-check here as well as in the store would put the dedup rule
+          // in two places, which is how the four copies drifted apart to
+          // begin with.
           for (const d of drifts.slice(0, DRIFT_ITEMS_PER_READ)) {
             // If the article's OWN role text disclaims the path, say so on the
             // item (board b7269100). Otherwise this exact no-op gets re-audited
@@ -4793,6 +4803,12 @@ export class SterlingTools {
     // that is a BARE record rather than an envelope with a `record` key —
     // board_update — where writeProjected digests the whole return value.
     if (record.claims_check !== undefined) digested.claims_check = record.claims_check;
+    // resolved_items (board b0bb9d96 / I-29) SURVIVES THE DIGEST for the same
+    // reason: it is a fact about the WRITE (what its resolves claim actually
+    // closed, and with which file_keys at close time) that the caller cannot
+    // reconstruct from what it sent, and digestRecord's field whitelist would
+    // otherwise drop it.
+    if (record.resolved_items !== undefined) digested.resolved_items = record.resolved_items;
     return digested;
   }
 
@@ -6907,6 +6923,35 @@ export class SterlingTools {
     identity_moved?: { previous_id: string; note: string };
     /** see CreateResult.claims_check — the same disclosure on this write's receipt */
     claims_check?: string;
+    /**
+     * WHAT resolves ACTUALLY CLOSED, named with its file_keys AS THEY STOOD
+     * AT THE MOMENT OF REMOVAL (board b0bb9d96 / I-29, fix-round HIGH):
+     * reconcile_needed's identity now folds and widens between a reader
+     * seeing an item and this write claiming it — a write closing "src/a.ts"
+     * could really be closing "src/a.ts, src/b.ts, src/c.ts" if another
+     * session's read-time or settlement mint widened it first. Sourced from
+     * `SterlingStore.drainResolves`'s own `receipt` out-param — a snapshot
+     * taken INSIDE the write's transaction, immediately before that item's
+     * removal — never from `claims` (this call's PRE-transaction validation
+     * read, which a concurrent widen can already have made stale by the time
+     * the drain actually runs; the target record's own CAS cannot catch this,
+     * because the concurrent write touched the TODO, not the target). One
+     * entry per claimed id actually drained; order matches the drain, not
+     * necessarily `resolves` order. NOT populated for the append-join
+     * (article_missing) discharge lane — its claims are validated and closed
+     * inside dischargeAppendJoin's own transaction, never surfaced to this
+     * scope (see that method's `retained` receipt for ITS disclosure of
+     * partial closes). The attestation-replacement lane below IS populated,
+     * but with a NARROWER guarantee than the ordinary path's: it reads each
+     * item via `store.get()` immediately before that item's own
+     * `store.remove()` call — fresher than a pre-transaction validation read,
+     * but NOT inside one shared transaction the way `drainResolves` is (each
+     * `store.remove` there opens its own), so another writer can still widen
+     * the item in the gap between that read and the remove. Residual, rated
+     * MEDIUM on re-review, confined to this one pre-existing non-atomic
+     * replacement lane.
+     */
+    resolved_items?: { id: string; system_reason?: string; file_keys?: string[] }[];
   } {
     const old = this.resolveRecordId(id, toolName);
     this.refuseStaleAddress(old, id, toolName);
@@ -7089,6 +7134,13 @@ export class SterlingTools {
     // feature_link matching, already-drained traces) — the store's own check is
     // the transactional backstop, not the explanation.
     let updated: DurableRecord;
+    // FILLED FROM THE STORE, NEVER FROM `claims` (board b0bb9d96 fix-round
+    // HIGH — see resolved_items' own doc comment above): `claims` is this
+    // call's pre-transaction validation read, which the fold can make stale
+    // before the drain actually runs. Each populated branch below reads the
+    // item immediately before removing it and pushes the COMMITTED snapshot
+    // here instead.
+    const resolvedReceipt: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[] = [];
     // The store's own validateRecord re-parses the merged record (`next`) and,
     // on a caller-supplied bad element (e.g. a history entry passed as a bare
     // string), throws zod's raw ZodError across the store boundary — the
@@ -7108,7 +7160,17 @@ export class SterlingTools {
         }
         updated = this.store.supersede(old.id, next);
         for (const claim of claims) {
+          // Read IMMEDIATELY before remove, never the earlier `claims` value:
+          // this narrows the staleness window this lane cannot fully close
+          // (each store.remove below opens its OWN transaction — there is no
+          // single transaction here the way drainResolves gives the ordinary
+          // path — but reading right here is still strictly fresher than the
+          // pre-transaction validation read `claims` holds).
+          const atRemoval = this.store.get(claim.id) as (DurableRecord & { system_reason?: string; file_keys?: string[]; text?: string }) | undefined;
           this.store.remove(claim.id, ts);
+          if (atRemoval) {
+            resolvedReceipt.push({ id: atRemoval.id, system_reason: atRemoval.system_reason, file_keys: atRemoval.file_keys ?? [], text: atRemoval.text });
+          }
         }
       } else if (isAppendJoinWrite) {
         // THE ATOMIC APPEND-JOIN DISCHARGE. Everything — the fresh reads, the
@@ -7154,7 +7216,7 @@ export class SterlingTools {
         const cas = expectedVersion ?? previousVersion;
         updated = this.store.updateRecord(old.id, next, {
           ...(cas !== undefined ? { expected_version: cas } : {}),
-          ...(claims.length ? { resolves: claims.map((claim) => claim.id) } : {}),
+          ...(claims.length ? { resolves: claims.map((claim) => claim.id), resolvedReceipt } : {}),
           ...(relationRemoval ? { remove_relation: relationRemoval } : {}),
         });
       }
@@ -7192,16 +7254,30 @@ export class SterlingTools {
     // carries it through the default digest receipt the same way it carries
     // previous_version, so the disclosure survives the projection it is for.
     const bumpedTo = (updated as unknown as { version?: number }).version;
+    // Sourced from `resolvedReceipt` — the COMMITTED state each populated
+    // branch above captured immediately before removing the item — never from
+    // `claims` (board b0bb9d96 fix-round HIGH; see resolved_items' own doc
+    // comment). Not populated on the append-join path (resolvedReceipt stays
+    // empty there; see the field's own doc comment).
+    const resolvedItems = resolvedReceipt.length
+      ? resolvedReceipt.map((item) => ({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [] }))
+      : undefined;
     const echo = replaced
       ? {
           ...claimsCheck,
           ...updated,
+          ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
           identity_moved: {
             previous_id: old.id,
             note: `an attestation update is a CONCEPT REPLACEMENT, not an in-place version bump (an inspection verdict is immutable by construction): this is a NEW record with a new id, and '${old.id}' was retired pointing at it. Cite '${updated.id}' from here on.`,
           },
         }
-      : { ...claimsCheck, ...updated, previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined) };
+      : {
+          ...claimsCheck,
+          ...updated,
+          ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
+          previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined),
+        };
     if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
       const registered = RECORD_TYPES[old.type as keyof typeof RECORD_TYPES];
       const excludeIds = new Set(chain);

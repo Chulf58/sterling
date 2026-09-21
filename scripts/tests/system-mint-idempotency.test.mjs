@@ -8,6 +8,11 @@
 // atomic dedup choke point (key: system_reason, feature_link, sorted
 // file_keys, or — when neither identifying field exists — the text; decision
 // 194f43e4). This change routes the mints through enqueueSystemTodo instead.
+// NEITHER lane this file exercises (capture_owed, article_missing) is the
+// reconcile_needed exception board b0bb9d96 / I-29 later added to
+// enqueueSystemTodo (identity (system_reason, feature_link) ALONE, file_keys
+// UNIONED rather than part of the key) — the key described above still
+// governs both lanes here exactly as written.
 //
 // Store-level key semantics (same-key returns existing / different-file is
 // distinct / text-differs updates / identical text is a no-op churn) are
