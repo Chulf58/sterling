@@ -9,12 +9,12 @@ import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
 // reconcile_needed closes on an EXPLICIT resolves claim, never on "a write
-// happened" (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373).
+// happened" (decision foreign_68988832; board 68fe8373).
 //
 // Background this file pins: knowledgeUpdate (and the append/edit paths that
 // share its versioned-update core) used to IMPLICITLY auto-drain every open
 // reconcile_needed/refresh_reference item whose feature_link was in the
-// updated record's supersede chain (decision 8ecd435f — pinned, until now, by
+// updated record's supersede chain (decision foreign_8ecd435f — pinned, until now, by
 // two tools.test.ts assertions amended alongside this file). That implicit
 // drain is REMOVED. knowledge_update / knowledge_append / knowledge_edit gain
 // an optional trailing `resolves: string[]` naming maintenance-queue item ids
@@ -164,7 +164,7 @@ test('AC2 (central regression pin): knowledge_update with NO resolves leaves a c
       feature_link: v1.id,
     });
 
-    // OLD CONTRACT (decision 8ecd435f): this write alone used to drain the
+    // OLD CONTRACT (decision foreign_8ecd435f): this write alone used to drain the
     // item with zero claim. NEW CONTRACT: a write is not a claim.
     const result = widen(tools).knowledgeUpdateResult(v1.id, { what_it_does: 'reconciled, unclaimed' });
 

@@ -37,7 +37,7 @@ const SERVED_TOOLS = [
   // expected_version is REQUIRED here, unlike knowledge_update — a destroy
   // states what it read (board 39673f6a).
   'knowledge_array_remove',
-  // Mechanized article split enforcing the 8b87efcb invariants in one
+  // Mechanized article split enforcing the foreign_8b87efcb invariants in one
   // transaction (board 136091d2, decision compaction-tooling-windowed-read-plus-split).
   'knowledge_split',
   'knowledge_extract',
@@ -72,7 +72,7 @@ const SERVED_TOOLS = [
   'no_capture',
   'concept_designed',
   'capture_pending',
-  // maintenance_enqueue deliberately unregistered — decision 6269b714:
+  // maintenance_enqueue deliberately unregistered — decision foreign_6269b714:
   // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
   // board_remove scoped to the queue, so the librarian can close what it drains
@@ -108,7 +108,7 @@ function payload(result: unknown): unknown {
   return JSON.parse(content[0].text);
 }
 
-test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom store is created (P5, research_finding e518f9e5)', () => {
+test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom store is created (P5, research_finding foreign_e518f9e5)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-phantom-'));
   try {
     const mainJs = join(dirname(fileURLToPath(import.meta.url)), '..', 'main.js');
@@ -216,7 +216,7 @@ test('main.ts (board b8639752): a RELATIVE --store argument resolves to an ABSOL
 // non-empty-export and clean-exit assertions stay green, proving the probe
 // itself still runs correctly under the sabotage).
 
-test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision 8dbbc85d, board b1de6fab)', async () => {
+test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision foreign_8dbbc85d, board b1de6fab)', async () => {
   const { client, cleanup } = await harness();
   try {
     // (2) knowledge_create accepts a research_finding WITH file_keys and
@@ -286,7 +286,7 @@ test('MCP: research_finding gains file_keys — create normalizes it, query join
     );
 
     // (5) a type that does NOT define file_keys still refuses it, naming the
-    // valid set — decision b47889b7 unchanged; reference_material is the control.
+    // valid set — decision foreign_b47889b7 unchanged; reference_material is the control.
     const refused = await client.callTool({
       name: 'knowledge_create',
       arguments: {
@@ -380,7 +380,7 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     assert.equal(bogusBoard.isError, true, 'strictness is a property of the whole tool surface');
     assert.match((bogusBoard.content as { text: string }[])[0].text, /limit/);
 
-    // WRITE-SIDE projection:"digest" over the wire (decision e23f38f8). This
+    // WRITE-SIDE projection:"digest" over the wire (decision foreign_e23f38f8). This
     // pins the server closures' {projection, ...rest} destructuring — the unit
     // tests exercise writeProjected directly, so only a wire call can prove
     // projection never leaks into field validation (board_add would refuse an
@@ -667,7 +667,7 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     // DEDUP IS PER (reason, feature_link) FOR reconcile_needed, file_keys
     // UNIONED IN — board b0bb9d96 / I-29 ("the mint storm"), superseding the
     // 2026-08-04 per-file reading this assertion used to pin (board 2ded3b4b,
-    // decision 30d18443's sibling). That reading fixed a real silent-loss bug
+    // decision foreign_30d18443's sibling). That reading fixed a real silent-loss bug
     // (a second drifting file was suppressed entirely), but its FIX — one item
     // PER file — let a read-time singleton and a settlement grouped item for
     // the SAME article coexist as duplicates, because the choke point's old key
@@ -914,8 +914,8 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
     // an article WITHOUT working_tree owning a copy-only path gets the false
     // deletion item (the bug); knowledge_update adding working_tree re-baselines
     // against the right tree. Closing the resulting debt is no longer implicit
-    // (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 retired the old
-    // knowledge_update auto-drain from decision 8ecd435f) — the SAME fix write
+    // (decision foreign_68988832 retired the old
+    // knowledge_update auto-drain from decision foreign_8ecd435f) — the SAME fix write
     // now names the false-deletion item via an explicit `resolves` claim, which
     // is exactly how an operator would perform this healing in practice: one
     // write that both re-baselines the tree AND discharges the debt it caused.
@@ -949,14 +949,14 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
   }
 });
 
-test('knowledge_create is typed per-type (decision 7c7f6db1, probe research_finding 15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
+test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe research_finding foreign_15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
   const { client, tools, cleanup } = await harness();
   try {
     const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_create');
     assert.ok(tool, 'knowledge_create is served');
 
     // (f) the SDK serves z.discriminatedUnion as a bare anyOf (discriminator
-    // keyword lost — research_finding 15c8e6b5), so the description carries the
+    // keyword lost — research_finding foreign_15c8e6b5), so the description carries the
     // hint a model needs to pick the right branch and stay inside it.
     assert.match(
       tool!.description ?? '',
@@ -1024,7 +1024,7 @@ test('knowledge_create is typed per-type (decision 7c7f6db1, probe research_find
     assert.deepEqual(seenTypes.sort(), registeredTypes, 'every registered type gets exactly one variant, no more, no fewer');
 
     // (e) size guard: the served tool definition (description + schema) stays
-    // well under the 25KB ceiling research_finding 15c8e6b5 measured for the
+    // well under the 25KB ceiling research_finding foreign_15c8e6b5 measured for the
     // WRITE_REFUSED_FIELDS-stripped union (~15.3KB / ~3,834 tokens).
     const servedBytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
     assert.ok(servedBytes < 25_000, `served knowledge_create tool definition is ${servedBytes} bytes, expected < 25000`);

@@ -7,7 +7,7 @@
 // reasoning from one stale premise before any of their own Read/Edit ever
 // fires the file-touch hook.
 //
-// LIVE-PROBED, not inferred (2026-08-04, research_finding 35a89a0f):
+// LIVE-PROBED, not inferred (2026-08-04, research_finding foreign_35a89a0f):
 // SubagentStart's hookSpecificOutput.additionalContext lands in the SPAWNED
 // subagent's own context (not the parent's), on the WSL CLI headless surface,
 // CC 2.1.220. Its stdin carries session_id, transcript_path, cwd, prompt_id,
@@ -24,7 +24,7 @@
 // non-blocking (P5) — dispatch staging is an aid layered on top of the file-
 // touch delivery, never a second place that can deny a spawn.
 //
-// H28 FOLD (2026-08-30, decision 04982f45): h28-return-contract.mjs absorbed
+// H28 FOLD (2026-08-30, decision foreign_04982f45): h28-return-contract.mjs absorbed
 // here — same SubagentStart event, same advisory/fail-open posture (both
 // warnNonBlocking). EXEMPT_AGENT_TYPES and RETURN_CONTRACT below are its
 // unchanged substance; the return contract is injected on EVERY dispatch
@@ -40,7 +40,7 @@ import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfi
 // h1-session-start.mjs and scripts/plan-lock.mjs.
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
 // Path extraction lives in lib/dispatch-prompt.mjs — one mechanism, imported
-// never reimplemented (decision f5638a84). Prompt RECOVERY no longer reads the
+// never reimplemented (decision foreign_f5638a84). Prompt RECOVERY no longer reads the
 // parent transcript (decision dispatch-state-machine-pre-slot-post-binding-
 // locked-start-resolution-replaces-transcript-attribution): this hook resolves
 // its own dispatch's prompt through the dispatch-state machine instead.
@@ -99,7 +99,7 @@ const RETURN_CONTRACT =
 
 const input = readStdin();
 
-// TDD / MUTATION-VERIFICATION POSTURE (decision 752caf98
+// TDD / MUTATION-VERIFICATION POSTURE (decision foreign_752caf98
 // tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): implementor
 // dispatches (the roster's one writing role) get the SAME live per-project posture line H1
 // injects at SessionStart — read fresh here via loadConfig rather than
@@ -109,7 +109,7 @@ const input = readStdin();
 // Guarded like every other config read in this file: a malformed config
 // costs only this line, never the knowledge payload or the return contract.
 // Only an explicit `false` reads as OFF — absent/undefined is the documented
-// schema default (both true, decision 752caf98), never invented.
+// schema default (both true, decision foreign_752caf98), never invented.
 //
 // THREE-STATE TREATMENT, mirroring h1-session-start.mjs's configUnreadable
 // guard exactly (review 2026-09-06 — H19 reproduced the same false-posture
@@ -271,7 +271,7 @@ async function main(input) {
     // SUBJECT CHANNEL (relevance slice 3): the same mechanism-axis match H20
     // applies at the conductor's dispatch seam, run over the SAME recovered
     // prompt text, delivered to the SPAWNED agent — one mechanism, imported
-    // never reimplemented (decision f5638a84 constraint). All three stage-2
+    // never reimplemented (decision foreign_f5638a84 constraint). All three stage-2
     // floors apply (AXIS_MIN_HITS, discriminating hit, record centrality) so the
     // measured 1-in-3 noise problem is not replicated one seam deeper. Records
     // the path channel already carries are excluded — one payload, one mention.

@@ -5,7 +5,7 @@
 // `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`
 // (knowledge_get 7c515e52-19a8-41cf-8c2d-6da61f1c8425) §2, §3, §5, §6, §7(d),
 // §8; board 5445066b; stdin shapes and the MEASURED interleaving from
-// research_finding 2bad782a (Pre×6 strictly serialized, Post and the child's
+// research_finding foreign_2bad782a (Pre×6 strictly serialized, Post and the child's
 // SubagentStart within 0.1-9.3 ms in EITHER order — Start first 1 of 6).
 //
 // H4 READ WALL HONORED: no implementation file was opened by this file's
@@ -110,7 +110,7 @@ function runHook(scriptPath, input, cwd) {
 const h22 = (input, dir) => runHook(H22_PATH, input, dir);
 const h19 = (input, dir) => runHook(H19_PATH, input, dir);
 
-// --- stdin shapes (research_finding 2bad782a) ------------------------------
+// --- stdin shapes (research_finding foreign_2bad782a) ------------------------------
 
 const preInput = (dir, { tool_use_id, subagent_type, prompt, description = 'a lane', session_id = 's1', tool_name = 'Task' }) => ({
   hook_event_name: 'PreToolUse',
@@ -462,7 +462,7 @@ test('DSH-4: a Start with NO state at all (a stale session that never loaded the
     const ctx = ctxOf(a);
     assert.ok(ctx.includes(STAGING_DISCLOSURE('no-slot')), `expected the no-slot disclosure; got: ${ctx}`);
     assert.doesNotMatch(ctx, /lonely does the lonely thing/, 'no transcript fallback, no guess');
-    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'the unconditional contract injection still fires (decision 04982f45) — the disclosure rides BESIDE it');
+    assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'the unconditional contract injection still fires (decision 04982f45) — the disclosure rides BESIDE it'); // not-a-citation: fixture id
 
     const entry = entryFor(dir, 'agent-nostate');
     assert.ok(entry, 'the round is still appended');
@@ -512,7 +512,7 @@ test('DSH-5: a RESUME (an already-ended round for this agent_id + a fresh same-t
     assert.equal(derivedState(stateFor(dir, 'toolu_someone_else')), 'pending', 'the fresh slot is still there for its real owner');
 
     const rounds = readRegister(dir).filter((e) => e.agent_id === 'agent-resumed');
-    assert.equal(rounds.length, 2, 'each Start is its own round (decision 24dc4c63) — a resume appends round 2');
+    assert.equal(rounds.length, 2, 'each Start is its own round (decision 24dc4c63) — a resume appends round 2'); // not-a-citation: fixture id
     const unended = rounds.filter((e) => !e.ended);
     assert.equal(unended.length, 1);
     assert.deepEqual(unended[0].files, []);
@@ -639,7 +639,7 @@ test('DSH-8: hooks/hooks.json registers h22-dispatch-register on PreToolUse, Pos
     assert.equal(
       mine[0].matcher,
       'Task|Agent',
-      `${event}'s matcher must be the normalized string "Task|Agent" (decision f99d527a) — got ${JSON.stringify(mine[0].matcher)}`
+      `${event}'s matcher must be the normalized string "Task|Agent" (decision f99d527a) — got ${JSON.stringify(mine[0].matcher)}` // not-a-citation: fixture id
     );
   }
 });
@@ -678,7 +678,7 @@ test('DSH-10: extractPathCandidates and parseReviewTerritory SURVIVE in scripts/
   assert.equal(existsSync(DISPATCH_PROMPT_LIB), true, 'the prompt-parsing lib is kept, not deleted with the tail readers');
   const mod = await import(pathToFileURL(DISPATCH_PROMPT_LIB).href);
   assert.equal(typeof mod.extractPathCandidates, 'function', 'extractPathCandidates stays exported — the consumers parse the resolved prompt with it');
-  assert.equal(typeof mod.parseReviewTerritory, 'function', 'parseReviewTerritory stays exported (decision 8f137474)');
+  assert.equal(typeof mod.parseReviewTerritory, 'function', 'parseReviewTerritory stays exported (decision 8f137474)'); // not-a-citation: fixture id
   for (const name of ['lastDispatchPrompts', 'lastDispatchBlocks', 'attributeBlocks']) {
     assert.equal(mod[name], undefined, `${name} must not survive as an export — an importable reader is a live fallback, not dead code`);
   }

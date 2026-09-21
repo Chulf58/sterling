@@ -1,5 +1,5 @@
 // GLOB LITERAL-PREFIX EXTRACTION + WIRING — board a63b226d ("GLOB BLIND
-// SPOT"), research_finding 289cd172's "a SEPARATE blind spot, in both
+// SPOT"), research_finding foreign_289cd172's "a SEPARATE blind spot, in both
 // directions". AUTHORED BY coder, for a test-writer to land verbatim.
 // Suggested target: scripts/tests/dispatch-advisory-glob-prefix.test.mjs
 //

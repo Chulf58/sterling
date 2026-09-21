@@ -410,7 +410,7 @@ test('SPEC F: a concept_designed event with a MISSING `at` must not be satisfied
 // the earlier research event still discharges it, and — this file's own
 // point — still does so through the fail-closed timestamp guard (a valid,
 // well-ordered timestamp must not be over-corrected into a nag).
-test('SPEC G1 (regression, revised per decision 51ebe0dd, no-capture-discharge-is-lane-scoped): an explicit `--lane research` no_capture declaration AT/AFTER a valid research event still discharges the research duty', () => {
+test('SPEC G1 (regression, revised per decision foreign_51ebe0dd, no-capture-discharge-is-lane-scoped): an explicit `--lane research` no_capture declaration AT/AFTER a valid research event still discharges the research duty', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     seedEventsConfig(dir);

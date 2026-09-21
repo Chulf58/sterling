@@ -261,7 +261,7 @@ test('sparring 3: model row shows the configured value when sparring_partner.mod
 // Item 4 — cursor traversal past config.models keys onto the sparring rows
 // ===========================================================================
 
-test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle row then the model row, and clamp at the tab\'s true bottom (moved off the model row by decision 752caf98)', () => {
+test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle row then the model row, and clamp at the tab\'s true bottom (moved off the model row by decision foreign_752caf98)', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
@@ -273,7 +273,7 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
     r = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
     assert.equal(r.ui.cursor, numKeys + 1, 'DOWN again lands on the model row');
 
-    // The model row is no longer the tab's last row: decision 752caf98 added
+    // The model row is no longer the tab's last row: decision foreign_752caf98 added
     // the tdd/mutation rows below it (traversal onto/through those rows is
     // pinned by tdd-mutation-toggles.test.ts's 'toggles 3'). The true-bottom
     // clamp is re-pinned here via a directly-placed cursor at the tab's real

@@ -546,7 +546,7 @@ test('E1 THE LOAD-BEARING PIN: board_remove REFUSES a minted slug — naming the
   }
 });
 
-test('E2 REGRESSION PIN: board_remove still refuses an unambiguous 8-char prefix — widening the READ surface for slugs must not quietly re-open the prefix rung on the destroying call (decision 6d5a6719)', () => {
+test('E2 REGRESSION PIN: board_remove still refuses an unambiguous 8-char prefix — widening the READ surface for slugs must not quietly re-open the prefix rung on the destroying call (decision foreign_6d5a6719)', () => {
   const { tools, cleanup } = harness();
   try {
     const item = boardAdd(tools, { text: 'PREFIXES STAY REFUSED ON DESTRUCTION.\n\nbody.', source: 'user' });

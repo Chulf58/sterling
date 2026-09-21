@@ -13,7 +13,7 @@
 // address resolves through the SAME id ladder as knowledge_get (full uuid,
 // exact slug, unambiguous 8-char prefix) before links[].target_id is
 // written. Ambiguous prefixes are refused, never picked. The destructive
-// board_remove/maintenance_remove path is UNCHANGED — decision 6d5a6719
+// board_remove/maintenance_remove path is UNCHANGED — decision foreign_6d5a6719
 // (id-ladder-extends-to-board-tools-with-collision-guard) stands: exact id
 // only, no guard, no prefix rung, for anything that hard-deletes.
 //
@@ -35,7 +35,7 @@
 // (deterministic pagination). ASSUMPTION FLAGGED: the exact field name
 // carrying the grouping label on a user item (`objective`) is taken from
 // board_add's existing, already-shipped parameter of the same name
-// (decision a8d2ce6c) — not from the in-flight diff.
+// (decision foreign_a8d2ce6c) — not from the in-flight diff.
 //
 // New params/literals not yet in the declared types (min_score, offset,
 // projection:'headline') are passed through an `as unknown as
@@ -103,7 +103,7 @@ function seedPrefixTwin(store: SterlingStore, tools: SterlingTools, primaryId: s
 }
 
 // The standing refusal-content contract for destructive board/maintenance
-// paths (decision 6d5a6719, already pinned by board-maintenance-id-
+// paths (decision foreign_6d5a6719, already pinned by board-maintenance-id-
 // resolution.test.ts): flexible on exact wording, pinned on the substance.
 const FULL_UUID_REQUIRED = /full uuid|full id/i;
 
@@ -176,7 +176,7 @@ test('SPEC1(c): an AMBIGUOUS 8-char prefix `to` address is refused naming the ca
   }
 });
 
-test('SPEC1(d): destroying paths are UNCHANGED by the links-ladder fix — board_remove still refuses an 8-char prefix, even an unambiguous one, and the item survives (decision 6d5a6719: exact id only stands)', () => {
+test('SPEC1(d): destroying paths are UNCHANGED by the links-ladder fix — board_remove still refuses an 8-char prefix, even an unambiguous one, and the item survives (decision foreign_6d5a6719: exact id only stands)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: item } = tools.boardAdd({ text: 'links-ladder must not loosen board_remove', source: 'user' }) as unknown as {

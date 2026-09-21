@@ -10,7 +10,7 @@ import { z } from 'zod';
 // append log at .sterling/transient/session-events.json; defined ONCE here
 // (invariant 1); written by H16 (research_tool, agent_dispatch),
 // debug-scope.mjs (debug_scope), concept-designed.mjs (concept_designed —
-// detail carries the concept FAMILY slug; decision 7208729b), and
+// detail carries the concept FAMILY slug; decision foreign_7208729b), and
 // no-capture.mjs (no_capture — detail carries the REASON; board 7bbec3bd:
 // an explicit declaration that a Stop produced nothing durable, satisfying
 // H10's capture duty for every touch/debug_scope event EARLIER than it; work

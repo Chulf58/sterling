@@ -1,5 +1,5 @@
 // H22 IN-FLIGHT DISPATCH REGISTER + H10 FAN-OUT-AWARE DUTY DEFERRAL
-// (decision ec9eacaa-674a-4dca-b782-cb1141237279)
+// (decision foreign_ec9eacaa)
 //
 // Spec under test (given by the launching agent, not inferred from any
 // implementation — hooks/h22-dispatch-register.mjs / scripts/hooks/h22-dispatch-register.mjs
@@ -441,7 +441,7 @@ test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a ne
     // quietly dropped. The old assertion was
     // `assert.ok(unended[0].files.includes('src/y.mjs'))`: round n+1 derived
     // its own territory from "the brief" found in the parent transcript.
-    // Decision 7c515e52 §5(ii) makes THIS EXACT SHAPE a RESUME — an existing
+    // Decision foreign_7c515e52 §5(ii) makes THIS EXACT SHAPE a RESUME — an existing
     // register round for (session_id, agent_id) is resume evidence — and §5
     // rules that a resume "stages nothing", consumes no slot, and appends its
     // round with files:[] files_source:'unattributable' attribution:'none'.
@@ -919,7 +919,7 @@ test("H22 PIN B (a pending dispatch without subagent_type is never a candidate):
 
 // ===========================================================================
 // RETIRED HERE — 'PIN C (prompt-less intermediate message does not truncate
-// the backward walk)', by decision 7c515e52.
+// the backward walk)', by decision foreign_7c515e52.
 // PIN C pinned the BOUNDED BACKWARD WALK through earlier dispatching assistant
 // messages. There is no walk and no message list: SubagentStart never reads the
 // parent transcript (its 3.4-5.5 s lag is the measured defect, finding

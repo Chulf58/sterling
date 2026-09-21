@@ -1,6 +1,6 @@
 // H28 RETURN CONTRACT — MIGRATED. h28-return-contract.mjs was absorbed into
 // scripts/hooks/h19-dispatch-staging.mjs (same SubagentStart event, combined
-// additionalContext emit) per decision 04982f45
+// additionalContext emit) per decision foreign_04982f45
 // (s7-small-hook-absorption-measured-two-fold-two-keep, de-complication S7).
 // The old dedicated hook file and its hooks.json registration are deleted.
 //

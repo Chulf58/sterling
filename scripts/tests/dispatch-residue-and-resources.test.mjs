@@ -13,19 +13,19 @@
 //
 // SPEC (given by the launching agent, from board 03ed9d35-32fb-433e-b714-
 // f7ab9e8b68e7 + board 31565253-cc6e-44fa-bb32-06f7b69fef8d, design pass
-// approved 2026-08-24 — see also reference_material a2a17efa §13.4/§13.6 for
+// approved 2026-08-24 — see also reference_material foreign_a2a17efa §13.4/§13.6 for
 // the incidents that motivated both):
 //
 // SPEC A — DEAD-DISPATCH RESIDUE. The H22 register is the sole observable.
 // An entry outliving config.dispatch_register.stale_minutes (default 60,
-// per decision ec9eacaa) whose SubagentStop never fired is an ORPHAN. When
+// per decision foreign_ec9eacaa) whose SubagentStop never fired is an ORPHAN. When
 // an orphan's declared files are git-dirty, ONE conductor-facing residue
 // line fires — at H10's Stop surface, again at H1's SessionStart if it
 // survives to the register wipe — shaped like: "dispatch <type>:<id>
 // stopped holding uncommitted edits to <paths>; its gates did not
 // complete." Separately, a KILL is detectable immediately at H22's own
 // SubagentStop firing (no TTL wait needed) via the real stdin field
-// `last_assistant_message` (confirmed live by research_finding 20b44518):
+// `last_assistant_message` (confirmed live by research_finding foreign_20b44518):
 // empty/absent + dirty declared files -> residue; a normal non-empty final
 // message -> no residue (agents always produce one). A git-probe failure
 // must never silently drop the residue; it prints, marked
@@ -287,7 +287,7 @@ const taskBlock = (name, subagent_type, prompt) => ({ type: 'tool_use', name, in
 // reads the parent transcript; it resolves ONE prompt from the per-dispatch
 // state record written at PreToolUse. Only SPEC B's four Start-side fixtures
 // used a planted transcript, and they now fire the real Pre event instead;
-// every resource-claim assertion is byte-identical. (Decision 41a28e1d's
+// every resource-claim assertion is byte-identical. (Decision foreign_41a28e1d's
 // rejected alternative "mint resource claims under attribution:'union'" is
 // unaffected in substance: the imprecise value is now 'none', and a claim is
 // still minted only for a precisely attributed Start.)
@@ -591,7 +591,7 @@ test('SPEC B (2): a negated mention of a configured resource writes NO exclusive
 
 // --- (B3) H26 warns on a live resource-holder overlap ----------------------
 // EXPECTED RED: h26-dispatch-overlap.mjs has no resource concept at all
-// (grep count 0 per research_finding dff23647's baseline for the sibling
+// (grep count 0 per research_finding foreign_dff23647's baseline for the sibling
 // file-overlap advisory; the resource check does not exist).
 // SABOTAGE: compare only `files`, never `exclusive_resources` — flips this
 // test red while its own no-overlap control (different resource name)

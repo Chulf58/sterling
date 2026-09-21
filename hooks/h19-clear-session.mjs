@@ -4218,13 +4218,13 @@ var featureArticleSchema = base.extend({
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
   // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision 65222971 → its baseline successor).
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
   // above, which reference_material shares so the shape is defined once.
   baseline_attestations: baselineAttestationsSchema,
   absence_attestations: absenceAttestationsSchema,
-  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
   article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
@@ -4234,7 +4234,7 @@ var featureArticleSchema = base.extend({
   // superRefine below, since "which kind" is a whole-record fact a single
   // field's shape cannot express alone.
   current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -4248,7 +4248,7 @@ var featureArticleSchema = base.extend({
   // ownership) resolve per record or abstain LOUD on an unmapped name.
   working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision 474b1c71).
+  // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -4327,7 +4327,7 @@ var researchFindingSchema = base.extend({
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
@@ -4470,7 +4470,7 @@ var SYSTEM_REASONS = [
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -4529,7 +4529,7 @@ var todoSchema = base.extend({
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
   system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -4698,7 +4698,7 @@ var configSchema = external_exports.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -4743,16 +4743,16 @@ var configSchema = external_exports.object({
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
     stale_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -4808,7 +4808,7 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -4865,7 +4865,7 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -4897,7 +4897,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -4936,7 +4936,7 @@ var configSchema = external_exports.object({
   // additive advisory-block pattern (every field has a default; an absent
   // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
@@ -4948,7 +4948,7 @@ var configSchema = external_exports.object({
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
   }).default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -4960,7 +4960,7 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately

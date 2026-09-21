@@ -52,7 +52,7 @@ for (const r of report) {
   }
   if (r.status === 'machine_rebaked') {
     console.error(
-      `machine_rebaked: '${r.name}' carried hook commands baked for another machine context — re-baked for THIS machine (anti_pattern 60e8463d).`
+      `machine_rebaked: '${r.name}' carried hook commands baked for another machine context — re-baked for THIS machine.`
     );
   }
 }

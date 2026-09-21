@@ -1,5 +1,5 @@
 // H22 STRUCTURED REVIEW TERRITORY — the declared-territory parser.
-// Governing decision: knowledge_get 8f137474-3ba0-4040-bb7d-28e4e608060c
+// Governing decision: knowledge_get foreign_8f137474
 // (slug review-territory-structured-receipt-files, board 0770ca72).
 //
 // R1 PIN RE-CUT: this file's Start-time declaration-parsing contracts are
@@ -522,7 +522,7 @@ test('(T5c) companion to T5/T5b, re-homed to the register layer: a non-reviewer 
 // (T7) RE-CUT — SIBLING ISOLATION. Two same-type dispatches are in flight; MY
 // dispatch declares a valid REVIEW-TERRITORY, the SIBLING's prompt is plain
 // prose naming another path. My Start is bound authoritatively by my own
-// PostToolUse (tool_response.agentId — the measured seam, finding 2bad782a),
+// PostToolUse (tool_response.agentId — the measured seam, finding foreign_2bad782a),
 // so §5(i) resolves my prompt and my prompt ONLY.
 // The ASSERTIONS ARE PRESERVED from the multi-block original (files[] is
 // exactly the declared array; the sibling's prose path never appears;
@@ -749,7 +749,7 @@ test('(P-newline-marker) "REVIEW-TERRITORY:" with the array on the NEXT line is 
 // DISCLOSED AS UNPINNED — multiple REVIEW-TERRITORY lines within a SINGLE
 // block's prompt (e.g. two separate `REVIEW-TERRITORY: [...]` lines in one
 // dispatch prompt). Requested precedence to pin: "first marker wins".
-// NOT PINNED: the governing contract (decision 8f137474, items 1-7, and the
+// NOT PINNED: the governing contract (decision foreign_8f137474, items 1-7, and the
 // launching brief's 7-item list) never specifies a precedence rule for two
 // marker lines in one prompt — it describes exactly one marker per block
 // throughout. Pinning "first wins" (or "last wins") here would fabricate a

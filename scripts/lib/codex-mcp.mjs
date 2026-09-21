@@ -1,7 +1,7 @@
 // Codex sparring-partner probe + MCP entry (decision sparring-partner-partnership-shape,
 // board a0714d0b, concept article sparring-partner). Runs ONLY on init's PLUGIN-REPO
 // branch (target === pluginRoot): probes for the OFFICIAL `codex mcp-server` stdio
-// subcommand (no third-party wrapper — research_finding dadf858e) and, when present,
+// subcommand (no third-party wrapper — research_finding foreign_dadf858e) and, when present,
 // auto-wires it beside the existing `sterling` entry in .claude-plugin/sterling-mcp.json.
 //
 // PROBE: `codex` resolvable on PATH, `codex mcp-server --help` succeeding, AND
@@ -157,7 +157,7 @@ export function probeCodexWin({ spawnFn = spawnSync, timeoutMs = PROBE_TIMEOUT_M
   return { ok: true, command: codexPath };
 }
 
-// The official codex mcp-server stdio subcommand — no wrapper (research_finding dadf858e).
+// The official codex mcp-server stdio subcommand — no wrapper (research_finding foreign_dadf858e).
 // The bare `codex` command is the FALLBACK spelling, used when a probe result carries no
 // resolved path (probeCodex resolves `codex` on PATH by spawning that same bare command,
 // so there its success does prove the entry). A probe that DID resolve an absolute path

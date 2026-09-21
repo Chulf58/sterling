@@ -1,6 +1,6 @@
 // snapshot-domains-for-windows [S] (P5, AC8) — the WSL side of the
 // domain-knowledge snapshot bridge. A native-Windows process cannot live-read
-// the WSL-resident WAL domain stores (research_finding 5c6437d8: WAL-over-9p
+// the WSL-resident WAL domain stores (research_finding foreign_5c6437d8: WAL-over-9p
 // `database is locked`), so at native-launcher startup we VACUUM-INTO a snapshot
 // of each WSL-resident domain store into the Windows-local default path. The
 // native TUI then opens those snapshots — local NTFS, so WAL works — via P4's

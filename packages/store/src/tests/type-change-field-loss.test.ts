@@ -33,7 +33,7 @@
 // not claimed as such anymore.
 //
 // PART 2 — DIRECT-IMPORT UNIT PINS on `droppedKeyPaths(before, after)`,
-// written from decision 961e4842's contract (not from index.ts — H4 read
+// written from decision foreign_961e4842's contract (not from index.ts — H4 read
 // wall): object->array and array->object as DISTINCT total-loss cases;
 // scalar->container growth reporting ZERO loss (the mutation-killer for the
 // scalar guard that board 7df896c9 found unpinned — the old pin's only
@@ -298,7 +298,7 @@ test('a schema DEFAULT that ADDS a key is not read as loss — one-directional c
 
 // ===========================================================================
 // PART 2 — DIRECT-IMPORT UNIT PINS on `droppedKeyPaths(before, after)`.
-// Written from decision 961e4842's contract, not from index.ts (H4 read wall).
+// Written from decision foreign_961e4842's contract, not from index.ts (H4 read wall).
 // Semantics under test: a path is LOST iff it is addressable in `before` and
 // NOT addressable in `after`. Growth (scalar->container, schema defaults) is
 // never loss.
@@ -405,7 +405,7 @@ test('a subtree reachable through TWO container paths reports BOTH alias path se
 // SABOTAGE: add a visited-set / identity-memoized skip so `shared` is walked
 // only once -> `right`/`right.secret` (whichever alias is visited second)
 // silently missing from `lost`, red here. This is the exact semantic reason
-// decision 961e4842 REJECTS a visited set as a budget fix.
+// decision foreign_961e4842 REJECTS a visited set as a budget fix.
 // EXPECTED: GREEN today — aliasing without a visited set predates this slice.
 
 test('a true self-referencing cycle throws the depth-bound error PROMPTLY, and it is NOT a bare stack-overflow RangeError', () => {
@@ -525,7 +525,7 @@ test('BUDGET: structurally-identical heavily-shared DAGs throw on the WORK budge
 // comparison edge walked -> this fixture emits ~0 paths (before/after match
 // structurally), so an output-only budget never fires and the matching-DAG
 // case hangs/burns CPU uncharged. This is the pin for "the work budget is
-// charged even when nothing is being emitted" (decision 961e4842).
+// charged even when nothing is being emitted" (decision foreign_961e4842).
 // EXPECTED: GREEN — the work budget has landed and is charged independent of
 // output, per the measured charge count above.
 
@@ -618,7 +618,7 @@ test('the budget error and the depth-bound cycle error are DISTINGUISHABLE from 
 });
 // SABOTAGE: throw one shared error class/message for both the budget and the
 // depth-bound failures -> `depthErr.message` starts matching /budget/i too,
-// red here. Pins decision 961e4842's DISTINCTNESS requirement: a caller must
+// red here. Pins decision foreign_961e4842's DISTINCTNESS requirement: a caller must
 // be able to tell which resource was exhausted, without pinning exact text.
 // EXPECTED: GREEN for both halves — CONFIRMED, 2026-08-31 (measured run): the
 // budget mechanism has landed, and the depth-bound error's message ("record

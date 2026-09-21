@@ -1,6 +1,6 @@
 // H1 SessionStart — GROUPED TASK COUNT in the systemMessage banner.
 //
-// Spec under test (decision a8d2ce6c slice 2, display surfaces; given by the launching
+// Spec under test (decision foreign_a8d2ce6c slice 2, display surfaces; given by the launching
 // agent, not inferred from implementation). Slice 1 shipped the field: a todo may carry
 // an optional non-empty `objective` string (a grouping KEY, absent = standalone).
 //

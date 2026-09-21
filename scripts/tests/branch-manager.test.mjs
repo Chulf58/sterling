@@ -140,7 +140,7 @@ test('direct-merge.mjs: merges the current branch and sweeps the merged sibling 
   }
 });
 
-test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed files; unrelated debt does not block; merges once drained (decision 9df61181)', async () => {
+test('direct-merge.mjs: refuses on open reconcile_needed debt covering changed files; unrelated debt does not block; merges once drained (decision foreign_9df61181)', async () => {
   const { dir, cleanup } = await makeGitProject();
   try {
     git(dir, ['checkout', '-b', 'feat/debt']);
@@ -290,7 +290,7 @@ test('direct-merge.mjs: pushes the base to origin after the merge (--no-push opt
   }
 });
 
-test('direct-merge.mjs: an unbumped version refuses when the diff goes beyond generated projections; diverged fields refuse; a bump (or --allow-same-version) merges (decision be9168e8)', async () => {
+test('direct-merge.mjs: an unbumped version refuses when the diff goes beyond generated projections; diverged fields refuse; a bump (or --allow-same-version) merges (decision foreign_be9168e8)', async () => {
   const { dir, cleanup } = await makeGitProject();
   try {
     // a plugin-shaped repo: manifest + package.json at 0.1.0 on the base

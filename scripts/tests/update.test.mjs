@@ -1,4 +1,4 @@
-// Consumer-machine update tests (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89).
+// Consumer-machine update tests (decision foreign_e6240afe).
 // Two halves, matching the two ways this can be wrong:
 //   1. the REFUSAL matrix — read against real temp git repos (local file
 //      remotes, no network), because "is this machine diverged?" is exactly the
@@ -622,7 +622,7 @@ test('the init ensure pass runs only when the clone is itself initialized', asyn
   }
 });
 
-// ── 3. machine-role stamp (todo cabbc10f, decision a9b98b7d) ────────────────
+// ── 3. machine-role stamp (todo cabbc10f, decision foreign_a9b98b7d) ────────────────
 
 test('stampConsumerRoleIfAbsent: stamps consumer when machine_role is absent, preserving other fields', () => {
   const dir = scratchCwd();
@@ -816,7 +816,7 @@ test('the dirty refusal splits committed BUILD OUTPUTS from source and gives eac
 // existing worktree-only `git checkout --`. SPEC-ONLY: authored from the fix's
 // own description (H4 read-wall denies scripts/lib/update.mjs), verified only
 // against this file's existing cleanCurrency()/refusalFor conventions and
-// decision a9b98b7d (the original hooks/architecture.md split this extends).
+// decision foreign_a9b98b7d (the original hooks/architecture.md split this extends).
 // -----------------------------------------------------------------------------
 
 test('CONTROL, placed first: a genuine SOURCE change (hooks/hooks.json) reads as SOURCE CHANGES, never a build output', () => {
@@ -1110,7 +1110,7 @@ test('the migration sweep attributes itself: migrate-stores.mjs is invoked with 
   }
 });
 
-// ── 6. the NATIVE-WINDOWS update arm (decision ffe7c416 ─────────────────────
+// ── 6. the NATIVE-WINDOWS update arm (decision foreign_ffe7c416 ─────────────────────
 //        `host-native-init-with-dev-machine-escape-hatch`; parity 1fe2a5e3;
 //        consumer update UX 558895a9; article consumer-update-path AC9)
 //
@@ -1278,7 +1278,7 @@ test('the SHIPPED native template renders clean on a win32 host: no placeholder 
 
 test('the baked interpreter is the INJECTED absolute exe, and defaults to an ABSOLUTE process.execPath — never the bare literal `node`', () => {
   // ffe7c416 measured `where.exe node` finding NOTHING on the real native host
-  // (research_finding 0c712d94), which is why the exe is baked from
+  // (research_finding foreign_0c712d94), which is why the exe is baked from
   // process.execPath — already known-runnable, needs no PATH membership.
   const clone = cloneWithBothTemplates();
   try {

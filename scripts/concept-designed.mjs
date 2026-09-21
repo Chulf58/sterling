@@ -1,4 +1,4 @@
-// Concept-designed registration (decision 7208729b, concept-article layer):
+// Concept-designed registration (decision foreign_7208729b, concept-article layer):
 // the conductor appends a concept_designed session event the moment a domain
 // concept's design SETTLES in conversation — H10's Stop check then demands the
 // family's concept article (feature_article with concept_family) before the

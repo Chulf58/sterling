@@ -173,7 +173,7 @@ for (const file of MIGRATED_HOOKS) {
     assert.deepEqual(
       offenders,
       [],
-      `every terminal-helper call must be \`return\`ed so nothing falls through into work a hard exit used to prevent (decision fa147ba4). Offending lines:\n${offenders.join('\n')}`,
+      `every terminal-helper call must be \`return\`ed so nothing falls through into work a hard exit used to prevent (decision fa147ba4). Offending lines:\n${offenders.join('\n')}`, // not-a-citation: fixture id
     );
   });
   // SABOTAGE: delete the `return ` from ONE same-line guard in this file —

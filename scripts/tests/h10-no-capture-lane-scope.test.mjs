@@ -193,7 +193,7 @@ test('L2: a BARE no_capture does NOT discharge the research duty — a research 
     const stop = () => runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
 
     const nag = stop();
-    assert.equal(nag.code, 2, 'FAIL-OPEN (pre-ruling / superseded-fix) SHAPE if this fires as 0: a bare no_capture declaration silently discharged the research duty — exactly the defect closed by decision no-capture-discharge-is-lane-scoped (51ebe0dd)');
+    assert.equal(nag.code, 2, 'FAIL-OPEN (pre-ruling / superseded-fix) SHAPE if this fires as 0: a bare no_capture declaration silently discharged the research duty — exactly the defect closed by decision no-capture-discharge-is-lane-scoped (51ebe0dd)'); // not-a-citation: fixture id
     assert.match(nag.stderr, /cache eviction policy threshold/, 'the research nag cites the actual query, proving the research duty — not silence — is what fired');
 
     const release = stop();
@@ -401,7 +401,7 @@ test('L8: a LEGACY no_capture event with NO lane field at all (the exact shape a
 // scope as "an explicit --lane scope" (CLI flag syntax) and lists
 // scripts/no-capture.mjs among its file_keys, so this spec is pinned at the
 // CLI script surface. The parallel MCP tool surface (`no_capture` on
-// packages/mcp-server/src/tools.ts, per decision aafbd49e) almost certainly
+// packages/mcp-server/src/tools.ts, per decision foreign_aafbd49e) almost certainly
 // needs the identical validation, but its parameter shape for lane is not
 // specified anywhere in the interface slice available to this test-writer
 // — that half of the spec is NOT expressed here; flagged in the handoff.
@@ -418,7 +418,7 @@ test('L9: an INVALID `--lane` value is refused loudly by the no_capture CLI scri
     );
     assert.notEqual(r.status, 0, 'SILENT-ACCEPT SHAPE if this exits 0: an unrecognized --lane value must be refused, not silently accepted as if it were a valid lane (or ignored as an unknown flag)');
     assert.match(`${r.stderr}\n${r.stdout}`, /lane/i, 'the refusal names the offending parameter ("lane") — a generic/opaque failure is not a loud refusal');
-    assert.equal(existsSync(eventsPath(dir)), false, 'REFUSAL-AFTER-WRITE SHAPE if this fails: the refusal happens BEFORE any session-event write, matching the existing honesty-surface precedent (blank reason/target/family refused before any write, decision aafbd49e) — no event register should exist at all');
+    assert.equal(existsSync(eventsPath(dir)), false, 'REFUSAL-AFTER-WRITE SHAPE if this fails: the refusal happens BEFORE any session-event write, matching the existing honesty-surface precedent (blank reason/target/family refused before any write, decision aafbd49e) — no event register should exist at all'); // not-a-citation: fixture id
   } finally {
     cleanup();
   }

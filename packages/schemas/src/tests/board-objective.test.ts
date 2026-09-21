@@ -1,5 +1,5 @@
 // ------------------- board `objective` grouping field, SCHEMA half -------------------
-// decision a8d2ce6c-ccb5-4176-8130-a23d619b6d5a, slice 1.
+// decision foreign_a8d2ce6c, slice 1.
 //
 // todoSchema gains an OPTIONAL `objective`: a non-empty string. THE LAYERING IS THE
 // POINT — the schema stores whatever non-empty string it is given; the literal
@@ -40,7 +40,7 @@ function userTodo(extra: Record<string, unknown> = {}) {
 
 type TodoWithObjective = { objective?: string; text?: string; priority?: string; source?: string };
 
-test('todo.objective: OPTIONAL — an ungrouped item round-trips with no invented field (decision a8d2ce6c slice 1)', () => {
+test('todo.objective: OPTIONAL — an ungrouped item round-trips with no invented field (decision foreign_a8d2ce6c slice 1)', () => {
   const bare = todoSchema.parse(userTodo()) as unknown as TodoWithObjective;
   assert.ok(
     !('objective' in bare) || bare.objective === undefined,
@@ -59,7 +59,7 @@ test('todo.objective: OPTIONAL — an ungrouped item round-trips with no invente
   );
 });
 
-test('todo.objective: a supplied non-empty string survives parsing verbatim, siblings untouched (decision a8d2ce6c slice 1)', () => {
+test('todo.objective: a supplied non-empty string survives parsing verbatim, siblings untouched (decision foreign_a8d2ce6c slice 1)', () => {
   // front-load the presence assertion so a STRIPPED field yields an AssertionError,
   // never a TypeError further down
   const grouped = todoSchema.parse(userTodo({ objective: 'Animation pass', priority: 'high' })) as unknown as TodoWithObjective;
@@ -68,7 +68,7 @@ test('todo.objective: a supplied non-empty string survives parsing verbatim, sib
   assert.equal(grouped.priority, 'high', 'the sibling priority field is untouched by the new field');
 });
 
-test('todo.objective: an EMPTY string is rejected loud; a non-string is rejected loud (decision a8d2ce6c slice 1)', () => {
+test('todo.objective: an EMPTY string is rejected loud; a non-string is rejected loud (decision foreign_a8d2ce6c slice 1)', () => {
   // a blank grouping key is indistinguishable from ungrouped, so it must never be
   // storable — z.string().min(1), fail loud (P5)
   assert.throws(() => todoSchema.parse(userTodo({ objective: '' })), 'an empty objective is rejected — a blank grouping key is not a group');
@@ -77,7 +77,7 @@ test('todo.objective: an EMPTY string is rejected loud; a non-string is rejected
   assert.throws(() => todoSchema.parse(userTodo({ objective: null })), 'objective is absent-or-string — an explicit null is rejected, never coerced to absent');
 });
 
-test('todo.objective: the schema stores "standalone" VERBATIM — normalization is the tool layer\'s job (decision a8d2ce6c slice 1)', () => {
+test('todo.objective: the schema stores "standalone" VERBATIM — normalization is the tool layer\'s job (decision foreign_a8d2ce6c slice 1)', () => {
   // The decision pins this split explicitly: board_add/board_update collapse the exact
   // literal "standalone" to ABSENT; the schema is not where that happens, so a record
   // handed "standalone" directly (a store-level write, a migration, a test fixture)
@@ -86,7 +86,7 @@ test('todo.objective: the schema stores "standalone" VERBATIM — normalization 
   assert.equal(parsed.objective, 'standalone', 'the schema does not normalize "standalone" — only the tool layer does');
 });
 
-test("todo.objective is a DIGEST headline field — a grouped item's digest line carries its objective (decision a8d2ce6c slice 1)", () => {
+test("todo.objective is a DIGEST headline field — a grouped item's digest line carries its objective (decision foreign_a8d2ce6c slice 1)", () => {
   assert.ok(
     'objective' in RECORD_TYPES.todo.digest,
     "RECORD_TYPES.todo.digest must name 'objective' so a digest board read shows the grouping without a full-body read"

@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// resolveTerminus(id) — supersession-terminus disclosure (decision de1a7329:
+// resolveTerminus(id) — supersession-terminus disclosure (decision foreign_de1a7329:
 // ids stay version-pinned; the fix DISCLOSES the chain, it never silently
 // redirects). SPEC-ONLY, written before the method exists on SterlingStore.
 //

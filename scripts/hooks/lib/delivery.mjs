@@ -1,4 +1,4 @@
-// H19 knowledge-delivery plumbing (decision 6dfbe675, concept family
+// H19 knowledge-delivery plumbing (decision foreign_6dfbe675, concept family
 // knowledge-delivery): guard ledger, notice state, payload rendering.
 // Transient, session-lifecycle-bound (P4): guard files live below a directory
 // named for their Claude session. h19-clear-session removes only the current
@@ -359,7 +359,7 @@ export function writeGuard(path, guard) {
  *  status/scope/supersession fields the denial must disclose. feature_article/
  *  research_finding/disconfirmed_hypothesis stay OUT: they describe or answer,
  *  they do not rule, so denying a question because it merely OVERLAPS one is
- *  not what this decision asks for. (Decision 68332e4b does not enumerate the
+ *  not what this decision asks for. (Decision foreign_68332e4b does not enumerate the
  *  type set explicitly — this scoping is this build's choice, flagged here.) */
 export const DENY_RULING_TYPES = ['decision', 'anti_pattern'];
 
@@ -377,7 +377,7 @@ export function subQuestionText(q) {
     .join('\n');
 }
 
-/** THE ONE LIFECYCLE-STATUS SPELLING (decision db3392db, part 1). The bracket
+/** THE ONE LIFECYCLE-STATUS SPELLING (decision foreign_db3392db, part 1). The bracket
  *  CONTENT `status·scope[, superseded_by: <id>]` is shared verbatim with every
  *  pointer surface, so a reader never has to learn a second spelling for the same fact.
  *  Absent status/scope render as 'unknown' rather than being dropped: a pointer
@@ -404,7 +404,7 @@ export function statusAnnotation(record) {
 function clip(text, cap) {
   const s = String(text ?? '');
   // Code-point safe AND early-stopping (fix 5b, deny-once compaction round 2,
-  // decision 80d0ab62): the old `Array.from(s)` splits by code point (so a
+  // decision foreign_80d0ab62): the old `Array.from(s)` splits by code point (so a
   // surrogate pair is never cut) but still MATERIALIZES THE ENTIRE INPUT as an
   // array before applying a small cap — shared consumers here pass unbounded
   // record fields (an oversized article body can be hundreds of KB), so that
@@ -452,7 +452,7 @@ function normalizeWs(text) {
  *  U+2028/U+2029 are LineTerminators in JS source. WHAT IS ACTUALLY IN THE
  *  STRING: backslash-u ESCAPE TEXT for both separators (the string parser
  *  resolves them to the real characters at load) — the source file is plain
- *  ASCII here, per anti-pattern d7e03137's posture. Verified 2026-08-31: a
+ *  ASCII here, per anti-pattern foreign_d7e03137's posture. Verified 2026-08-31: a
  *  raw-control-byte grep over this file matches nothing. */
 function flattenToOneLine(text) {
   return String(text ?? '').replace(new RegExp('[\\r\\n\\t\\f\\v\u2028\u2029]+', 'g'), ' ');
@@ -492,7 +492,7 @@ function pointerLine(store, kind, slug) {
  *  renderArticle DIGESTS: a bounded head excerpt plus a knowledge_get pointer
  *  to the full record (its id, so the reader can fetch the withheld body),
  *  never the whole thing. Delivery degrades to a pointer, it NEVER denies
- *  (decision 9950dfff lineage / AC7 — this is not a gate). Below the floor,
+ *  (decision foreign_9950dfff lineage / AC7 — this is not a gate). Below the floor,
  *  delivery is byte-identical to before, so small articles are untouched. */
 export const ARTICLE_BODY_FLOOR = 4096;
 
@@ -536,7 +536,7 @@ export function isOwnerDiscoveryOnly(record) {
 }
 
 // ---------------------------------------------------------------------------
-// KNOWN_GAPS INLINE DELIVERY (decision db3392db Part 3, ship-ruled by decision
+// KNOWN_GAPS INLINE DELIVERY (decision foreign_db3392db Part 3, ship-ruled by decision
 // 53fd6f62 known-gaps-inline-ships-with-probe-seam-boarded; board 3dbbdb35).
 // A delivered article's known_gaps ({site, kind, evidence, recorded_run} —
 // packages/schemas records.ts) render inline beside the article: site + a
@@ -723,9 +723,9 @@ export function renderArticle(store, article, { gaps } = {}) {
   // delivery ceiling that clipping the body alone otherwise guarantees. Real
   // kebab slugs sit far under this bound, so normal rendering is unchanged.
   // `state` is the ARTICLE's build state, the trailing bracket is the RECORD's
-  // lifecycle status (decision db3392db part 1) — two different facts, printed
+  // lifecycle status (decision foreign_db3392db part 1) — two different facts, printed
   // side by side rather than collapsed into one token.
-  // ID ON THE HEADER (decision 2e8c30e4 human-readable ids — name first, id
+  // ID ON THE HEADER (decision foreign_2e8c30e4 human-readable ids — name first, id
   // retained): the 8-char prefix rides in its OWN parenthetical, ahead of the
   // (state, concept_family) group, so a reader citing this article by id never
   // has to fall back to knowledge_query to learn what it even is first.
@@ -763,7 +763,7 @@ export function renderArticle(store, article, { gaps } = {}) {
     `INTENDED BEHAVIOR: ${String(article.intended_behavior ?? '')}`,
     // The oversize branch above already carries a knowledge_get pointer; this
     // branch (small/normal articles) did not, so a reader could not cite the
-    // record by id without a second lookup (decision 2e8c30e4).
+    // record by id without a second lookup (decision foreign_2e8c30e4).
     `▸ FULL RECORD: knowledge_get ${article.id}`,
   ];
   // Board a9280db7: on a probe|tool article, current_ac can be the structured
@@ -839,7 +839,7 @@ export function cappedHazards(hazards, cap = HAZARD_CAP) {
  *  the dropped hazards are always the least severe.
  *
  *  WHY THIS EXISTS (defect reported from a consuming project 2026-07-30,
- *  decision ca23c811): delivery's owner query was articles-only, so an
+ *  decision foreign_ca23c811): delivery's owner query was articles-only, so an
  *  anti_pattern naming the EXACT file being edited was never delivered, while
  *  H10 asked at Stop whether a hazard had been RECORDED. The two directions were
  *  asymmetric, and anti_pattern is precisely the type whose whole value is being
@@ -847,7 +847,7 @@ export function cappedHazards(hazards, cap = HAZARD_CAP) {
  *  one-way-latch bug in territory that had a stored one-way-latch anti_pattern.
  *  Substance (trigger + right_way), not a pointer: a pointer to a hazard the
  *  reader must choose to follow reproduces the skippable step delivery deletes. */
-/** THE ONE HAZARD HEADER LINE BUILDER (consolidation, decision 6f3e334c still
+/** THE ONE HAZARD HEADER LINE BUILDER (consolidation, decision foreign_6f3e334c still
  *  governs: hazards are SUBSTANCE, rendered the SAME WAY wherever they appear
  *  — two header formats for one hazard block, depending on which surface
  *  rendered it, is the "enforced in two places" smell). Both `renderHazards`
@@ -1027,7 +1027,7 @@ export function rankFileDecisionPointers(decisions) {
   );
 }
 
-/** Per-pointer clip budgets (decision 6a3b1a46). The statement ORIENTS — what was
+/** Per-pointer clip budgets (decision foreign_6a3b1a46). The statement ORIENTS — what was
  *  decided; the rejected options STOP — what you may be about to propose. */
 export const DECISION_STATEMENT_CLIP = 120;
 export const DECISION_REJECTED_CLIP = 140;
@@ -1041,7 +1041,7 @@ export const DECISION_REJECTED_CLIP = 140;
  *  there is', which is the failure mode knowledge_query's own capped envelope
  *  exists to prevent.
  *
- *  SECOND LINE ADDED 2026-08-03 (decision 6a3b1a46, board 82e2969a): the header
+ *  SECOND LINE ADDED 2026-08-03 (decision foreign_6a3b1a46, board 82e2969a): the header
  *  below has promised 'and what was rejected' since 2026-07-30 while the body
  *  carried only the statement clip — delivery advertising a field it does not
  *  deliver, the same defect class as the frontier notice claiming 'there is no
@@ -1152,7 +1152,7 @@ export function joinSuspectBlock({ header, lines = [], footer } = {}) {
  *  entirely of DISCLOSURES about records that died since enqueue. Deriving the
  *  promise from blocks.length there prints the assurance above nothing but
  *  tombstones — precisely the false-assurance failure renderFrontier's own
- *  comment (decision ca23c811) exists to prevent, arriving from the other side.
+ *  comment (decision foreign_ca23c811) exists to prevent, arriving from the other side.
  *  Omitted, it falls back to blocks.length, so producer calls are unchanged. */
 // UTF-8 byte utilities shared by the delivery assembler and renderers.
 function byteLen(s) {

@@ -1,5 +1,5 @@
 // ------------------- board `objective` grouping field, TOOL half -------------------
-// decision a8d2ce6c-ccb5-4176-8130-a23d619b6d5a, slice 1.
+// decision foreign_a8d2ce6c, slice 1.
 //
 // board_add gains an `objective` parameter; board_update's updatable-fields allowlist
 // gains 'objective'; board_query's digest projection carries it. The four rules the
@@ -58,7 +58,7 @@ function boardItems(tools: SterlingTools, source: 'user' | 'system' = 'user'): L
   return tools.boardQuery({ source }) as unknown as Loose[];
 }
 
-test('board_add objective:"Animation pass" — the objective is PERSISTED on the todo and echoed in the digest receipt (decision a8d2ce6c slice 1)', () => {
+test('board_add objective:"Animation pass" — the objective is PERSISTED on the todo and echoed in the digest receipt (decision foreign_a8d2ce6c slice 1)', () => {
   const { tools, cleanup } = harness();
   try {
     let res: Loose | undefined;
@@ -93,7 +93,7 @@ test('board_add objective:"Animation pass" — the objective is PERSISTED on the
   }
 });
 
-test('board_add objective:"standalone" — normalized to ABSENT, the write still succeeds normally (decision a8d2ce6c slice 1)', () => {
+test('board_add objective:"standalone" — normalized to ABSENT, the write still succeeds normally (decision foreign_a8d2ce6c slice 1)', () => {
   const { tools, cleanup } = harness();
   try {
     let res: Loose | undefined;
@@ -126,7 +126,7 @@ test('board_add objective:"standalone" — normalized to ABSENT, the write still
   }
 });
 
-test('board_add objective:"standalone" is EXACT-LOWERCASE — "Standalone" / " standalone " are ordinary objectives, not the sentinel (decision a8d2ce6c slice 1)', () => {
+test('board_add objective:"standalone" is EXACT-LOWERCASE — "Standalone" / " standalone " are ordinary objectives, not the sentinel (decision foreign_a8d2ce6c slice 1)', () => {
   const { tools, cleanup } = harness();
   try {
     // the decision pins the sentinel as the exact lowercase literal; a near-miss must be
@@ -155,7 +155,7 @@ test('board_add objective:"standalone" is EXACT-LOWERCASE — "Standalone" / " s
   }
 });
 
-test('board_add with the objective OMITTED — the item is STILL SAVED and the result carries a loud "objective undeclared" notice naming board_update (decision a8d2ce6c slice 1)', () => {
+test('board_add with the objective OMITTED — the item is STILL SAVED and the result carries a loud "objective undeclared" notice naming board_update (decision foreign_a8d2ce6c slice 1)', () => {
   const { tools, cleanup } = harness();
   try {
     // THE RULE THIS PROTECTS: a user-stated task must never be lost to a missing
@@ -184,7 +184,7 @@ test('board_add with the objective OMITTED — the item is STILL SAVED and the r
   }
 });
 
-test("board_add: an objective on a source:'system' add is REFUSED loudly naming the constraint; nothing is written (decision a8d2ce6c slice 1)", () => {
+test("board_add: an objective on a source:'system' add is REFUSED loudly naming the constraint; nothing is written (decision foreign_a8d2ce6c slice 1)", () => {
   const { tools, cleanup } = harness();
   try {
     assert.throws(
@@ -225,7 +225,7 @@ test("board_add: an objective on a source:'system' add is REFUSED loudly naming 
   }
 });
 
-test("board_update: 'objective' joins the updatable-fields allowlist — grouped IN PLACE, id stable, no supersession (decision a8d2ce6c slice 1)", () => {
+test("board_update: 'objective' joins the updatable-fields allowlist — grouped IN PLACE, id stable, no supersession (decision foreign_a8d2ce6c slice 1)", () => {
   const { store, tools, cleanup } = harness();
   try {
     const { record: original } = tools.boardAdd({ text: 'ship the animation pass', source: 'user', priority: 'low' });
@@ -278,7 +278,7 @@ test("board_update: 'objective' joins the updatable-fields allowlist — grouped
   }
 });
 
-test("board_update: the unknown-field refusal message now LISTS 'objective' among the valid fields (decision a8d2ce6c slice 1)", () => {
+test("board_update: the unknown-field refusal message now LISTS 'objective' among the valid fields (decision foreign_a8d2ce6c slice 1)", () => {
   const { tools, cleanup } = harness();
   try {
     const { record: item } = tools.boardAdd({ text: 'ship the animation pass', source: 'user', priority: 'low' });
@@ -313,7 +313,7 @@ test("board_update: the unknown-field refusal message now LISTS 'objective' amon
   }
 });
 
-test("board_query projection:'digest': a grouped item's digest line carries its objective; an ungrouped one shows none (decision a8d2ce6c slice 1)", () => {
+test("board_query projection:'digest': a grouped item's digest line carries its objective; an ungrouped one shows none (decision foreign_a8d2ce6c slice 1)", () => {
   const { tools, cleanup } = harness();
   try {
     // a digest board read is the TRIAGE read: grouping by objective is exactly what it is

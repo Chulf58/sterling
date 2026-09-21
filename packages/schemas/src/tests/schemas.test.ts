@@ -265,7 +265,7 @@ test('full §3.2 record set: anti_pattern, research_finding, reference_material,
   });
 });
 
-test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision 8dbbc85d)', () => {
+test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision foreign_8dbbc85d)', () => {
   const base = {
     ...envelope('research_finding'),
     question: 'does the platform rate-limit per org or per token?',
@@ -293,14 +293,14 @@ test("registry: research_finding.fileKeys reads its own file_keys field — the 
   assert.deepEqual(fk({}), [], 'no file_keys present yields an empty join set, never a throw');
 });
 
-test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision b47889b7 unchanged, board b1de6fab)', () => {
+test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision foreign_b47889b7 unchanged, board b1de6fab)', () => {
   const rf = knownFieldsFor('research_finding');
   assert.ok(rf, 'research_finding must resolve its known field set');
   assert.ok(rf!.has('file_keys'), 'file_keys is now a real field of research_finding');
 
   const ref = knownFieldsFor('reference_material');
   assert.ok(ref, 'reference_material must resolve its known field set');
-  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)');
+  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)'); // not-a-citation: fixture id
 });
 
 test('evidence_basis + measured_by: optional on the three ruling types, enum closed, distinct from anti_pattern.basis (board 1d02b6b4)', () => {
@@ -444,7 +444,7 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
 
 test("registry: every projection:'digest' headline field is a REAL field of its own schema (invariant 3 check)", () => {
   // WHY THIS EXISTS. knownFieldsFor derives a type's valid fields from its
-  // schema so no second list can drift (decision 44e45931). The digest map is
+  // schema so no second list can drift (decision foreign_44e45931). The digest map is
   // the one thing that CANNOT be derived — which field is a record's headline
   // is an editorial call — so it is the one place a hand-maintained list of
   // field names survives, and this is its consistency check.
@@ -538,7 +538,7 @@ test('sessionEventSchema: the six register kinds parse; unknown kind + missing f
 
   assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'researcher', at: NOW }).kind, 'agent_dispatch');
   assert.equal(s.parse({ kind: 'debug_scope', detail: 'src/a.mjs', at: NOW }).kind, 'debug_scope');
-  // concept_designed (decision 7208729b): detail carries the concept FAMILY slug
+  // concept_designed (decision foreign_7208729b): detail carries the concept FAMILY slug
   assert.equal(s.parse({ kind: 'concept_designed', detail: 'weapons', at: NOW }).kind, 'concept_designed');
   // no_capture (board 7bbec3bd): detail carries the REASON for the declaration
   assert.equal(s.parse({ kind: 'no_capture', detail: 'read-only investigation, nothing durable', at: NOW }).kind, 'no_capture');
@@ -642,7 +642,7 @@ test('research_owed is a registered SYSTEM_REASONS member draining under "captur
   assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...reasons].sort(), 'DRAIN_VERBS and SYSTEM_REASONS stay 1:1');
 });
 
-// ---- concept-article layer (decision 7208729b, brief concept-article-layer-wiring) ----
+// ---- concept-article layer (decision foreign_7208729b, brief concept-article-layer-wiring) ----
 
 test('feature_article.concept_family: optional marker round-trips; legacy articles omit it; it joins the FTS text; concept_article_missing drains under "created"', async () => {
   const mod = (await import('../index.js')) as unknown as Record<string, unknown>;

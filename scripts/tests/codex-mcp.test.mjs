@@ -1,5 +1,5 @@
 // SPARRING-PARTNER slice 1 — scripts/lib/codex-mcp.mjs
-// (decision cd019e0b, sparring-partner-partnership-shape)
+// (decision foreign_cd019e0b, sparring-partner-partnership-shape)
 //
 // Under test, per the declared interface slice only (no implementation read):
 //   probeCodex({spawnFn, timeoutMs, env}) -> probe result
@@ -19,7 +19,7 @@
 // on withCodexEntry's OWN observable output. This tests the real end-to-end
 // contract (probe -> merged servers) without inventing an internal shape.
 //
-// SCOPED EXCEPTION as of decision ffe7c416 (host-native init, user-decided
+// SCOPED EXCEPTION as of decision foreign_ffe7c416 (host-native init, user-decided
 // 2026-08-27): probeCodexWin's `command` field IS now part of the declared
 // interface — defect (2) of that ruling is precisely that the resolved
 // absolute path was being discarded, so "the path survives the probe" is an
@@ -229,14 +229,14 @@ test('codexSkipLine("timeout") starts with the fixed prefix and is distinguishab
 //     {ok:false, reason} with reason ∈ {binary-absent, not-logged-in, timeout}
 //     and NO command, on every failure.
 //
-//     AMENDED by decision ffe7c416 (host-native init, user-decided 2026-08-27).
+//     AMENDED by decision foreign_ffe7c416 (host-native init, user-decided 2026-08-27).
 //     Two pins in this section previously asserted `deepEqual(result, {ok:true})`
 //     — an EXACT-SHAPE check that forbids the resolved path surviving, which is
 //     exactly the defect the ruling orders closed: ffe7c416 defect (2) records
 //     that CODEX_MCP_ENTRY hardcoded a bare `codex` and threw away the path
 //     where.exe had just resolved, so a successful probe did NOT prove the
 //     written entry would spawn (npm installs codex as codex.cmd, hostile to
-//     shell-less spawning, and research_finding 0c712d94 measured PATH to be an
+//     shell-less spawning, and research_finding foreign_0c712d94 measured PATH to be an
 //     unreliable presence oracle on the very host this must work on). Those two
 //     deepEquals are now `assert.equal(result.ok, true)` PLUS a POSITIVE
 //     assertion on result.command. The exact-shape discipline is not simply
@@ -382,7 +382,7 @@ test('probeCodexWin: resolves via spawnFn("where.exe", ["codex"], ...) — the W
   assert.equal(
     result.command,
     WIN_CODEX_PATH,
-    'the probe CARRIES the path where.exe resolved (decision ffe7c416 defect 2): a probe that proves an absolute executable spawns, then hands back nothing but ok:true, forces the caller onto a bare "codex" that is NOT known to spawn — the exact gap that left codex-on-Windows broken after a SUCCESSFUL probe'
+    'the probe CARRIES the path where.exe resolved (decision ffe7c416 defect 2): a probe that proves an absolute executable spawns, then hands back nothing but ok:true, forces the caller onto a bare "codex" that is NOT known to spawn — the exact gap that left codex-on-Windows broken after a SUCCESSFUL probe' // not-a-citation: fixture id
   );
 });
 // SABOTAGE: call spawnFn('codex', ...) directly instead of resolving through
@@ -540,7 +540,7 @@ test('probeCodexWin: STERLING_CODEX_WIN_PATH set (non-empty) bypasses where.exe 
   assert.equal(
     result.command,
     FORCED_PATH,
-    'the FORCED path is what the probe carries forward — not the where.exe fixture path, not a bare "codex" (decision ffe7c416 defect 2). This is also what makes STERLING_CODEX_WIN_PATH a usable command seam for init-ensure.test.mjs, which drives the end-to-end wiring through it'
+    'the FORCED path is what the probe carries forward — not the where.exe fixture path, not a bare "codex" (decision ffe7c416 defect 2). This is also what makes STERLING_CODEX_WIN_PATH a usable command seam for init-ensure.test.mjs, which drives the end-to-end wiring through it' // not-a-citation: fixture id
   );
   assert.notEqual(result.command, WIN_CODEX_PATH, 'the seam wins over detection — the where.exe fixture path never leaks into a forced-path result');
 });
@@ -571,7 +571,7 @@ test('probeCodexWin: STERLING_CODEX_WIN_PATH set to the EMPTY STRING forces bina
 // pin goes red, which is exactly how it catches the truthiness-vs-presence bug.
 
 // =============================================================================
-// Part E (decision ffe7c416, defect 2) — withCodexEntry consumes the probe's
+// Part E (decision foreign_ffe7c416, defect 2) — withCodexEntry consumes the probe's
 // CARRIED COMMAND. Spec-only: scripts/lib/codex-mcp.mjs was NOT read to author
 // these.
 //

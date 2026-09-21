@@ -13,7 +13,7 @@ try {
   const candidates = articles
     .filter((a) => a.state === 'deprecated' || a.state === 'dormant')
     .map((a) => {
-      // relies_on names articles by SLUG (pinned convention, decision 474b1c71); id accepted as a legacy fallback.
+      // relies_on names articles by SLUG (pinned convention, decision foreign_474b1c71); id accepted as a legacy fallback.
       const active_dependents = articles
         .filter((other) => other.id !== a.id && activeById.has(other.id) && (other.dependencies.relies_on.includes(a.slug) || other.dependencies.relies_on.includes(a.id)))
         .map((d) => ({ id: d.id, slug: d.slug }));
@@ -22,7 +22,7 @@ try {
         slug: a.slug,
         state: a.state,
         files: a.files.map((f) => f.path),
-        // Board a9280db7 (decision c48380bf): on a probe|tool article,
+        // Board a9280db7 (decision foreign_c48380bf): on a probe|tool article,
         // live_test_refs can be the structured not_applicable exemption
         // object instead of an array — normalize to [] so this reports no
         // traced tests rather than throwing on .flatMap.

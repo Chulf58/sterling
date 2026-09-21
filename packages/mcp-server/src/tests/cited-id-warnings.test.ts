@@ -14,14 +14,14 @@
 // id-shaped citations — full uuids and 8-plus-hex-char prefixes adjacent to
 // the word `knowledge_get` or a record-type word (the convention already
 // used throughout this store's own prose, e.g. "(knowledge_get 19b506ce-…)"
-// and "decision de1a7329") — and for each citation that does NOT resolve to
+// and "decision foreign_de1a7329") — and for each citation that does NOT resolve to
 // any record (ANY status; a superseded tombstone counts as resolving), the
 // write still SUCCEEDS but its echo's `warnings` array carries a warning
 // naming that unresolved citation. This file exercises knowledge_create and
 // board_add, per the assigned ACs.
 //
 // TODAY, before this ships: knowledge_create/board_add's `warnings` channel
-// already exists (decision 9c8e4601 — every write tool's echo carries
+// already exists (decision foreign_9c8e4601 — every write tool's echo carries
 // warnings/check_skipped/…) but nothing populates it from cited-id scanning,
 // so it is unconditionally `[]` regardless of what the written text
 // contains. Every test below pairs a citation that MUST resolve with one
@@ -116,7 +116,7 @@ test('AC1 & AC2: knowledge_create draws no warning citing a real record\'s full 
   }
 });
 
-test("AC3: citing a SUPERSEDED record's id resolves (tombstones are legitimate citations, decision de1a7329) — contrasted against a fabricated sibling citation in the same write", () => {
+test("AC3: citing a SUPERSEDED record's id resolves (tombstones are legitimate citations, decision foreign_de1a7329) — contrasted against a fabricated sibling citation in the same write", () => {
   const { tools, cleanup } = harness();
   try {
     const v1 = mkDecision(tools, 'to be superseded', 'v1 statement');

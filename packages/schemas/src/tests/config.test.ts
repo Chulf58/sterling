@@ -141,7 +141,7 @@ test('delivery.total_cap_bytes: an explicit value is honored; negative and non-n
   assert.throws(() => parseConfig({ delivery: { total_cap_bytes: 'lots' } }), 'a non-number fails loud');
 });
 
-// ------------------- sparring_partner config (decision cd019e0b, sparring-partner-partnership-shape) -------------------
+// ------------------- sparring_partner config (decision foreign_cd019e0b, sparring-partner-partnership-shape) -------------------
 
 // sparring_partner is a NEW top-level config block, additive-optional: an
 // absent block still parses with defaults ({enabled: true}). Accessed through
@@ -176,7 +176,7 @@ test('templates/default-config.json still parses and carries sparring_partner en
 });
 
 // ------------------- sparring_partner.model (slice 2, article 'sparring-partner' interaction i /
-// decision cd019e0b point 8: the System-tab model selector; optional, empty/absent = CLI default) -------------------
+// decision foreign_cd019e0b point 8: the System-tab model selector; optional, empty/absent = CLI default) -------------------
 
 // model is a NEW field on the EXISTING sparring_partner block — additive-optional,
 // a sibling of `enabled` above which this addition must leave untouched. Accessed
@@ -212,7 +212,7 @@ test('templates/default-config.json still parses with sparring_partner.model omi
   assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped enabled default is untouched by the new sibling field');
 });
 
-// ------------------- tdd / mutation_verification config toggles (decision 752caf98,
+// ------------------- tdd / mutation_verification config toggles (decision foreign_752caf98,
 // tdd-and-mutation-toggles-in-system-tab) -------------------
 //
 // tdd and mutation_verification are TWO NEW, INDEPENDENT top-level config
@@ -221,7 +221,7 @@ test('templates/default-config.json still parses with sparring_partner.model omi
 // TDD-by-default (user-affirmed 2026-08-09) and verify-by-mutation-on-ruling-
 // change (measured 2026-08-22) posture until a user explicitly turns either
 // off. Like `sparring_partner`/`difficulty` above, both blocks are NON-STRICT
-// configSchema objects — decision 752caf98 says only that the two blocks
+// configSchema objects — decision foreign_752caf98 says only that the two blocks
 // mirror sparring_partner's shape; it makes no strictness claim at all.
 // Unknown keys inside either block are silently STRIPPED on parse, the same
 // forward-compat posture the `difficulty` section above documents (an older
@@ -235,7 +235,7 @@ type CfgWithTddMutation = {
   mutation_verification?: { enabled?: boolean };
 };
 
-test('tdd: absent block defaults to {enabled: true} (TDD-by-default stays the standing posture, decision 752caf98)', () => {
+test('tdd: absent block defaults to {enabled: true} (TDD-by-default stays the standing posture, decision foreign_752caf98)', () => {
   const empty = parseConfig({}) as unknown as CfgWithTddMutation;
   assert.ok(empty.tdd, 'parseConfig defaults must add a tdd block even when absent from input');
   assert.equal(empty.tdd?.enabled, true, 'tdd.enabled defaults to true when the block is absent');
@@ -262,7 +262,7 @@ test('tdd: an unknown field inside the block is silently stripped — the block 
   assert.equal(stripped.tdd?.bogus_field, undefined, 'the unknown key is stripped from the parsed output, not thrown on');
 });
 
-test('mutation_verification: absent block defaults to {enabled: true} (verify-by-mutation stays the standing posture, decision 752caf98)', () => {
+test('mutation_verification: absent block defaults to {enabled: true} (verify-by-mutation stays the standing posture, decision foreign_752caf98)', () => {
   const empty = parseConfig({}) as unknown as CfgWithTddMutation;
   assert.ok(empty.mutation_verification, 'parseConfig defaults must add a mutation_verification block even when absent from input');
   assert.equal(empty.mutation_verification?.enabled, true, 'mutation_verification.enabled defaults to true when the block is absent');

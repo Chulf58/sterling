@@ -30,7 +30,7 @@ export function extractPathCandidates(text) {
   return [...new Set(found)];
 }
 
-// REVIEW-TERRITORY structured declaration (decision 8f137474, slug
+// REVIEW-TERRITORY structured declaration (decision foreign_8f137474, slug
 // review-territory-structured-receipt-files) — a dispatch block's prompt may
 // carry a line `REVIEW-TERRITORY: [...]` (a JSON array of repo-relative
 // POSIX path strings) that takes precedence over the free-prose extractor
@@ -48,7 +48,7 @@ export function extractPathCandidates(text) {
 // spaces) never matches — it is silently not-present, never malformed.
 export const REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
 
-// Repo-relative POSIX PATH SHAPE (review-fix round, decision 8f137474): a
+// Repo-relative POSIX PATH SHAPE (review-fix round, decision foreign_8f137474): a
 // declared string is a legitimate path only when it is already in canonical
 // repo-relative POSIX form — no '..' segment, no leading '/', no drive
 // letter, no backslash, non-empty. Reuses H22's own normalization primitive

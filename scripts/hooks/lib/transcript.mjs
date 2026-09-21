@@ -6,7 +6,7 @@
 import { openSync, readSync, closeSync, fstatSync, existsSync, statSync, readdirSync } from 'node:fs';
 
 // FORWARD READ FOR A KNOWN-ID LOOKUP — the sibling of readTail below, added
-// for H22's Stop-time reviewer binding (decision edbaa38d, slug
+// for H22's Stop-time reviewer binding (decision foreign_edbaa38d, slug
 // reviewer-attribution-binds-at-stop-from-child-transcript-and-meta-sidecar).
 // readTail is deliberately UNCHANGED: its 1MB window is the right shape for
 // "the most recent entry of interest", which is what every other caller wants,

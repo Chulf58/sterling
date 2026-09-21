@@ -84,7 +84,7 @@ function runStop(dir, over = {}, stdio) {
     env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
   };
   if (stdio) opts.stdio = stdio;
-  // Match the PRODUCTION invocation (hooks.json, decision fedc4e84): every hook
+  // Match the PRODUCTION invocation (hooks.json, decision foreign_fedc4e84): every hook
   // is spawned with --disable-warning=ExperimentalWarning. Without it Node 24's
   // node:sqlite ExperimentalWarning lands on stderr FIRST and the strict
   // header/line-count assertions below measure the noise instead of the

@@ -34,7 +34,7 @@ function runHook(script, input, cwd) {
   return { code: r.status, stderr: r.stderr ?? '', stdout: r.stdout ?? '' };
 }
 
-// Anti-pattern ee89c3fd: raw multi-line child-process stderr interpolated into
+// Anti-pattern foreign_ee89c3fd: raw multi-line child-process stderr interpolated into
 // an assertion message that is EXPECTED to fail poisons the TAP crash/assertion
 // classifier — the multi-line `code:` diagnostic starts a YAML line, so
 // ERR_ASSERTION is no longer the first `code:` the parser sees and the outcome
@@ -419,7 +419,7 @@ test('bundled hooks are standalone: esbuild output runs without workspace resolu
   const liveProbe = join(root, 'hooks', 'h15-store-guard.mjs');
   // MTIME, not bytes: on a clean tree an in-place rebuild emits byte-identical
   // output, so a content comparison would pass while the live surface was in
-  // fact rewritten — the exact hollow pin decision cf863d84 warns about. The
+  // fact rewritten — the exact hollow pin decision foreign_cf863d84 warns about. The
   // mtime moves on every write, identical bytes or not. Tolerates an unbuilt
   // clone (no shipped bundle yet) rather than throwing before the cleanup.
   const liveBefore = existsSync(liveProbe) ? statSync(liveProbe).mtimeMs : null;

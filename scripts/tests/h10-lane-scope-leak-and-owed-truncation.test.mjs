@@ -12,7 +12,7 @@
 // ---------------------------------------------------------------------------
 // GROUP A — THE LANE-SCOPE LEAK (board f4616312, hole 1).
 //
-// THE RULING (decision `no-capture-discharge-is-lane-scoped`, 51ebe0dd,
+// THE RULING (decision `no-capture-discharge-is-lane-scoped`, foreign_51ebe0dd,
 // carried with its justification clause): "a discharge must be no broader than
 // the claim the human actually made ... where a declaration's scope is
 // ambiguous the duty stays armed", BECAUSE silent knowledge loss is the severe
@@ -223,7 +223,7 @@ function declareNoCapture(dir, reason = 'read-only follow-up; nothing durable le
   assert.equal(r.status, 0, `FIXTURE LIVENESS: the BARE no_capture declaration must be accepted by scripts/no-capture.mjs: ${r.stderr}`);
   const events = readEvents(dir).filter((e) => e.kind === 'no_capture');
   assert.equal(events.length, 1, 'FIXTURE LIVENESS: exactly one no_capture event landed in the register — an unarmed declaration would leave the capture duty armed and make this arm green for the wrong reason');
-  assert.equal(events[0].lane, undefined, 'FIXTURE LIVENESS: this is the BARE (capture-lane) declaration shape — no lane field at all (decision 51ebe0dd: bare covers CAPTURE only)');
+  assert.equal(events[0].lane, undefined, 'FIXTURE LIVENESS: this is the BARE (capture-lane) declaration shape — no lane field at all (decision 51ebe0dd: bare covers CAPTURE only)'); // not-a-citation: fixture id
   return r;
 }
 
@@ -342,7 +342,7 @@ test('A-1: three TRACKED unowned source files with the capture duty fully discha
     assert.equal(
       first.code,
       2,
-      `LANE-SCOPE LEAK SHAPE (RED before the fix, releasing with 0): the human declared "nothing durable was learned" — a CAPTURE-lane claim (decision no-capture-discharge-is-lane-scoped, 51ebe0dd). They never declared that three unowned files need no owning article. A discharge must be no broader than the claim actually made, because silent knowledge loss is the severe direction (P5/P2). stderr: ${first.stderr}`,
+      `LANE-SCOPE LEAK SHAPE (RED before the fix, releasing with 0): the human declared "nothing durable was learned" — a CAPTURE-lane claim (decision no-capture-discharge-is-lane-scoped, 51ebe0dd). They never declared that three unowned files need no owning article. A discharge must be no broader than the claim actually made, because silent knowledge loss is the severe direction (P5/P2). stderr: ${first.stderr}`, // not-a-citation: fixture id
     );
     assert.match(first.stderr, /article demand/i, 'the ARTICLE demand is what fired');
     assert.doesNotMatch(

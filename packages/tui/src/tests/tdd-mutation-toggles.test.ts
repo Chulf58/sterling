@@ -9,7 +9,7 @@ import * as stateMod from '../state.js';
 import * as viewmodel from '../viewmodel.js';
 
 // ===========================================================================
-// TDD / MUTATION-VERIFICATION toggle rows (decision 752caf98,
+// TDD / MUTATION-VERIFICATION toggle rows (decision foreign_752caf98,
 // tdd-and-mutation-toggles-in-system-tab) — SPEC-ONLY, written against the
 // decision's WIRING clause ("the TUI System tab gains two rows following the
 // exact sparring_partner.enabled row pattern") without reading state.ts/

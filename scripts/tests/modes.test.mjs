@@ -103,7 +103,7 @@ test('cleanup-plan: dormant/deprecated candidates with dependency evidence; acti
     const dead = store.create(articleRec('dead-feat', ['src/dead.mjs'], { state: 'deprecated' }));
     const blockedDep = store.create(articleRec('blocked-feat', ['src/blocked.mjs'], { state: 'dormant', state_reason: 'r', wiring_todo_id: randomUUID() }));
     const legacyDep = store.create(articleRec('legacy-feat', ['src/legacy.mjs'], { state: 'deprecated' }));
-    // relies_on holds SLUGS (decision 474b1c71); id-based references still block as a legacy fallback.
+    // relies_on holds SLUGS (decision foreign_474b1c71); id-based references still block as a legacy fallback.
     store.create(articleRec('consumer', ['src/consumer.mjs'], { dependencies: { relies_on: ['blocked-feat'], relied_by: [] } }));
     store.create(articleRec('legacy-consumer', ['src/legacy-consumer.mjs'], { dependencies: { relies_on: [legacyDep.id], relied_by: [] } }));
     // a dependent that is itself a cleanup candidate is not "active" — it must not block.

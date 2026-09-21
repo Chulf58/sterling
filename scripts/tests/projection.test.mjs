@@ -131,7 +131,7 @@ test('§15 projection freshness check (audit finding 25/43): passes when current
   }
 });
 
-// Consumer-machine shape (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89): the
+// Consumer-machine shape (decision foreign_e6240afe): the
 // clone HAS a store — init creates it — but no articles, because .sterling/ is
 // gitignored and knowledge never travels with the repo. Comparing the committed
 // projection against that store reported staleness that cannot exist there, and

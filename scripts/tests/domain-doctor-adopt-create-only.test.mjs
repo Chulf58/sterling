@@ -71,14 +71,14 @@
 //
 // FIXTURE NOTES, inherited from the sibling suites.
 // (1) Provenance DDL is HARDCODED, never introspected (the composite-PK trap,
-//     anti_pattern 0059fa66):
+//     anti_pattern foreign_0059fa66):
 //       record_versions(record_id, version, archived_at, body) PK(record_id,version)
 //       record_aliases(historical_id PK, canonical_id, archived_version, created_at)
 //       record_relations(source_id, rel, target_id, created_at) PK(source_id,rel,target_id)
 // (2) oneLine() flattens a child-process stream only inside an assertion's own
-//     MESSAGE, never its TARGET (anti_pattern ee89c3fd).
+//     MESSAGE, never its TARGET (anti_pattern foreign_ee89c3fd).
 // (3) THIS SUITE'S OWN READS MUST NOT CREATE THE LITTER IT CHECKS FOR
-//     (anti_pattern 8616e72d): a read-only DatabaseSync open on a WAL store
+//     (anti_pattern foreign_8616e72d): a read-only DatabaseSync open on a WAL store
 //     MATERIALIZES an empty -wal/-shm. Every directory/byte snapshot is
 //     therefore taken with raw fs reads ONLY, and every openRO()/listIds()
 //     verification happens strictly AFTER the last such snapshot in its test.
@@ -343,11 +343,11 @@ test('CONTROL: `adopt --apply` WITHOUT --create-only onto a MISSING destination 
 // source's records AND its satellite tables. The satellites are the load-
 // bearing half: whole-file adoption exists precisely because migrate's
 // record-replay cannot carry record_versions / record_aliases /
-// record_relations (decision 8e3848ad part 2). A create-only apply that
+// record_relations (decision foreign_8e3848ad part 2). A create-only apply that
 // published a record-replay would satisfy a records-only assertion and quietly
 // destroy the reason the mode exists.
 //
-// MASKING NOTE (anti_pattern f1d66bef): the satellite-rows prototype defect
+// MASKING NOTE (anti_pattern foreign_f1d66bef): the satellite-rows prototype defect
 // fixed in satelliteRows() above was, on an earlier run, hidden by an
 // unrelated litter assertion failing FIRST in this same long test and
 // aborting before execution ever reached the satellite comparisons — another
@@ -398,7 +398,7 @@ test('PIN1: --apply --create-only onto a fresh destination publishes a valid v2 
 
   // SABOTAGE: open the source WRITABLE anywhere on this path instead of
   // read-only — on a cold store that leaves a -wal/-shm pair behind (the
-  // converse direction of AC15, anti_pattern 8616e72d).
+  // converse direction of AC15, anti_pattern foreign_8616e72d).
   assert.equal(hashFile(fromPath), sourceHashBefore, 'the SOURCE is byte-identical after an apply — adoption reads, never writes, the source');
   assert.equal(existsSync(`${fromPath}-wal`), false, 'and gains no -wal litter');
   assert.equal(existsSync(`${fromPath}-shm`), false, 'and gains no -shm litter');
@@ -412,7 +412,7 @@ test('PIN1: --apply --create-only onto a fresh destination publishes a valid v2 
   // replay into a fresh store (i.e. re-implement adopt as migrate). Records and
   // ids survive that mutation; these three assertions do not — they are the
   // ONLY thing in this file that distinguishes whole-file adoption from the
-  // lossy replay adopt exists to avoid (decision 8e3848ad, anti_pattern
+  // lossy replay adopt exists to avoid (decision foreign_8e3848ad, anti_pattern
   // 44d4f74f).
   const sat = satelliteRows(to);
   assert.deepEqual(

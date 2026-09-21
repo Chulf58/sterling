@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// SPEC-ONLY pins for board-provenance-measured-at-head (decision e9858b23,
+// SPEC-ONLY pins for board-provenance-measured-at-head (decision foreign_e9858b23,
 // slug board-provenance-measured-at-head). Written BLIND to the in-flight
 // coder diff to packages/mcp-server/src/tools.ts and packages/schemas/src/
 // records.ts — H4 forbids reading either while this slice lands. Harness and

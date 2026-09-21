@@ -169,7 +169,7 @@ function paint(rows) {
  *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle).
  *
  *  WALK-UP FIRST; THE ENV SEAM IS CONSULTED ONLY WHEN THE WALK-UP FINDS NO
- *  PLUGIN TREE (decision 95c2c109 F2's shape, extended from H15 to H1 by board
+ *  PLUGIN TREE (decision foreign_95c2c109 F2's shape, extended from H15 to H1 by board
  *  fb7c43fb N-3). This ordering is the security property, not a preference:
  *  every consumer of this root READS CODE from it (plugin.json, the agent
  *  template registry), RESOLVES THE SERVER against it, and — sharpest —
@@ -189,7 +189,7 @@ function pluginRoot() {
 /** The walk-up alone — never the env seam, not even as a last resort. Used
  *  where the root is about to be PRINTED AS A COMMAND (the receipt remedy
  *  below): an env-supplied value is agent-influenceable under the threat model
- *  decision 95c2c109 F2 closed in H15, so the paste-ready line must come from
+ *  decision foreign_95c2c109 F2 closed in H15, so the paste-ready line must come from
  *  the running hook's own location only, and an unresolvable walk-up prints the
  *  placeholder rather than falling back to anything. */
 function walkUpPluginRoot() {
@@ -379,7 +379,7 @@ if (!store) {
   // must still get it HERE, on this early exit, or its register accumulates
   // forever and every startup re-reports the same residue without ever
   // wiping. UNCONDITIONAL (C6, correctness review) — this now matches the
-  // store-present call site below EXACTLY: decision ec9eacaa deletes the
+  // store-present call site below EXACTLY: decision foreign_ec9eacaa deletes the
   // in-flight dispatch register on EVERY source, resume included (an entry
   // can only ever defer a duty on behalf of an agent this NEW session cannot
   // observe), so a source-gated call here disagreed with that same-file
@@ -392,7 +392,7 @@ if (!store) {
 // deep-queue threshold, never the conventions injection, so this read is guarded
 // and falls back to the schema default rather than throwing. Contrast the gates
 // (H3/H5/H14/H15), which fail CLOSED on exactly this input — a hook that cannot
-// evaluate must deny only where denying is its job (anti_pattern e13f0fb5).
+// evaluate must deny only where denying is its job (anti_pattern foreign_e13f0fb5).
 let config = null;
 let configUnreadable = false;
 try {
@@ -431,7 +431,7 @@ if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
   configUnreadable = true;
 }
 
-// MACHINE ROLE (todo cabbc10f, decision a9b98b7d): stated ONLY when this
+// MACHINE ROLE (todo cabbc10f, decision foreign_a9b98b7d): stated ONLY when this
 // session's project IS a Sterling clone itself — comparing the normalized
 // input.cwd to pluginRoot(). Every OTHER Sterling project (a consumer of the
 // plugin, not a clone of it) never sees this line; it exists because the
@@ -459,7 +459,7 @@ try {
   // fail-open — a malformed config or unresolved plugin root costs only this line
 }
 
-// TDD / MUTATION-VERIFICATION POSTURE (decision 752caf98
+// TDD / MUTATION-VERIFICATION POSTURE (decision foreign_752caf98
 // tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): mechanizes
 // the "check what this machine is set to" instruction CLAUDE.md states in
 // prose by reading the LIVE per-project toggles at every SessionStart, rather
@@ -468,7 +468,7 @@ try {
 // applied (unlike the MCP server's parseConfig) — a project whose config
 // predates this toggle, or config === null on a malformed read, leaves
 // config?.tdd?.enabled undefined here. Undefined is treated as the
-// DOCUMENTED SCHEMA DEFAULT (both fields default true, decision 752caf98)
+// DOCUMENTED SCHEMA DEFAULT (both fields default true, decision foreign_752caf98)
 // rather than invented: only an explicit `false` reads as OFF. Positioned
 // immediately after roleContext in the output concatenation below. Guarded
 // like every other H1 read — H1 is soft, so a malformed config costs only
@@ -504,7 +504,7 @@ try {
   // fail-open — a malformed config costs only this line
 }
 
-// CLONE-CURRENCY SIGNAL (closes the gap decision be9168e8 surfaced and parked:
+// CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
 // behind"). Probes the CLONE at pluginRoot() — not this project — so every
 // session on the machine states whether Sterling is current. Throttle: the one
@@ -566,7 +566,7 @@ try {
           currencyWarning = `⚠ Sterling is ${behind} update(s) behind — double-click sterling-update.bat (or run /sterling:update), then restart the session. A /clear is NOT enough — MCP servers survive it, so EXIT AND RELAUNCH the Claude Code CLI. `;
           currencyContext =
             `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. ` +
-            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse, decision e6240afe), ` +
+            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse), ` +
             `and remind them a session RESTART follows a successful update — that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
         }
       }
@@ -1015,7 +1015,7 @@ const dispatchResidueContext = dispatchResidueLines.length
     dispatchResidueLines.join('\n')
   : '';
 
-// IN-FLIGHT DISPATCH REGISTER (decision ec9eacaa): deleted UNCONDITIONALLY —
+// IN-FLIGHT DISPATCH REGISTER (decision foreign_ec9eacaa): deleted UNCONDITIONALLY —
 // every source, resume included. Unlike H10's other three registers there is no
 // debt to VERIFY and no source to gate on: an entry can only ever defer a duty
 // on behalf of an agent this NEW session cannot observe, which is exactly the
@@ -1036,7 +1036,7 @@ const dispatchResidueContext = dispatchResidueLines.length
 await deleteRegisterUnderLock(input.cwd);
 
 // GRAVESTONE — an unconditional `rmSync` of the conductor-attested enforcement
-// stamp (`.sterling/transient/enforcement-stamp.json`, decision 6e132e19) stood
+// stamp (`.sterling/transient/enforcement-stamp.json`, decision foreign_6e132e19) stood
 // here. DELETED 2026-08-30 (S4) by decisions h17-demotes-to-tripwire-with-
 // minimal-b-hash-list (78dc9bd6) and b-baseline-hash-list-concrete-design
 // (fe861066): the stamp/attestation apparatus is gone whole, so there is nothing
@@ -1055,7 +1055,7 @@ await deleteRegisterUnderLock(input.cwd);
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
 // (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
 // paths — but a session that dies without one (kill, deny-then-close, or the
-// capture-pending deferral's deliberate allow-without-clear, decision bd594c03)
+// capture-pending deferral's deliberate allow-without-clear, decision foreign_bd594c03)
 // leaks them into the NEXT session: a stale nag marker silently downgrades every
 // duty's soft-block to queue items, a stale capture_pending suppresses the capture
 // nag for unrelated new work, and stale touches backdate `earliest` and pollute
@@ -1186,7 +1186,7 @@ try {
   const userTotal = store.count({ types: ['todo'], source: 'user' });
   counts.todos = userTotal;
   const userTodos = userTotal > 0 ? store.query({ types: ['todo'], source: 'user', cap: userTotal }) : [];
-  // Objective grouping (decision a8d2ce6c): the banner discloses how many of
+  // Objective grouping (decision foreign_a8d2ce6c): the banner discloses how many of
   // the open tasks are slices of larger objectives, so a sliced board reads
   // as N objectives to the human too — not only in the TUI's grouped view.
   const grouped = userTodos.filter((t) => t.objective);
@@ -1289,7 +1289,7 @@ if (drainable >= deepThreshold) {
     ' This is a persistent visibility count by design — items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.';
 }
 
-// shared project registry (decision 8f9e6db2): touch THIS project's last_seen
+// shared project registry (decision foreign_8f9e6db2): touch THIS project's last_seen
 // for the session, and make the CONDUCTOR aware of sibling projects via
 // additionalContext (NOT systemMessage — this is conductor awareness, not a
 // human banner). Only if the registry exists (init creates it) — H1 never
@@ -1320,7 +1320,7 @@ if (existsSync(registryPath())) {
  *  other error = null (indeterminate — caller must not suppress a real warning
  *  on it). Existence alone over-warns: pid numbering resets on reboot (WSL
  *  restarts routinely), so an orphan marker's pid is often REUSED by an
- *  unrelated process and the dead-writer suppression (decision 132177d2) fails
+ *  unrelated process and the dead-writer suppression (decision foreign_132177d2) fails
  *  — observed 2026-07-02. On Linux, confirm identity via /proc/<pid>/cmdline:
  *  the writer is always the MCP server, launched from .../packages/mcp-server/
  *  dist, so a live cmdline WITHOUT 'mcp-server' is a reused pid = confirmed
@@ -1375,7 +1375,7 @@ try {
   // fail-open — the staleness guard must never break SessionStart
 }
 
-// Machine-activation guard (todo 8789eccf, anti_pattern 60e8463d): installed
+// Machine-activation guard (todo 8789eccf, anti_pattern foreign_60e8463d): installed
 // agents bake node paths per machine context (d53dc92c); a WSL↔Windows context
 // flip leaves every agent hook failing non-blocking — the enforcement floor is
 // silently absent while sync-agents' hash bookkeeping reads up_to_date. Probe
@@ -1448,7 +1448,7 @@ try {
         : '') +
       `Run /sterling:sync-agents from this context, then restart. `;
     machineContext =
-      `\n\nMACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` +
+      `\n\nMACHINE-CONTEXT DRIFT (H1): ` +
       (dead.length ? `${dead.length} inactive (${dead.map((d) => d.agent).join(', ')}); ` : '') +
       (unknown.length ? `${unknown.length} UNKNOWN (${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}). ` : '') +
       `Hooks for inactive agents fail non-blocking. Run /sterling:sync-agents, restart, then pass scripts/check-agents-visible.mjs before dispatching.`;
@@ -1460,7 +1460,7 @@ try {
   // own catch and each degrades LOUD, so nothing routine reaches here (02a1ed39).
 }
 
-// AGENT CURRENCY (board 6ce18724, research_finding 0038af7c). The machine-
+// AGENT CURRENCY (board 6ce18724, research_finding foreign_0038af7c). The machine-
 // activation guard above asks "do these agents' hooks RUN here?"; this asks
 // "are these agents the CURRENT ones?" — a different silent failure, measured
 // 2026-08-28: /sterling:update's agent sync only visits projects in the SHARED
@@ -1469,7 +1469,7 @@ try {
 // projects on this machine at 43 and 80 days, state `stale` and never
 // REFUSED — never VISITED). H1 already reads the project at SessionStart, so
 // the detection lands where the failure actually lives, registry membership or
-// not. Distinct from the CLONE-currency signal further up (decision 558895a9),
+// not. Distinct from the CLONE-currency signal further up (decision foreign_558895a9),
 // which is correctly SILENT in the failing case because the clone is not
 // behind — another clone-currency banner would close nothing.
 //
@@ -1478,7 +1478,7 @@ try {
 // file (user-ruled 2026-08-29 — fixes (a) and (c) only).
 //
 // DEGRADE LOUD, NEVER SILENT: a clone template that cannot be read is reported
-// as UNKNOWN currency, never omitted. anti_pattern 02a1ed39 is precisely this
+// as UNKNOWN currency, never omitted. anti_pattern foreign_02a1ed39 is precisely this
 // check's failure mode — a staleness check that answered `up_to_date` NINE
 // times while the agents were dead — so a per-agent `catch` that swallows an
 // unreadable template is the defect here, not the safety net. Only the
@@ -1622,7 +1622,7 @@ try {
         `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
         `run /sterling:sync-agents in this project, then restart. `;
       agentCurrencyContext =
-        `\n\nAGENT CURRENCY (H1, research_finding 0038af7c): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
+        `\n\nAGENT CURRENCY (H1): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
         stateLines.join('; ') +
         `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
     }
@@ -1651,7 +1651,7 @@ let undeclaredSourceContext = '';
 try {
   // `config` was read ABOVE under its own guarded try/catch — null there IS
   // the malformed/missing-config case, and computeUndeclaredSourceDisclosure
-  // treats it as UNAVAILABLE, never as "zero toolchains" (decision b128f79c).
+  // treats it as UNAVAILABLE, never as "zero toolchains" (decision foreign_b128f79c).
   const report = computeUndeclaredSourceDisclosure({ cwd: input.cwd, config });
   if (report) undeclaredSourceContext = `\n\n${report}`;
 } catch (err) {

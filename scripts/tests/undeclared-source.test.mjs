@@ -147,7 +147,7 @@ test('classifyCoverage: excluded wins over a matching toolchain glob — the fil
   // sabotage: check excludeGlobs only when pathGlobs did NOT match (wrong precedence) -> covered wins, file leaks into result.covered -> red
 });
 
-// Final-pass review + decision b128f79c: excludeGlobs must stay CASE-SENSITIVE
+// Final-pass review + decision foreign_b128f79c: excludeGlobs must stay CASE-SENSITIVE
 // even though pathGlobs (include) keeps a case-insensitive fallback — an
 // exclude glob is a deliberate, precise carve-out; a case-insensitive exclude
 // can silently swallow a differently-cased sibling the author never intended
@@ -179,7 +179,7 @@ test('classifyCoverage: excludeGlobs are case-SENSITIVE while pathGlobs keep the
 
 // Codex outside-family review 2026-08-31 (thread 01a05861), adjudicated by
 // conductor — three pins below close gaps that review found in the pure
-// rendering/classification surface. Decision b128f79c remains the governing
+// rendering/classification surface. Decision foreign_b128f79c remains the governing
 // record; these pins do not change its rulings, only close spec gaps under it.
 
 test('renderUndeclaredSourceReport: a path containing a raw newline renders as ONE physical line with the control character escaped (spoof defense)', async () => {

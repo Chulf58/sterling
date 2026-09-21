@@ -22,7 +22,7 @@ import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-h
 // out here on purpose — it is load-bearing in this file's asserted scope
 // strings, knowledgePromote targets and resolveDomainMounts arms, and must
 // NOT be parameterized away. Conductor hand-edit under H5's frozen-test wall
-// (anti_pattern 985e1266); counts verified independently afterwards.
+// (anti_pattern foreign_985e1266); counts verified independently afterwards.
 function harness() {
   const h = harnessMountedShared(['genesys'], {
     now: '2026-06-16T12:00:00.000Z',

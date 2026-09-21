@@ -10,9 +10,9 @@ import { SterlingTools } from '../tools.js';
 // Idempotent maintenance_remove (board 83478fc6).
 //
 // Background this file pins: maintenance_remove on an item that was already
-// drained — auto-drained by a knowledge_update re-baseline (decision 8ecd435f),
+// drained — auto-drained by a knowledge_update re-baseline (decision foreign_8ecd435f),
 // or removed a moment earlier by a concurrent librarian call — currently
-// THROWS (decision 4c09401d / board 97d773ef only taught the throw to tell
+// THROWS (decision foreign_4c09401d / board 97d773ef only taught the throw to tell
 // "already removed" apart from "never existed"; it did not stop it being a
 // throw). A throw here reads as a FAILED drain when the state on disk is
 // exactly what the caller wanted. This suite asserts the fix: the
@@ -75,7 +75,7 @@ test('AC1: maintenance_remove on an open system item removes it and returns the 
   }
 });
 
-test('AC2: maintenance_remove on an id closed by an explicit knowledge_update resolves claim SUCCEEDS with already_drained:true, and repeats idempotently (board 83478fc6; decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1)', () => {
+test('AC2: maintenance_remove on an id closed by an explicit knowledge_update resolves claim SUCCEEDS with already_drained:true, and repeats idempotently (board 83478fc6; decision foreign_68988832)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -87,8 +87,8 @@ test('AC2: maintenance_remove on an id closed by an explicit knowledge_update re
     });
 
     // the routine race this AC exists for: the reconcile closes the item via
-    // an EXPLICIT resolves claim (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1
-    // retired the old implicit auto-drain pinned by decision 8ecd435f) BEFORE
+    // an EXPLICIT resolves claim (decision foreign_68988832
+    // retired the old implicit auto-drain pinned by decision foreign_8ecd435f) BEFORE
     // maintenance_remove is ever called.
     (
       tools as unknown as {
@@ -158,7 +158,7 @@ test('AC2: maintenance_remove on an id already closed by a DIRECT removal a mome
 test('AC3 (boundary): maintenance_remove on an id that never existed at all still REFUSES — unknown id is not read as already-drained', () => {
   const { tools, cleanup } = harness();
   try {
-    // No trace in the queue_drain_log for a fabricated id (decision 4c09401d
+    // No trace in the queue_drain_log for a fabricated id (decision foreign_4c09401d
     // gives the log a record_id column — the one observable distinction
     // between "was a maintenance item, now already removed" and "never
     // existed"; if that distinction is ever unavailable, this test pins

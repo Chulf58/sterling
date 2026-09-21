@@ -303,7 +303,7 @@ test('(D0) CONTROL: a positive claim lands in BOTH files and claimed_files', () 
 // ---------------------------------------------------------------------------
 // (D1) WRITE SIDE: a trailing-prohibition brief keeps the path OUT of
 // claimed_files (write territory) while `files` still records it — the
-// receipt/residue/H10 breadth that research_finding 289cd172 protects must
+// receipt/residue/H10 breadth that research_finding foreign_289cd172 protects must
 // not narrow. Two assertions, two different carriers, deliberately in one
 // test: the pin is precisely that the two fields DIVERGE here.
 // SABOTAGE: drop the `|| trailingSuppresses` term in hasUnsuppressedMatch —

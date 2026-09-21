@@ -138,7 +138,7 @@ const eff = recorded
 
 // Every Sterling-initialized project mounts a universal `sterling` domain so
 // general Sterling-tooling knowledge (gotchas, conventions, anti_patterns about
-// using Sterling itself) is shared across ALL projects (decision 47be4388). It
+// using Sterling itself) is shared across ALL projects (decision foreign_47be4388). It
 // is force-added to the §3.3 mount manifest regardless of what the project
 // declares — deduped, ordered AFTER the project's own tags so project/tech
 // knowledge still ranks ahead of the shared tooling domain.
@@ -204,7 +204,7 @@ if (!recorded) {
   let mutated = rawRecorded;
   const mutationNotes = [];
 
-  // managed mutation (decision 47be4388): every project mounts the universal
+  // managed mutation (decision foreign_47be4388): every project mounts the universal
   // `sterling` domain. Surgically ADD it, preserving every hand-tuned field —
   // NOT a regenerate-from-defaults (that would clobber tunings).
   if (!recorded.stack_tags.includes(UNIVERSAL_DOMAIN)) {
@@ -217,7 +217,7 @@ if (!recorded) {
     // the merged config is invalid, but its RETURN value is discarded. Zod
     // materializes every absent default and STRIPS tolerated unknown/future
     // keys, so serializing its return would silently rewrite policy the merge
-    // never touched (additive-only violation, anti_pattern 94f16632). Serialize
+    // never touched (additive-only violation, anti_pattern foreign_94f16632). Serialize
     // the RAW `mutated` object instead — rawRecorded plus only the additive
     // changes above — so unknown keys survive and no defaults are materialized
     // beyond what was already recorded on disk.
@@ -280,7 +280,7 @@ if (!existsSync(claudeMdPath)) {
   items.push({ item: 'CLAUDE.md', status: 'differs', detail: 'left untouched — merge the conductor contract by hand (template: templates/target-claude-md.md)' });
 }
 
-// WSL/tmux launchers (§11, decision bb5e25cd): all projects are WSL (company
+// WSL/tmux launchers (§11, decision foreign_bb5e25cd): all projects are WSL (company
 // policy), so init generates the new-way launchers — a thin Windows .bat that
 // double-clicks into `wt -> wsl --cd <project> -> bash -lic ./sterling-launch.sh`,
 // plus the per-project tmux launcher sterling-launch.sh (claude left, TUI right).
@@ -341,7 +341,7 @@ const dualContext = process.argv.includes('--dual-context') || process.env.STERL
 // STERLING_CODEX_PROBE — honored at THIS call site only. unset/'' -> the real host
 // predicate; 'host-native' / 'dual-context' force the arm. It exists because the
 // host-native arm is otherwise unreachable from the Linux host the suite runs on, and a
-// permanently-skipped pin is a hollow pin (research_finding 0c712d94, M6: 36 tests that
+// permanently-skipped pin is a hollow pin (research_finding foreign_0c712d94, M6: 36 tests that
 // reported 0 failures by running none). Unknown value halts loud (P5).
 const nativeMcpModeOverride = process.env.STERLING_NATIVE_MCP_MODE;
 const nativeMcpNeedsWinConfig = !nativeMcpModeOverride
@@ -656,7 +656,7 @@ for (const a of agentReport) {
 }
 const restartNeeded = agentChangesRequireRestart(agentReport);
 
-// MCP packaging (decision 097851ed, refined): the Sterling MCP server is declared
+// MCP packaging (decision foreign_097851ed, refined): the Sterling MCP server is declared
 // ONCE as the PLUGIN's server — but NOT via a root .mcp.json. A root .mcp.json is
 // BOTH auto-discovered by the plugin AND read as Sterling-self's project-scope config
 // (the dual-role), and bare ${CLAUDE_PROJECT_DIR} does not substitute in project scope
@@ -946,7 +946,7 @@ if (!initIsPluginRepo) {
 
 if (initIsPluginRepo) {
   // ALSO — IN DUAL-CONTEXT MODE ONLY — the native-claude Windows MCP config (option B,
-  // decision a756e5d9 / native-claude-mcp-via-strict-win-config): sterling-windows.bat
+  // decision foreign_a756e5d9 / native-claude-mcp-via-strict-win-config): sterling-windows.bat
   // launches claude.exe with `--mcp-config <this> --strict-mcp-config` so NATIVE claude
   // runs the MCP server on the WINDOWS node, because the plugin's sterling-mcp.json names
   // THIS (non-Windows) interpreter and cannot run under native claude (-32000). Generated
@@ -1138,7 +1138,7 @@ if (missing.length) {
 // (dead-term check now runs per-render before each write — see assertNoDeadTerms,
 // audit finding 22/43 — so no poisoned file reaches disk before the refusal.)
 
-// shared project registry (decision 8f9e6db2): note this project in the
+// shared project registry (decision foreign_8f9e6db2): note this project in the
 // machine-global registry so the others are aware it exists. Upsert by repo_path,
 // bound to the init event (P4); the H1 hook later touches last_seen_at per session.
 const pluginPkg = (() => {

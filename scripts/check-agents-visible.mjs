@@ -28,7 +28,7 @@ const { visible, problems } = checkAgentsVisible({
   registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
   targetAgentsDir: join(targetDir, '.claude', 'agents'),
   sessionStartedAt,
-  // Executability probe (anti_pattern 60e8463d): a machine-context flip leaves
+  // Executability probe (anti_pattern foreign_60e8463d): a machine-context flip leaves
   // baked hook node paths unresolvable while visibility alone still passes —
   // the gate must block on dead enforcement, not just an absent roster.
   probeExecutability: true,

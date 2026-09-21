@@ -26,7 +26,7 @@
 // decision-style AUTO-SUPERSEDE shape as decision/anti_pattern/
 // research_finding — knowledge_update (and knowledge_edit, which delegates
 // to it) mints a NEW active version and marks the original superseded,
-// rather than refusing. This is exactly what decision a7dbac2f states ("a
+// rather than refusing. This is exactly what decision foreign_a7dbac2f states ("a
 // re-inspection or changed verdict is a NEW attestation superseding the
 // old"; alternatives_rejected explicitly rejects mutable in-place editing)
 // and what the code comment above SUPERSEDE_ALLOWED_TYPES confirms:
@@ -97,7 +97,7 @@ test('attestation (a): knowledge_schema names artifact_key/verdict/inspector/ins
   try {
     const schema = schemaOf(tools, 'attestation');
     for (const f of ['artifact_key', 'verdict', 'inspector', 'inspected_at']) {
-      assert.ok(schema.required.includes(f), `EXPECTED GREEN: knowledge_schema('attestation').required names '${f}' per decision a7dbac2f`);
+      assert.ok(schema.required.includes(f), `EXPECTED GREEN: knowledge_schema('attestation').required names '${f}' per decision a7dbac2f`); // not-a-citation: fixture id
     }
     const verdictField = schema.fields.find((f) => f.name === 'verdict');
     assert.ok(verdictField, 'verdict is a reported field');
@@ -156,7 +156,7 @@ test('attestation (b): knowledge_update on an attestation auto-supersedes it —
 
     // DEBUGGER-VERIFIED: attestation is excluded from SUPERSEDE_ALLOWED_TYPES
     // precisely because knowledge_update's ordinary fix-forward path already
-    // IS its supersession mechanism (decision a7dbac2f). knowledge_update
+    // IS its supersession mechanism (decision foreign_a7dbac2f). knowledge_update
     // therefore behaves exactly as it does for decision/anti_pattern/
     // research_finding: it mints a NEW active row and marks the original
     // superseded, rather than mutating in place or refusing.
@@ -190,7 +190,7 @@ test('attestation (c): knowledge_edit on a string field (notes) likewise auto-su
     const res = tools.knowledgeEdit(originalId, 'notes', 'MARKER_TO_EDIT', 'EDITED_MARKER') as unknown as {
       record: Loose;
     };
-    assert.equal(res.record.status, 'active', 'EXPECTED GREEN: knowledge_edit delegates to knowledge_update (decision 9948475b item 4), so it auto-supersedes identically');
+    assert.equal(res.record.status, 'active', 'EXPECTED GREEN: knowledge_edit delegates to knowledge_update (decision 9948475b item 4), so it auto-supersedes identically'); // not-a-citation: fixture id
     assert.notEqual(res.record.id, originalId, 'EXPECTED GREEN: a new id, not an in-place mutation');
     assert.equal(res.record.notes, 'EDITED_MARKER lives right here.', 'the replacement landed on the new version');
 

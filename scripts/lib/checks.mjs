@@ -83,7 +83,7 @@ export function checkSpawnContract(content, label) {
 }
 
 // ---------------------------------------------------------------------------
-// Tool-grant linter (board bc272f83; decision e7a805b6, research_finding 4211a9f7).
+// Tool-grant linter (board bc272f83; decision foreign_e7a805b6, research_finding foreign_4211a9f7).
 // The failure mode this guards is SILENT: Claude Code ignores an agent `tools:`
 // entry naming a tool that is not mounted, so the agent simply lacks it and says
 // nothing. That class has bitten twice — the `mcp__plugin_sterling_sterling__`
@@ -252,8 +252,8 @@ export const UNCITED_RECORD_WORDS = ['board', 'boards', 'todo', 'todos', 'mainte
 
 // An id citation is an 8+ hex-char token within a short window after a record-type
 // word — a WINDOW rather than strict adjacency because real citations put a slug
-// between the two ('article stale-server-guard 8f48f67c') and list several ids
-// after one word ('decisions a127e6e1, 5a992de5').
+// between the two ('article stale-server-guard foreign_8f48f67c') and list several ids
+// after one word ('decisions foreign_a127e6e1, foreign_5a992de5').
 //
 // THE NEAREST PRECEDING WORD OWNS THE ID, and both lists are searched to find it.
 // Without this rule the window leaks across words and the exclusions stop working:
@@ -263,6 +263,12 @@ export const UNCITED_RECORD_WORDS = ['board', 'boards', 'todo', 'todos', 'mainte
 // its keep or becomes noise.
 const CITATION_WINDOW = 64;
 const ID_TOKEN = /\b([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)\b/g;
+
+// `foreign_<id8>` (decision [a-dead-foreign-citation-becomes-a-foreign-id8-provenance-token])
+// is PROVENANCE, not a citation: it marks a ruling of a store this clone does
+// not hold and was never meant to resolve here. ID_TOKEN never matches inside
+// it because `_` is a word character, so no `\b` opens before the hex — this
+// is the declared, tested reason the checker skips it, not an accidental dodge.
 
 /** Line-scoped opt-out for text that must SHOW an id shape without citing a
  *  record — test fixtures for this very check, and docs illustrating the format.
@@ -337,7 +343,7 @@ export function lintRecordCitations(content, label, resolve) {
 
 // -- citation CURRENCY (board 9d0fb893) --------------------------------------
 // check-record-citations verifies EXISTENCE, not CURRENCY: a citation two
-// supersessions stale passes clean (CLAUDE.md cited decision 0956a464 — the
+// supersessions stale passes clean (CLAUDE.md cited decision foreign_0956a464 — the
 // verify-at-build register — while the live record was 19678617, which
 // supersedes 0956a464 AND fe543519; the existence check passed every run
 // because superseded records are retained by design, rule 3 above).

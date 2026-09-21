@@ -1,5 +1,5 @@
 // H22 TERRITORY-EVIDENCE — observed tool paths as CORROBORATION.
-// Governing decision: knowledge_get 9500cce1-f54b-450b-ae63-dd78ee53dbab
+// Governing decision: knowledge_get foreign_9500cce1
 // (slug review-territory-observed-evidence) — confirmed LIVE as of the
 // amendment below (it did not exist at this file's first draft).
 //
@@ -21,7 +21,7 @@
 //   distinguished from "some other coded advisory fired" by a token alone.
 //
 // SPEC CORRECTION (post-first-draft amendment, verified against
-// research_finding 20b44518-39d0-4dd4-81b7-59a403ad09e1, a byte-exact live
+// research_finding foreign_20b44518, a byte-exact live
 // stdin probe): at SubagentStop, stdin.transcript_path is the PARENT
 // (conductor) transcript, NOT the departing subagent's own transcript as
 // this file's first draft assumed. The departing subagent's OWN transcript
@@ -60,7 +60,7 @@
 //
 // PART 2 — H22 SubagentStart: agent_type starting with 'reviewer-' and no
 // attributed block carrying a VALID REVIEW-TERRITORY line (per the
-// already-shipped decision 8f137474 semantics: parsed, path-shape-valid,
+// already-shipped decision foreign_8f137474 semantics: parsed, path-shape-valid,
 // including the explicit-empty-array case) gets a loud stderr warning naming
 // REVIEW-TERRITORY plus an absence indicator. Exit stays 0. A valid
 // declaration, or a non-reviewer agent_type, produces no such warning.
@@ -99,12 +99,12 @@
 //       not a reason to weaken the assertions below.
 //   (c) "no attributed dispatch block carries a valid REVIEW-TERRITORY line"
 //       is read to include BOTH the no-marker-at-all case AND the
-//       marker-present-but-malformed case (decision 8f137474's own
+//       marker-present-but-malformed case (decision foreign_8f137474's own
 //       free-prose-fallback outcome) — both are "no valid declaration".
 //   (d) The stderr warning's exact wording is free (per the brief); the
 //       assertion helper below requires the literal substring
 //       'REVIEW-TERRITORY' PLUS a nearby absence word ("no"/"missing"/
-//       "without"), designed to avoid false-matching decision 8f137474's
+//       "without"), designed to avoid false-matching decision foreign_8f137474's
 //       PRE-EXISTING malformed-declaration warning (which names the bad
 //       content, not an absence). CORRECTED (review finding, hollow pin):
 //       the absence-word alternation is now WORD-BOUNDARY ANCHORED
@@ -222,7 +222,7 @@ function readLedger(dir) {
 }
 
 // Dual-shape lookup: the shipped ledger shape may be the v1 flat six-key
-// entry or the v2 nested envelope (decision 57984926) depending on what has
+// entry or the v2 nested envelope (decision foreign_57984926) depending on what has
 // landed ahead of this slice — mirrors the same dual-shape convention used by
 // scripts/tests/h22-review-territory.test.mjs (T5/T5b) and
 // scripts/tests/h22-ledger-v2-entry.test.mjs (findEntryByFile) for exactly
@@ -723,7 +723,7 @@ test('(P2-no-marker) a reviewer-* dispatch with NO REVIEW-TERRITORY marker at al
 //
 // PRESERVATION PIN ADDED (reviewer-found gap, coordinator amendment): the
 // two assertions above prove only the NEW absence warning fires — that pair
-// would stay GREEN even if decision 8f137474's PRE-EXISTING malformed-
+// would stay GREEN even if decision foreign_8f137474's PRE-EXISTING malformed-
 // declaration warning ("malformed REVIEW-TERRITORY declaration ignored...")
 // were deleted entirely, since assertNoDeclarationWarning never checks for
 // it. The new assertion below closes that gap by requiring BOTH warnings to
@@ -731,11 +731,11 @@ test('(P2-no-marker) a reviewer-* dispatch with NO REVIEW-TERRITORY marker at al
 // EXPECTED (regression net, stated per the coordinator's brief — NOT
 // executed by me; I hold no Bash, so this is a claim about what the gate
 // should observe, not a measured result): GREEN against the current
-// implementation — decision 8f137474 already ships the malformed-content
+// implementation — decision foreign_8f137474 already ships the malformed-content
 // warning today, so `/malformed REVIEW-TERRITORY declaration/` should
 // already match; only the co-occurrence with the absence warning is new.
 // SABOTAGE: delete/rename the pre-existing malformed-declaration stderr line
-// (decision 8f137474) while leaving the new absence-warning logic intact —
+// (decision foreign_8f137474) while leaving the new absence-warning logic intact —
 // the two assertions above stay green (they never look for the malformed
 // line), but this new assertion goes red, which is the whole reason it
 // exists as a SEPARATE, additional check rather than folded into
@@ -750,7 +750,7 @@ test('(P2-malformed-marker) a reviewer-* dispatch whose marker is malformed (fal
     assert.match(
       r.stderr,
       /malformed REVIEW-TERRITORY declaration/,
-      'the PRE-EXISTING malformed-declaration warning (decision 8f137474) still fires alongside the NEW absence warning — a malformed marker must never surface only one of the two'
+      'the PRE-EXISTING malformed-declaration warning (decision 8f137474) still fires alongside the NEW absence warning — a malformed marker must never surface only one of the two' // not-a-citation: fixture id
     );
   } finally {
     cleanup();
@@ -762,7 +762,7 @@ test('(P2-malformed-marker) a reviewer-* dispatch whose marker is malformed (fal
 // keep holding once the fix lands.
 // SABOTAGE: treat an explicit empty array the same as "no marker at all"
 // (conflating absence with the deliberate empty declaration, exactly the
-// conflation decision 8f137474 item 3 already warns against for the files[]
+// conflation decision foreign_8f137474 item 3 already warns against for the files[]
 // field) and warn anyway — flips this red while P2-CONTROL (a non-empty
 // declaration) stays green, proving the empty-array case is independently
 // exercised.

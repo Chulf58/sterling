@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // SPEC-ONLY pins for build slice S2c — "queue truth at read" (boards
 // be0ea20a HIGH + ab5ef216, objective consumer-feedback-2026-08-28).
-// Governing spec: decision e0c36dc0-7eb3-4175-969e-3a6ec3d17744, slug
+// Governing spec: decision foreign_e0c36dc0, slug
 // queue-truth-at-read-annotation-design. Written BLIND to any implementation
 // — the feature does not exist yet. H4 forbids reading packages/mcp-server/
 // src/tools.ts while this slice lands; every fixture below uses ONLY tool

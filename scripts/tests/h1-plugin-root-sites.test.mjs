@@ -6,7 +6,7 @@
 // (~:1159) must all derive the active plugin root by WALKING UP from H1's own
 // module location — never from the agent-settable STERLING_PLUGIN_ROOT env
 // var, which is a TEST-ONLY seam consulted solely when that walk-up finds no
-// plugin tree (decision 95c2c109 F2's shape, extended by this board item to
+// plugin tree (decision foreign_95c2c109 F2's shape, extended by this board item to
 // these remaining sites). roleContext (~:557) is NOT separately pinned here —
 // board fb7c43fb groups it with the other three but gives no distinct
 // observable surface for it; C1-C3 already exercise the shared root-derivation
@@ -28,11 +28,11 @@
 // The stale-server guard's file shapes (packages/mcp-server/dist/.build-id;
 // <project>/.sterling/transient/mcp-runtime.json holding {build_id, pid,
 // booted_at}; a mismatch on a confirmed-alive writer WARNS, an orphaned
-// (confirmed-dead) writer is SILENT) are taken from feature_article 9c83b485
-// ("stale-server-guard") and decisions 132177d2 / c71d676f — spec records, not
+// (confirmed-dead) writer is SILENT) are taken from feature_article foreign_9c83b485
+// ("stale-server-guard") and decisions foreign_132177d2 / foreign_c71d676f — spec records, not
 // code, and the only way to construct C3 without inventing a schema.
 //
-// MUTATION DISCIPLINE (decision 23afbc83): every pin carries a SABOTAGE
+// MUTATION DISCIPLINE (decision foreign_23afbc83): every pin carries a SABOTAGE
 // comment naming the one-line change that must turn it RED. None is executed
 // here — this file's author holds no Bash by design, and no mutation result is
 // claimed.
@@ -521,12 +521,12 @@ test('C2 (board fb7c43fb N-3, expect RED today): pluginVersion() reads the WALK-
 // =============================================================================
 // SECTION 3 (C3) — THE STALE-SERVER GUARD'S server-dist RESOLUTION.
 //
-// Per feature_article 9c83b485: H1 compares packages/mcp-server/dist/.build-id
+// Per feature_article foreign_9c83b485: H1 compares packages/mcp-server/dist/.build-id
 // (resolved via the plugin-root walk-up) against the project's runtime marker
 // (<project>/.sterling/transient/mcp-runtime.json: {build_id, pid,
 // booted_at}). A mismatch WARNS iff the marker's writer is not confirmed gone
-// (decision 132177d2); on Linux a live pid whose /proc/<pid>/cmdline lacks
-// 'mcp-server' is confirmed NOT the writer (decision c71d676f) and the marker
+// (decision foreign_132177d2); on Linux a live pid whose /proc/<pid>/cmdline lacks
+// 'mcp-server' is confirmed NOT the writer (decision foreign_c71d676f) and the marker
 // is silently orphaned instead. So the marker's pid must be a LIVE process
 // whose own invocation contains 'mcp-server', or a genuine mismatch would be
 // silenced by the writer-identity gate rather than by the root question this
@@ -633,7 +633,7 @@ test('C3 (board fb7c43fb N-3, expect RED today): the stale-server guard reads .b
     assert.match(
       r.combined,
       /restart|stale|out of date/i,
-      `feature_article 9c83b485 AC3: a marker whose build_id differs from the current build-id, with a writer not confirmed gone, must WARN. The marker's build_id (the planted literal) can only equal the REAL clone's actual .build-id by astronomical coincidence, so a correctly walked-up comparison MUST mismatch and MUST warn — compare C3-control, which proves the mismatch+liveness machinery fires in this exact fixture shape. combined=${flat(r.combined)}`
+      `feature_article 9c83b485 AC3: a marker whose build_id differs from the current build-id, with a writer not confirmed gone, must WARN. The marker's build_id (the planted literal) can only equal the REAL clone's actual .build-id by astronomical coincidence, so a correctly walked-up comparison MUST mismatch and MUST warn — compare C3-control, which proves the mismatch+liveness machinery fires in this exact fixture shape. combined=${flat(r.combined)}` // not-a-citation: fixture id
     );
   } finally {
     decoy.kill();

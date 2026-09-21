@@ -1105,7 +1105,7 @@ test('target scope refusal: an append-join whose target article has scope other 
 // ['node'] explicitly, so nothing inherits a default from anywhere.
 // Conductor hand-edit: H5 freezes test paths against pipeline agents, and a
 // behaviour-neutral harness re-point matches neither evidence contract of
-// scripts/test-repair.mjs (anti_pattern 985e1266, whose right_way is exactly
+// scripts/test-repair.mjs (anti_pattern foreign_985e1266, whose right_way is exactly
 // this route) — counts verified independently after the change.
 function harnessMounted(domains: string[] = ['node']) {
   return harnessMountedShared(domains, { now: NOW, prefix: 'sterling-append-join-mounted-' });

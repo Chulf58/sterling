@@ -15,7 +15,7 @@ const storePathArg = args[storeIdx + 1];
 
 // P5: an unexpanded config placeholder must refuse boot loudly, never open a
 // store. Project-scope and --mcp-config configs do NOT env-expand
-// ${CLAUDE_PROJECT_DIR} at parse time (research_finding e518f9e5), so a bare
+// ${CLAUDE_PROJECT_DIR} at parse time (research_finding foreign_e518f9e5), so a bare
 // placeholder reaches this process literally — proceeding would mkdir a phantom
 // '${...}/.sterling/' store at cwd and silently serve an empty knowledge base
 // (the 2026-06-24 native-launcher incident).

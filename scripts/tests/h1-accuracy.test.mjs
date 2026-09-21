@@ -4,7 +4,7 @@
 // Two independently-reported defects from the 2026-08-14→20 feedback batch:
 //
 //   AC1 (uncapped counts): H1's queue-depth summary (the deep-queue signal,
-//   decision 44e45931/e23f38f8 — additionalContext names the drainable maintenance
+//   decision foreign_44e45931/foreign_e23f38f8 — additionalContext names the drainable maintenance
 //   count once config.maintenance_queue.deep_threshold is met) was built from a
 //   CAPPED read: with 250 system maintenance items seeded (well above any plausible
 //   default query cap), the true total (250) must appear verbatim in H1's

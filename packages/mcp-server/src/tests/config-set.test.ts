@@ -310,7 +310,7 @@ test('CS-1 CONTROL: config_set tdd.enabled=false lands — receipt digest is sha
     assert.ok(
       !Object.prototype.hasOwnProperty.call(after, 'maintenance_queue'),
       'a MODELED-but-absent key stays absent: validating the document must not materialize schema DEFAULTS into the file ' +
-        '(that is how a formerly-inert field silently reverts recorded policy — anti_pattern 94f16632)'
+        '(that is how a formerly-inert field silently reverts recorded policy — anti_pattern 94f16632)' // not-a-citation: fixture id
     );
     assert.ok(
       afterText.includes('"zz_unmodeled_leaf": "keep-me"'),
@@ -557,7 +557,7 @@ test('CS-10: config_set is served on the MCP tool surface, and its params are ST
 
     // The decision's "foreign-project target impossible" guarantee is
     // structural: there is NO path/root argument to point elsewhere, and the
-    // strict-params rule (decision b47889b7) means offering one is refused
+    // strict-params rule (decision foreign_b47889b7) means offering one is refused
     // BY NAME rather than silently ignored.
     const bogus = await client.callTool({
       name: 'config_set',
@@ -907,7 +907,7 @@ test('CS-18: a symlinked .sterling DIRECTORY is refused — nothing is written i
 // not its ancestor — the shipped-in-CS-9 guard, unextended → the write lands
 // inside the foreign directory, RED on the missing exception and on the
 // target-bytes assertion. CS-9 and CS-17 both stay GREEN under it.
-// SPEC NOTE: decision 1dc3f9aa names the FILE ("the destination must be a
+// SPEC NOTE: decision foreign_1dc3f9aa names the FILE ("the destination must be a
 // regular non-symlink file"); the DIRECTORY case is this review round's
 // extension of the same "never a foreign project" guarantee, and it needs a
 // realpath containment check on the .sterling ancestor rather than one more

@@ -145,7 +145,7 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // tell — "Fix src/a.mjs while preserving the public API; do not change it."
 // suppresses src/a.mjs although "it" may mean the API. Resolving that needs
 // pronoun-referent semantics, which nothing here implements and this comment
-// does not claim (anti-pattern 586bccdc: a guard's comment must never assert a
+// does not claim (anti-pattern foreign_586bccdc: a guard's comment must never assert a
 // protection the code does not carry). The bound is narrow — it requires a
 // prohibition marker AND a territory verb (touch/edit/modify/change/write/
 // alter) AND a trailing pronoun AND no path of the prohibition's own — and
@@ -167,7 +167,7 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // second divergent heuristic on the read and write sides WAS the original
 // c56862a9 defect. h22's `files` is untouched (it is computed with the BARE
 // extractor and means territory EXAMINED — receipts, residue probes, H10
-// deferral — see research_finding 289cd172).
+// deferral — see research_finding foreign_289cd172).
 const TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
 const ANAPHOR_RE = String.raw`(?:those|these|them|it|that)`;
 // Which of those pronouns can stand for MORE THAN ONE referent — gate (ii).
@@ -394,7 +394,7 @@ export function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// GLOB LITERAL-PREFIX EXTRACTION (board a63b226d, research_finding 289cd172
+// GLOB LITERAL-PREFIX EXTRACTION (board a63b226d, research_finding foreign_289cd172
 // "a SEPARATE blind spot, in both directions"). PATH_CANDIDATE_RE
 // (dispatch-prompt.mjs:27) hard-requires a literal '.' immediately after a
 // directory prefix (the extension group) — a glob token like
@@ -412,7 +412,7 @@ export function escapeRe(s) {
 // "packages/mcp-server/**"). It does NOT attempt general glob matching (no
 // brace/char-class/single-star-without-directory support, e.g.
 // "scripts/hooks/*.mjs" or "**/*.mjs" stay unhandled) and imports no
-// globbing dependency (hooks stay dependency-light, decision f5638a84's
+// globbing dependency (hooks stay dependency-light, decision foreign_f5638a84's
 // constraint). A caller wanting the raw literal glob token back (e.g. to
 // build a suppression-check pattern against the original prompt text, the
 // same way h22/h26 already do for extractPathCandidates output) can always

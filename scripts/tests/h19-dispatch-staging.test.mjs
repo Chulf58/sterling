@@ -1,13 +1,13 @@
 // H19 — dispatch staging (AC5, board 7b01f139-7341-4d3c-9991-6c1c27ceafc7).
 // SubagentStart hook: resolves THIS spawn's own dispatch prompt (there is no
-// prompt field on stdin — research_finding 35a89a0f) and stages the same
+// prompt field on stdin — research_finding foreign_35a89a0f) and stages the same
 // governed-territory payload h19-knowledge-delivery.mjs computes for a file
 // touch. AC7 precedent holds here too: never a gate, exit 0/1 only.
 //
-// SUPERSEDED SOURCE OF THE PROMPT (decision 7c515e52, board 5445066b): the
+// SUPERSEDED SOURCE OF THE PROMPT (decision foreign_7c515e52, board 5445066b): the
 // prompt used to be recovered from the PARENT TRANSCRIPT's last dispatching
 // message. That read lagged 3.4-5.5 s behind the spawn and delivered the wrong
-// territory to 4 of 6 measured spawns (finding 51506eec), so it is DELETED and
+// territory to 4 of 6 measured spawns (finding foreign_51506eec), so it is DELETED and
 // replaced by the per-dispatch state record (PreToolUse slot -> PostToolUse
 // binding -> locked Start resolution). See the fixture note below.
 import { test } from 'node:test';
@@ -103,7 +103,7 @@ function makeProject(configOverride = {}) {
 // `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
 // knowledge_get 7c515e52 — opened, not paraphrased). H19 no longer recovers
 // the dispatch prompt from the PARENT TRANSCRIPT: the transcript tail is the
-// MEASURED defect (finding 51506eec — 3.4-5.5 s of lag, 4 of 6 spawns saw an
+// MEASURED defect (finding foreign_51506eec — 3.4-5.5 s of lag, 4 of 6 spawns saw an
 // older unrelated block), so lastDispatchPrompts is DELETED and a Start
 // resolves its own dispatch from the per-dispatch STATE RECORD written at
 // PreToolUse (and bound by PostToolUse's tool_response.agentId).
@@ -160,7 +160,7 @@ const guardOf = (dir, agentId) => {
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
 };
 
-// POST-FOLD (decision 04982f45): H28's contract injection was unconditional
+// POST-FOLD (decision foreign_04982f45): H28's contract injection was unconditional
 // for every non-exempt agent_type, with zero dependency on transcript
 // content, project state, or the staging guard — "byte-preserved, only
 // relocated". So a dispatch with nothing to STAGE is no longer silent: it is
@@ -186,7 +186,7 @@ test('no dispatch state at all (no-slot): contract-only, exit 0 (nothing to stag
     assert.doesNotMatch(ctx, /alpha does the alpha thing/, 'no article content leaks in when there is nothing to stage');
     assert.equal(guardOf(dir, 'agent-1'), null, 'no staging guard written — nothing was staged, only the contract fired');
 
-    // SHAPE PIN (decision d6acfc54): the emit stays exactly
+    // SHAPE PIN (decision foreign_d6acfc54): the emit stays exactly
     // {hookSpecificOutput:{hookEventName, additionalContext}} — nothing else
     // at top level, nothing else inside hookSpecificOutput. The fold must not
     // widen this (e.g. a separate contract field, or permissionDecision —
@@ -262,7 +262,7 @@ test('prompt names a governed file: payload contains the article, the guard is w
     // Re-running the same dispatch: the STAGING guard suppresses re-delivery of
     // the knowledge payload (nothing fresh to stage) — but the contract
     // injection carries NO such guard (h28's own behavior was unconditional,
-    // byte-preserved per decision 04982f45), so the second call is
+    // byte-preserved per decision foreign_04982f45), so the second call is
     // contract-only, not silent.
     const again = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
     assert.equal(again.code, 0, again.stderr);
@@ -312,7 +312,7 @@ test('parallel two-dispatch message: each Start stages EXACTLY its own dispatch\
 // distinguishable.
 
 // ===========================================================================
-// RETIRED HERE — three TRANSCRIPT-shape pins, by decision 7c515e52.
+// RETIRED HERE — three TRANSCRIPT-shape pins, by decision foreign_7c515e52.
 //
 // RETIRED: 'malformed transcript (corrupt JSONL): contract-only ...'
 // RETIRED: 'missing transcript_path / nonexistent file: contract-only ...'
@@ -328,7 +328,7 @@ test('parallel two-dispatch message: each Start stages EXACTLY its own dispatch\
 // contract pin in this file already passes a nonexistent transcript path, so
 // the never-a-throw property stays exercised throughout.
 // The third pinned message RECENCY as the disambiguator; recency is exactly
-// what the 3.4-5.5 s transcript lag made wrong (finding 51506eec), and it is
+// what the 3.4-5.5 s transcript lag made wrong (finding foreign_51506eec), and it is
 // replaced by the tool_use_id-keyed state record. Its replacement is the
 // isolation pin above plus DSH-1.
 // ===========================================================================
@@ -353,7 +353,7 @@ test('not a Sterling project (no store): contract-only — the absorbed injectio
 // — the STERLING DEFAULT RETURN CONTRACT match above goes red.
 
 // ===========================================================================
-// H28 ABSORPTION (decision 04982f45 / s7-small-hook-absorption-measured-two-
+// H28 ABSORPTION (decision foreign_04982f45 / s7-small-hook-absorption-measured-two-
 // fold-two-keep): the STERLING DEFAULT RETURN CONTRACT injection formerly
 // lived in its own SubagentStart hook (h28-return-contract.mjs, deleted —
 // 68 lines, ~15 of substance) and now fires from THIS hook on the SAME
@@ -609,8 +609,8 @@ test('H28 exemption suppresses ONLY the contract, not staging: exempt agent_type
 // objective dome-farmer-issues-2026-09-05). SPEC-ONLY, blind to the coder's
 // parallel implementation.
 //
-// Governing knowledge: decision 752caf98 (tdd-and-mutation-toggles-in-
-// system-tab); decision 466ac94f (H25 is warn-only — the same
+// Governing knowledge: decision foreign_752caf98 (tdd-and-mutation-toggles-in-
+// system-tab); decision foreign_466ac94f (H25 is warn-only — the same
 // never-a-gate posture the toggle checks extend, though this hook is H19,
 // not H25). Board 7e7279c4's fix shape item (3): H19's combinedContext()
 // pushes the SAME one-line posture (see scripts/tests/h1-tdd-posture-line.

@@ -1,7 +1,7 @@
 // H15 SEAM HARNESS — spawn a hook from a location whose walk-up finds NO
 // plugin tree, so the STERLING_PLUGIN_ROOT test seam is actually consulted.
 //
-// WHY THIS EXISTS (decision 95c2c109 F2, user-ruled 2026-09-05): the active
+// WHY THIS EXISTS (decision foreign_95c2c109 F2, user-ruled 2026-09-05): the active
 // plugin root PREFERS the running hook's own import.meta.url walk-up, and the
 // seam is consulted ONLY when that walk-up finds no plugin layout above the
 // hook. A pin that spawns the SOURCE hook (scripts/hooks/h15-store-guard.mjs)
@@ -13,7 +13,7 @@
 // relative to the source under test (it is built here, not copied from
 // hooks/). Building into a temp target is also the ONLY sanctioned way for a
 // test to obtain a bundle — an in-place build deploys to the live enforcement
-// surface (anti_pattern 37b3cb0a, severity BLOCK).
+// surface (anti_pattern foreign_37b3cb0a, severity BLOCK).
 //
 // The three layout markers are hand-rolled here rather than imported from the
 // module under test, so the harness precondition does not depend on the code

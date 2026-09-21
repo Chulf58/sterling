@@ -1,8 +1,8 @@
 // ---------------------------------------------------------------------------
 // S2b SUPPLEMENTARY FROZEN PINS — stable-identity wave, review-adjudicated
 // contracts the main 22-pin suite (stable-identity-write-path.test.ts) left
-// uncovered (decision stable-identity-design-v2 / 2176748e-72f6-4cfc-a790-
-// 7fd67c7ee6aa, concept article record-identity / 6a4059f7). Authored FROM
+// uncovered (decision stable-identity-design-v2 / foreign_2176748e-72f6-4cfc-a790-
+// 7fd67c7ee6aa, concept article record-identity / foreign_6a4059f7). Authored FROM
 // THAT CONTRACT LIST ALONE — no implementation was read, and none of these
 // nine points is assumed already fixed; "fixes land in parallel" per the
 // dispatch brief.

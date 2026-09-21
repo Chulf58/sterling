@@ -13,8 +13,8 @@ import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS } from './t
 const passthrough = z.object({}).passthrough();
 
 /**
- * knowledge_create's typed `fields` body (decision 7c7f6db1, probe
- * research_finding 15c8e6b5) — REPLACES the passthrough with a per-type
+ * knowledge_create's typed `fields` body (decision foreign_7c7f6db1, probe
+ * research_finding foreign_15c8e6b5) — REPLACES the passthrough with a per-type
  * z.discriminatedUnion('type', ...) derived MECHANICALLY from RECORD_TYPES, so
  * a malformed first write is refused at PARSE TIME with a variant-scoped zod
  * error instead of round-tripping through knowledgeCreate's own schema.parse.
@@ -33,7 +33,7 @@ const passthrough = z.object({}).passthrough();
  * property (`fields`) sidesteps this entirely: the outer object DOES have
  * `.shape`, normalizeObjectSchema succeeds on it, and zod-to-json-schema then
  * recurses into `fields` and renders the union as the bare `anyOf` research_
- * finding 15c8e6b5 actually measured. This was re-verified against the
+ * finding foreign_15c8e6b5 actually measured. This was re-verified against the
  * installed SDK build for this exact shape before settling on it.
  *
  * WHY THE DISCRIMINATOR LITERAL THEREFORE LIVES INSIDE `fields` (fields.type),
@@ -85,7 +85,7 @@ const passthrough = z.object({}).passthrough();
  * path is even entered, and names the type's actual allowed set in the zod
  * error rather than a generic "unknown field" message.
  *
- * Served as a bare `anyOf` (research_finding 15c8e6b5 measured this against
+ * Served as a bare `anyOf` (research_finding foreign_15c8e6b5 measured this against
  * the SDK's actual zod-to-json-schema conversion, re-confirmed above): each
  * variant carries its own accurate `properties` / `required[]` /
  * `type:{const:...}` literal even though the discriminator keyword itself is
@@ -153,7 +153,7 @@ const knowledgeCreateFieldsSchema = z.discriminatedUnion(
  * only the parameter names that are a closed set.
  *
  * A z.discriminatedUnion is verified the SAME way, separately (decision
- * 7c7f6db1, probe research_finding 15c8e6b5, re-confirmed empirically against
+ * 7c7f6db1, probe research_finding foreign_15c8e6b5, re-confirmed empirically against
  * this same installed SDK build): `normalizeObjectSchema` only ever runs on
  * the TOP-LEVEL tool.inputSchema, and it requires `.shape` — a union has none,
  * so a union AS the top-level inputSchema serves EMPTY (`{properties:{}}`),

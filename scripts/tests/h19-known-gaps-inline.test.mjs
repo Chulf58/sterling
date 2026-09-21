@@ -2,7 +2,7 @@
 //
 // Spec source (verified by knowledge_get, not paraphrase): decision
 // delivery-lifecycle-and-drain-reresolve-design (db3392db) Part 3, ship-ruled by
-// decision known-gaps-inline-ships-with-probe-seam-boarded (53fd6f62), board
+// decision known-gaps-inline-ships-with-probe-seam-boarded (foreign_53fd6f62), board
 // 3dbbdb35. The Part 3 paragraph, verbatim substance pinned here:
 //
 //   "when H19 file-touch delivery resolves a touched path to owning articles
@@ -376,7 +376,7 @@ test('dedup: a second touch of the same article does not re-inline its gaps; a d
 
 // ---------------------------------------------------------------------------
 // (7) The probe-output/Bash pointer path stays gap-free — the accepted,
-// boarded exclusion (decision 53fd6f62; follow-up board f1489964). The exclusion
+// boarded exclusion (decision foreign_53fd6f62; follow-up board f1489964). The exclusion
 // pin that stood here was INVERTED DELIBERATELY on 2026-09-01 when board
 // f1489964 shipped the seam closure — exactly the deliberate change the old
 // pin existed to force (its own header named f1489964 as the sanctioned
@@ -472,7 +472,7 @@ test('zero-budget disclosure: the owning article whose gaps are entirely consume
 // (delivery-first) with 3 'other'-kind gaps, beta with 1 mutation_survivor
 // gap. Beta's survivor must be among the 3 shown, AND the total shown across
 // both owners stays exactly 3 (pooled, not multiplied per owner — the exact
-// failure mode decision db3392db Part 3 names and rejects: "per-article
+// failure mode decision foreign_db3392db Part 3 names and rejects: "per-article
 // budgets multiply unboundedly when several articles own one path").
 // EXPECTED GREEN against the fixed implementation.
 // SABOTAGE: cap each owner's gaps at 3 independently instead of pooling

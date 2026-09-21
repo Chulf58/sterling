@@ -1,4 +1,4 @@
-// rulings-projection tests (decision 255f58b7, closes board 8f81704a):
+// rulings-projection tests (decision foreign_255f58b7, closes board 8f81704a):
 // rulings.md is a generated read-only projection over the ruling corpus —
 // ACTIVE decisions + anti_patterns, grouped by component — never
 // hand-maintained. Mirrors scripts/tests/projection.test.mjs (architecture.md).

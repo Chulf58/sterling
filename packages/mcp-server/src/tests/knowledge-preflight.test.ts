@@ -275,7 +275,7 @@ test('AC-g3: knowledge_query envelope — a normal, uncapped, non-empty result a
 
 // --- H23 regression pins: a ruling's transferable principle is unretrievable by its
 // own subject when the record's body is dominated by the incident that justified it
-// (knowledge_get 5f3e0a42, reproducing decision e9387b85 / research_finding 79942bda's
+// (knowledge_get 5f3e0a42, reproducing decision foreign_e9387b85 / research_finding foreign_79942bda's
 // SHAPE — never their real ids/content, which would rot and would bind this test to
 // production data). Every fixture below is synthetic, seeded fresh per test. This file
 // was authored spec-only, blind to any fix: no scoring/centrality internals were read.
@@ -300,7 +300,7 @@ const INCIDENT_BODY = INCIDENT_SENTENCE.repeat(20);
 
 // CORRECTED (this session, see AC1 below): the matcher's narrow text for a
 // `decision` record is `title + statement` only — `rationale` is excluded
-// entirely (field mapping confirmed via decision 00b23915, which cites
+// entirely (field mapping confirmed via decision foreign_00b23915, which cites
 // axis.ts:97; cited rather than read — H4 forbids reading axis.ts itself
 // from this role, field mapping only). The ORIGINAL shape of this fixture
 // put INCIDENT_BODY in `rationale`, a field the matcher never looks at, so
@@ -385,7 +385,7 @@ test(
 );
 
 // NOTE on scope (checked this session, not fixed): a research_finding's narrow text is `question`
-// ONLY — slug and answer are both excluded (confirmed via decision 00b23915, which cites axis.ts:99;
+// ONLY — slug and answer are both excluded (confirmed via decision foreign_00b23915, which cites axis.ts:99;
 // field mapping cited, axis.ts itself not read by this role per H4). The same decision states the
 // title-union arm's "title-ish" text for research_finding is ALSO just `question`. So narrowText ===
 // titleishText for this type, always — the union is a mathematical no-op and NO fixture, however the

@@ -1,6 +1,6 @@
 // stamp-contract [S] — propagate contract-wording bullets from
 // templates/target-claude-md.md to every registered sibling project's CLAUDE.md
-// (decision 7208729b wiring; second propagation after c76f63fa proved the need
+// (decision foreign_7208729b wiring; second propagation after foreign_c76f63fa proved the need
 // recurs). Deterministic (P3) and guarded:
 //   - a sibling bullet is replaced ONLY when its current text matches some
 //     HISTORICAL version of that bullet in the template's git history (a clean

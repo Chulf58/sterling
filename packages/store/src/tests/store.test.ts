@@ -154,7 +154,7 @@ test('query: filter by type and stack tags, file-key join, cap (§3.4 order)', (
   }
 });
 
-test('query: research_finding file-key join — the same join every other file_keys-bearing type gets (decision 8dbbc85d, board b1de6fab)', () => {
+test('query: research_finding file-key join — the same join every other file_keys-bearing type gets (decision foreign_8dbbc85d, board b1de6fab)', () => {
   const { dir, store } = tempStore();
   try {
     const withKey = store.create(researchFinding({ question: 'q-with-key', file_keys: ['scripts/hooks/x.mjs'] }));
@@ -743,10 +743,10 @@ test('AC6 match_all:true: PREFIX terms are AND-joined too (zap*/quib* → inters
 // ===========================================================================
 // AC8 — models catalog: bootstrap-if-absent, catalogStatus (present/stale),
 // and deduped refresh_reference enqueue. Store-level oracle for run r-ea9e
-// phase 3, brief tui-system-tab (08bfa318). SPEC-ONLY: catalogStatus /
+// phase 3, brief tui-system-tab (foreign_08bfa318). SPEC-ONLY: catalogStatus /
 // bootstrapCatalogIfAbsent / enqueueRefreshReferenceOnce do not exist yet.
 //
-// Governing design — decision 98064d77:
+// Governing design — decision foreign_98064d77:
 //   - the catalog is a PROJECT-scoped reference_material record carrying the
 //     optional typed `catalog` field {entries:[{id,label,tier,status}]}
 //     (phase-1 schema, commit e44e78a); one record.
@@ -760,7 +760,7 @@ test('AC6 match_all:true: PREFIX terms are AND-joined too (zap*/quib* → inters
 // STALENESS CONVENTION (grounded, not invented): the existing refresh_reference /
 // staleness lane compares `age > threshold` STRICTLY (packages/mcp-server/src/
 // tools.ts: `sourceAge > threshold`, `ageDays(updated_at) > platform_external_days`,
-// with age = floor((now - anchor)/DAY_MS)). Decision 98064d77 says the catalog
+// with age = floor((now - anchor)/DAY_MS)). Decision foreign_98064d77 says the catalog
 // "reuses the EXISTING refresh_reference maintenance lane", so this oracle pins
 // the SAME strict-greater semantics: at EXACTLY staleness_days elapsed the catalog
 // is FRESH; it becomes stale only PAST the threshold. A `>=` implementation is a
@@ -993,7 +993,7 @@ test('AC8 enqueue: creates exactly ONE refresh_reference system maintenance item
     assert.equal(items.length, 1, 'one refresh_reference item enqueued');
     const item = items[0];
     assert.equal(item.source, 'system', 'a maintenance item is source:system');
-    assert.equal(item.system_reason, 'refresh_reference', 'reuses the existing refresh_reference lane (decision 98064d77)');
+    assert.equal(item.system_reason, 'refresh_reference', 'reuses the existing refresh_reference lane (decision 98064d77)'); // not-a-citation: fixture id
     if (item.feature_link != null) {
       assert.equal(item.feature_link, catalogRecords(store)[0].id, 'when linked, the refresh item points at the catalog record');
     }
@@ -1067,7 +1067,7 @@ test('articlesBySlug resolves an exact slug deterministically — a slug that lo
     const target = store.create(article({ slug: 'hooks-suite', what_it_does: 'Twenty-two bundled hooks.' }));
     // Six DECOYS that each mention the target slug far more than the target does
     // itself — the exact shape that made the ranked cap-5 lookup report a live
-    // article as absent (decision 3db7095f).
+    // article as absent (decision foreign_3db7095f).
     for (let i = 0; i < 6; i += 1) {
       store.create(
         article({
@@ -1204,7 +1204,7 @@ test('enqueueSystemTodo: reconcile_needed — a DIFFERENT file on the SAME artic
 // DIRECT DESCENDANT of the historical silent-loss pin this fold replaced (the
 // old store.test.ts:1172/1349 and server.test.ts:687 asserted 2 items here,
 // each carrying its own guard text: "this is the silent-loss half of the
-// bug" / "silently re-introduces the exact silent-loss bug decision 194f43e4
+// bug" / "silently re-introduces the exact silent-loss bug decision foreign_194f43e4
 // fixed"). That earlier bug (board 2ded3b4b) kept the SAME shape this fold
 // now produces — one surviving item — but got there by keying dedup on
 // (reason, feature_link) WITHOUT the file at all: a genuinely NEW, DISJOINT
@@ -1217,7 +1217,7 @@ test('enqueueSystemTodo: reconcile_needed — a DIFFERENT file on the SAME artic
 // DISJOINT single-file payload — the second call names ONLY 'src/b.ts', never
 // 'src/a.ts' — so the union is the only way 'src/a.ts' can still be present
 // afterward.
-test('enqueueSystemTodo: reconcile_needed — a DISJOINT second file must not be silently lost (descendant of the pre-fold silent-loss pin, board 2ded3b4b/decision 194f43e4)', () => {
+test('enqueueSystemTodo: reconcile_needed — a DISJOINT second file must not be silently lost (descendant of the pre-fold silent-loss pin, board 2ded3b4b/decision foreign_194f43e4)', () => {
   const { store, cleanup } = storeHarness();
   try {
     const first = store.enqueueSystemTodo(sysTodo({ file_keys: ['src/a.ts'] }));
@@ -1669,7 +1669,7 @@ test('pruneReconcileNeeded: a non-reconcile_needed lane item is never touched by
 // 194f43e4) that mints a fresh duplicate every time the shape shifts. The fix
 // gives state_review ONLY a lane-specific key of {system_reason, feature_link}
 // at the enqueueSystemTodo choke point. Every OTHER lane's per-file dedup
-// (decision 194f43e4) was UNCHANGED at the time this block was written and is
+// (decision foreign_194f43e4) was UNCHANGED at the time this block was written and is
 // still pinned below as a control — EXCEPT reconcile_needed WITH a
 // feature_link, which board b0bb9d96 / I-29 later gave its own
 // {system_reason, feature_link} fold (unioning file_keys in, never keying on
@@ -1730,7 +1730,7 @@ test('enqueueSystemTodo: state_review CONTROL — a genuinely DIFFERENT article 
 
 // ---------------------------------------------------------------------------
 // reconcile_needed's fold-to-union (board b0bb9d96 / I-29) SUPERSEDES the
-// per-file-SET reading of decision 194f43e4 for this one lane, but not its
+// per-file-SET reading of decision foreign_194f43e4 for this one lane, but not its
 // underlying purpose: 194f43e4 existed to stop a second drifting file being
 // SILENTLY LOST when a first file's debt was reconciled. The fold does not
 // reopen that hole — every file stays named, just inside ONE item's unioned

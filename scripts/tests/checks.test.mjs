@@ -75,19 +75,19 @@ test('skill linter: flags stale file references, accepts live ones', () => {
 
 test('citation grammar: the NEAREST preceding record word owns the id', () => {
   assert.deepEqual(
-    collectRecordCitations('see decision 6dfbe675 for the fork').map((c) => [c.word, c.id]),
-    [['decision', '6dfbe675']]
+    collectRecordCitations('see decision 6dfbe675 for the fork').map((c) => [c.word, c.id]), // not-a-citation: fixture id
+    [['decision', '6dfbe675']] // not-a-citation: fixture id
   );
   // a slug may sit between the word and the id
-  assert.deepEqual(collectRecordCitations('article stale-server-guard 8f48f67c').map((c) => c.id), ['8f48f67c']);
+  assert.deepEqual(collectRecordCitations('article stale-server-guard 8f48f67c').map((c) => c.id), ['8f48f67c']); // not-a-citation: fixture id
   // several ids after one word all count
-  assert.deepEqual(collectRecordCitations('decisions a127e6e1, 5a992de5 apply').map((c) => c.id), [
+  assert.deepEqual(collectRecordCitations('decisions a127e6e1, 5a992de5 apply').map((c) => c.id), [ // not-a-citation: fixture ids
     'a127e6e1',
     '5a992de5',
   ]);
   // full uuids are cited too
   assert.deepEqual(
-    collectRecordCitations('research_finding 5c1a824d-d182-4a1f-92d5-e6837dd1de09').map((c) => c.id),
+    collectRecordCitations('research_finding 5c1a824d-d182-4a1f-92d5-e6837dd1de09').map((c) => c.id), // not-a-citation: fixture id
     ['5c1a824d-d182-4a1f-92d5-e6837dd1de09']
   );
   // REGRESSION (both live false positives on a clean tree): the window must not
@@ -99,12 +99,26 @@ test('citation grammar: the NEAREST preceding record word owns the id', () => {
   // REGRESSION (live false positive 2026-08-21, h22-dispatch-register.mjs:1):
   // the PLURAL 'boards' must shield its ids too, or the window leaks back to a
   // preceding 'decision' and blames a drained board id on it
-  assert.deepEqual(collectRecordCitations('(decision ec9eacaa, boards 54c451b4 / 570832d4)').map((c) => c.id), ['ec9eacaa']);
+  assert.deepEqual(collectRecordCitations('(decision ec9eacaa, boards 54c451b4 / 570832d4)').map((c) => c.id), ['ec9eacaa']); // not-a-citation: fixture id
   // an id on the next line belongs to no word
   assert.deepEqual(collectRecordCitations('decision\n6dfbe675'), []);
   // the two word lists must stay disjoint — a word cannot be both
   const overlap = CITED_RECORD_WORDS.filter((w) => UNCITED_RECORD_WORDS.includes(w));
   assert.deepEqual(overlap, [], 'a record word is either citation-checked or excluded, never both');
+});
+
+// REGRESSION [a-dead-foreign-citation-becomes-a-foreign-id8-provenance-token]:
+// a `foreign_<id8>` token is provenance, not a citation — `_` is a word char so
+// no `\b` opens before the hex and ID_TOKEN never matches inside it. A plain id
+// on the same kind of line, and a plain id sharing a line with a foreign one,
+// must still be collected.
+test('citation grammar: a foreign_<id8> token is not a citation; a plain id beside one still is', () => {
+  assert.deepEqual(collectRecordCitations('decision foreign_c1ffbcb6'), []);
+  assert.deepEqual(collectRecordCitations('decision c1ffbcb6').map((c) => c.id), ['c1ffbcb6']); // not-a-citation: fixture id
+  assert.deepEqual(
+    collectRecordCitations('decision foreign_aaaaaaaa and decision bbbbbbbb').map((c) => c.id), // not-a-citation: fixture id
+    ['bbbbbbbb'] // not-a-citation: fixture ids
+  );
 });
 
 test('citation lint: fails on nothing, passes on a TOMBSTONE, flags an ambiguous prefix', () => {
@@ -303,7 +317,7 @@ test('check-record-citations: a stale id on a POINTER SURFACE warns without fail
   }
 });
 
-// Consumer-machine shape (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89): the
+// Consumer-machine shape (decision foreign_e6240afe): the
 // clone HAS a store — init creates it — but no project-scoped records, because
 // .sterling/ is gitignored and knowledge never travels with the repo. Every
 // citation in the tree then "fails" for want of knowledge, which aborted

@@ -21,7 +21,7 @@ const base = (over = {}) => ({
   ...over,
 });
 
-test('register: creates a row keyed by repo_path; first_init_at == last_init_at on first init; list parses arrays (decision 8f9e6db2)', () => {
+test('register: creates a row keyed by repo_path; first_init_at == last_init_at on first init; list parses arrays (decision foreign_8f9e6db2)', () => {
   const { reg, cleanup } = harness();
   try {
     reg.register(base());

@@ -602,7 +602,7 @@ test('a config MODEL divergence is never silently repaired — like the machine-
 });
 
 // -----------------------------------------------------------------------------
-// Machine-var drift detection (todo 8789eccf, anti_pattern 60e8463d): a
+// Machine-var drift detection (todo 8789eccf, anti_pattern foreign_60e8463d): a
 // machine-context flip (WSL <-> native Windows) leaves an installed agent
 // self-consistent and template-current, so hash bookkeeping alone reads it
 // up_to_date while every baked hook command points at the other context's

@@ -10,7 +10,7 @@
 // writes, (b) pre-merge as hard backstop, (c) run completion — commit alone is
 // deliberately NOT a settlement boundary. At settlement: hash only FINAL
 // touched paths against the owning article's file_baselines (sha256 of the
-// owned file's bytes, decision 57d9a52d) — no mint for edit-then-revert; no
+// owned file's bytes, decision foreign_57d9a52d) — no mint for edit-then-revert; no
 // mint if an intervening knowledge write already rebaselined the article;
 // group remaining paths per article (one item per article, not per path).
 // ALSO: direct-merge re-evaluates the LIVE predicate (contentChanged against
@@ -128,7 +128,7 @@ function envelope(type, at = NOW) {
 /** feature_article owning `files` (array of {path, content}); file_baselines
  * keyed per path = sha256 of the given ORIGINAL content, mirroring how a
  * real article's baseline is server-computed from content at create/reconcile
- * time (decision 57d9a52d). */
+ * time (decision foreign_57d9a52d). */
 function articleWithBaseline(store, slug, files, at = NOW) {
   return store.create({
     ...envelope('feature_article', at),

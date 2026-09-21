@@ -1,15 +1,15 @@
 // H20 — mechanism-axis delivery at DISPATCH (board 62806222; concept family
 // knowledge-delivery, member 7). Registered at PreToolUse on TWO matcher entries:
 // Task|Agent (the dispatch surface) and AskUserQuestion (the question surface,
-// decision f5638a84). Every delivery member elsewhere NEVER blocks; AC7 still
+// decision foreign_f5638a84). Every delivery member elsewhere NEVER blocks; AC7 still
 // holds for the dispatch/consult surfaces here. The AskUserQuestion surface is
-// the ONE exception (decision 68332e4b, 2026-08-24): a first-attempt question
+// the ONE exception (decision foreign_68332e4b, 2026-08-24): a first-attempt question
 // whose subject STRONGLY matches a store RULING (decision/anti_pattern) is
 // DENIED (exit 2) before it ever reaches the user — see the DENY-ONCE block
 // below and its plumbing in lib/delivery.mjs. Everywhere else this file still
 // never exits 2.
 //
-// TIMING, probed live 2026-08-11 (research_finding 63a9646d-2f0d-406e-8a36-9e95d0b11dbd):
+// TIMING, probed live 2026-08-11 (research_finding foreign_63a9646d):
 // PreToolUse additionalContext reaches the model WITH the tool result — and
 // structurally, a PreToolUse hook fires only after the model has already emitted
 // the call. On the dispatch surface that is still pre-flight enough to matter
@@ -38,7 +38,7 @@
 // WHY THE DISPATCH SEAM: a fan-out multiplies one bad premise by N, so "I am
 // about to brief" is the last cheap moment to intervene. Both consuming-project
 // documents name it independently. And PreToolUse on Task is PROVEN to deliver
-// additionalContext to the DISPATCHING agent (research_finding e14dcf9a, issue
+// additionalContext to the DISPATCHING agent (research_finding foreign_e14dcf9a, issue
 // #39814) — which is the right destination here, because the conductor writing
 // the prompt is who needs stopping. (That same finding is why this is NOT the
 // seam for H19 AC5 dispatch staging: for staging knowledge INTO the subagent,
@@ -48,7 +48,7 @@
 // exists): it is SILENT unless a real match survives both stages. A hook that
 // fires on every dispatch would train the reader to skip it, which is precisely
 // the H10 file-count failure this must not repeat. Measured 2026-08-04
-// (board 648bb497, research_finding bf74c65f): on THIS repo it was firing
+// (board 648bb497, research_finding foreign_bf74c65f): on THIS repo it was firing
 // 15/15, dominated by universal dev vocabulary that AXIS_MIN_HITS alone could
 // not exclude — stage 2 now also requires hasDiscriminatingHit, a third floor
 // that a match matching ONLY generic terms (test, check, file, ...) cannot
@@ -117,7 +117,7 @@ const input = readStdin();
 
 // ===========================================================================
 // CODEX MODEL PIN — THE FIRST STEP, AHEAD OF EVERYTHING BELOW (board 7423f7a2
-// slice 5; decision 8b329d57 as CORRECTED FORWARD; research_finding be284452).
+// slice 5; decision foreign_8b329d57 as CORRECTED FORWARD; research_finding foreign_be284452).
 //
 // config.sparring_partner.model is the per-project SOURCE for which model a
 // consult lands on, and until now NOTHING read it — the TUI wrote the value and
@@ -139,7 +139,7 @@ const input = readStdin();
 // inherits its opener's model), so the injection guard is the EXACT opener name,
 // not the 'mcp__codex__' matcher prefix that isConsult uses for the header.
 //
-// ADVISORY ALWAYS (decision ea68735d point 3): enabled:false prints a loud OFF
+// ADVISORY ALWAYS (decision foreign_ea68735d point 3): enabled:false prints a loud OFF
 // line and changes nothing else — enablement and model selection are separate
 // axes, and an explicitly user-asked consult still runs. An explicit call-site
 // model always wins. A missing, unreadable or empty-valued config injects
@@ -167,7 +167,7 @@ function buildModelPin(inp) {
   // bounds a value planted to flood the payload.
   // SCOPE, deliberately: this escapes what is DISPLAYED, never what is INJECTED
   // — updatedInput.model still crosses byte-for-byte, which frozen pin M-8
-  // requires and decision 8b329d57 rules ("free non-empty string verbatim, no
+  // requires and decision foreign_8b329d57 rules ("free non-empty string verbatim, no
   // validation" — there is no shell/TOML boundary on this route and codex
   // validates ids server-side with a loud 400).
   const show = (v) => {
@@ -201,7 +201,7 @@ function buildModelPin(inp) {
   if (sp && sp.enabled === false) {
     lines.push(
       `${PIN} — the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). ` +
-        `That is ADVISORY, NEVER A GATE (decision ea68735d point 3): this consult is not blocked, and the model below still applies. ` +
+        `That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. ` +
         `Turn it back on in the TUI System tab if the OFF state is stale.`
     );
   }
@@ -315,7 +315,7 @@ function main(input) {
     // BOTH OF THESE SIT INSIDE THE TRY (2026-09-05), where
     // they were not before: outgoingProposalText reads an arbitrary tool_input and
     // openStore THROWS on a corrupt or locked db (it returns null only for an
-    // ABSENT one — anti-pattern e13f0fb5 pins that distinction). An uncaught throw
+    // ABSENT one — anti-pattern foreign_e13f0fb5 pins that distinction). An uncaught throw
     // exits 1, and an exit-1 hook's stdout is not the envelope Claude Code reads
     // updatedInput from, so the consult would silently lose its model pin — the
     // exact loss the catch arm below was written to prevent, one statement too
@@ -405,7 +405,7 @@ function main(input) {
     // rationale). Stage 1's index spans long discursive fields, so an FTS hit is
     // not yet a reason to interrupt anyone.
     // GENERIC-TERM FLOOR (board 648bb497, tuned on the measured 15/15 fire
-    // rate in research_finding bf74c65f): AXIS_MIN_HITS alone is satisfied by
+    // rate in research_finding foreign_bf74c65f): AXIS_MIN_HITS alone is satisfied by
     // universal dev vocabulary in a store whose own subject IS this repo's
     // machinery, so a payload matched PURELY on generic terms goes silent here
     // — at least one matched term must actually discriminate.

@@ -1,4 +1,4 @@
-// Shared project registry shape (decision 8f9e6db2). Defined here per the
+// Shared project registry shape (decision foreign_8f9e6db2). Defined here per the
 // schema-defined-once invariant, but NOT a RECORD_TYPES member: a registry row
 // is mutable metadata (last_seen_at updates every session), not an immutable
 // durable knowledge record. The ProjectRegistry store (packages/store) is the

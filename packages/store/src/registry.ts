@@ -1,4 +1,4 @@
-// @sterling/store — ProjectRegistry (decision 8f9e6db2): the machine-global
+// @sterling/store — ProjectRegistry (decision foreign_8f9e6db2): the machine-global
 // registry of /sterling:init'd projects, so projects are aware the others exist.
 // SEPARATE from the project + domain knowledge stores and NOT in the
 // knowledge_query fan — this is project METADATA, not domain knowledge. A single

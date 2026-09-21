@@ -63,7 +63,7 @@ function userTodo(extra: Record<string, unknown> = {}) {
   return { ...envelope('todo'), text: 'EXPORT THE BOARD AS CSV.\n\nbody prose.', source: 'user', ...extra };
 }
 
-// A minted handle at the mint's own <=60 clamp (decision de1a7329). Used to
+// A minted handle at the mint's own <=60 clamp (decision foreign_de1a7329). Used to
 // prove the digest does NOT clip the handle — the clip belongs to the composed
 // display form, not to the field.
 const SLUG_60 = 'render-every-human-facing-surface-with-the-readable-name-now';

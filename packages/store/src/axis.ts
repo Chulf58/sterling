@@ -3,7 +3,7 @@
 // knowledge_preflight MCP tool (H19/H20 relevance slice 4). Moved here from
 // scripts/hooks/lib/delivery.mjs (which re-exports it for hook consumers) so
 // the MCP server and the hooks import ONE definition — the one-mechanism
-// constraint from decision f5638a84's build. Pure functions: no fs, no store
+// constraint from decision foreign_f5638a84's build. Pure functions: no fs, no store
 // handle, no imports — safe in hook bundles (esbuild resolves the workspace
 // import at build, exactly as h20's MAX_RANK_TERMS import already does) and in
 // the server alike.
@@ -65,7 +65,7 @@ export interface AxisRecord {
  *  result is fully deterministic for a given prompt — the same prompt must
  *  always produce the same query. `maxTerms` is supplied by the CALLER: the
  *  real ceiling is MAX_RANK_TERMS, and writing 16 in a second place is the
- *  exact drift decision b47889b7 removed. */
+ *  exact drift decision foreign_b47889b7 removed. */
 export function extractAxisTerms(text: unknown, maxTerms: number): string[] {
   return rankedAxisTerms(text).slice(0, Math.max(0, maxTerms));
 }
@@ -152,9 +152,9 @@ export function axisNarrowText(record: AxisRecord | null | undefined): string {
  *  axisNarrowText concatenates a record's title and its body into ONE flat
  *  frequency pool, so a 178-char title cannot out-count a 4106-char statement
  *  and a ruling becomes unretrievable BY ITS OWN SUBJECT the more thoroughly it
- *  is evidenced — measured 2026-08-30 on decision e9387b85, whose title says
+ *  is evidenced — measured 2026-08-30 on decision foreign_e9387b85, whose title says
  *  'attestation' twice while the term ranks 12th in its own top-K
- *  (research_finding 5f3e0a42). For every type this is a SUBSET of
+ *  (research_finding foreign_5f3e0a42). For every type this is a SUBSET of
  *  axisNarrowText (identical for feature_article / research_finding /
  *  disconfirmed_hypothesis, whose narrow text is already subject-only), which
  *  is what keeps the union below from ever growing a terse record's central
@@ -186,11 +186,11 @@ export function axisHits(record: AxisRecord, terms: string[]): string[] {
 /** UNIVERSAL coding vocabulary — words that show up in essentially every
  *  dispatch prompt regardless of SUBJECT, so a match confined to this set
  *  cannot discriminate between one dispatch and the next. Tuned on the
- *  measured 15/15 fire rate (board 648bb497, research_finding bf74c65f,
+ *  measured 15/15 fire rate (board 648bb497, research_finding foreign_bf74c65f,
  *  2026-08-04). DELIBERATELY EXCLUDES Sterling domain words ('board',
  *  'decision', 'article', ...) even though several read as ordinary English —
  *  in THIS store they discriminate, because the store's subject IS Sterling's
- *  own mechanism (decision 3b09bc8f). */
+ *  own mechanism (decision foreign_3b09bc8f). */
 export const GENERIC_DEV_TERMS = new Set([
   'test', 'tests', 'testing', 'script', 'scripts', 'commit', 'commits', 'branch', 'merge',
   'build', 'builds', 'check', 'checks', 'node', 'file', 'files', 'path', 'paths', 'run', 'runs',
@@ -218,7 +218,7 @@ export function hasDiscriminatingHit(hits: string[], minDiscriminating = 1): boo
   return distinct.size >= minDiscriminating;
 }
 
-/** RECORD CENTRALITY — the third stage-2 floor (decision 599a28ed). The first
+/** RECORD CENTRALITY — the third stage-2 floor (decision foreign_599a28ed). The first
  *  two floors ask whether the OUTGOING prompt is specific enough; this one asks
  *  whether the matched terms are central to the RECORD — a record may not fire
  *  on words that appear only in passing in its own trigger. */
@@ -247,7 +247,7 @@ function narrowCentralTerms(record: AxisRecord, topK: number): string[] {
 }
 
 /** The RETRIEVAL central set: the narrow top-K UNIONED with the top-K terms of
- *  the record's own subject line (axisTitleText) — decision 00b23915, so a long
+ *  the record's own subject line (axisTitleText) — decision foreign_00b23915, so a long
  *  statement can no longer crowd out the principle in its own title. Up to 2*topK
  *  entries. Narrow-first, so the existing frequency order is preserved and only
  *  genuinely new subject terms are appended. Used by the two RECALL-side

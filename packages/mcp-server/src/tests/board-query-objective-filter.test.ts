@@ -1,5 +1,5 @@
 // ---------------- board_query({ objective }) — the FILTER half of a8d2ce6c ----------------
-// Decision a8d2ce6c-ccb5-4176-8130-a23d619b6d5a gave `todo` an `objective` grouping
+// Decision foreign_a8d2ce6c gave `todo` an `objective` grouping
 // field (write half pinned in board-objective.test.ts). This file pins the READ half:
 // board_query gains an `objective` filter clause beside source / system_reason /
 // contains. Consuming-project feedback called it "the single most obvious missing
@@ -11,7 +11,7 @@
 //   2. `objective: 'standalone'` matches items with the field ABSENT — mirroring
 //      the exact-lowercase sentinel the WRITE side already normalizes to absent.
 //   3. The parameter is REGISTERED in server.ts's board_query inputSchema. Unknown
-//      parameters are REJECTED, not ignored (AC9 / decision b47889b7), so an
+//      parameters are REJECTED, not ignored (AC9 / decision foreign_b47889b7), so an
 //      unregistered `objective` is unreachable from any real caller no matter how
 //      correct boardFiltered is. That defect class is only observable OVER THE WIRE.
 //   4. THE CAVEAT: maintenance items are ungrouped too, so `objective:'standalone'`
@@ -112,7 +112,7 @@ function seed(tools: SterlingTools) {
 // a later "returns exactly 2" could be explained by a board that only held 2, and
 // the standalone caveat could not be shown to bite.
 // ---------------------------------------------------------------------------
-test('OBJ0 (control): an unfiltered board read narrows NOTHING — 7 user items across 4 distinct groupings, and the read spans BOTH sources (decision a8d2ce6c)', () => {
+test('OBJ0 (control): an unfiltered board read narrows NOTHING — 7 user items across 4 distinct groupings, and the read spans BOTH sources (decision foreign_a8d2ce6c)', () => {
   const { tools, cleanup } = harness();
   try {
     seed(tools);
@@ -140,7 +140,7 @@ test('OBJ0 (control): an unfiltered board read narrows NOTHING — 7 user items 
 // ---------------------------------------------------------------------------
 // OBJ1 — the filter is an EXACT match, AND-ed with the sibling clauses.
 // ---------------------------------------------------------------------------
-test('OBJ1: objective:"Animation pass" returns EXACTLY that objective\'s slices, exact-matched and AND-ed with sibling clauses (decision a8d2ce6c)', () => {
+test('OBJ1: objective:"Animation pass" returns EXACTLY that objective\'s slices, exact-matched and AND-ed with sibling clauses (decision foreign_a8d2ce6c)', () => {
   const { tools, cleanup } = harness();
   try {
     seed(tools);
@@ -179,7 +179,7 @@ test('OBJ1: objective:"Animation pass" returns EXACTLY that objective\'s slices,
 // ---------------------------------------------------------------------------
 // OBJ2 — the 'standalone' sentinel selects FIELD-ABSENT items, and the caveat.
 // ---------------------------------------------------------------------------
-test('OBJ2: objective:"standalone" selects the UNGROUPED items (field-absent) — and alone it is NOT "user items with no objective" (decision a8d2ce6c)', () => {
+test('OBJ2: objective:"standalone" selects the UNGROUPED items (field-absent) — and alone it is NOT "user items with no objective" (decision foreign_a8d2ce6c)', () => {
   const { tools, cleanup } = harness();
   try {
     seed(tools);
@@ -233,7 +233,7 @@ test('OBJ2: objective:"standalone" selects the UNGROUPED items (field-absent) �
 // "the objective call was accepted" has two possible causes — the parameter is
 // registered, or this tool accepts anything.
 // ---------------------------------------------------------------------------
-test('OBJ3 (control): over the wire, board_query REJECTS an unknown parameter name in-band — so acceptance below is evidence of REGISTRATION (AC9, decision b47889b7)', async () => {
+test('OBJ3 (control): over the wire, board_query REJECTS an unknown parameter name in-band — so acceptance below is evidence of REGISTRATION (AC9, decision foreign_b47889b7)', async () => {
   const { client, cleanup } = await wireHarness();
   try {
     const bogus = await client.callTool({
@@ -255,7 +255,7 @@ test('OBJ3 (control): over the wire, board_query REJECTS an unknown parameter na
 // perfect boardFiltered clause is still unreachable from every real caller.
 // No in-process arm can observe this.
 // ---------------------------------------------------------------------------
-test('OBJ3: board_query({objective}) is REGISTERED in the server inputSchema — the wire call is accepted and returns exactly that objective (decision a8d2ce6c)', async () => {
+test('OBJ3: board_query({objective}) is REGISTERED in the server inputSchema — the wire call is accepted and returns exactly that objective (decision foreign_a8d2ce6c)', async () => {
   const { client, tools, cleanup } = await wireHarness();
   try {
     seed(tools); // seeded in-process; only the QUERY goes over the wire

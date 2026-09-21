@@ -1,5 +1,5 @@
 // H22 CLAIMED-TERRITORY (write-side negation guard) — board c56862a9,
-// research_finding 289cd172 v2 (h26-registers-do-not-touch-paths-as-held-territory).
+// research_finding foreign_289cd172 v2 (h26-registers-do-not-touch-paths-as-held-territory).
 //
 // R1 PIN RE-CUT: KEPT WHOLE. The rebuild keeps `files` (territory EXAMINED)
 // and `claimed_files` (territory CLAIMED) as separate RegisterEntry fields

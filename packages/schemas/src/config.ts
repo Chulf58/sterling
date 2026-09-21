@@ -18,7 +18,7 @@ const modelEffort = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh']),
 }).strict();
 
-// Toolchain success predicates (decision 98549344, slug
+// Toolchain success predicates (decision foreign_98549344, slug
 // toolchain-success-predicates-run-gate, board babf3a9e). Lives ALONGSIDE
 // run_commands, keyed by the same run_command key — never nested inside a
 // run_commands string value (that would break H14's Object.values flatMap
@@ -101,7 +101,7 @@ export const configSchema = z.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -150,10 +150,10 @@ export const configSchema = z.object({
         .default({}),
     })
     .default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: z
@@ -161,7 +161,7 @@ export const configSchema = z.object({
       stale_minutes: z.number().int().positive().default(60),
     })
     .default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -225,7 +225,7 @@ export const configSchema = z.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: z.number().int().positive().default(60000),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -282,7 +282,7 @@ export const configSchema = z.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: z.enum(['primary', 'secondary']).default('primary'),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -322,7 +322,7 @@ export const configSchema = z.object({
       staleness_days: z.number().int().positive().default(45),
     })
     .default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -363,7 +363,7 @@ export const configSchema = z.object({
   // additive advisory-block pattern (every field has a default; an absent
   // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: z
@@ -377,7 +377,7 @@ export const configSchema = z.object({
       model: z.string().optional(),
     })
     .default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -391,7 +391,7 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately

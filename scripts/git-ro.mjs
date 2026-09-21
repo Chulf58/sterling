@@ -179,7 +179,7 @@ const CHILD_ENV = {
   // alias.*). Point it at the null device so the child reads no global config
   // at all. WIN32: 'NUL' is the documented null device and git-for-Windows
   // accepts it here, but that is NOT VERIFIABLE FROM WSL — VERIFY AT BUILD ON
-  // WINDOWS (decision 19678617's verify-at-build register). If the win32 form
+  // WINDOWS (decision foreign_19678617's verify-at-build register). If the win32 form
   // is wrong the failure is loud (git refuses to read the config path), never a
   // silent re-enabling of the global config.
   GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',

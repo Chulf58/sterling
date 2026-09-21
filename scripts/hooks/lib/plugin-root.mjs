@@ -16,11 +16,11 @@
 // The {root, reason, source} return shape, the throwing-statSync fail-closed
 // semantics (ENOENT/ENOTDIR = absent, anything else = unreadable → root:null
 // and the STERLING_PLUGIN_ROOT seam NOT consulted), and the seam-only-after-
-// a-clean-walk-up-finds-nothing order (decision 95c2c109 F2) are all
+// a-clean-walk-up-finds-nothing order (decision foreign_95c2c109 F2) are all
 // UNCHANGED by this move.
 //
-// GOVERNING SPEC: decision 5b82e94f (h15-realpath-binding-active-plugin-root-
-// provenance), adopting decision 1434cd54 Ruling 3's seven-step sequence.
+// GOVERNING SPEC: decision foreign_5b82e94f (h15-realpath-binding-active-plugin-root-
+// provenance), adopting decision foreign_1434cd54 Ruling 3's seven-step sequence.
 //
 // DEPENDENCY-FREE (node builtins only) so it costs the H15 bundle nothing —
 // the same contract sanctioned-provenance.mjs carries.
@@ -29,7 +29,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// The canonicalizer decision 5b82e94f step 3 names. `.native` is the OS
+// The canonicalizer decision foreign_5b82e94f step 3 names. `.native` is the OS
 // realpath(3) — physical resolution, which is the whole point; the JS fallback
 // is only for a runtime that does not expose it.
 const realNative = realpathSync.native ?? realpathSync;

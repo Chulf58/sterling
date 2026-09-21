@@ -1,6 +1,6 @@
 // H20 consult carriage — sparring-partner (codex) consults get the same
 // mechanism-axis delivery as agent dispatches (board a63e75d8-d7d9-4294-aa60-
-// 83b56e7d3a47; decision 2d19ac0c-ca5c-44d6-a3cd-7adbcd5c342f, slug
+// 83b56e7d3a47; decision foreign_2d19ac0c, slug
 // 'consult-carriage-h20-codex-seam').
 //
 // SETTLED DESIGN (verbatim from the decision statement — this is the oracle):
@@ -156,7 +156,7 @@ test('CONSULT DELIVERY: a codex consult carrying a matching prompt gets the same
     fileMotivatingRecord(store);
     const r = runHook(consult(dir, MOTIVATING_PROMPT), dir);
     assert.equal(r.code, 0, 'never blocks (AC7 floor)');
-    assert.notEqual(r.stdout, '', 'the fixture record must be delivered — extraction already reads tool_input.prompt generically per decision 2d19ac0c');
+    assert.notEqual(r.stdout, '', 'the fixture record must be delivered — extraction already reads tool_input.prompt generically per decision 2d19ac0c'); // not-a-citation: fixture id
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, /MECHANISM-AXIS DELIVERY \(H20\)/);
     assert.match(ctx, /Signal connected at boot but emitter initialises later/, 'the fixture record reaches the consult, named by its title');
@@ -187,7 +187,7 @@ test('HEADER: a codex consult\'s header names a sparring-partner CONSULT, and dr
     const r = runHook(consult(dir, MOTIVATING_PROMPT), dir);
     assert.equal(r.code, 0);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.doesNotMatch(ctx, /about to dispatch 'an agent'/, 'the literal existing dispatch phrase (decision 2d19ac0c) must not appear for a codex tool_name');
+    assert.doesNotMatch(ctx, /about to dispatch 'an agent'/, 'the literal existing dispatch phrase (decision 2d19ac0c) must not appear for a codex tool_name'); // not-a-citation: fixture id
     assert.match(ctx, /consult|sparring/i, 'the header must name the consult/sparring-partner framing instead');
   } finally {
     cleanup();
@@ -217,7 +217,7 @@ test('REGRESSION: a Task dispatch still renders the unchanged literal dispatch p
     const r = runHook(dispatch(dir, MOTIVATING_PROMPT, 'coder'), dir);
     assert.equal(r.code, 0);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    assert.match(ctx, /you are about to dispatch 'coder'/, 'Task dispatch keeps the exact literal existing phrase — h20-mechanism-axis.mjs:201 interpolates subagent_type (\'coder\' per this fixture); decision 2d19ac0c quoted a paraphrase, not the real output — untouched by this change');
+    assert.match(ctx, /you are about to dispatch 'coder'/, 'Task dispatch keeps the exact literal existing phrase — h20-mechanism-axis.mjs:201 interpolates subagent_type (\'coder\' per this fixture); decision 2d19ac0c quoted a paraphrase, not the real output — untouched by this change'); // not-a-citation: fixture id
     assert.doesNotMatch(ctx, /consult|sparring/i, 'the new consult framing must not leak onto the dispatch path');
   } finally {
     cleanup();
@@ -249,7 +249,7 @@ test('INERT: a codex tool_name with no prompt field at all draws NO relevance ca
   try {
     fileMotivatingRecord(store);
     const r = runHook({ hook_event_name: 'PreToolUse', tool_name: 'mcp__codex__codex', tool_input: {}, session_id: 's1', cwd: dir }, dir);
-    assert.equal(r.code, 0, 'a prompt-less consult is never denied (decision ea68735d point 3 — advisory, never gating)');
+    assert.equal(r.code, 0, 'a prompt-less consult is never denied (decision ea68735d point 3 — advisory, never gating)'); // not-a-citation: fixture id
     assert.notEqual(r.stdout.trim(), '', 'the model-pin envelope is emitted even on the shape that carries no relevance — the pin runs BEFORE the early exits (board 7423f7a2)');
 
     const out = JSON.parse(r.stdout);

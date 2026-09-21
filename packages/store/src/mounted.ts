@@ -268,7 +268,7 @@ export class MountedStores {
   }
 
   /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
-   *  fallthrough is the sole caller (decision df361a0f) and takes result[0] as
+   *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
    *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
    *  live in exactly one store: retireInFavorOf's promotion shape leaves the
    *  project tombstone behind while the live copy is promoted into a domain
@@ -286,7 +286,7 @@ export class MountedStores {
       .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
   }
 
-  /** Cross-store terminus resolution (decision de1a7329): a record lives in
+  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
    *  exactly one store (same reasoning as get()), so this tries each mounted
    *  store project-first and returns the first hit. */
   resolveTerminus(id: string): ReturnType<SterlingStore['resolveTerminus']> {
@@ -302,7 +302,7 @@ export class MountedStores {
    *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
    *  target itself — every mount is scanned and the hits merged, same
    *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
-   *  anti_pattern 1896c79b): a record promoted into a domain store leaves a
+   *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
    *  project-store tombstone behind, so the SAME source id can resolve out of
    *  two different mounts — first-seen (project-first, this.all()'s own
    *  ordering) wins, never a duplicate entry for one concept. */

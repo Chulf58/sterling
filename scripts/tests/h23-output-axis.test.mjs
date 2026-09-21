@@ -224,7 +224,7 @@ test('AC1: an object-shaped tool_response (e.g. a structured Bash result) is str
   }
 });
 
-// Decision `h23-kept-raised-threshold-one-pointer-payload` (284fc4b0, user-ruled
+// Decision `h23-kept-raised-threshold-one-pointer-payload` (foreign_284fc4b0, user-ruled
 // 2026-08-31): "payload drops to ONE pointer plus the suppressed-count tail (was
 // 3 + tail)" — the volume cut that keeps H23's unique output-axis coverage while
 // removing the noise its ~6% follow rate paid for. Class ordering (hazards ahead
@@ -243,7 +243,7 @@ test('AC1: hazards outrank decisions for the single pointer line, the outranked 
     const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
 
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
-    assert.equal(lines.length, 1, 'exactly one pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0');
+    assert.equal(lines.length, 1, 'exactly one pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0'); // not-a-citation: fixture id
 
     assert.ok(payload.includes('AP-ALPHA'), 'the hazard — the highest class — occupies the one available pointer line');
     assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the rendered pointer is the anti_pattern, not the decision');
@@ -405,7 +405,7 @@ test('AC6: an event carrying a subagent session marker delivers directly to that
 // AC7 — cap
 // ---------------------------------------------------------------------------
 
-// Decision `h23-kept-raised-threshold-one-pointer-payload` (284fc4b0, user-ruled
+// Decision `h23-kept-raised-threshold-one-pointer-payload` (foreign_284fc4b0, user-ruled
 // 2026-08-31) supersedes the 3-line cap: the payload is ONE pointer plus the
 // suppressed-count tail. The remainder is therefore matched-minus-one, and the
 // tail is the only thing standing between a volume cut and silent knowledge loss
@@ -422,7 +422,7 @@ test('AC7: more than 1 matching record caps the pointer block at 1 line and disc
     assert.equal(r.code, 0);
     const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
-    assert.equal(lines.length, 1, 'at most 1 pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0');
+    assert.equal(lines.length, 1, 'at most 1 pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0'); // not-a-citation: fixture id
     const remainderMatch = payload.match(/\(\+(\d+) more matched\)/);
     assert.ok(remainderMatch, 'a remainder disclosure names how many more matched');
     assert.equal(remainderMatch[1], '3', '4 matched minus the 1 shown leaves exactly 3 suppressed records disclosed as the remainder');

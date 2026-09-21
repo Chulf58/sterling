@@ -2,9 +2,9 @@
 //
 // SPEC ONLY. Nothing in scripts/hooks/h1-session-start.mjs, scripts/lib/*.mjs or
 // scripts/sync-agents.mjs was read to author this file (H4 read wall). The
-// contract below comes from board 6ce18724, research_finding 0038af7c (the
-// measurement), decision 946125ff + anti_pattern 02a1ed39 (the three-seam
-// precedent this copies), decision 558895a9 (the CLONE-currency signal that is
+// contract below comes from board 6ce18724, research_finding foreign_0038af7c (the
+// measurement), decision foreign_946125ff + anti_pattern foreign_02a1ed39 (the three-seam
+// precedent this copies), decision foreign_558895a9 (the CLONE-currency signal that is
 // explicitly NOT this) and the launching agent's user-ruled shape. The harness
 // (runHook / hookInput / envelope / makeProject / h1) is copied from
 // scripts/tests/h1-accuracy.test.mjs; the agent fixtures and the installAgents /
@@ -42,7 +42,7 @@
 //     via `systemMessage`, the conductor via `hookSpecificOutput.additionalContext`.
 //  5. SILENT WHEN CURRENT: every installed sterling-generated agent matching the
 //     clone's current template => no marker anywhere.
-//  6. DEGRADE LOUD (P5, and the whole lesson of anti_pattern 02a1ed39, whose
+//  6. DEGRADE LOUD (P5, and the whole lesson of anti_pattern foreign_02a1ed39, whose
 //     staleness check reported `up_to_date` NINE times while the agents were
 //     dead): if the clone-side template cannot be read/hashed, the notice fires
 //     saying so and never claims up-to-date.
@@ -77,7 +77,7 @@ const T_INSTALL = '2026-01-01T00:00:00.000Z'; // safely BEFORE any real session 
 
 let SterlingStore;
 // H1's pluginRoot() resolution is now walkUpPluginRoot() || process.env.STERLING_PLUGIN_ROOT
-// (decision 95c2c109 F2): the running hook's own walk-up wins over the env
+// (decision foreign_95c2c109 F2): the running hook's own walk-up wins over the env
 // seam, and is consulted ONLY when that walk-up fails. Every test in this file
 // points STERLING_PLUGIN_ROOT at a synthetic clone (see h1() below) so BOTH
 // sides of the currency comparison are controlled fixtures — but
@@ -261,7 +261,7 @@ test('CONTROL: every installed agent matches the clone template_hash — H1 says
 // under it.
 
 // =============================================================================
-// THE MEASURED CASE (research_finding 0038af7c)
+// THE MEASURED CASE (research_finding foreign_0038af7c)
 // =============================================================================
 
 test('MEASURED CASE: an unmodified install whose header template_hash is OLD is reported STALE, naming the agent', () => {
@@ -280,7 +280,7 @@ test('MEASURED CASE: an unmodified install whose header template_hash is OLD is 
     const line = lineFor(section, 'coder');
     assert.notEqual(line, '', 'the notice NAMES the stale agent — "some agents are stale" is not actionable');
     assert.match(line, /stale/i, 'the named agent is described as stale');
-    assert.doesNotMatch(section, /up[-_ ]to[-_ ]date/i, 'the notice never claims up-to-date while reporting staleness (anti_pattern 02a1ed39)');
+    assert.doesNotMatch(section, /up[-_ ]to[-_ ]date/i, 'the notice never claims up-to-date while reporting staleness (anti_pattern 02a1ed39)'); // not-a-citation: fixture id
   } finally {
     cleanup();
     clone.cleanup();
@@ -439,7 +439,7 @@ test('NON-BLOCKING: a project full of stale agents still starts — exit 0, no b
 // the rest of the banner.
 
 // =============================================================================
-// DEGRADE LOUD, NEVER SILENT (P5; the entire lesson of anti_pattern 02a1ed39,
+// DEGRADE LOUD, NEVER SILENT (P5; the entire lesson of anti_pattern foreign_02a1ed39,
 // whose staleness check reported up_to_date NINE times while the agents were dead)
 // =============================================================================
 
@@ -518,7 +518,7 @@ test('DEGRADE LOUD: the clone has no agent-templates directory at all — H1 sti
 //
 // STILL SPEC-ONLY: scripts/hooks/h1-session-start.mjs was NOT read (H4 read
 // wall). These expectations come from the fix list in the dispatch brief, the
-// contract at the top of this file, anti_pattern 02a1ed39 and research_finding
+// contract at the top of this file, anti_pattern foreign_02a1ed39 and research_finding
 // 0038af7c — never from the implementation.
 //
 // Run with:  node --test scripts/tests/agent-currency-h1.test.mjs

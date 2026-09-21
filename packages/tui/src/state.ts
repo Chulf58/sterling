@@ -59,7 +59,7 @@ export const initialUi: UiState = { tab: 0, cursor: 0, expanded: [], searchQuery
 
 // ---------------------------------------------------------------------------
 // System tab (run r-f9a7) — the agent roster snapshot injected at TAB
-// ACTIVATION (never the 1 Hz loop, per decision 98064d77) and the pure
+// ACTIVATION (never the 1 Hz loop, per decision foreign_98064d77) and the pure
 // projections that render it. The snapshot carries the INSTALLED frontmatter
 // values (the copy that governs dispatch), the authoritative config.models
 // table, and the PRECOMPUTED catalog status (the now-dependent catalogStatus
@@ -99,7 +99,7 @@ export interface AgentRosterSnapshot {
   configModels: Record<string, { model: string; effort: string }>;
   catalog: CatalogStatusView;
   /** config.sparring_partner, read at the same activation-only cadence as the
-   *  rest of the snapshot. Additive-optional (decision 34d61f60's idiom, as
+   *  rest of the snapshot. Additive-optional (decision foreign_34d61f60's idiom, as
    *  cited for the roster? param itself): absent → defaults applied where
    *  rendered, so the phase-4 fixtures that predate this field keep compiling
    *  and passing unchanged. */
@@ -112,11 +112,11 @@ export interface AgentRosterSnapshot {
    *  that flipping the toggle must never hide. Additive-optional, same reason
    *  as sparringPartner above. */
   codexWired?: boolean;
-  /** config.tdd (decision 752caf98, tdd-and-mutation-toggles-in-system-tab):
+  /** config.tdd (decision foreign_752caf98, tdd-and-mutation-toggles-in-system-tab):
    *  the TDD-by-default posture toggle. Additive-optional, same idiom as
    *  sparringPartner — absent → the buildSystemTab default below applies. */
   tdd?: { enabled: boolean };
-  /** config.mutation_verification (decision 752caf98): the verify-by-mutation
+  /** config.mutation_verification (decision foreign_752caf98): the verify-by-mutation
    *  posture toggle, independent of tdd. Additive-optional, same idiom. */
   mutationVerification?: { enabled: boolean };
 }
@@ -145,7 +145,7 @@ export interface SystemTabView {
    *  order; hidden while a config.models picker (ui.selector) is open, same
    *  focus rule as the roster rows. */
   sparringRows: SystemRow[];
-  /** tdd/mutation_verification toggle rows (decision 752caf98): two SEPARATE
+  /** tdd/mutation_verification toggle rows (decision foreign_752caf98): two SEPARATE
    *  single-entry lists, each mirroring sparringRows[0]'s toggle-only shape
    *  (neither field carries a model, so there is no second row). Appended
    *  after sparringRows in cursor order; hidden while a config.models picker
@@ -175,7 +175,7 @@ export function effortOptions(key: string): string[] {
   return key === 'coder_hard' ? ['low', 'medium', 'high', 'xhigh'] : ['low', 'medium', 'high'];
 }
 
-/** The model-value floor (decision 98064d77): a committed swap model must be a
+/** The model-value floor (decision foreign_98064d77): a committed swap model must be a
  *  claude-* id or the commit is refused. */
 export const MODEL_VALUE_RE = /^claude-/;
 
@@ -287,14 +287,14 @@ export interface SparringModelEffect {
   type: 'sparring_model';
   model: string;
 }
-/** System tab, tdd toggle row (decision 752caf98): flips config.tdd.enabled.
+/** System tab, tdd toggle row (decision foreign_752caf98): flips config.tdd.enabled.
  *  OFF silences the automatic default posture only — H5/H18 test protection
  *  is untouched, and an explicit user ask still fires TDD. */
 export interface TddToggleEffect {
   type: 'tdd_toggle';
   enabled: boolean;
 }
-/** System tab, mutation_verification toggle row (decision 752caf98): flips
+/** System tab, mutation_verification toggle row (decision foreign_752caf98): flips
  *  config.mutation_verification.enabled. Same silences-the-default-only
  *  semantics as TddToggleEffect. */
 export interface MutationToggleEffect {
@@ -639,7 +639,7 @@ function catalogBanner(catalog: CatalogStatusView, width: number): string[] {
  * ui.sparringModelEdit is defined AND this row is under the cursor, the row
  * shows the live edit buffer with a caret instead of the committed value.
  *
- * The label says DEFAULT (board 7423f7a2 slice 5, decision 8b329d57 as
+ * The label says DEFAULT (board 7423f7a2 slice 5, decision foreign_8b329d57 as
  * corrected forward): since H20's PreToolUse arm fills this value into a codex
  * consult that names no model, the value is exactly a DEFAULT — a model named
  * on the call itself still wins, and a running codex-reply thread keeps its
@@ -674,7 +674,7 @@ function sparringPartnerRows(snap: AgentRosterSnapshot, ui: UiState, width: numb
   return [toggleRow, modelRow];
 }
 
-/** tdd toggle row (decision 752caf98): ON/OFF from tdd.enabled, one row, no
+/** tdd toggle row (decision foreign_752caf98): ON/OFF from tdd.enabled, one row, no
  *  model sibling. Mirrors sparringPartnerRows' toggle-row shape exactly. */
 function tddToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
   const clip = (s: string): string => clipEllipsis(s, width);
@@ -685,7 +685,7 @@ function tddToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cur
   return { id: 'sys:tdd_enabled', lines: [{ text: clip(`${marker}TDD: ${onOff}`), kind: 'title', selected }] };
 }
 
-/** mutation_verification toggle row (decision 752caf98): ON/OFF from
+/** mutation_verification toggle row (decision foreign_752caf98): ON/OFF from
  *  mutationVerification.enabled, one row, no model sibling. */
 function mutationToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
   const clip = (s: string): string => clipEllipsis(s, width);
@@ -786,7 +786,7 @@ function systemDashboardState(
     rows.push({ id: sr.id, type: 'system', selected: sr.lines.some((l) => l.selected === true), expanded: false, lines, screenRow });
     screenRow += lines.length;
   }
-  // tdd/mutation_verification toggle rows (decision 752caf98): drawn after the
+  // tdd/mutation_verification toggle rows (decision foreign_752caf98): drawn after the
   // sparring-partner rows, same row shape — separate lists, never merged.
   for (const sr of [...view.tddRows, ...view.mutationRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
@@ -1030,7 +1030,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
     }
     const card = node.card;
     if (card.type === 'objective') {
-      // objective group header (decision a8d2ce6c): fold/unfold — navigation,
+      // objective group header (decision foreign_a8d2ce6c): fold/unfold — navigation,
       // not a selection; nothing durable to select behind the derived label.
       return { ...ui, cursor: index, expanded: toggle(card.id) };
     }
@@ -1049,7 +1049,7 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         // model row (sysKeys.length + 1), appended after the config.models
         // roster (board a0714d0b) — then the tdd toggle row (sysKeys.length + 2)
         // and the mutation_verification toggle row (sysKeys.length + 3),
-        // decision 752caf98 — cursor addressing composes over all four.
+        // decision foreign_752caf98 — cursor addressing composes over all four.
         const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== undefined;
@@ -1104,12 +1104,12 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
               return { ui: { ...ui, cursor, sparringModelEdit: roster.sparringPartner?.model ?? '', notice: undefined }, effects };
             }
             if (cursor === sysKeys.length + 2) {
-              // tdd toggle row (decision 752caf98): an immediate flip, no picker
+              // tdd toggle row (decision foreign_752caf98): an immediate flip, no picker
               effects.push({ type: 'tdd_toggle', enabled: !(roster.tdd?.enabled ?? true) });
               return { ui: { ...ui, cursor, notice: undefined }, effects };
             }
             if (cursor === sysKeys.length + 3) {
-              // mutation_verification toggle row (decision 752caf98): an
+              // mutation_verification toggle row (decision foreign_752caf98): an
               // immediate flip, no picker
               effects.push({ type: 'mutation_toggle', enabled: !(roster.mutationVerification?.enabled ?? true) });
               return { ui: { ...ui, cursor, notice: undefined }, effects };

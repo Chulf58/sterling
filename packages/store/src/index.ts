@@ -191,7 +191,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 // ---------------------------------------------------------------------------
 // Schema-version guard (stable-identity S1, extended by S2; decision
 // [stable-identity-design-v2] / 2176748e): refuse-until-migrated. PRAGMA
-// user_version (research_finding 5555895c: a 32-bit application-owned integer
+// user_version (research_finding foreign_5555895c: a 32-bit application-owned integer
 // at header offset 60 — NEVER SQLite's own PRAGMA schema_version) is checked at
 // the very top of open, before the DDL or any other write lands, so a store
 // from a NEWER, unsupported schema is refused with nothing touched.
@@ -450,7 +450,7 @@ export type ToolStore = Pick<
   // cannot serve because it matches a full id only.
   | 'recordIdIndex'
   // knowledge_create resolves an exact slug through this to REFUSE a second
-  // feature_article under a slug that already exists (decision 3db7095f built it
+  // feature_article under a slug that already exists (decision foreign_3db7095f built it
   // for H19's one-hop pointers and noted "a second consumer does not exist yet"
   // — this is that second consumer). Deterministic, so the refusal can never be
   // a ranking artefact.
@@ -458,11 +458,11 @@ export type ToolStore = Pick<
   // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
   // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
   | 'recordsBySlug'
-  // knowledge_get's dead-slug fallthrough ONLY (decision df361a0f) — the
+  // knowledge_get's dead-slug fallthrough ONLY (decision foreign_df361a0f) — the
   // superseded-only counterpart of recordsBySlug, consulted after both
   // live-slug and id-prefix resolution fail.
   | 'supersededRecordsBySlug'
-  // knowledge_get's terminus disclosure (decision de1a7329) — the pinned
+  // knowledge_get's terminus disclosure (decision foreign_de1a7329) — the pinned
   // record stays version-pinned; this is the only way the tool layer learns
   // where a superseded record's chain currently ends.
   | 'resolveTerminus'
@@ -1269,7 +1269,7 @@ export class SterlingStore {
     // than busy_timeout — and for the hooks that is a FAIL-OPEN, because a
     // hook's uncaught throw exits 1, the runner reads any non-2 exit as
     // NON-BLOCKING, and openStore sits outside several hooks' fail-closed try
-    // (anti-pattern e13f0fb5). Fixing it here rather than in one hook is
+    // (anti-pattern foreign_e13f0fb5). Fixing it here rather than in one hook is
     // deliberate: every openStore caller inherits it.
     //
     // The condition is exact, not a heuristic. Control reaches this point only
@@ -2374,7 +2374,7 @@ export class SterlingStore {
     // change" and silently swallowed). A GENUINE change — the state is fixed, a
     // different file's role goes unverified, the wording itself changes — still
     // differs after normalizing this one token and still escalates exactly as
-    // before. Every OTHER lane keeps EXACT text equality (decision 194f43e4's
+    // before. Every OTHER lane keeps EXACT text equality (decision foreign_194f43e4's
     // escalating-severity behavior, e.g. edited→deleted, is unaffected).
     const textsEquivalent = (a: string, b: string): boolean => {
       if (candidate.system_reason !== 'state_review') return a === b;
@@ -2467,7 +2467,7 @@ export class SterlingStore {
         // or a legacy duplicate being folded in) demands the shared builder's
         // truthful union text; it may not go on naming only the first file.
         // A same-file re-report with NO folding keeps this lane's ordinary
-        // escalating-severity behaviour (decision 194f43e4) — same file,
+        // escalating-severity behaviour (decision foreign_194f43e4) — same file,
         // worse news, plain text equality decides whether it updates.
         const widening = folded.length > 0 || unionFiles.length > 1;
         let nextText = candidate.text ?? '';
@@ -2803,7 +2803,7 @@ export class SterlingStore {
 
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
    * uses this ONLY after live-slug and id-prefix resolution both fail, so it
    * can never shadow a live record: a slug still carried by a non-superseded
@@ -2828,7 +2828,7 @@ export class SterlingStore {
   }
 
   /**
-   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)
    * record resolves to itself at hops:0. Unknown id -> null. Never throws
@@ -2863,7 +2863,7 @@ export class SterlingStore {
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
    * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
    * it only ever has something to say about a record that was itself retired
    * via supersede(). A record can also be named the target of a rel:'supersedes'
    * link WITHOUT ever being retired — a clause-level or partial override
@@ -3202,7 +3202,7 @@ export class SterlingStore {
     // THE REPLACEMENT MUST BE ALIVE. Retiring A in favour of B and then B in
     // favour of A left both records retired, each forwarding to a dead one — a
     // supersession cycle where the reader is sent nowhere, which is exactly
-    // what `in_favor_of` is required for in the first place (decision 9948475b).
+    // what `in_favor_of` is required for in the first place (decision foreign_9948475b).
     // A replacement this store cannot see is the PROMOTION shape (the survivor
     // is the copy in a domain store) and stays allowed: relations carry no
     // foreign key by design, and MountedStores has already resolved it.
@@ -3608,7 +3608,7 @@ export class SterlingStore {
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
    */
   enqueueRefreshReferenceOnce(nowISO: string): void {
     const pending = this.query({ types: ['todo'], cap: 200 }).filter(

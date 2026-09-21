@@ -3,12 +3,12 @@
 //
 // ============================================================================
 // THIS IS NOT AN AGENT CAPABILITY. Run it by hand, as the conductor, only.
-// Decision 02e03ed8 [clean-room-mutation-runs-via-conductor-only-helper] makes
+// Decision foreign_02e03ed8 [clean-room-mutation-runs-via-conductor-only-helper] makes
 // that an OPERATIONAL boundary, not a claim of containment: the helper must not
 // be advertised or granted as an agent capability.
 //
 // !! UNENFORCED AS SHIPPED — READ THIS BEFORE TRUSTING THE CONTAINMENT BELOW.
-// Decision 02e03ed8 requires that "the helper plus its manifest are themselves
+// Decision foreign_02e03ed8 requires that "the helper plus its manifest are themselves
 // protected as enforcement surface, conductor-modifiable only". THAT PROTECTION
 // IS NOT IN PLACE. An agent with scripts/** in scope can edit the manifest below
 // and the conductor would then execute agent-authored
@@ -19,7 +19,7 @@
 // (scripts/tests/enforcement.test.mjs, the "ENFORCEMENT_SURFACE stays the
 // declared triple" assertions) — that pin has to be re-cut deliberately first.
 // UNTIL THEN: re-read the MANIFEST before every run. This notice is stated in
-// the negative on purpose (anti_pattern 586bccdc: a security comment asserting a
+// the negative on purpose (anti_pattern foreign_586bccdc: a security comment asserting a
 // protection nothing implements is worse than the gap, because it stops the next
 // reader from looking).
 // ============================================================================
@@ -30,8 +30,8 @@
 // STERLING_HOOKS_DIR set INSIDE this process, report BOTH verdicts, and DELETE
 // the fixture in `finally`.
 //
-// WHY IT EXISTS. Decision 23afbc83 mandates clean-room mutation verification and
-// anti_pattern 37b3cb0a [BLOCK] forbids mutating in place or touching the live
+// WHY IT EXISTS. Decision foreign_23afbc83 mandates clean-room mutation verification and
+// anti_pattern foreign_37b3cb0a [BLOCK] forbids mutating in place or touching the live
 // enforcement surface. Setting the seam inside this process via spawnSync's
 // `env` keeps it out of the runner's caller interface.
 //
@@ -51,7 +51,7 @@
 //   * cleanup in finally, failure and timeout too   -> the try/finally in main()
 // KNOWN AND ACCEPTED: there is no SIGINT/SIGTERM handler, so Ctrl-C mid-run
 // leaves the fixture behind. It sits in tmpdir(), outside governed territory, so
-// it does not reproduce the residue harm measured in research_finding 01cab59b.
+// it does not reproduce the residue harm measured in research_finding foreign_01cab59b.
 // Nothing is read from argv except one manifest id. No path, command, patch or
 // environment assignment can be passed in.
 //
@@ -262,7 +262,7 @@ function main() {
   if (argv.length !== 1) {
     refuse(
       `expected exactly one argument, the mutation id. Known ids: ${Object.keys(MANIFEST).join(', ')}. ` +
-        'No path, command, patch or environment assignment may be passed in (decision 02e03ed8).',
+        'No path, command, patch or environment assignment may be passed in.',
     );
   }
   const id = argv[0];
@@ -334,8 +334,8 @@ function main() {
     runError = err;
   } finally {
     // Cleanup is mandatory on EVERY path — success, refusal-free failure, and
-    // timeout alike (decision 23afbc83's delete step; the residue measured in
-    // research_finding 01cab59b is what this guarantees against).
+    // timeout alike (decision foreign_23afbc83's delete step; the residue measured in
+    // research_finding foreign_01cab59b is what this guarantees against).
     if (fixtureRoot) {
       try {
         rmSync(fixtureRoot, { recursive: true, force: true });

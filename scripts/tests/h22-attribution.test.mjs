@@ -1,5 +1,5 @@
 // H22/H26 PER-BLOCK ATTRIBUTION (Start-side) AND REVIEWER TERRITORY BINDING
-// AT SubagentStop (decision edbaa38d).
+// AT SubagentStop (decision foreign_edbaa38d).
 //
 // ===========================================================================
 // STATE-MACHINE RE-CUT (board 5445066b, decision
@@ -42,7 +42,7 @@
 // ===========================================================================
 //
 // R1 PIN RE-CUT (contract sheet §2.1 + amendments A1/A4/A6): the attribution
-// contracts in this file are KEPT — the rebuild keeps decision edbaa38d's
+// contracts in this file are KEPT — the rebuild keeps decision foreign_edbaa38d's
 // Stop-bind and today's positional rules at Start, including the
 // unattributable partition. What changed:
 //   - A1: SubagentStop MARKS the register entry ended; it does not delete it.
@@ -196,8 +196,8 @@ function h22Input(dir, over = {}) {
 }
 
 // --------------------------------------------------------------------------
-// STATE-MACHINE FIXTURES (decision 7c515e52 §1-§2; stdin shapes from
-// research_finding 2bad782a). A dispatch is declared by its REAL PreToolUse
+// STATE-MACHINE FIXTURES (decision foreign_7c515e52 §1-§2; stdin shapes from
+// research_finding foreign_2bad782a). A dispatch is declared by its REAL PreToolUse
 // event, exactly as the platform fires it — never by planting a transcript.
 // --------------------------------------------------------------------------
 
@@ -355,7 +355,7 @@ test('H22 attribution PIN2: same-type twins — two pending test-writer dispatch
 // ===========================================================================
 // RETIRED HERE — 'PIN3: cross-batch walk-back'.
 // The bounded BACKWARD WALK through earlier dispatching assistant messages
-// does not exist under decision 7c515e52: SubagentStart never reads the parent
+// does not exist under decision foreign_7c515e52: SubagentStart never reads the parent
 // transcript, so there is no message list to walk. A late-starting agent whose
 // slot is still pending resolves through §5(i)/(iii) with no notion of message
 // recency at all (pinned by PIN1 above and by
@@ -381,7 +381,7 @@ test('H22 attribution PIN2: same-type twins — two pending test-writer dispatch
 //    case; the safe single-block case and every NON-reviewer class keep
 //    today's behaviour byte-identical (non-reviewer unsafe = 'union')."
 // The register-level home of "territory.source" (per the pre-existing
-// decision 8f137474/h22-review-territory.test.mjs contract, where every
+// decision foreign_8f137474/h22-review-territory.test.mjs contract, where every
 // register entry already carries files_source: 'review-territory' |
 // 'free-prose-fallback', later nested as ledger territory.source at
 // SubagentStop promotion) is files_source; the new value this slice adds is
@@ -434,7 +434,7 @@ test('H22 attribution REVIEWER-R1: UNSAFE case — two pending same-type reviewe
     const reg = readRegister(dir);
     const entry = reg.find((e) => e.agent_id === 'agent-rev-sibling');
     assert.ok(entry, 'entry was appended');
-    assert.equal(entry.files_source, 'unattributable', 'two same-type pending dispatches means this Start (whose stdin carries no tool_use_id — finding 51506eec) cannot tell which physical dispatch is its own');
+    assert.equal(entry.files_source, 'unattributable', 'two same-type pending dispatches means this Start (whose stdin carries no tool_use_id — finding 51506eec) cannot tell which physical dispatch is its own'); // not-a-citation: fixture id
     assert.match(outputOf(r), ANY_CODE, 'the case is disclosed through the shared errors module, code first (A6) — never a silent downgrade');
   } finally {
     cleanup();
@@ -448,7 +448,7 @@ test('H22 attribution REVIEWER-R1: UNSAFE case — two pending same-type reviewe
 
 // ===========================================================================
 // RETIRED HERE — 'REVIEWER-R2' (a SINGLE walk-back match) and 'REVIEWER-R3'
-// (the terminal union), both by decision 7c515e52.
+// (the terminal union), both by decision foreign_7c515e52.
 // Both pinned SHAPES of the deleted transcript-tail reader: R2 pinned the
 // bounded backward walk (there is no message list to walk), R3 pinned the
 // union of the last message's blocks (there is no union). Their substance —

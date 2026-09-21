@@ -16,7 +16,7 @@ const NOW = '2026-06-10T12:00:00.000Z';
 let SterlingStore;
 let ProjectRegistry;
 let parseConfig;
-// The seam-spawnable H15 bundle (decision 95c2c109 F2): H15 reads
+// The seam-spawnable H15 bundle (decision foreign_95c2c109 F2): H15 reads
 // STERLING_PLUGIN_ROOT only when its own walk-up finds no plugin tree, so the
 // one H15 test below that names a fixture root through the seam must spawn a
 // bundle built into a marker-free temp dir, never the source under scripts/hooks/.
@@ -223,7 +223,7 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     }
 
     // A malformed config costs the THRESHOLD, never the conventions: H1 is soft,
-    // unlike the gates that fail closed on this same input (anti_pattern e13f0fb5).
+    // unlike the gates that fail closed on this same input (anti_pattern foreign_e13f0fb5).
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
     const broken = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' });
     assert.equal(broken.code, 0, broken.stderr);
@@ -233,12 +233,12 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
   }
 });
 
-test('H1 machine role (todo cabbc10f, decision a9b98b7d): stated only on a Sterling clone itself, one line per declared state', () => {
+test('H1 machine role (todo cabbc10f, decision foreign_a9b98b7d): stated only on a Sterling clone itself, one line per declared state', () => {
   const { dir, cleanup } = makeProject();
   try {
     // STERLING_PLUGIN_ROOT makes this tmp project LOOK like the plugin's own
     // clone to pluginRoot() — but only when the SPAWNED hook's own walk-up
-    // fails to find a real plugin tree first (decision 95c2c109 F2). Spawning
+    // fails to find a real plugin tree first (decision foreign_95c2c109 F2). Spawning
     // scripts/hooks/h1-session-start.mjs from its source location inside THIS
     // repo would let that walk-up win every time and ignore the fixture, so
     // this fakes the plugin root through H1_SEAM.hookPath — a bundle built
@@ -284,7 +284,7 @@ test('H1 machine role (isolates the notAClone arm at :290-291): a fixture root w
   // fixture root (see RW-5 in h1-receipt-remedy-wording.test.mjs for that
   // shape) and remains unexercised here. makeProject()'s dir carries no
   // .claude-plugin marker of any kind, and H1_SEAM.hookPath is a bundle
-  // built into a marker-free temp dir (decision 95c2c109 F2) — so both the
+  // built into a marker-free temp dir (decision foreign_95c2c109 F2) — so both the
   // project cwd's walk-up AND the hook's own walk-up find no plugin tree,
   // with no STERLING_PLUGIN_ROOT override to name a differing root either:
   // this is the unresolvable-root path only.
@@ -314,7 +314,7 @@ test('H1 machine role: a malformed config on the plugin\'s own clone costs only 
   const { dir, cleanup } = makeProject();
   try {
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
-    // H1_SEAM.hookPath (decision 95c2c109 F2, see the block comment above): the
+    // H1_SEAM.hookPath (decision foreign_95c2c109 F2, see the block comment above): the
     // source hook's own walk-up would find THIS repo and ignore the
     // STERLING_PLUGIN_ROOT fixture below.
     const r = runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, {
@@ -333,7 +333,7 @@ test('H1 machine role: a malformed config on the plugin\'s own clone costs only 
   }
 });
 
-test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer clone behind origin warns BOTH surfaces; current or declared-authoring stays silent', () => {
+test('H1 clone-currency signal (the gap decision foreign_be9168e8 parked): a consumer clone behind origin warns BOTH surfaces; current or declared-authoring stays silent', () => {
   const { dir, cleanup } = makeProject();
   const base = mkdtempSync(join(tmpdir(), 'sterling-currency-'));
   // real git against a LOCAL file remote — the probe's fetch works offline
@@ -361,7 +361,7 @@ test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer cl
     sh(author, ['push']);
 
     // TTL 0 → the fetch throttle never reads as fresh, so each run probes.
-    // Spawned via H1_SEAM.hookPath (decision 95c2c109 F2, see the block comment
+    // Spawned via H1_SEAM.hookPath (decision foreign_95c2c109 F2, see the block comment
     // above): the source hook's own walk-up would find THIS repo (whose
     // .sterling/config.json declares machine_role: authoring) and the
     // STERLING_PLUGIN_ROOT=clone fixture below would never be consulted at all.
@@ -399,7 +399,7 @@ test('H1 clone-currency signal (the gap decision be9168e8 parked): a consumer cl
   }
 });
 
-test('H1: shared project registry — touches this project last_seen + makes the CONDUCTOR aware of live siblings via additionalContext, not systemMessage (decision 8f9e6db2)', () => {
+test('H1: shared project registry — touches this project last_seen + makes the CONDUCTOR aware of live siblings via additionalContext, not systemMessage (decision foreign_8f9e6db2)', () => {
   const { dir, cleanup } = makeProject();
   const regPath = join(dir, 'registry.db');
   const cwdPosix = dir.replace(/\\/g, '/');
@@ -442,7 +442,7 @@ test('H1: shared project registry — touches this project last_seen + makes the
   }
 });
 
-test('H1 machine-activation guard: unresolvable baked hook node warns human + conductor; resolvable or foreign installs stay quiet (anti_pattern 60e8463d)', () => {
+test('H1 machine-activation guard: unresolvable baked hook node warns human + conductor; resolvable or foreign installs stay quiet (anti_pattern foreign_60e8463d)', () => {
   const { dir, cleanup } = makeProject();
   try {
     const agentsDir = join(dir, '.claude', 'agents');
@@ -604,7 +604,7 @@ test('H2: selection row consumed one-shot, transactionally, from the store — n
 // time — it only registers the candidate path in touches.json (Arm 2,
 // unchanged). Minting moves to SETTLEMENT (H10's Stop), hashing final touched
 // content against the owning record's file_baselines (sha256 of the owned
-// file's bytes, decision 57d9a52d). Pipeline-mode minting-on-touch is
+// file's bytes, decision foreign_57d9a52d). Pipeline-mode minting-on-touch is
 // UNCHANGED (untouched below).
 // Restored here (its original position sat between the deleted H4 test and
 // this one — swept away with that test's segment by my line-range deletion,
@@ -1042,7 +1042,7 @@ test('hook cwd: a SUBDIRECTORY resolves to the project root; a bare .sterling di
 
 // H3/H8 fail-closed (audit finding 5/43, board ea2742e0): a BLOCKING gate whose
 // store access throws must DENY (exit 2), never void itself via an uncaught
-// exit 1 (decision 2422e76a's rule, previously applied only to H17/H15).
+// exit 1 (decision foreign_2422e76a's rule, previously applied only to H17/H15).
 test('H16 hooks.json matcher covers WebSearch, WebFetch, Task, Agent on PostToolUse (H11 lesson: direct-invocation tests bypass the platform matcher, so assert the registration itself)', () => {
   const hooksJson = JSON.parse(readFileSync(join(root, 'hooks', 'hooks.json'), 'utf8'));
   const entry = (hooksJson.hooks.PostToolUse ?? []).find((e) =>
@@ -1789,7 +1789,7 @@ test('H10 AC7 (SOP half): the drain skill text routes the research_owed lane (fu
   assert.match(skill, /research_owed[\s\S]{0,400}quer/i, 'the lane routes to writing the durable record from the cited queries');
 });
 
-// ---- H10 concept duty (decision 7208729b, concept-article-layer-wiring) ----
+// ---- H10 concept duty (decision foreign_7208729b, concept-article-layer-wiring) ----
 // A concept_designed event (detail = FAMILY slug, appended by concept-designed.mjs
 // the moment a design settles) demands that family's concept article — a
 // feature_article with concept_family === family created/updated since the event.
@@ -1884,7 +1884,7 @@ test('H10 concept duty: concept_article_missing is deduped per family — an ope
     // pre-existing open item for weapons (a prior session's release)
     store.create({
       ...envelope('todo'),
-      text: "concept article missing: design settled for concept family 'weapons' and the session ended without its concept article — create/update the feature_article with concept_family 'weapons' (decision 7208729b)",
+      text: "concept article missing: design settled for concept family 'weapons' and the session ended without its concept article — create/update the feature_article with concept_family 'weapons'",
       source: 'system',
       system_reason: 'concept_article_missing',
     });

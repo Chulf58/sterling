@@ -14,17 +14,17 @@
 // review-ledger receipt was never minted.
 //
 // Corroborating records (knowledge_get'd, not paraphrased from memory):
-//   - decision review-receipt-ledger (12a26ca6): SubagentStop PROMOTES a
+//   - decision review-receipt-ledger (foreign_12a26ca6): SubagentStop PROMOTES a
 //     reviewer-class entry (agent_type strictly prefixed 'reviewer-') into
 //     the durable ledger .sterling/review-ledger.json instead of just
 //     deleting it; the ledger write itself IS lock-guarded — "unlike the
 //     register a lost ledger update is PERMANENT". The register
 //     read-modify-write was NOT lock-guarded.
-//   - feature_article h22-dispatch-register (5eee48d3): confirms the above
+//   - feature_article h22-dispatch-register (foreign_5eee48d3): confirms the above
 //     mechanism and that an unmatched SubagentStop is "a clean no-op" by
 //     design — the exact behavior that turns a lost register append into a
 //     silently lost review receipt.
-//   - decision register-writers-cooperating-lock (1e0ba0d0): SETTLES the fix
+//   - decision register-writers-cooperating-lock (foreign_1e0ba0d0): SETTLES the fix
 //     shape — an EXTRACTED shared lock helper
 //     (scripts/hooks/lib/dispatch-register-lock.mjs) guards every register
 //     writer (H22 Start append, H22 Stop remove/promote, H22's prune pass,
@@ -84,7 +84,7 @@
 //   always-green, never flaky-green. The D1x arms below run IN-PROCESS
 //   (cooperative event-loop interleaving of concurrent acquireLock()
 //   promises, not separate OS processes) and are the PRIMARY proof per
-//   decision 1e0ba0d0 — "the probabilistic pin alone is insufficient because
+//   decision foreign_1e0ba0d0 — "the probabilistic pin alone is insufficient because
 //   a scheduler can serialize the unfixed code into an accidental pass."
 //
 // HARNESS LIMITATION (disclosed honestly): true microsecond-simultaneous
@@ -774,7 +774,7 @@ test('H10-TIMEOUT: while the register lock is held, an H10 Stop that would stamp
 // ledger append path — the second-Stop "still exactly one receipt"
 // assertion goes red.
 // STRENGTHENED 2026-08-31 (Codex outside-family review, thread 01a0586b +
-// decision 57984926): Codex called the old generic-word disclosure match
+// decision foreign_57984926): Codex called the old generic-word disclosure match
 // non-probative — it could pass under a wrong agent_type+at-keyed dedupe just
 // as easily as a correct agent_id-keyed one. The disclosure assertion below
 // now demands the actual duplicate IDENTITY (the literal agent_id) appear,

@@ -1,4 +1,4 @@
-// ------------- Tasks-tab OBJECTIVE GROUPING (decision a8d2ce6c, slice 2) -------------
+// ------------- Tasks-tab OBJECTIVE GROUPING (decision foreign_a8d2ce6c, slice 2) -------------
 //
 // SPEC-ONLY oracle, written BEFORE the grouping exists. Slice 1 shipped the field:
 // a todo may carry an optional non-empty `objective` string (a grouping KEY, not a
@@ -47,7 +47,7 @@
 //     wins, exactly as a collapsed Knowledge source hides an expanded card).
 //   • the pure projection keeps its existing name and gains a TRAILING OPTIONAL
 //     param: todoCards(store, expanded?) — the additive-optional-param idiom
-//     (decision 34d61f60) the P4 `knowledge?` and System-tab `roster?` params used.
+//     (decision foreign_34d61f60) the P4 `knowledge?` and System-tab `roster?` params used.
 //     Group headers are returned INLINE, in display order, ahead of their children.
 //   • ORDER between groups and standalone cards is deliberately NOT pinned (nothing
 //     in the decision fixes it); what IS pinned is nesting, membership, counts and

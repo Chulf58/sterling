@@ -1,7 +1,7 @@
 // Shared clone-currency READ (board 4ccf0644): is the Sterling CLONE at
 // `root` behind origin's default branch? This is a passive, READ-ONLY probe
 // — it never runs `git fetch` itself, so it never opens a second fetch path
-// beside H1's own throttled one (decision 558895a9, scripts/hooks/h1-session-
+// beside H1's own throttled one (decision foreign_558895a9, scripts/hooks/h1-session-
 // start.mjs). It only computes the behind-count against whatever ref state
 // H1's own SessionStart cadence (or a manual fetch/update) has already left
 // behind — the exact same LOCAL computation H1 performs after its own

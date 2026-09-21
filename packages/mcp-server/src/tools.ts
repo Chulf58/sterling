@@ -50,7 +50,7 @@ export interface CreateResult {
    */
   warnings: string[];
   /**
-   * SAME-SUBJECT SURFACING (decision 7e3c66c5): present only for ruling-type
+   * SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): present only for ruling-type
    * creates (decision / anti_pattern / research_finding) — other types'
    * responses stay byte-identical. Advisory only, never gates the write.
    */
@@ -127,7 +127,7 @@ export interface BoardFilter {
    * (board e725979c — maintenance_query's feature_slug gap). Resolution is
    * CHAIN-AWARE: it matches the live article's id AND every ancestor id in
    * its supersede chain (the same rel:'supersedes' links join knowledgeUpdate's
-   * drift-item auto-drain already walks, decision 8ecd435f) — an item raised
+   * drift-item auto-drain already walks, decision foreign_8ecd435f) — an item raised
    * against an earlier version of the article still matches after a later
    * reconcile superseded it. An unresolvable slug narrows to NOTHING rather
    * than erroring (no article to own anything), and combines with every other
@@ -136,7 +136,7 @@ export interface BoardFilter {
   feature_slug?: string;
   /**
    * Narrow to the slices of ONE objective — the grouping key board_add requires
-   * and decision a8d2ce6c made the axis the TUI groups by and H1 counts by. The
+   * and decision foreign_a8d2ce6c made the axis the TUI groups by and H1 counts by. The
    * data was always stored and the filter was simply missing: a consuming
    * project paged 306 items across two lanes to find one objective's slices.
    *
@@ -583,7 +583,7 @@ export interface InboundSupersedesEntry {
 }
 
 /**
- * SAME-SUBJECT SURFACING ON WRITE (decision 7e3c66c5): one digest entry per
+ * SAME-SUBJECT SURFACING ON WRITE (decision foreign_7e3c66c5): one digest entry per
  * OTHER active record the preflight axis engine judges to govern the same
  * subject as a record just written. Mirrors knowledgePreflight's own
  * per-candidate shape (id/type/title/matched_on) plus `slug`, since a ruling
@@ -619,7 +619,7 @@ export interface ToolDeps {
 const DAY_MS = 86_400_000;
 
 // Board/queue read defaults, named rather than inlined for the DEFAULT_QUERY_CAP
-// reason (decision b47889b7): the tool layer now REPORTS the cap it applied, so
+// reason (decision foreign_b47889b7): the tool layer now REPORTS the cap it applied, so
 // the value has two readers and a literal would be a second place to drift.
 const DEFAULT_BOARD_CAP = 50;
 // The bounded todo scan the filter runs over. A full scan means the reported
@@ -1049,7 +1049,7 @@ interface DriftCheckContext {
   baselinedAt: string;
   /**
    * Whether the cheap stat-first mtime prefilter may TERMINATE with `clean`
-   * (no hash). TRUE at the mint (its historical behaviour, decision 57d9a52d);
+   * (no hash). TRUE at the mint (its historical behaviour, decision foreign_57d9a52d);
    * ALWAYS FALSE at the recheck (review FIX 1, 2026-08-31) — there a
    * timestamp-only `clean` becomes the affirmative "no longer reproduces"
    * claim, and an mtime-preserved edit after an unrelated re-baseline would make
@@ -1139,7 +1139,7 @@ export class UnresolvedIdentifierError extends Error {}
  * CATCHES it and serves the archived snapshot plus a legacy_resolution block.
  * Putting the alias hit on the error keeps the ladder single-exit — the
  * alternative, a second resolution function for reads, is exactly the fork the
- * one-ladder decision (2debab53) exists to prevent.
+ * one-ladder decision (foreign_2debab53) exists to prevent.
  */
 export class HistoricalIdError extends Error {
   constructor(
@@ -1177,7 +1177,7 @@ export interface KnowledgeSplitInput {
  * hoisted this out of refuseServerOwnedFields so knowledge_schema's
  * server_owned mask derives from the SAME list this refusal guard consumes).
  * Exported at MODULE scope (invariant 1 — one definition) so server.ts's typed
- * knowledge_create input schema (decision 7c7f6db1) strips exactly this set
+ * knowledge_create input schema (decision foreign_7c7f6db1) strips exactly this set
  * from every per-type variant instead of re-deriving or copying it.
  */
 export const WRITE_REFUSED_FIELDS: readonly string[] = [
@@ -1214,7 +1214,7 @@ export const SERVER_OWNED_FIELDS: readonly string[] = [...WRITE_REFUSED_FIELDS, 
  * links [], scope 'project', stack_tags []) — caller-SUPPLIABLE but never
  * caller-REQUIRED. Exported so the typed create variants mark these
  * `.optional()` exactly like knowledge_schema already reports them, keeping
- * the two surfaces in lockstep (decision 7c7f6db1).
+ * the two surfaces in lockstep (decision foreign_7c7f6db1).
  */
 export const CREATE_DEFAULTED_FIELDS: readonly string[] = ['author', 'links', 'scope', 'stack_tags'];
 
@@ -1633,7 +1633,7 @@ export class SterlingTools {
     if (!mapped) return { root: undefined, unresolved: true };
     // HOST-INDEPENDENT classification (decision windows-linux-parity):
     // config.working_trees maps a name to an absolute-OR-project-relative path
-    // (decision a0fc8743), so this branch decides which. node:path's isAbsolute
+    // (decision foreign_a0fc8743), so this branch decides which. node:path's isAbsolute
     // is host-native, so the SAME config resolved differently depending on which
     // OS ran the server — 'C:\\tree' and '\\tree' read as absolute on Windows and
     // as relative on Linux, where they were then joined onto the project root.
@@ -1768,7 +1768,7 @@ export class SterlingTools {
       // findings 1+2 — the two collapse into one fix: never_tracked no longer
       // depends on the capped per-ref tip loop at all, so a truncated tip scan
       // can only ever under-detect a live PARK — an already-accepted, documented
-      // degrade (decision 30d18443: a failed or bounded probe must never SUPPRESS
+      // degrade (decision foreign_30d18443: a failed or bounded probe must never SUPPRESS
       // a real deletion finding) — never inflate into a false never_tracked).
       // One subprocess per already-rare missing file is the accepted cost here.
       const history = run(['rev-list', '--all', '--', rel]);
@@ -2111,7 +2111,7 @@ export class SterlingTools {
    * queue-truth-at-read-annotation-design; boards be0ea20a HIGH + ab5ef216).
    *
    * THE MEASURED PROBLEM: the reconcile lane is minted by the READ path
-   * (research_finding f512020b), so READ VOLUME — not drift volume — drives the
+   * (research_finding foreign_f512020b), so READ VOLUME — not drift volume — drives the
    * queue, and 12 of 14 lane items measured stale-open: the drift they name had
    * already been reconciled away, and nothing said so. A drainer had to
    * re-derive each item's premise by hand, which is exactly the cost that makes
@@ -2133,7 +2133,7 @@ export class SterlingTools {
    * rather than implying anything about the commit. A mapped working tree is
    * judged against THAT tree's own HEAD.
    *
-   * NEVER CLOSURE AUTHORITY. Decision 68988832's rejection of auto-closure and
+   * NEVER CLOSURE AUTHORITY. Decision foreign_68988832's rejection of auto-closure and
    * auto-drain STANDS: this is a best-effort READ annotation that makes a human
    * drain cheap, and it writes nothing (a read is a pure function here — AC2
    * pins two identical reads producing identical records).
@@ -2544,7 +2544,7 @@ export class SterlingTools {
     // MODE (2/2) — THE MTIME PREFILTER'S TERMINATING POWER.
     //
     // At the MINT the prefilter is unconditional and is the cheap half of the
-    // two-step check (decision 57d9a52d): mtime no newer than the article's last
+    // two-step check (decision foreign_57d9a52d): mtime no newer than the article's last
     // update means the file cannot have moved since its baseline was taken, so
     // no content read is owed.
     //
@@ -2574,7 +2574,7 @@ export class SterlingTools {
     }
     // A registered generated projection never CONTENT-flags: every regen changes
     // it by design and check-projection-fresh guards its currency at the merge
-    // gate (decision e1275166). Its DELETION still flags, in the arm above.
+    // gate (decision foreign_e1275166). Its DELETION still flags, in the arm above.
     if (this.isGeneratedProjection(rel)) return { verdict: { kind: 'clean' }, size };
     if (baseline === undefined) {
       // NOT collapsed to `false`/clean here (the contentChanged() anti-model):
@@ -2669,7 +2669,7 @@ export class SterlingTools {
    * read at finer grain — one policy, two readings, not two policies.
    *
    * A FLAG ONLY, never a mint: this path enqueues nothing. Invalidation already
-   * exists (H7 / the read-time drift wires, decision 57d9a52d) and a second lane
+   * exists (H7 / the read-time drift wires, decision foreign_57d9a52d) and a second lane
    * on the same fact would be double-reporting.
    *
    * Baselines exist for feature_article and reference_material only (see
@@ -3004,7 +3004,7 @@ export class SterlingTools {
    *
    * CORRECTED 2026-08-04: this message used to end "There is NO way to retire a
    * record to a non-serving state through this surface". True when written, and
-   * outlived five days later by knowledge_retire (decision 9948475b) — which
+   * outlived five days later by knowledge_retire (decision foreign_9948475b) — which
    * rewrote the same claim in CLAUDE.md and missed this copy. It now NAMES the
    * retirement path and its boundary in one breath: retirement is for a genuine
    * DUPLICATE, never for a record that is merely wrong, because a caller here may
@@ -3097,7 +3097,7 @@ export class SterlingTools {
   /**
    * Refuse a write carrying fields the record type does not define, naming them
    * AND the valid set — the write-side half of fail-loud (P5), symmetric with the
-   * strict tool PARAMETERS of decision b47889b7. The valid set is in the message
+   * strict tool PARAMETERS of decision foreign_b47889b7. The valid set is in the message
    * because discoverability is the actual complaint: per-type required fields and
    * the files-vs-file_keys split (feature_article uses files[].path, decision /
    * anti_pattern / research_finding / todo use file_keys, reference_material
@@ -3129,7 +3129,7 @@ export class SterlingTools {
 
   /**
    * Render a zod schema-validation failure in this surface's own idiom
-   * (board 03c92e2a; decision d0b88e27 — a refusal names its DISCRIMINATOR,
+   * (board 03c92e2a; decision foreign_d0b88e27 — a refusal names its DISCRIMINATOR,
    * not just its rule) instead of leaking the raw issue array. Per issue:
    * the caller-facing field path (renderIssuePath), what was RECEIVED vs
    * EXPECTED, and — when the failing element itself should have been an
@@ -3137,7 +3137,7 @@ export class SterlingTools {
    * element) — that element's expected shape enumerated by name/type/
    * required-ness. The shape and any enum's permitted values are pulled
    * from schemaFor(type) — the SAME schema-walk knowledge_schema projects
-   * (decision 9948475b) — never a second hand-written description, so this
+   * (decision foreign_9948475b) — never a second hand-written description, so this
    * cannot drift from what knowledge_schema itself reports.
    */
   private renderValidationFailure(err: ZodError, type: string, op: string): Error {
@@ -3167,7 +3167,7 @@ export class SterlingTools {
         }
         return text;
       }
-      // Board a9280db7 (decision c48380bf): current_ac/live_test_refs are now a
+      // Board a9280db7 (decision foreign_c48380bf): current_ac/live_test_refs are now a
       // union (real content OR the structured not_applicable exemption), so a
       // bad element inside the array branch surfaces as a single top-level
       // 'invalid_union' issue instead of a direct 'invalid_type' — without
@@ -3614,7 +3614,7 @@ export class SterlingTools {
     }
     const record = this.store.create(candidate);
     this.surfacePromotionCandidate(record, type);
-    // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): only for the three ruling
     // types — other types' create responses stay byte-identical. Computed
     // AFTER the store write (AC6: disclosure never blocks or gates), on the
     // registered FTS extractor's text (same source citedIdWarnings already
@@ -3752,7 +3752,7 @@ export class SterlingTools {
             // a path would have the first one's open item silently suppress
             // the second SUBJECT's finding, and duplicating the dedup rule
             // here is exactly how the four hand-rolled copies drifted apart
-            // (decision 194f43e4).
+            // (decision foreign_194f43e4).
             this.maintenanceEnqueue({
               reason: 'refresh_reference',
               text: `refresh reference '${r.title}' — ${rel} changed on disk after source_date (out-of-band edit); refresh summary + source_date`,
@@ -4034,7 +4034,7 @@ export class SterlingTools {
    * keeps returning full flagged records for exactly that reason.
    */
   /**
-   * APPEND to an array field without retransmitting it (decision 44e45931's
+   * APPEND to an array field without retransmitting it (decision foreign_44e45931's
    * successor — the append half of the append/identity problem).
    *
    * knowledgeUpdate REPLACES each field it receives, so adding one history entry
@@ -4048,7 +4048,7 @@ export class SterlingTools {
    *
    * It delegates to knowledgeUpdate rather than writing its own supersede, so it
    * CANNOT diverge from the update path's guarantees: version bump, prior version
-   * retained, file_baselines re-baseline, and (decision 68988832) an EXPLICIT
+   * retained, file_baselines re-baseline, and (decision foreign_68988832) an EXPLICIT
    * resolves claim — never an implicit drain — all happen exactly once and
    * exactly as before. Any open reconcile_needed/refresh_reference debt on the
    * chain not named in resolves is warned on the receipt, not silently
@@ -4085,7 +4085,7 @@ export class SterlingTools {
     const next = [...((current as unknown[]) ?? []), ...entries];
     // Straight through the ONE update path — every guarantee above rides along,
     // including the oversize check (board 8390f8fa) and the resolves claim
-    // (decision 68988832): the write's result carries a warning on the SAME
+    // (decision foreign_68988832): the write's result carries a warning on the SAME
     // channel knowledge_update uses. same_subject (ruling types only) is
     // split off rather than left inside `record` — see splitSameSubject.
     // THE APPEND-JOIN CANDIDATE PATHS (board 31b2c872; rebuilt per decision
@@ -4510,7 +4510,7 @@ export class SterlingTools {
     // does not put .min(1) on files[], so an empty array would validate and the
     // article would silently become un-ownable territory — the floor has to be
     // stated here, as knowledge_split states it, and for the same reason (full
-    // donation is retire-and-replace, rejected by decision 8b87efcb).
+    // donation is retire-and-replace, rejected by decision foreign_8b87efcb).
     if (old.type === 'feature_article' && base === 'files' && arr.length === 1) {
       throw new Error(
         `knowledge_array_remove: this would remove the LAST entry of feature_article.files — the article must retain at least one owned file ` +
@@ -4591,7 +4591,7 @@ export class SterlingTools {
    * calling this once here — from THEM, on the record it returns — covers all
    * three without a second definition).
    *
-   * Rides the EXISTING coherence-warning channel (decision 8ed62c1b) rather
+   * Rides the EXISTING coherence-warning channel (decision foreign_8ed62c1b) rather
    * than inventing a second one: knowledge_update already returns
    * {record, warnings[]} via knowledgeUpdateResult, and append/edit now carry
    * the same shape. WARNS, never refuses — same reasoning as the coherence
@@ -4621,7 +4621,7 @@ export class SterlingTools {
     if (size <= threshold) return [];
     const a = record as unknown as { slug: string; files?: { path: string }[] };
 
-    // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+    // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
     // exemption register, config.article_oversize_exempt[slug] -> justifying
     // decision id. The exemption suppresses the mint ONLY while the cited
     // decision resolves through the SAME id ladder as knowledge_get and is
@@ -4746,7 +4746,7 @@ export class SterlingTools {
     // the same record store.get would, and a genuinely bad id throws here with
     // the same 'knowledge_update' naming knowledgeUpdate's own resolution would.
     const before = this.resolveRecordId(id, 'knowledge_update');
-    // SAME-SUBJECT SURFACING (decision 7e3c66c5, HIGH review finding): lift
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5, HIGH review finding): lift
     // same_subject OUT of the flattened record and onto its own envelope
     // sibling — mirroring knowledge_create/knowledge_supersede — BEFORE this
     // wraps it as `record`. Left inside, the digest write-projection
@@ -4782,7 +4782,7 @@ export class SterlingTools {
     // of the merged record, which was already scanned (or not) on whatever
     // write introduced it.
     warnings.push(...this.citedIdWarnings(JSON.stringify(body)));
-    // OPEN RECONCILE-LANE DEBT DISCLOSURE (decision 68988832-2ef5-4ff3-b693-
+    // OPEN RECONCILE-LANE DEBT DISCLOSURE (decision foreign_68988832-2ef5-4ff3-b693-
     // d8bd8dae1): any reconcile_needed/refresh_reference item still open on
     // this article's chain, not named in this write's resolves, is unclaimed
     // debt — named here so it is visible at the exact moment the writer is
@@ -4801,7 +4801,7 @@ export class SterlingTools {
    * projection:"digest" the result envelope survives intact (warnings,
    * check_skipped, replaced, deduped — everything a caller acts on) and only
    * the echoed record collapses to its digestRecord headline, the same
-   * projection vocabulary the read side already has (decision 87a12a1e): one
+   * projection vocabulary the read side already has (decision foreign_87a12a1e): one
    * projection concept, not two. The default is the DIGEST receipt (board
    * 7ddf13a7, flipping e23f38f8's default-full after the 2026-08-10
    * retrospective measured the echo as the biggest single context leak): the
@@ -4987,7 +4987,7 @@ export class SterlingTools {
 
   /**
    * The candidate-matching CORE shared by knowledgePreflight and same-subject
-   * surfacing on write (decision 7e3c66c5) — the preflight axis floors
+   * surfacing on write (decision foreign_7e3c66c5) — the preflight axis floors
    * (extractAxisTerms already run by the caller -> store.query the six
    * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
    * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
@@ -5050,12 +5050,12 @@ export class SterlingTools {
     );
   }
 
-  /** Disclosure cap (decision 7e3c66c5, AC7): same_subject is a hint at what
+  /** Disclosure cap (decision foreign_7e3c66c5, AC7): same_subject is a hint at what
    *  else governs this subject, never an unbounded inventory. */
   private static readonly SAME_SUBJECT_CAP = 5;
 
   /**
-   * SAME-SUBJECT SURFACING ON WRITE (decision 7e3c66c5): reuses
+   * SAME-SUBJECT SURFACING ON WRITE (decision foreign_7e3c66c5): reuses
    * axisCandidateMatches unchanged, sourced from the WRITTEN record's own text
    * (the registered FTS extractor's output — the same text the citation scan
    * uses) rather than an outgoing dispatch prompt, and excludes a
@@ -5290,8 +5290,8 @@ export class SterlingTools {
 
   /**
    * knowledge_get — full uuid, or the 8-char PREFIX every citation in this repo
-   * uses (decision 27f148c2). CLAUDE.md, code comments and record prose all cite
-   * "decision 6dfbe675" style, and check-record-citations already resolves that
+   * uses (decision foreign_27f148c2). CLAUDE.md, code comments and record prose all cite
+   * "decision foreign_6dfbe675" style, and check-record-citations already resolves that
    * form mechanically through recordIdIndex() — so an agent handed a citation
    * from any of those surfaces could read it everywhere except through the tool
    * built for reading. Two agents in a consuming project burned a session on
@@ -5372,7 +5372,7 @@ export class SterlingTools {
         }
         return this.projectFieldWindow(this.serveArchivedAlias(alias), options);
       }
-      // DEAD-SLUG FALLTHROUGH (decision df361a0f, board 2b9f2f1a part 3,
+      // DEAD-SLUG FALLTHROUGH (decision foreign_df361a0f, board 2b9f2f1a part 3,
       // 'supersede + disclose'), knowledge_get-ONLY: resolveRecordId already
       // tried live-slug then id-prefix resolution and both failed, so this
       // can never shadow a live record. If the id names a slug carried only
@@ -5395,7 +5395,7 @@ export class SterlingTools {
       if (!deadSlugCarriers.length) throw err;
       record = deadSlugCarriers[0];
     }
-    // Additive terminus disclosure (decision de1a7329): the pinned record's own
+    // Additive terminus disclosure (decision foreign_de1a7329): the pinned record's own
     // fields are never touched — a live record gets no `terminus` key at all,
     // never a null/undefined one (AC6). Only a superseded record gains it,
     // sourced from store.resolveTerminus so the disclosed end is the true chain
@@ -5753,7 +5753,7 @@ export class SterlingTools {
 
   /**
    * Shared id resolution (board slice 85ecfe43): full uuid, exact slug (board
-   * 1e639f32), or the 8-char citation prefix (decision 27f148c2) — the same
+   * 1e639f32), or the 8-char citation prefix (decision foreign_27f148c2) — the same
    * three forms knowledge_get has always resolved, now reused by every write
    * tool that addresses a record by caller-supplied id so none of them can
    * drift from knowledge_get's own resolution or its ambiguity wording.
@@ -5924,7 +5924,7 @@ export class SterlingTools {
    * legacy_resolution block that tells the reader where the concept lives now
    * and how far behind this body is. Version-pinned on purpose — a citation
    * meant a specific text, and silently forwarding it to a rewritten head is
-   * the failure mode decision de1a7329 already ruled out for dead ids.
+   * the failure mode decision foreign_de1a7329 already ruled out for dead ids.
    *
    * A missing snapshot refuses LOUDLY rather than falling back to the head: an
    * alias promising version N while record_versions holds no such row is a torn
@@ -5963,19 +5963,19 @@ export class SterlingTools {
    * Matches a citation-shaped token — a full uuid, or an 8-plus-hex-char
    * prefix — immediately following `knowledge_get` or a record-type word, the
    * convention already used throughout this store's own prose (e.g.
-   * "(knowledge_get 19b506ce-…)", "decision de1a7329"). Deliberately
+   * "(knowledge_get 19b506ce-…)", "decision foreign_de1a7329"). Deliberately
    * conservative: a hex-looking word with no adjacent trigger word never
    * matches, so false negatives are preferred over false positives.
    *
    * Resolution reuses recordIdIndex() — the same cheap, no-body-fetch read
    * knowledge_get's own prefix resolution uses — so ANY status resolves,
-   * tombstones included (decision de1a7329: a superseded record is a
+   * tombstones included (decision foreign_de1a7329: a superseded record is a
    * legitimate citation).
    */
   // Separator class widened (board fc053051 extension) to tolerate the
   // spellings already seen in review feedback and in this store's own prose:
-  // a plain space, an opening paren, a colon ("decision: 19b506ce"), and a
-  // backtick ("decision `19b506ce`") — alongside the original space/paren.
+  // a plain space, an opening paren, a colon ("decision: foreign_19b506ce"), and a
+  // backtick ("decision `foreign_19b506ce`") — alongside the original space/paren.
   // The id capture is widened from EXACTLY 8 hex chars to 8-40, because a
   // dash-less citation longer than 8 (e.g. a 12- or 16-char prefix) used to
   // be clipped at 8 chars and then fail the trailing \b boundary check
@@ -6152,7 +6152,7 @@ export class SterlingTools {
   /**
    * Validate ONE `resolves` claim BEFORE any write lands (decision
    * 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373 — replaces the
-   * implicit chain-based auto-drain of decision 8ecd435f). The named id must:
+   * implicit chain-based auto-drain of decision foreign_8ecd435f). The named id must:
    * exist as an open maintenance item; be in a DRAINABLE lane
    * (reconcile_needed or refresh_reference — promotion_review and every
    * other lane close only through their own mechanism, never resolves); and
@@ -6173,7 +6173,7 @@ export class SterlingTools {
    */
   /**
    * Lanes a knowledge_update (in-place, non-split) `resolves` claim may close —
-   * board 4afbfa56, extending decision 68988832's original reconcile_needed/
+   * board 4afbfa56, extending decision foreign_68988832's original reconcile_needed/
    * refresh_reference pair. The fulfilling-write discharge shape for these
    * three ALREADY EXISTS (knowledge_update), so this is exactly the same
    * mechanism, just a wider allowed set — not a new abstraction. The other
@@ -6215,7 +6215,7 @@ export class SterlingTools {
    * H10's OWNERSHIP PREDICATE, mirrored — AND RESTRICTED TO THE PROJECT STORE
    * (decision [append-join-discharge-rebuilt-as-one-atomic-transition],
    * requirement B; the project-local posture itself was already ruled in
-   * decision 8c65937e).
+   * decision foreign_8c65937e).
    *
    * The append-join admission and the hook that MINTS the items it closes must
    * never be able to disagree about what "owned" means, so this asks the same
@@ -6525,7 +6525,7 @@ export class SterlingTools {
     // FOREIGN-TREE ARTICLES CANNOT DISCHARGE ROOT OWNERSHIP DEBT (review
     // finding, 2026-09-05). H10 mints these items from `isUnowned`, which
     // EXCLUDES every owner row declaring a working_tree — that article owns a
-    // different tree's copy of the same-named path (decision a0fc8743), so its
+    // different tree's copy of the same-named path (decision foreign_a0fc8743), so its
     // files[] entry never makes the ROOT's path owned. Admitting the join here
     // would discharge the item while H10 went on demanding an article for the
     // very same path: the debt closed without the ownership that created it
@@ -7063,7 +7063,7 @@ export class SterlingTools {
         throw new Error(`resolves: '${duplicate}' is named more than once — an item can only be claimed once; nothing was written.`);
       }
     }
-    // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision 68988832): a
+    // RESOLVES CLAIM VALIDATION runs BEFORE any write (decision foreign_68988832): a
     // write that does not validate is a write that must not land.
     //
     // THE APPEND-JOIN PATH VALIDATES INSIDE ITS TRANSACTION INSTEAD, and
@@ -7147,7 +7147,7 @@ export class SterlingTools {
     // History rotation (board 0697c6bd): bound the stored history to genesis +
     // newest entries. The middle is dropped from the version being written —
     // the PRIOR body, archived whole in record_versions by this same write,
-    // retains them forever (the archive that decision c68eb219's rotation
+    // retains them forever (the archive that decision foreign_c68eb219's rotation
     // originally leaned on the supersede chain for), so no entry ever becomes
     // unreadable. Callers see the rotation via historyRotationWarnings on the
     // write's result envelope.
@@ -7193,11 +7193,11 @@ export class SterlingTools {
       next.absence_attestations = undefined;
     }
     const previousVersion = (old as unknown as { version?: number }).version;
-    // EXPLICIT-RESOLVES CLOSURE (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1;
+    // EXPLICIT-RESOLVES CLOSURE (decision foreign_68988832;
     // board 68fe8373): drain EXACTLY the named+validated items, through the
     // SAME drain-log path maintenance_remove uses, so maintenance_remove later
     // answers already_drained:true. The old implicit chain-based auto-drain
-    // (decision 8ecd435f — every open reconcile_needed/refresh_reference item
+    // (decision foreign_8ecd435f — every open reconcile_needed/refresh_reference item
     // on the chain, discharged by ANY write, no claim required) is REMOVED: a
     // write that does not name an item leaves it open, however tightly linked.
     //
@@ -7314,7 +7314,7 @@ export class SterlingTools {
     // read-modify-write). It now happens inside dischargeAppendJoin's own
     // transaction; re-introducing anything here would re-open exactly that gap.
     this.repointPromotionReview(chain, updated.id, ts);
-    // SAME-SUBJECT SURFACING (decision 7e3c66c5): only for the three ruling
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): only for the three ruling
     // types — other types' update responses stay byte-identical. Excludes
     // the update's own lineage: `chain` (the prior version plus every
     // ancestor it already carries a 'supersedes' link to — the exact set
@@ -7430,7 +7430,7 @@ export class SterlingTools {
    * lane: promotion_review still refuses unconditionally (P1), every other
    * lane closes on a chain-matching feature_link OR the article-oversize
    * marker for this parent's slug. An item left unnamed stays open, exactly
-   * the explicit-claim posture decision 68988832 established.
+   * the explicit-claim posture decision foreign_68988832 established.
    */
   knowledgeSplit(input: KnowledgeSplitInput): {
     parent: { id: string; slug: string; version: number };
@@ -7462,7 +7462,7 @@ export class SterlingTools {
       live_test_refs: { ac_id: string; test_paths: string[] }[] | { not_applicable: { reason: string; ruling_record_id?: string } };
       dependencies?: { relies_on: string[]; relied_by: string[] };
     };
-    // Board a9280db7 (decision c48380bf): current_ac/live_test_refs may now be
+    // Board a9280db7 (decision foreign_c48380bf): current_ac/live_test_refs may now be
     // the structured not_applicable exemption object on a probe|tool article,
     // not an array — every read below assumed array shape unconditionally
     // (.map/.filter), which would THROW rather than refuse cleanly on such a
@@ -7545,12 +7545,12 @@ export class SterlingTools {
       }
     }
 
-    // Full donation refused (decision 8b87efcb's own rejected alternatives:
+    // Full donation refused (decision foreign_8b87efcb's own rejected alternatives:
     // that shape is retire-and-replace, not a split) — the parent must retain
     // at least one owned file.
     if (parentRec.files.length > 0 && claimedPaths.size >= parentRec.files.length) {
       throw new Error(
-        `knowledge_split: this split moves all ${parentRec.files.length} of parent '${parentRec.slug}''s files — the parent must retain at least one owned file (full donation is retire-and-replace, rejected by decision 8b87efcb); nothing was written.`
+        `knowledge_split: this split moves all ${parentRec.files.length} of parent '${parentRec.slug}''s files — the parent must retain at least one owned file (full donation is retire-and-replace, not a split); nothing was written.`
       );
     }
 
@@ -7575,7 +7575,7 @@ export class SterlingTools {
     const childResults: { id: string; slug: string }[] = [];
     let parentResult!: DurableRecord;
 
-    // SYMMETRIC DEPENDENCY EDGE (skeptic finding 2, knowledge_get 2334f653):
+    // SYMMETRIC DEPENDENCY EDGE (skeptic finding 2, knowledge_get foreign_2334f653):
     // relied_by is derived at READ time from the union of every OTHER
     // article's relies_on, so leaving the parent's STORED relied_by
     // untouched would read back as relied_by_stored_stale the instant a
@@ -7634,7 +7634,7 @@ export class SterlingTools {
         dependencies: { relies_on: parentRec.dependencies?.relies_on ?? [], relied_by: parentReliedBy },
       });
 
-      // Explicit-claim closure (decision 68988832's posture, broadened per
+      // Explicit-claim closure (decision foreign_68988832's posture, broadened per
       // validateResolveClaim's split semantics above): drained INSIDE the
       // same transaction so a claim only lands alongside a split that
       // actually landed.
@@ -7993,7 +7993,7 @@ export class SterlingTools {
       // persist both rows without a nested-tx conflict).
       this.store.addLink(newId, 'informed_by', original.id);
       this.store.addLink(original.id, 'cites', newId);
-      // Explicit-claim closure (decision 68988832), drained inside this same
+      // Explicit-claim closure (decision foreign_68988832), drained inside this same
       // transaction so a claim only lands alongside an extract that landed.
       for (const claim of resolveClaims) this.store.remove(claim.id, ts);
     });
@@ -8106,8 +8106,8 @@ export class SterlingTools {
    * owed, same lineage, so RE-POINT rather than drop. In-place via updateTodo
    * (no new version, no id churn) so every other reference to the item survives.
    *
-   * Shared by knowledgeUpdate (decision 01f31039) and knowledge_supersede
-   * (decision e17794ea). Since S3 ([stable-identity-design-v2]) knowledgeUpdate
+   * Shared by knowledgeUpdate (decision foreign_01f31039) and knowledge_supersede
+   * (decision foreign_e17794ea). Since S3 ([stable-identity-design-v2]) knowledgeUpdate
    * writes IN PLACE, so only two shapes actually move an id and owe a re-point:
    * knowledge_supersede, and knowledgeUpdate's ONE re-minting branch — an
    * attestation concept replacement. On the in-place path `newId` IS the id the
@@ -8166,7 +8166,7 @@ export class SterlingTools {
     kept_stack_tags: string[];
     warnings: string[];
   } {
-    // Through the SHARED LADDER (decision 2debab53), not a raw store.get: a
+    // Through the SHARED LADDER (decision foreign_2debab53), not a raw store.get: a
     // slug or an 8-char citation prefix resolves here exactly as it does
     // everywhere else, and — the reason this changed — a HISTORICAL id now
     // produces the designed refusal naming the canonical record instead of a
@@ -8397,7 +8397,7 @@ export class SterlingTools {
     return { declared: reason, at, lane: declaredLane ?? 'capture' };
   }
 
-  /** concept_designed (§10): a domain concept family's design settled — H10 will demand the family's concept article (decision 7208729b). */
+  /** concept_designed (§10): a domain concept family's design settled — H10 will demand the family's concept article (decision foreign_7208729b). */
   conceptDesigned(families: string[]): { registered: string[]; at: string } {
     if (!Array.isArray(families) || families.length === 0 || families.some((f) => typeof f !== 'string' || !f.trim())) {
       throw new Error(`concept_designed: 'families' must be a non-empty array of concept family slugs — blank entries are refused`);
@@ -8499,7 +8499,7 @@ export class SterlingTools {
     opts?: { internalMint?: boolean }
   ): CreateResult & { notice?: string } {
     const { text, source, objective, measured_at_head, ...rest } = args;
-    // Objective grouping (decision a8d2ce6c): a grouping key for the human's
+    // Objective grouping (decision foreign_a8d2ce6c): a grouping key for the human's
     // board only — maintenance items are lane-keyed by system_reason.
     if (objective !== undefined && source === 'system') {
       throw new Error(
@@ -8510,7 +8510,7 @@ export class SterlingTools {
     // it normalizes to field-absent so ungrouped items stay shapeless.
     const normalized = objective === 'standalone' ? undefined : objective;
     // board-provenance-measured-at-head: server-stamps HEAD at add time unless
-    // the caller supplies its own sha (decision — the a2a17efa §13.2 incident:
+    // the caller supplies its own sha (decision — the foreign_a2a17efa §13.2 incident:
     // an author who knew the head had nowhere to put it). A caller-supplied
     // sha that does not resolve in this repo is refused BY NAME rather than
     // silently replaced with HEAD (P5); an absent/unavailable git degrades to
@@ -8557,7 +8557,7 @@ export class SterlingTools {
     const notices: string[] = [];
     if (source === 'user' && objective === undefined) {
       // Never a throw on the capture path — the item is saved; the default is
-      // disclosed loudly with its remedy (decision a8d2ce6c: the server has no
+      // disclosed loudly with its remedy (decision foreign_a8d2ce6c: the server has no
       // caller identity, so a refusal could lose a user-stated task).
       notices.push(
         `objective undeclared — saved as standalone; if this task is a slice of a larger objective, set it via board_update {objective: "<name>"}`
@@ -8629,7 +8629,7 @@ export class SterlingTools {
       filtered = filtered.filter((t) => ((t as { text?: string }).text ?? '').toLowerCase().includes(needle));
     }
     if (filter.objective !== undefined) {
-      // Same normalization the WRITE side applies (decision a8d2ce6c):
+      // Same normalization the WRITE side applies (decision foreign_a8d2ce6c):
       // 'standalone' means ungrouped, which is stored as field-absent.
       const wanted = filter.objective === 'standalone' ? undefined : filter.objective;
       filtered = filtered.filter((t) => (t as { objective?: string }).objective === wanted);
@@ -8672,7 +8672,7 @@ export class SterlingTools {
    * Resolves a feature_slug to its owning article's id PLUS every ancestor id
    * in its supersede chain — the article's own rel:'supersedes' links, which
    * accumulate every prior version across reconciles (the same join
-   * knowledgeUpdate's drift-item auto-drain already walks, decision 8ecd435f),
+   * knowledgeUpdate's drift-item auto-drain already walks, decision foreign_8ecd435f),
    * so an item raised against an earlier version of the article still matches
    * after it was superseded. Returns null when the slug resolves to no article
    * at all — the caller treats that as "narrows to nothing", not an error.
@@ -8735,7 +8735,7 @@ export class SterlingTools {
     const groups = new Map<string, { paths: string[]; items: DurableRecord[] }>();
     for (const [path, items] of byPath) {
       if (items.length < 2) continue; // AC1: two or more, or it is not a collision
-      // Separator is a SOURCE-LEVEL escape (anti-pattern d7e03137): \x1F cannot
+      // Separator is a SOURCE-LEVEL escape (anti-pattern foreign_d7e03137): \x1F cannot
       // occur in a uuid, so the impossibility property holds without a raw
       // control byte flipping this file to binary for grep/tooling.
       const key = items.map((i) => (i as unknown as { id: string }).id).join('\x1F');
@@ -9026,7 +9026,7 @@ export class SterlingTools {
 
   /**
    * The MCP-facing result for board_query / maintenance_query: the same envelope
-   * knowledge_query gained in decision b47889b7, extended to the two surfaces it
+   * knowledge_query gained in decision foreign_b47889b7, extended to the two surfaces it
    * MISSED. That omission was reported from the field within a day: "maintenance_
    * query caps at 50 silently. No count, no '50 of N'. I only learned the tail was
    * deep because removing 19 revealed 19 more, including a capture_owed reason not
@@ -9211,7 +9211,7 @@ export class SterlingTools {
    * superseded_by are server-owned everywhere else in this store, and this
    * surface is no exception. Anything outside that set is REFUSED BY NAME,
    * naming the valid set — the same refuse-don't-drop convention as
-   * refuseUnknownFields/refuseServerOwnedFields (decision b47889b7 class) —
+   * refuseUnknownFields/refuseServerOwnedFields (decision foreign_b47889b7 class) —
    * rather than silently ignored, which would report success on a write that
    * changed nothing the caller asked for. An empty patch is refused for the
    * same reason: nothing to update is not a no-op success.
@@ -9220,7 +9220,7 @@ export class SterlingTools {
 
   boardUpdate(id: string, patch: Record<string, unknown>): DurableRecord & { claims_check?: string } {
     // Resolves through the SAME ladder as knowledge_get/board_get (full uuid,
-    // exact slug, 8-char citation prefix — resolveRecordId, decision 2debab53):
+    // exact slug, 8-char citation prefix — resolveRecordId, decision foreign_2debab53):
     // board_update previously used a raw store.get(id), so an unresolved
     // prefix that board_get resolved fine threw a bare "no record" here
     // (measured 2026-08-22 friction). A HistoricalIdError is deliberately left
@@ -9265,7 +9265,7 @@ export class SterlingTools {
       if (head && MEASURED_AT_HEAD_RE.test(head)) patch = { ...patch, measured_at_head: head };
     }
     const next = { ...old, ...patch, updated_at: this.now() } as Record<string, unknown>;
-    // 'standalone' clears the grouping to absent (decision a8d2ce6c) — the same
+    // 'standalone' clears the grouping to absent (decision foreign_a8d2ce6c) — the same
     // sentinel board_add takes, so re-grouping and un-grouping share one vocabulary.
     if (next.objective === 'standalone') delete next.objective;
     // old.id (the resolved canonical id), not the caller's possibly-short
@@ -9365,7 +9365,7 @@ export class SterlingTools {
    * board_edit(id, find, replace) — knowledge_edit's exactly-once find/replace
    * contract (board fd6d8da9), applied to a board/queue item's `text` IN
    * PLACE: id preserved, no new version minted, unlike knowledge_edit's
-   * supersession (decision a91c80b5 — board_update's identity semantics, not
+   * supersession (decision foreign_a91c80b5 — board_update's identity semantics, not
    * knowledge_update's). Delegates the actual write to boardUpdate so there is
    * exactly one in-place-edit code path — source/system_reason cannot move an
    * item between surfaces, status/id/created_at stay server-owned, updated_at
@@ -9711,7 +9711,7 @@ export class SterlingTools {
     //
     // The exemption exists because settlement strips a projection path from every
     // candidate set BEFORE it evaluates ownership or drift, and the read-time
-    // classifier calls it clean without consulting baselines (decision e1275166's
+    // classifier calls it clean without consulting baselines (decision foreign_e1275166's
     // territory) — so H7 does not govern it and there is no re-mint to suppress.
     // That is an AFFIRMATIVE exemption, and decision
     // [attestation-bypass-requires-affirmative-exemption-not-unavailable-evidence]
@@ -10232,7 +10232,7 @@ export class SterlingTools {
       // drain-log trace naming a SYSTEM item (system_reason set, per the store's
       // `record.system_reason ?? ''` write) means this id was a maintenance-queue
       // item that is already gone — auto-drained by a knowledge_update
-      // re-baseline (decision 8ecd435f) or closed a moment earlier by a
+      // re-baseline (decision foreign_8ecd435f) or closed a moment earlier by a
       // concurrent librarian call. That is the caller's desired end state, not a
       // failure, so it SUCCEEDS idempotently instead of throwing. A trace with no
       // system_reason (a user item) or no trace at all still falls through to the
@@ -10347,7 +10347,7 @@ export class SterlingTools {
     return { retired };
   }
 
-  // -- knowledge_supersede (decision e17794ea, board 0b33c27b) ----------------
+  // -- knowledge_supersede (decision foreign_e17794ea, board 0b33c27b) ----------------
 
   /** old-record types knowledge_supersede accepts — see the class comment above.
    *  attestation is deliberately NOT here: its supersession path is
@@ -10356,7 +10356,7 @@ export class SterlingTools {
   private static readonly SUPERSEDE_ALLOWED_TYPES = ['decision', 'anti_pattern', 'research_finding'];
 
   /** ruling-write types whose create/update receipts surface SAME-SUBJECT
-   *  records (decision 7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
+   *  records (decision foreign_7e3c66c5). Superset of SUPERSEDE_ALLOWED_TYPES since
    *  2026-08-21 (review finding on board 259a455f): a second attestation on
    *  one artifact_key is exactly the write that must surface the prior verdict. */
   private static readonly SAME_SUBJECT_TYPES = ['decision', 'anti_pattern', 'research_finding', 'attestation'];
@@ -10494,7 +10494,7 @@ export class SterlingTools {
     const type = old.type;
     const { id: _i, created_at: _c, updated_at: _u, status: _s, superseded_by: _sb, type: _t, ...body } = fields;
 
-    // Slug continuity (decision de1a7329): fields with no slug inherit the old
+    // Slug continuity (decision foreign_de1a7329): fields with no slug inherit the old
     // record's slug so the concept handle survives the replacement — the old
     // record itself still owns that slug at this point (it is still active),
     // so its own id is excluded from the collision check.
@@ -10634,7 +10634,7 @@ export class SterlingTools {
     const updated = this.store.supersede(old.id, parsed);
     this.repointPromotionReview(chain, updated.id, ts);
 
-    // SAME-SUBJECT SURFACING (decision 7e3c66c5): knowledge_supersede only
+    // SAME-SUBJECT SURFACING (decision foreign_7e3c66c5): knowledge_supersede only
     // ever operates on the three ruling types (SUPERSEDE_ALLOWED_TYPES,
     // enforced above), so this always applies here. Excludes the old,
     // just-superseded record and its own supersede chain, plus the new

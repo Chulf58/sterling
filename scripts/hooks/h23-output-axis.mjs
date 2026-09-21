@@ -65,7 +65,7 @@ import {
   joinPointerBlock,
 } from './lib/delivery.mjs';
 
-// Clip and cap, named per the brief (b266d6b7): matching runs over the first
+// Clip and cap, named per the brief (foreign_b266d6b7): matching runs over the first
 // 16,000 chars of the stringified tool_response only, and at most
 // OUTPUT_AXIS_POINTER_CAP pointer lines render per block regardless of how many
 // records matched.

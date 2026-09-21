@@ -1,5 +1,5 @@
 // scripts/migrate-stores.mjs — the stable-identity schema v1 -> v2 DATA
-// migration runner (S4, decision [stable-identity-design-v2] / 2176748e
+// migration runner (S4, decision [stable-identity-design-v2] / foreign_2176748e
 // section 6; board 60fa6960). The write-side sibling of the read-only
 // scripts/migration-preflight.mjs (S1): preflight REPORTS the shape of what
 // this script MOVES, and the two agree by construction — same --db CLI, same
@@ -38,7 +38,7 @@
 //      already at/past v2 (idempotent no-op, byte-identical), a too-new store
 //      (refuse, never downgrade), a file that is not a v1 Sterling store. The
 //      version probe reads the SQLite header's user_version field DIRECTLY
-//      (offset 60, big-endian u32 — research_finding 5555895c), so a refused
+//      (offset 60, big-endian u32 — research_finding foreign_5555895c), so a refused
 //      run opens no connection, creates no -wal/-shm sidecar, and leaves no
 //      litter. A HOT -wal (a pending checkpoint could hold a newer
 //      user_version) falls back to a read-only SQLite read, disclosed.
@@ -278,7 +278,7 @@ function identityFromLegacyStatus(status, retired) {
 
 /**
  * user_version WITHOUT opening a connection: bytes 60..63 of the SQLite header,
- * big-endian (research_finding 5555895c — an application-owned integer, never
+ * big-endian (research_finding foreign_5555895c — an application-owned integer, never
  * SQLite's own PRAGMA schema_version). Refusal paths must leave NO litter, and
  * a read-only DatabaseSync open of a WAL store can materialize a -shm sidecar;
  * reading the header cannot touch anything.
@@ -432,7 +432,7 @@ function classify(records, links, elections = new Map()) {
           // link-only extra claimant therefore never served: on the column
           // chain it is a legacy link-copy (transitive), off the chain it is
           // an amendment/fork mis-encoded as a supersedes edge (found live:
-          // decision a127e6e1 claimed by its rewrite AND its amendment). The
+          // decision foreign_a127e6e1 claimed by its rewrite AND its amendment). The
           // column claim wins — the winner was already written, not invented;
           // the dropped edge survives in the backup and this journal.
           const claimSurfaces = successors.get(s);

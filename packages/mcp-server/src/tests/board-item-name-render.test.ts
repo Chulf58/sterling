@@ -321,7 +321,7 @@ test('H3 IDS NEVER CLIP — THE REGRESSION PIN: the headline keeps its FULL uuid
   // GREEN AND MUST STAY GREEN. This is the arm that answers the brief's
   // headline full-id question, and it answers it with a CONSEQUENCE rather than
   // a preference: board_remove and maintenance_remove demand the exact full
-  // uuid and refuse an 8-char prefix (S1 arm E2, decision 6d5a6719, anti-pattern
+  // uuid and refuse an 8-char prefix (S1 arm E2, decision foreign_6d5a6719, anti-pattern
   // no-bounded-trail-guard-for-destructive-addressing at severity BLOCK). If a
   // headline listing carried only id8, every item a reader could SEE would be
   // one they could not remove. So: the display form ADDS, it never REPLACES.

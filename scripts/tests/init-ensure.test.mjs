@@ -164,7 +164,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     // a consuming project gets NO per-project .mcp.json — the plugin declares sterling
     assert.ok(!existsSync(join(dir, '.mcp.json')), 'no per-project .mcp.json — the plugin declares the sterling server');
     assert.match(r.stdout, /^\.mcp\.json\s+matches\s+not written — the plugin declares sterling/m);
-    // init never manages .claude/settings.local.json (decision 097851ed, refined): the MCP
+    // init never manages .claude/settings.local.json (decision foreign_097851ed, refined): the MCP
     // dual-role is gone (the plugin declares its server via plugin.json mcpServers, not a root
     // .mcp.json), so no enable-flag enforcement is needed — a consuming project keeps its own.
     assert.ok(!existsSync(join(dir, '.claude', 'settings.local.json')), 'consuming project: settings.local.json left to the user (init never writes it)');
@@ -174,7 +174,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.equal(config.project_name, 'ensure-target', 'project name recorded for flagless re-runs');
     assert.ok(config.backup_path.endsWith('/backups'), 'backup path recorded absolute, forward slashes');
-    assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)');
+    assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)'); // not-a-citation: fixture id
     // native-Windows launcher (sterling-windows.bat): fully native, generated from the fake win-node
     assert.match(r.stdout, /^sterling-windows\.bat\s+created\b/m);
     const nat = readFileSync(join(dir, 'sterling-windows.bat'), 'utf8');
@@ -186,11 +186,11 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     // option B: native claude loads the Windows MCP config and strictly ignores the plugin's WSL server
     assert.match(nat, /--mcp-config "[^"]*\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config/, 'native claude loads the Windows MCP config strictly');
 
-    // --- decision ffe7c416 / board 3873d33b: THE WSL BRIDGE IS GONE -------
+    // --- decision foreign_ffe7c416 / board 3873d33b: THE WSL BRIDGE IS GONE -------
     // WAS (P5, AC8): the native launcher shelled to wsl.exe EXACTLY ONCE, to
     // refresh a VACUUM-INTO snapshot of the WSL-resident domain stores before
     // launching the native panes — a native process cannot live-read WAL stores
-    // over 9p (research_finding 5c6437d8, `database is locked`). That bridge
+    // over 9p (research_finding foreign_5c6437d8, `database is locked`). That bridge
     // served a MIXED host.
     //
     // NOW (ffe7c416, user-decided 2026-08-27; board 3873d33b): Sterling users
@@ -342,7 +342,7 @@ test('native launcher SKIPPED loudly when no Windows node is resolvable (P5), wi
     const r = init(dir, FRESH_FLAGS, { STERLING_WIN_NODE: '' });
     assert.equal(r.code, 0, r.stderr); // the rest of init still completes
     assert.match(r.stdout, /^sterling-windows\.bat\s+skipped\b/m, 'reports skipped, not silently absent');
-    // STILL CORRECT AFTER decision ffe7c416, and deliberately so — do not
+    // STILL CORRECT AFTER decision foreign_ffe7c416, and deliberately so — do not
     // "modernize" this into the host-native mode note. STERLING_WIN_NODE is
     // DEFINED here (empty string), which under ffe7c416's resolution order is an
     // EXPLICIT OVERRIDE that says "use this Windows node" and names nothing. That
@@ -410,7 +410,7 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
   }
 });
 
-test('universal sterling domain: a config lacking it gains it on re-init (refreshed), hand-tunings preserved (decision 47be4388)', () => {
+test('universal sterling domain: a config lacking it gains it on re-init (refreshed), hand-tunings preserved (decision foreign_47be4388)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -535,7 +535,7 @@ test('MCP store args: plugin config stays bare ${CLAUDE_PROJECT_DIR}; the --mcp-
   );
 });
 
-test('init notes the project in the shared registry (decision 8f9e6db2)', () => {
+test('init notes the project in the shared registry (decision foreign_8f9e6db2)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     const r = init(dir, FRESH_FLAGS);
@@ -546,7 +546,7 @@ test('init notes the project in the shared registry (decision 8f9e6db2)', () => 
       const me = reg.list().find((p) => p.repo_path === dir.replace(/\\/g, '/'));
       assert.ok(me, 'this project is registered, keyed by its absolute POSIX repo path');
       assert.equal(me.name, 'ensure-target');
-      assert.deepEqual(me.stack_tags, ['node', 'sterling'], 'declared tag + the auto-injected universal sterling domain (decision 47be4388)');
+      assert.deepEqual(me.stack_tags, ['node', 'sterling'], 'declared tag + the auto-injected universal sterling domain (decision 47be4388)'); // not-a-citation: fixture id
       assert.deepEqual(me.toolchains, ['node']);
       assert.equal(me.first_init_at, me.last_init_at, 'fresh init: first_init_at == last_init_at');
       assert.equal(me.last_seen_at, null, 'no session-start touch yet');
@@ -598,7 +598,7 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 // =============================================================================
 // P5 — domain-knowledge snapshot bridge: scripts/snapshot-domains-for-windows.mjs
 //
-// SCOPE NARROWED BY decision ffe7c416 / board 3873d33b (2026-08-27) — READ THIS
+// SCOPE NARROWED BY decision foreign_ffe7c416 / board 3873d33b (2026-08-27) — READ THIS
 // BEFORE TRUSTING THE PARAGRAPH BELOW. The native launcher NO LONGER invokes
 // this script: under never-cross-usage a Windows-only user's native processes
 // open their own %USERPROFILE%\.sterling\domains directly, so the launch-path
@@ -613,7 +613,7 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 // domain store into the Windows-local default path at startup; the native TUI
 // opens those read-only and shows their records (stale-as-of-launch). The WSL
 // side of that bridge is this script. A native process cannot live-read the
-// WSL-resident WAL stores (research_finding 5c6437d8) — so the source domain
+// WSL-resident WAL stores (research_finding foreign_5c6437d8) — so the source domain
 // stores are snapshotted (VACUUM INTO, reusing SterlingStore.snapshot /
 // MountedStores.snapshotAll) into the Windows-local default path read-only.
 //
@@ -801,7 +801,7 @@ test('P5 snapshot script: refreshes over an existing snapshot — a second run r
 
 // =============================================================================
 // Part C (sparring-partner slice 1) — codex MCP-server wiring through init's
-// plugin-repo branch (decision cd019e0b, concept slug
+// plugin-repo branch (decision foreign_cd019e0b, concept slug
 // sparring-partner-partnership-shape). Spec only, per the dispatch — init.mjs's
 // implementation body was NOT read to author these.
 //
@@ -1100,12 +1100,12 @@ test('sparring-partner-win case 1 (CONTROL ARM for case 9 below): probe OK with 
     assert.ok(existsSync(mcpPath), 'native-Windows MCP config generated (plugin-repo branch)');
     const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
     assert.ok(mcp.mcpServers && mcp.mcpServers.sterling, 'sterling entry present alongside codex');
-    // COMMENT CORRECTED per decision ffe7c416 (host-native init, user-decided
+    // COMMENT CORRECTED per decision foreign_ffe7c416 (host-native init, user-decided
     // 2026-08-27). This assertion's original message claimed the win entry is
     // "the same entry object the WSL branch wires, not a win-specific variant".
     // That is now INVERTED: defect (2) of the ruling is that discarding the
     // resolved absolute path left codex-on-Windows unable to spawn after a
-    // SUCCESSFUL probe (npm ships codex.cmd; research_finding 0c712d94 measured
+    // SUCCESSFUL probe (npm ships codex.cmd; research_finding foreign_0c712d94 measured
     // PATH to be an unreliable presence oracle on the target host). So the win
     // entry IS win-specific WHENEVER the probe resolved a path — case 9 below
     // pins exactly that. What survives is the FALLBACK: a probe that resolved
@@ -1337,7 +1337,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 // rewrite. That is exactly the discrimination this control arm buys.
 
 // =============================================================================
-// Part F (decision ffe7c416 — host-native init with a dev-machine escape hatch,
+// Part F (decision foreign_ffe7c416 — host-native init with a dev-machine escape hatch,
 // USER-DECIDED 2026-08-27; boards 99f53af8 / 4c3a8e59 / 3873d33b). SPEC-ONLY:
 // scripts/init-impl.mjs's implementation body was NOT read to author these.
 //
@@ -1346,7 +1346,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 //   (1) HOST-NATIVE IS THE DEFAULT MODE, and a missing Windows launcher on a
 //       non-Windows host is that MODE, not a broken PATH. ffe7c416 defect (1):
 //       `where.exe node` gated BOTH the native launcher AND the Windows MCP
-//       config, and research_finding 0c712d94 MEASURED node to be absent from
+//       config, and research_finding foreign_0c712d94 MEASURED node to be absent from
 //       the Windows PATH on the very host this must serve — so one PATH miss
 //       cost a Windows user both artifacts. The resolution order is now
 //       STERLING_WIN_NODE (honored on KEY PRESENCE, defined-even-empty) ->
@@ -1374,7 +1374,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 //   • The `process.platform === 'win32' -> process.execPath` arm has NO
 //     injection seam by design, so it cannot be exercised from a Linux/WSL test
 //     run. Faking one would test the fake. It is owed a real native-Windows
-//     sitting; note that research_finding 0c712d94 measured the h17 suite
+//     sitting; note that research_finding foreign_0c712d94 measured the h17 suite
 //     returning 0 pass / 36 SKIP on that host, so a pin added "for Windows"
 //     today would be permanently skipped, i.e. hollow by construction. The
 //     host-native arms below are therefore explicitly skipped ON win32 rather
@@ -1474,7 +1474,7 @@ test('ffe7c416 (1): with NO Windows node and NO opt-in, the native launcher and 
     assert.equal(r.code, 0, `host-native is a MODE, not a failure — init still exits 0: ${r.stderr}`);
 
     assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no Windows launcher on disk — nothing half-written, no launcher pointing at a node that does not exist');
-    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no Windows MCP config either — the same host-native decision governs both artifacts (ffe7c416 defect 1: one PATH lookup used to gate both)');
+    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no Windows MCP config either — the same host-native decision governs both artifacts (ffe7c416 defect 1: one PATH lookup used to gate both)'); // not-a-citation: fixture id
 
     // Loud, per P5 — an absent artifact is REPORTED, never silently missing.
     assert.match(r.stdout, /^sterling-windows\.bat\s+skipped\b/m, 'the launcher skip is reported');
@@ -1678,7 +1678,7 @@ test('sparring-partner-win case 9 (ffe7c416 defect 2): the win MCP config carrie
     // is that init WRITES that path — a successful probe must prove the entry it
     // generates will actually spawn (npm ships codex.cmd, hostile to shell-less
     // spawning; PATH is a measured-unreliable oracle on the target host,
-    // research_finding 0c712d94).
+    // research_finding foreign_0c712d94).
     const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'ok', STERLING_CODEX_WIN_PATH: PROBED });
     assert.equal(r.code, 0, r.stderr);
     const mcp = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json'), 'utf8'));
@@ -1750,7 +1750,7 @@ test('sparring-partner-win case 10: the MANAGED REFRESH carries the probed path 
 // builder that carries this verdict.
 
 // =============================================================================
-// Part G — the FOUR review-driven fixes that landed on top of decision ffe7c416
+// Part G — the FOUR review-driven fixes that landed on top of decision foreign_ffe7c416
 // (slug host-native-init-with-dev-machine-escape-hatch) with NO frozen pin. A
 // green suite over them proved only that nothing BROKE; every one of them is a
 // behaviour a future edit can silently delete.
@@ -2339,7 +2339,7 @@ test('H containment: the whole suite leaves THIS clone\'s live plugin MCP config
     assert.deepEqual(
       liveStamps(),
       LIVE_STAMPS_AT_LOAD,
-      'this clone\'s live .claude-plugin/sterling-mcp{,-win}.json must be byte-and-timestamp untouched across the entire suite: they are the MCP config the running session loads, and a suite that rewrites them repoints the live session at the test runner\'s interpreter (anti_pattern 37b3cb0a, severity block)'
+      'this clone\'s live .claude-plugin/sterling-mcp{,-win}.json must be byte-and-timestamp untouched across the entire suite: they are the MCP config the running session loads, and a suite that rewrites them repoints the live session at the test runner\'s interpreter (anti_pattern 37b3cb0a, severity block)' // not-a-citation: fixture id
     );
   } finally {
     for (const d of [pluginDir, plainDir]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

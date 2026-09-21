@@ -3,9 +3,9 @@
 // scripts/build-hooks.mjs.
 //
 // Governing records — read these before changing anything here:
-//   decision  1dab2a9f [hollow-test-mutation-arm-design-accepted-sequenced-enablement]
+//   decision  foreign_1dab2a9f [hollow-test-mutation-arm-design-accepted-sequenced-enablement]
 //   anti_pat  37b3cb0a [a-test-that-builds-in-place-ships-whatever-is-in-the-working-tree] (severity BLOCK)
-//   decision  23afbc83 [conductor-executes-test-writer-sabotage-clean-room]
+//   decision  foreign_23afbc83 [conductor-executes-test-writer-sabotage-clean-room]
 //   board     5402a024 (slice list; Codex preconditions P1/P3)
 //
 // WHY S0 EXISTS. The arm mutates a named enforcement guard and asserts a named
@@ -44,7 +44,7 @@
 // (esbuild nodePaths/alias/absWorkingDir — implementer's choice). These pins
 // deliberately place the clean room in os.tmpdir() because the accepted design's
 // clean room is `mkdtemp` and the git-worktree alternative was REJECTED
-// (anti_pattern e2a1fee8). If the build cannot be made to work from tmpdir, that
+// (anti_pattern foreign_e2a1fee8). If the build cannot be made to work from tmpdir, that
 // is a DESIGN escalation — do not relocate the clean room into the repo tree to
 // make these pins pass: a clean room inside the repo re-opens the very blast
 // radius 37b3cb0a is about.
@@ -55,7 +55,7 @@
 // this test file living beside it (H5 / leave-nothing-behind forbid that, and
 // H14 denies running `node --test` outside the repo root). The seam exists for
 // clean-room mutation per 23afbc83, not as test-only convenience — see
-// research_finding 01cab59b.
+// research_finding foreign_01cab59b.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -98,7 +98,7 @@ const MARK_HOOK = 'h23-output-axis.mjs';
 
 const rooms = [];
 
-// Anti-pattern ee89c3fd: raw multi-line child stderr interpolated into a message
+// Anti-pattern foreign_ee89c3fd: raw multi-line child stderr interpolated into a message
 // that is EXPECTED to fail poisons the TAP crash/assertion classifier, and a red
 // gate then cannot tell "the pin caught the sabotage" from "the harness fell
 // over" — which is the entire currency of a mutation battery. Flatten only,
@@ -184,7 +184,7 @@ function assertTreeIdentical(before_, after_, when) {
   assert.deepEqual(
     [...after_.keys()].sort(),
     [...before_.keys()].sort(),
-    `${when}: the file SET under hooks/ changed — a build wrote into the live enforcement surface (anti_pattern 37b3cb0a)`,
+    `${when}: the file SET under hooks/ changed — a build wrote into the live enforcement surface (anti_pattern 37b3cb0a)`, // not-a-citation: fixture id
   );
   for (const [rel, b] of before_) {
     const a = after_.get(rel);
@@ -192,7 +192,7 @@ function assertTreeIdentical(before_, after_, when) {
     // CONTENT layer — catches a same-size rewrite even with the timestamp restored.
     assert.equal(a.sha256, b.sha256, `${when}: hooks/${rel} CONTENT changed (sha256) — the live bundle was rewritten`);
     // MTIME layer — catches a byte-identical in-place rebuild, which the content
-    // layer cannot see (37b3cb0a right_way; decision cf863d84's hollow-pin class).
+    // layer cannot see (37b3cb0a right_way; decision foreign_cf863d84's hollow-pin class).
     assert.equal(a.mtimeMs, b.mtimeMs, `${when}: hooks/${rel} MTIME moved — the live bundle was REWRITTEN even though its bytes are identical`);
   }
 }
@@ -269,7 +269,7 @@ test('AC1: a bundle built with --src-dir contains a marker that exists ONLY in t
   // And the live shipped bundle never gained it — the marker lived only in the copy.
   assert.ok(
     !readFileSync(join(LIVE_HOOKS, MARK_HOOK), 'utf8').includes('STERLING-S0-SRC-DIR-MARKER'),
-    'the LIVE bundle contains a clean-room marker — mutation would be sabotage of the shipped enforcement surface (anti_pattern 37b3cb0a)',
+    'the LIVE bundle contains a clean-room marker — mutation would be sabotage of the shipped enforcement surface (anti_pattern 37b3cb0a)', // not-a-citation: fixture id
   );
 });
 

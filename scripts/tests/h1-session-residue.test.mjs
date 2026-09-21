@@ -521,7 +521,7 @@ test('AC6: other transient files (pressure-nagged.json, conductor-pressure.json)
 //
 // ADDED S4 — THE REPLACEMENT INVARIANT, in the opposite direction. The
 // persistent (B) baseline hash list at .sterling/enforcement-baseline.json
-// (decision fe861066 D1/D2) is deliberately NOT transient, NOT P4
+// (decision foreign_fe861066 D1/D2) is deliberately NOT transient, NOT P4
 // lifecycle-bound, and NOT session-scoped — it is the whole point of the
 // redesign that it survive across sessions so cross-call/cross-session (B)
 // tampering is finally detectable. If H1 ever ported the old

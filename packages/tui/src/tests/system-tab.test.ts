@@ -53,7 +53,7 @@ import * as viewmodel from '../viewmodel.js';
 //     in its text (the visible AC4 marker); an aligned row does neither.
 //   • reduce/buildDashboardState gain a TRAILING optional roster? param (after
 //     the existing knowledge? param) — the additive-optional-param idiom of
-//     decision 34d61f60. buildSystemTab reads the same snapshot from ui.
+//     decision foreign_34d61f60. buildSystemTab reads the same snapshot from ui.
 //   • inline selector protocol: on a key row ENTER opens the MODEL picker
 //     (options = catalog entries, highlight at index 0); UP/DOWN move the
 //     highlight; ENTER confirms the model and opens the EFFORT picker (options

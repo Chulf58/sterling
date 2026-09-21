@@ -354,7 +354,7 @@ function buildDanglingFixture(path) {
 // test-repair 2026-08-22: the original fixture (column names Q1, Q2 link-only)
 // is now mechanically RESOLVABLE — v1 served only the superseded_by column, so
 // a link-only extra claim never served and is dropped, disclosed (live
-// adjudication: decision a127e6e1, claimed by its rewrite AND an amendment
+// adjudication: decision foreign_a127e6e1, claimed by its rewrite AND an amendment
 // mis-encoded as supersession). The refusal this pin guards remains for the
 // shape with NO column corroboration: two link-only claimants and a NULL
 // column — no serving surface ever picked a winner, so the runner must not

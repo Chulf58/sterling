@@ -83,7 +83,7 @@ if (dirtyLines.length > 0) {
 
 // Gate precondition (merge.md): every affected article reconciled. Open
 // reconcile_needed debt on files this branch changed refuses the merge — the
-// direct-merge reconciliation requirement (decision 9df61181).
+// direct-merge reconciliation requirement (decision foreign_9df61181).
 // -c core.quotePath=false (r-review F3, applied here too for consistency): without
 // it, non-ASCII filenames arrive C-quoted and defeat the plain-string path
 // comparisons further down.
@@ -289,7 +289,7 @@ try {
     // per ARTICLE, not per branch) — evaluating liveness over the FULL item
     // would let that unrelated path's drift refuse THIS merge. Scope the live
     // check to item.file_keys ∩ this branch's changed files (the merge gate's
-    // own scope, decision 9df61181) by passing a view of the item carrying
+    // own scope, decision foreign_9df61181) by passing a view of the item carrying
     // only the intersecting keys — always non-empty here, since the .some()
     // above already guarantees at least one overlapping key.
     //
@@ -456,7 +456,7 @@ if (debt.length > 0) {
   // rule every time, not conditionally.
   const remedy = [
     '',
-    'Two sanctioned discharges — close each item with ONE of these (never a bare knowledge_update; drain requires an explicit `resolves` claim, decision 68988832):',
+    'Two sanctioned discharges — close each item with ONE of these (never a bare knowledge_update; drain requires an explicit `resolves` claim):',
     '  (a) BEHAVIOR CHANGED: reconcile the article with a real write carrying resolves:[<full item id>].',
     '  (b) VERIFIED UNAFFECTED: append a verification-history entry — `resolves` deletes the WHOLE item and the write',
     '      re-baselines EVERY file the owning article owns, so verify EVERY file_key on the item (and rule out any',
@@ -479,7 +479,7 @@ if (debt.length > 0) {
   fail(`direct-merge: ${headline} cover files this branch changed — reconcile before merging:\n` + grouped + '\n' + remedy.join('\n'));
 }
 
-// VERSION MOVES WITH THE MERGE (decision be9168e8 + user directive 2026-08-05
+// VERSION MOVES WITH THE MERGE (decision foreign_be9168e8 + user directive 2026-08-05
 // "bump the version when you push"). The plugin version is the clone-currency
 // signal consumers read, and be9168e8 deferred automating the bump "until the
 // rule is observed to fail" — it failed on 2026-08-05 (a feature merge shipped
@@ -508,13 +508,13 @@ if (existsSync(join(target, pluginManifestRel))) {
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail(
         `direct-merge: version fields DIVERGED — ${pluginManifestRel} is ${branchPlugin}, package.json is ${branchPkg}. ` +
-          `They move together in the same commit (decision be9168e8). Align them, commit, rerun.`
+          `They move together in the same commit. Align them, commit, rerun.`
       );
     }
     if (basePlugin !== null && branchPlugin === basePlugin) {
       fail(
         `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.\n` +
-          `The version is the clone-currency signal consumers read (decision be9168e8): bump BOTH ${pluginManifestRel} and package.json\n` +
+          `The version is the clone-currency signal consumers read: bump BOTH ${pluginManifestRel} and package.json\n` +
           `(0.x rule: breaking → MINOR, additive → PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
       );
     }
@@ -552,7 +552,7 @@ if (hasCheck) {
 //
 // WHY THIS SURFACE EXISTS AT ALL, given the ruling was about COMMIT time: the
 // design's first sparring round found commit-only delivery FATAL as a complete
-// shape. Commit stderr reaches the CONDUCTOR, while decision a7dbac2f reserves
+// shape. Commit stderr reaches the CONDUCTOR, while decision foreign_a7dbac2f reserves
 // inspection judgment for the HUMAN — and the human stands HERE, at the merge
 // gate. So the same one computation runs at both moments; this is an amendment
 // to the user-ruled commit-time disclosure, never a replacement for it.
@@ -609,7 +609,7 @@ try {
 } catch (e) {
   fail(`direct-merge: ${e?.message ?? e}`);
 }
-// The disclosure rides the machine-readable report too (decision 1f069af4 v2
+// The disclosure rides the machine-readable report too (decision foreign_1f069af4 v2
 // §6), not only stderr: everything below prints `{ ...merged, … }` from one of
 // five exit points, so attaching it to `merged` once is what makes every one of
 // them carry it — including the sweep-failure and stale-bundle paths, which exit

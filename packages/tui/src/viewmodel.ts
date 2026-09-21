@@ -40,7 +40,7 @@ interface FeatureArticleRec {
   files: { path: string }[];
   dependencies: { relies_on: string[] };
   version: number;
-  // Board a9280db7 (decision c48380bf): on a probe|tool article this can now
+  // Board a9280db7 (decision foreign_c48380bf): on a probe|tool article this can now
   // be the structured not_applicable exemption object instead of an array —
   // widened here so the Array.isArray guard below is not fighting the type.
   current_ac?:
@@ -355,7 +355,7 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
 }
 
 /**
- * Tasks-tab cards. Items sharing an `objective` (decision a8d2ce6c) collapse
+ * Tasks-tab cards. Items sharing an `objective` (decision foreign_a8d2ce6c) collapse
  * under one `obj:<name>` header entry — children are emitted only when the
  * header id is in `expanded` (the same fold mechanism the Knowledge tree
  * uses), so the board reads as N objectives, not N×slices. Standalone items
@@ -389,14 +389,14 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
  * (2) replace the split with an indexOf('\n') slice; both keep this shape and
  * move the ceiling several-fold. Only past roughly 1,500–2,000 items on this
  * text profile does the Knowledge tree's count-then-fetch-per-source pattern
- * (decision 5f8419c5) become genuinely required.
+ * (decision foreign_5f8419c5) become genuinely required.
  */
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
   for (const t of store.query({ types: ['todo'], source: 'user', cap: 500 })) {
     const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string };
-    // `name (id8)` where a LABEL EXISTS (decision 2e8c30e4; board 081508d0
+    // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0
     // review round 2). Gated on the derived LABEL, NOT on whether a slug was
     // ever minted (review round 2, HIGH finding): a legacy pre-mint item has
     // real text and therefore a real label — omitting id8 for it left every

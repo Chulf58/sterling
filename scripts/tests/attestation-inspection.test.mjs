@@ -565,7 +565,7 @@ test('T16: ** matches across path segments; a single * stays within one segment'
 // instead of `[^/]*`).
 // EXPECTED RED: `assert.equal(singleStar.touched_count, 1, ...)` fails (becomes 2).
 
-// ── T17'/T18': read-only IN PLACE, manage nothing (decision 1f069af4 v2; the
+// ── T17'/T18': read-only IN PLACE, manage nothing (decision foreign_1f069af4 v2; the
 // snapshot-copy design was REVERSED 2026-09-01, Codex thread 01a05c7b; pins
 // renegotiated by the conductor via test-repair — the old T18 asserted the
 // copy-era no-litter property, which the reversal deliberately abandons).

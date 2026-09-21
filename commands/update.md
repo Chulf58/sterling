@@ -12,7 +12,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/update.mjs"
 
 Flags, when the user asks for them: `--check` (currency report only, mutates nothing), `--force` (rebuild and re-sync even when already current), `--no-test` (skip the ~90s battery), `--no-projects` (skip the per-project agent sync), `--no-fetch` (report against the last fetch, offline).
 
-**Every machine but the authoring one is a pure consumer of the default branch** (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89). The update is a fast-forward or a refusal — never a merge, never a rebase, and never a file-by-file comparison against GitHub.
+**Every machine but the authoring one is a pure consumer of the default branch.** The update is a fast-forward or a refusal — never a merge, never a rebase, and never a file-by-file comparison against GitHub.
 
 - **Exit 0**: updated, or already current. Relay the restart instruction prominently — the MCP server and every project subagent load at session start, so until the session restarts, the code on disk is not the code running.
 - **Exit 2 — refused**: the pre-flight found divergence (dirty tracked files, local commits, a non-default branch, detached HEAD, no origin) and **mutated nothing**. Show the refusal exactly as printed. Do not merge, rebase, reset, or "reconcile" the working copy yourself — the message names where it gets fixed, and that decision is the user's. Exit 2 also covers a `sync-agents` refusal in a consuming project (a locally modified agent): same rule, relay verbatim.

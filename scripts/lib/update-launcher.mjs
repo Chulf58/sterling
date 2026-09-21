@@ -20,8 +20,8 @@ export const UPDATE_LAUNCHER_NAME = 'sterling-update.bat';
 // and the clone update is the ONLY way a consuming machine ever receives
 // Sterling changes — so on a win32 HOST the native template is rendered
 // instead, driving the same scripts/update.mjs directly through node
-// (decision ffe7c416 host-native-init-with-dev-machine-escape-hatch; parity
-// decision 1fe2a5e3; distribution model e6240afe). The discriminator is the
+// (decision foreign_ffe7c416 host-native-init-with-dev-machine-escape-hatch; parity
+// decision foreign_1fe2a5e3; distribution model foreign_e6240afe). The discriminator is the
 // RENDERING host's platform, which is exactly the host-native derivation the
 // ruling asks for: a WSL/Linux session keeps emitting the WSL chain (the
 // authoring machine's dual-context escape hatch), a native-Windows session

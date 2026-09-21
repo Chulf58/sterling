@@ -105,7 +105,7 @@ function main(input) {
   }
 
   // KNOWN_GAPS RE-EMISSION AT THE BASH/PROBE-OUTPUT SEAM (board f1489964,
-  // decision known-gaps-inline-ships-with-probe-seam-boarded 53fd6f62's ship
+  // decision known-gaps-inline-ships-with-probe-seam-boarded foreign_53fd6f62's ship
   // condition — closed here). The inline known_gaps slice (h19-knowledge-
   // delivery.mjs) never reaches the exact moment a probe's OUTPUT is trusted,
   // because this hook is pointer-only. Trigger is NARROW and reuses the

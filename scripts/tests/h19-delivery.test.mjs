@@ -1,4 +1,4 @@
-// H19 knowledge delivery (decision 6dfbe675, brief retrieval-first-knowledge-
+// H19 knowledge delivery (decision foreign_6dfbe675, brief retrieval-first-knowledge-
 // delivery): file-touch delivery + frontier signal + session guard + drain.
 // AC7 pins the floor everywhere: no path through these hooks may exit 2.
 import { test, before } from 'node:test';
@@ -324,7 +324,7 @@ test('self-healing: corrupt guard resets and delivers directly', () => {
     assert.match(JSON.parse(r.stdout).hookSpecificOutput.additionalContext, /alpha does the alpha thing/);
   } finally { cleanup(); }
 });
-// SHARED-FATE (outside-family review finding; decision 04982f45 absorbed
+// SHARED-FATE (outside-family review finding; decision foreign_04982f45 absorbed
 // h13-clear-conductor's pruneUnhashed(ledgerPath) into THIS hook, same
 // UserPromptSubmit event as the pending-delivery drain below). A failure in
 // the ABSORBED prune half must not swallow this hook's OWN pending-delivery
@@ -434,7 +434,7 @@ test('h19-clear-session: compact removes this session delivery guard (P4)', () =
 });
 
 // ---------------------------------------------------------------------------
-// Hazards and rationale for the touched path (decision ca23c811). Delivery had
+// Hazards and rationale for the touched path (decision foreign_ca23c811). Delivery had
 // been articles-only, so an anti_pattern naming the EXACT file being edited was
 // never delivered while H10 asked at Stop whether a hazard had been RECORDED.
 // ---------------------------------------------------------------------------
@@ -489,7 +489,7 @@ test('H19: an anti_pattern owning the touched path delivers as SUBSTANCE (trigge
 test('H19: a hazard in UNOWNED territory delivers WITH the frontier signal — the case the early return used to swallow', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
-    // No article owns this path: only the hazard does. Before ca23c811 the
+    // No article owns this path: only the hazard does. Before foreign_ca23c811 the
     // frontier branch returned early and the hazard was never seen.
     store.create(antiPattern('latch', ['src/orphan.mjs']));
     const r = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/orphan.mjs'), dir);
@@ -747,7 +747,7 @@ test('H19 (rank PIN 4): a second touch of the SAME file delivers the remaining r
 // assertion above goes red if the renderer's own re-derived order diverges
 // from the one the guard sliced against.
 
-test('H19: a decision pointer carries its rejected OPTIONS beneath the statement (decision 6a3b1a46)', () => {
+test('H19: a decision pointer carries its rejected OPTIONS beneath the statement (decision foreign_6a3b1a46)', () => {
   const { dir, store, cleanup } = makeProject({ rung: 'read' });
   try {
     store.create(article('alpha', ['src/a.mjs']));
@@ -1024,7 +1024,7 @@ test('H19: a one-hop pointer resolves a sibling that loses its own bm25 top-5 �
     store.create(article('popular', ['src/p.mjs'], { what_it_does: 'popular is the sibling that matters' }));
     // Decoys that cite the sibling's slug far more than it names itself — the live
     // shape that made the old ranked cap-5 pointer lookup report it absent
-    // (decision 3db7095f).
+    // (decision foreign_3db7095f).
     for (let i = 0; i < 6; i += 1) {
       store.create(
         article(`citer-${i}`, [`src/c${i}.mjs`], {

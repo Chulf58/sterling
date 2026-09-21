@@ -1,7 +1,7 @@
-// H19 — knowledge delivery (decision 6dfbe675; concept family
+// H19 — knowledge delivery (decision foreign_6dfbe675; concept family
 // knowledge-delivery). The front half of the learning loop: put the owning
 // article IN FRONT of the agent at file-touch, mechanically — never a gate
-// (AC7: this hook must never exit 2). Since decision ca23c811 the payload also
+// (AC7: this hook must never exit 2). Since decision foreign_ca23c811 the payload also
 // carries the path's HAZARDS (anti_pattern, as substance) and its RATIONALE
 // (decision, as capped pointers) — articles alone answer neither "what must I
 // not do here" nor "why is it this way". Registered at PostToolUse
@@ -75,7 +75,7 @@ function main(input) {
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
       .filter((r) => !r.working_tree);
 
-    // HAZARDS AND RATIONALE FOR THIS PATH (decision ca23c811). Articles answer
+    // HAZARDS AND RATIONALE FOR THIS PATH (decision foreign_ca23c811). Articles answer
     // "what is this and how must it behave"; they do NOT answer "what must I not
     // do here" or "why is it this way" — those live in anti_pattern and decision,
     // both of which carry file_keys and neither of which delivery served. An
@@ -165,7 +165,7 @@ function main(input) {
     const shownDecisions = freshDecisions.slice(0, DECISION_POINTER_CAP);
     const fresh = [...freshOwners, ...shownHazards, ...shownDecisions];
 
-    // KNOWN_GAPS INLINE (decision db3392db Part 3 / 53fd6f62, board 3dbbdb35):
+    // KNOWN_GAPS INLINE (decision foreign_db3392db Part 3 / foreign_53fd6f62, board 3dbbdb35):
     // one GLOBAL 3-gap budget across every fresh owner in THIS delivery — never
     // per-article — computed over freshOwners in their own delivery order so an
     // article that does not re-render this session (already guarded) never
@@ -317,7 +317,7 @@ function main(input) {
     // fully closes the case where the delivery THROWS (enqueue or stdout). It cannot
     // close the case where stdout succeeds and the PLATFORM ignores additionalContext
     // — nothing raises there, so no in-process ordering helps. That case is now PROBED
-    // rather than hypothetical (research_finding 6adaa2ef, decision aa41e2ed): both
+    // rather than hypothetical (research_finding foreign_6adaa2ef, decision foreign_aa41e2ed): both
     // surfaces inject on this machine's WSL CLI at CC 2.1.220, interactive as well as
     // headless, so injection_rung is 'read' here. What that probe does NOT license is
     // the claim this comment used to make — that the failure is a 'per-platform

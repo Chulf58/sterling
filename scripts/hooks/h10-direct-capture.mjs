@@ -24,7 +24,7 @@
 // covered by a no_capture declaration (same cutoff as the capture lane above —
 // item 353416a9), not followed by a durable capture → nag once (shared
 // marker), then research_owed on release.
-// Concept duty (decision 7208729b): concept_designed events (detail
+// Concept duty (decision foreign_7208729b): concept_designed events (detail
 // = family slug) not followed by that family's concept article
 // (feature_article.concept_family) → shared nag, then one
 // concept_article_missing item per family on release.
@@ -68,7 +68,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   // the duty-deferral tri-state above already uses.
   const { availability, entries: registerEntries } = readRegister(cwd);
   if (availability !== 'ok' || !registerEntries.length) return [];
-  let staleMinutes = 60; // schema default (decision ec9eacaa) when config cannot be read
+  let staleMinutes = 60; // schema default (decision foreign_ec9eacaa) when config cannot be read
   try {
     staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
   } catch {
@@ -355,12 +355,12 @@ try {
    * stop_hook_active suppresses without spending, so a suppressed advisory can still
    * fire on a later Stop of the same session.
    *
-   * Fan-out deferral/staleness disclosures (decision ec9eacaa) ride this release
+   * Fan-out deferral/staleness disclosures (decision foreign_ec9eacaa) ride this release
    * whichever way it goes: prefixed to the block when one is due, and otherwise
    * emitted as a systemMessage on the exit-0 release — a deferral is a fact to
    * disclose, never a reason to block (P5).
    */
-  // SPEND AFTER DELIVERY, shared (point D, decision ee8ab1f5; Fix 1 review
+  // SPEND AFTER DELIVERY, shared (point D, decision foreign_ee8ab1f5; Fix 1 review
   // round): write stderr synchronously; ONLY on a successful write run the
   // given spend callbacks, each independently try/caught (a marker WRITE
   // failure is caught and ignored, point E) — then exit 2 either way. A
@@ -603,7 +603,7 @@ try {
     sessionEvents = [];
   }
 
-  // FAN-OUT-AWARE DUTY DEFERRAL (decision ec9eacaa; register maintained by H22
+  // FAN-OUT-AWARE DUTY DEFERRAL (decision foreign_ec9eacaa; register maintained by H22
   // on SubagentStart/SubagentStop). A live dispatch OWNS the files it is
   // mid-writing: demanding their capture or their owning article at the
   // conductor's Stop reads agent work-in-progress as conductor negligence
@@ -611,7 +611,7 @@ try {
   // An entry is LIVE iff it belongs to THIS session and its age is under
   // config.dispatch_register.stale_minutes; a STALE entry defers nothing and
   // says so loudly (P5): SubagentStop was never probed for killed/aborted
-  // subagents (research_finding 20b44518), so the TTL is what stops an orphan
+  // subagents (research_finding foreign_20b44518), so the TTL is what stops an orphan
   // entry deferring a duty forever. Absent/malformed register degrades to empty
   // — byte-identical to the behavior before this block existed (the same
   // posture session-events.json takes above).
@@ -650,7 +650,7 @@ try {
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
   // Worktree subagents record their touches under
-  // .claude/worktrees/<name>/<repo-relative path> (anti_pattern b3972717) while
+  // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
   // the dispatch prompt names the plain repo-relative path — an exact-string
   // join would therefore miss the heaviest fan-out shape there is. The prefix is
   // stripped for COMPARISON ONLY: touches.json keeps exactly what H7 wrote.
@@ -714,13 +714,13 @@ try {
         : deferredPaths.join(', ');
     disclosureParts.push(
       `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}]: ${pathsDisplay} — duty re-arms when they land ` +
-        `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
+        `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral; not a stuck nag)`
     );
   }
   // UNKNOWN — disclosed WITHOUT excluding. Only named when it actually bites
   // something this Stop touched: an unknown owner of an untouched file changes
   // no outcome and would repeat byte-identically every Stop (board cac61a95
-  // noise shape, P1) — decision ee8ab1f5 governs FREQUENCY and WORDING only,
+  // noise shape, P1) — decision foreign_ee8ab1f5 governs FREQUENCY and WORDING only,
   // never which entries qualify, so this qualification is unchanged. The
   // once-per-session key dedup (point C) applies ON TOP of biting: a note
   // fires only when the row bites AND its key is not yet spent this session.
@@ -802,7 +802,7 @@ try {
   // research/dispatch events are work evidence. This does not guarantee that a
   // later work item is satisfied by an earlier durable record, nor that a
   // declaration survives a real session boundary, which H1 owns.
-  // FAN-OUT DEFERRAL EXCEPTION (decision ec9eacaa, on the capture_pending
+  // FAN-OUT DEFERRAL EXCEPTION (decision foreign_ec9eacaa, on the capture_pending
   // precedent bd594c03): while a live dispatch owns any touched file this
   // release is NOT terminal — clearing would delete the very touch entries
   // whose duty has to re-arm once the dispatch lands. The debt cannot
@@ -943,7 +943,7 @@ try {
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
   );
-  // Concept duty (decision 7208729b): concept_designed events, deduped to the
+  // Concept duty (decision foreign_7208729b): concept_designed events, deduped to the
   // EARLIEST event per family — detail is the concept FAMILY slug.
   // FAIL-CLOSED on a missing/malformed `at` (2026-08-22): the old `e.at ?? now`
   // invented an anchor. A literal '0' sank the family's window below every
@@ -1037,7 +1037,7 @@ try {
   const dischargedOnCaptureLane = (at) => dischargedByCutoff(at, captureLaneCutoff);
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
 
-  // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
+  // Capture-pending declaration (board 1af5d630, decision follows foreign_e23f38f8):
   // the capture EXISTS and its write is in flight on a named target (detail =
   // "<target> — <reason>"). Unlike no_capture it covers LATER work too — the
   // whole point is that new work keeps arriving while the capture rides a
@@ -1708,7 +1708,7 @@ try {
       .some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
   }
 
-  // Concept duty satisfaction (decision 7208729b): per FAMILY, a feature_article
+  // Concept duty satisfaction (decision foreign_7208729b): per FAMILY, a feature_article
   // carrying concept_family === family created/updated since the SESSION WINDOW
   // START for that family — min(that family's earliest concept_designed event
   // `at`, the earliest valid `at` across ALL session-register events of any
@@ -1815,7 +1815,7 @@ try {
     // this grace is the TARGET's liveness, not a Stop count: while the register
     // still holds the dispatch the declaration names, converting to debt would
     // file mid-flight agent work as conductor negligence — the exact misreading
-    // decision ec9eacaa fixed for the file lanes, which this lane never
+    // decision foreign_ec9eacaa fixed for the file lanes, which this lane never
     // inherited. Non-terminal in exactly the shape of the first pending Stop
     // above: BOTH work registers survive, so a write landing before any later
     // Stop still settles the duty terminally with zero queue noise (the
@@ -1835,7 +1835,7 @@ try {
     }
     // "any capture_owed open" gates more than the choke's exact-key match (its
     // file_keys vary with activePaths) — kept deliberately; only the write
-    // itself routes through enqueueSystemTodo (decision 194f43e4).
+    // itself routes through enqueueSystemTodo (decision foreign_194f43e4).
     const openPending = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
@@ -1894,7 +1894,7 @@ try {
     // pre-existing hazard: a failed write would convert an unseen duty
     // straight into queued debt with the nag never having been shown.
     // Any fan-out deferral/staleness leads the block: the demands that follow are
-    // exactly the ones the deferral did NOT cover (decision ec9eacaa).
+    // exactly the ones the deferral did NOT cover (decision foreign_ec9eacaa).
     const parts = [...disclosureParts];
 
     const hasDebug = activeDebugEvents.length > 0;
@@ -1923,7 +1923,7 @@ try {
     // FIX 4 (review round): concept/article compact too — only DEFERRAL lines
     // (disclosureParts, already outside this compact/full decision) stay as
     // full lines beside the one-liner; they carry live ownership evidence
-    // (decision ee8ab1f5 (2)) that a token can't stand in for.
+    // (decision foreign_ee8ab1f5 (2)) that a token can't stand in for.
     const laneVariant = (lane) => {
       if (lane === 'capture') return hasDebug ? 'debug_scope' : integrityNote ? 'test-integrity' : 'touch';
       if (lane === 'research') return 'research';
@@ -2001,7 +2001,7 @@ try {
       }
     }
 
-    // Concept demand nag (decision 7208729b): design settled, article owed NOW.
+    // Concept demand nag (decision foreign_7208729b): design settled, article owed NOW.
     // FIX 4: full detail only when NOT compacted — the compact one-liner
     // above already carries this lane's token.
     if (!compact && conceptLaneOpen) {
@@ -2040,7 +2040,7 @@ try {
     // or it would dangle forever with no next-Stop adoption ever triggered.
     releaseTouchesClaim();
 
-    // SPEND AFTER DELIVERY (point D, decision ee8ab1f5): this deliberately
+    // SPEND AFTER DELIVERY (point D, decision foreign_ee8ab1f5): this deliberately
     // does NOT call deny() — deny() writes stderr and exits unconditionally,
     // which is exactly the ordering hazard being closed (capture-nagged used
     // to be written at :1841, before the text was ever shown). Every marker
@@ -2203,7 +2203,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article — create/update the feature_article with concept_family '${family}' (decision 7208729b)`,
+        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article — create/update the feature_article with concept_family '${family}'`,
         source: 'system',
         system_reason: 'concept_article_missing',
       });

@@ -164,7 +164,7 @@ export function isLocallyModified(content, header) {
 }
 
 // Machine-activation surface (P5; the 2026-07-03 dead-hooks incident,
-// anti_pattern 60e8463d): installed agents bake NODE/HOOKS_DIR into frontmatter
+// anti_pattern foreign_60e8463d): installed agents bake NODE/HOOKS_DIR into frontmatter
 // hook commands at install time (d53dc92c) — an install produced by the OTHER
 // machine context (WSL vs native Windows) is self-consistent and
 // template-current, so hash bookkeeping alone reads it up_to_date while every
@@ -482,7 +482,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       report.push({ name: entry.name, status: 'refreshed' });
     } else {
       // Unmodified + template-current — but hash bookkeeping cannot see a
-      // machine-context flip (anti_pattern 60e8463d: nine× up_to_date while
+      // machine-context flip (anti_pattern foreign_60e8463d: nine× up_to_date while
       // every hook command pointed at the other context's node). Compare the
       // baked hook command lines against a fresh render with THIS machine's
       // vars: command drift on an UNMODIFIED install is provably baked-var
@@ -514,7 +514,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
 // probeExecutability (opt-in; the check-agents-visible CLI always enables it):
 // additionally verify every baked hook node path resolves on THIS machine —
 // visibility alone said 'ok' during the 2026-07-03 incident while every hook
-// failed non-blocking (enforcement silently absent, anti_pattern 60e8463d).
+// failed non-blocking (enforcement silently absent, anti_pattern foreign_60e8463d).
 // Opt-in so the lib contract (pure visibility) is unchanged for existing callers.
 export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt, probeExecutability = false }) {
   const registry = loadRegistry(registryPath);

@@ -122,7 +122,7 @@ function makeProject() {
 // `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
 // knowledge_get 7c515e52 — opened, not paraphrased): H19 no longer recovers
 // the dispatch prompt from the PARENT TRANSCRIPT (3.4-5.5 s of lag, 4 of 6
-// spawns saw an older unrelated block — finding 51506eec). A dispatch is now
+// spawns saw an older unrelated block — finding foreign_51506eec). A dispatch is now
 // declared by firing its real PreToolUse Task event through
 // h22-dispatch-register.mjs, the registered owner of that seam (§7(d)), and
 // SubagentStart's transcript_path points at a file that does NOT exist.
@@ -322,7 +322,7 @@ test('d. a record reachable through BOTH the path channel (owns the named file) 
 // --- e. guard dedup on a second identical dispatch -------------------------
 
 // REPAIRED (this dispatch): the second call is contract-only, not empty —
-// the absorbed H28 contract carries no staging guard (decision 04982f45),
+// the absorbed H28 contract carries no staging guard (decision foreign_04982f45),
 // so it fires again on the repeat call even while the KNOWLEDGE DELIVERY
 // payload stays guarded. The arm's original negative intent (no re-delivery
 // of the subject-matched record) is preserved via the doesNotMatch
@@ -417,7 +417,7 @@ test('g. no path candidates AND no subject match in the prompt: contract-only un
 //        visible to this Start (was: per-prompt matching inside a union;
 //        review finding 5, commit follows 45bb722) -------------------------
 //
-// RE-CUT BY DECISION 7c515e52 (board 5445066b). The original arm pinned that
+// RE-CUT BY DECISION foreign_7c515e52 (board 5445066b). The original arm pinned that
 // subject matching ran PER PROMPT *within a union of the dispatching message's
 // prompts* — the union was the thing that could dilute a short prompt, and
 // per-prompt matching was the fix. The UNION SEMANTICS ARE DELETED: a Start

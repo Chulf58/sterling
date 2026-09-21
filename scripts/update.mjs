@@ -1,5 +1,5 @@
 // /sterling:update [S] — bring THIS machine's Sterling clone to origin's default
-// branch (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89).
+// branch (decision foreign_e6240afe).
 //
 // Every machine but the authoring one is a pure consumer: the update is a
 // fast-forward or a loud refusal, never a hand reconciliation against GitHub.

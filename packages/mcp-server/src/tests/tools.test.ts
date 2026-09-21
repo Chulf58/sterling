@@ -237,7 +237,7 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
 // with because the id never changes. Re-based to assert the item stays put on
 // the SAME (stable) id, still open, rather than asserting a re-point that no
 // longer has anything to do. [stable-identity-design-v2]
-test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review stays anchored to the stable id, a correct NO-OP (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
+test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review stays anchored to the stable id, a correct NO-OP (decision foreign_68988832 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -250,7 +250,7 @@ test('knowledge_update leaves the article\'s drift maintenance items OPEN on an 
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'other'`, file_keys: ['src/other.ts'], feature_link: other.id });
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 4);
 
-    // NO resolves named — decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1: a
+    // NO resolves named — decision foreign_68988832: a
     // write is not a claim, so nothing here is discharged by writing alone.
     const updated = tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
     assert.equal(updated.id, article.id, 'stable-identity-design-v2: no re-mint on write, id unchanged');
@@ -332,7 +332,7 @@ test('article_oversize: over threshold, knowledge_update warns via the coherence
 test('article_oversize: a files[] change between two oversize writes refreshes the ONE open item in place — never a second (board 3acb0126)', () => {
   // The 2026-08-11 incident: dedup keyed on the exact sorted file set, so a
   // reconcile that legitimately grew files[] changed the key and minted a
-  // duplicate, contradicting decision 86216751's refreshes-in-place contract.
+  // duplicate, contradicting decision foreign_86216751's refreshes-in-place contract.
   const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 200 });
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -390,13 +390,13 @@ test('article_oversize: knowledge_append and knowledge_edit carry the same warni
   }
 });
 
-test('knowledge_update no longer drains a drift item whose feature_link points to an ANCESTOR version on an UNCLAIMED write — the auto-drain-via-chain is gone (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1); explicit ancestor-chain claiming via resolves is pinned in resolves-claim.test.ts', () => {
+test('knowledge_update no longer drains a drift item whose feature_link points to an ANCESTOR version on an UNCLAIMED write — the auto-drain-via-chain is gone (decision foreign_68988832); explicit ancestor-chain claiming via resolves is pinned in resolves-claim.test.ts', () => {
   const { tools, cleanup } = harness();
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
     const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
     // an item raised against the now-superseded v1 (a flag that lagged a version).
-    // OLD CONTRACT (decision 8ecd435f): reconciling v2→v3 alone drained it via
+    // OLD CONTRACT (decision foreign_8ecd435f): reconciling v2→v3 alone drained it via
     // the supersede chain, no claim needed. NEW CONTRACT: a write is not a
     // claim — it stays open until named via `resolves`.
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: v1.id });
@@ -1530,7 +1530,7 @@ test('maintenance_query: system_reason is filtered BEFORE the cap — matches pa
 // in packages/schemas/src/tests/schemas.test.ts.
 
 // ---------------------------------------------------------------------------
-// knowledge_get id-PREFIX resolution (decision 27f148c2) — the citation format
+// knowledge_get id-PREFIX resolution (decision foreign_27f148c2) — the citation format
 // the whole repo writes, which get() alone could not serve.
 // ---------------------------------------------------------------------------
 
@@ -1588,7 +1588,7 @@ test('knowledge_get resolves the 8-char citation prefix, at any status, and refu
   }
 });
 
-// The "run wire outside a run" test that lived here (decision 391fae4f) was
+// The "run wire outside a run" test that lived here (decision foreign_391fae4f) was
 // removed with the staged pipeline (decision
 // sterling-claude-code-scale-down-boundary, 2ad87dd1) — agentExit,
 // handoffWrite and handoffRead no longer exist.
@@ -1729,7 +1729,7 @@ test('knowledge_schema reports required vs optional, types and closed enums (§2
   }
 });
 
-test('knowledge_schema(research_finding) reports file_keys as optional; reference_material still does not (decision 8dbbc85d, board b1de6fab)', () => {
+test('knowledge_schema(research_finding) reports file_keys as optional; reference_material still does not (decision foreign_8dbbc85d, board b1de6fab)', () => {
   const { tools, cleanup } = harness();
   try {
     const rf = tools.knowledgeSchema('research_finding');
@@ -1741,7 +1741,7 @@ test('knowledge_schema(research_finding) reports file_keys as optional; referenc
 
     // control: the per-type split still holds — reference_material carries its
     // path via `location`, not file_keys, and this addition must not blur that
-    // (decision b47889b7, unchanged).
+    // (decision foreign_b47889b7, unchanged).
     const ref = tools.knowledgeSchema('reference_material');
     assert.ok(!ref.optional.includes('file_keys') && !ref.required.includes('file_keys'), 'reference_material is unaffected by this addition');
   } finally {
@@ -1749,7 +1749,7 @@ test('knowledge_schema(research_finding) reports file_keys as optional; referenc
   }
 });
 
-test('knowledge_create/knowledge_query: research_finding accepts file_keys, normalizes it, and joins by it — same as decision/anti_pattern (decision 8dbbc85d, board b1de6fab)', () => {
+test('knowledge_create/knowledge_query: research_finding accepts file_keys, normalizes it, and joins by it — same as decision/anti_pattern (decision foreign_8dbbc85d, board b1de6fab)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record } = tools.knowledgeCreate('research_finding', {
@@ -2775,7 +2775,7 @@ test("removes distinguish 'already removed' from 'never existed' via the drain-l
       file_keys: ['src/thing.ts'],
       feature_link: article.id,
     });
-    // CONDUCTOR HARNESS REPAIR 2026-08-21 (decision 68988832): the implicit
+    // CONDUCTOR HARNESS REPAIR 2026-08-21 (decision foreign_68988832): the implicit
     // auto-drain this line relied on is retired — the item is closed via the
     // explicit resolves claim, preserving this test's subject (the drain-log
     // trace distinguishing 'already removed' from 'never existed').

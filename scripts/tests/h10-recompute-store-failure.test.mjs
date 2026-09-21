@@ -10,7 +10,7 @@
 //   * board `da8dcd27` (h10-now-opens-a-write-transaction-upstream-of-its-own-blocki),
 //     measured at HEAD 80fa755, quoting file:line, the exit-1 consequence, and
 //     the three weighed fix directions (a)/(b)/(c);
-//   * anti_pattern `e13f0fb5` — "a blocking hook that reads loadConfig/openStore
+//   * anti_pattern `foreign_e13f0fb5` — "a blocking hook that reads loadConfig/openStore
 //     UNGUARDED fails OPEN on a corrupt config/store — the F5 class recurs
 //     across hooks";
 //   * scripts/tests/h10-article-missing-live-recompute.test.mjs (the recompute's

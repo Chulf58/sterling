@@ -8,7 +8,7 @@
 // unresolved-identifier refusal, exactly as if the slug had never existed.
 // This is wrong: the slug WAS real, it points into a real lineage, and the
 // reader deserves the standard supersession-terminus disclosure
-// (terminus-disclosure.test.ts / decision de1a7329: ids and — per this
+// (terminus-disclosure.test.ts / decision foreign_de1a7329: ids and — per this
 // slice — dead slugs stay version-pinned to the record they actually name;
 // they are never silently redirected to the live head) rather than a bare
 // "no such thing" refusal.

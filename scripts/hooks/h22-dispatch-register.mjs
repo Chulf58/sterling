@@ -203,7 +203,7 @@ try {
       const positionalSafe = res.source === 'post' || res.source === 'derived-type-unique';
 
       // A11: a PRESENT-but-unusable declaration is disclosed for EVERY class
-      // (decision 8f137474 §5); only the NO-DECLARATION-AT-ALL absence
+      // (decision foreign_8f137474 §5); only the NO-DECLARATION-AT-ALL absence
       // warning below is reviewer-only (receipt risk, reviewer-class only).
       for (const m of territory.malformed) {
         lines.push(render(disclosure('territory_declaration_malformed', { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));

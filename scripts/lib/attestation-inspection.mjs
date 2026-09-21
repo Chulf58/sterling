@@ -7,7 +7,7 @@
 // hook REFUSING a commit that touches render/asset paths without a fresh
 // attestation. That refusing form was DECLINED: a gate the conductor must pass
 // converts the conductor into the de-facto attestation trigger, reversing
-// decision a7dbac2f (an attestation records a HUMAN inspection) in practice.
+// decision foreign_a7dbac2f (an attestation records a HUMAN inspection) in practice.
 // What ships instead is DISCLOSURE — the same facts, at the same moments, with
 // no verdict and no refusal anywhere. Nothing in this module or its callers may
 // ever fail an operation, and every caller wraps it fail-open.

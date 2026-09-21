@@ -11,7 +11,7 @@
 // h1-session-start.mjs and scripts/init-impl.mjs both call the SAME ladder
 // instead of maintaining two copies that can (and did — MED-3) diverge.
 //
-// MED-1 (contract violation, decision b128f79c: "malformed config is
+// MED-1 (contract violation, decision foreign_b128f79c: "malformed config is
 // UNAVAILABLE, never zero-toolchains"): the config ladder now validates EACH
 // toolchain ENTRY, not just the array shape. A non-object entry, or an entry
 // whose path_globs is not an array of strings, refuses the whole section as

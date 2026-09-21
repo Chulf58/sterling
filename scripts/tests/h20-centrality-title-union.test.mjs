@@ -1,4 +1,4 @@
-// H20 stage-2 RECORD CENTRALITY — TITLE-ISH UNION fix (research_finding 5f3e0a42,
+// H20 stage-2 RECORD CENTRALITY — TITLE-ISH UNION fix (research_finding foreign_5f3e0a42,
 // slug 'a-rulings-principle-is-unretrievable-by-its-own-subject-when-buried-in-incident-evidence').
 //
 // THE DEFECT: a record's narrow text (e.g. a decision's title+statement, flattened
