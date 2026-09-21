@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SterlingStore, MountedStores } from '@sterling/store';
+import { SterlingStore, MountedStores, MAX_RANK_TERMS } from '@sterling/store';
 import { todoCards } from '../viewmodel.js';
 import * as viewmodel from '../viewmodel.js';
 import { buildDashboardState, initialUi, reduce, screenLineToRow, visibleBodyLines, wrapText, QUEUE_TAB, TABS, type UiState, type DashboardState } from '../state.js';
@@ -1368,6 +1368,27 @@ test('P3 AC5: a TWO-term query is AND — only records matching BOTH terms survi
   } finally {
     cleanup();
   }
+});
+
+test('rankTermsOf dedupes repeated search words BEFORE the MAX_RANK_TERMS cap (Sol fix round item 3)', () => {
+  assert.deepEqual(
+    stateMod.rankTermsOf('mech mech Mech repair'),
+    ['mech*', 'repair*'],
+    'case-insensitive dedupe of the prefix-starred terms, first occurrence wins'
+  );
+  // MAX_RANK_TERMS+5 copies of the SAME word must not eat cap slots — they
+  // dedupe down to one term, well under the cap, exactly as the store's own
+  // rankTerms.parse does
+  const manyDuplicates = Array(MAX_RANK_TERMS + 5).fill('dup').join(' ');
+  assert.deepEqual(stateMod.rankTermsOf(manyDuplicates), ['dup*'], 'duplicates are removed before the cap, not after');
+  // a genuinely distinct word after duplicates must still survive the cap —
+  // proof the dedupe runs BEFORE slice(0, MAX_RANK_TERMS), not after
+  const dupsThenDistinct = Array(MAX_RANK_TERMS).fill('dup').concat('distinct').join(' ');
+  assert.deepEqual(
+    stateMod.rankTermsOf(dupsThenDistinct),
+    ['dup*', 'distinct*'],
+    'a later distinct word is not truncated away by earlier duplicates eating cap slots'
+  );
 });
 
 test('P3 AC5: an empty query restores the full category tree; Esc clears the query and resets the cursor to 0', () => {

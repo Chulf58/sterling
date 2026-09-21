@@ -343,9 +343,56 @@ function deepReplaceString(value: unknown, from: string, to: string): unknown {
 // it, and callers building rank_terms (the TUI search) clamp to it so they never
 // hand the store an over-long list that throws at parse (audit finding 9/43).
 export const MAX_RANK_TERMS = 16;
+
+/**
+ * The dedupe KEY for one rank term: lowercased, with runs of Unicode
+ * punctuation (\p{P}) and separators (\p{Z}) folded to one space — the
+ * characters FTS5's default unicode61 tokenizer treats as token separators.
+ * Symbols, marks, letters and digits are left alone, and there is no NFKD or
+ * mark stripping: merging two terms FTS treats as different queries ("C++"
+ * onto "C", two emoji onto one empty key) silently DROPS a caller's term,
+ * which is worse than the double count this exists to fix. So the key
+ * under-dedupes by design. A term that folds to nothing keys on itself. A
+ * trailing '*' is set aside before the fold and re-appended, using
+ * ftsMatchExpr's own prefix test, so "mech*" stays distinct from "mech".
+ * NOT guaranteed: diacritic variants ("café"/"cafe") and locale case-folding
+ * (Turkish dotted/dotless I) may still double-count; and JS's current Unicode
+ * tables are newer than unicode61's 6.1, so a rare newer-script case pair or
+ * punctuation mark could still be merged here while FTS keeps it apart.
+ * Exported so the TUI's rank-term builder uses this same key.
+ */
+export function rankTermDedupeKey(term: string): string {
+  const isPrefix = term.endsWith('*') && term.length > 1;
+  const base = isPrefix ? term.slice(0, -1) : term;
+  const folded = base
+    .toLowerCase()
+    .replace(/[\p{P}\p{Z}]+/gu, ' ')
+    .trim();
+  const key = folded.length > 0 ? folded : base;
+  return isPrefix ? `${key}*` : key;
+}
+
 export const rankTerms = z
   .array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)'))
-  .max(MAX_RANK_TERMS);
+  // Dedupe BEFORE the cap, on rankTermDedupeKey, first occurrence wins,
+  // original order otherwise preserved — the ORIGINAL term text is what is
+  // kept and sent to FTS, only the comparison is folded. This is the ONE
+  // place rank_terms are normalized — every caller (query(), countAboveScore())
+  // reaches the FTS match expression only through rankTerms.parse(), so a
+  // duplicate can never reach ftsMatchExpr and double a record's bm25
+  // contribution.
+  .transform((terms) => {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const term of terms) {
+      const key = rankTermDedupeKey(term);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(term);
+    }
+    return deduped;
+  })
+  .pipe(z.array(z.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
 // One definition of the §3.4 default cap (invariant 1), for the same reason as
 // MAX_RANK_TERMS: it was written literally in BOTH query() here and

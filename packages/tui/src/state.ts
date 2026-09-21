@@ -3,7 +3,7 @@
 // prints; reduce maps input events (keys AND mouse) to new UI state plus
 // effects. The renderer stays thin enough to be boring.
 import type { SterlingStore, MountedStores } from '@sterling/store';
-import { MAX_RANK_TERMS } from '@sterling/store';
+import { MAX_RANK_TERMS, rankTermDedupeKey } from '@sterling/store';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { KNOWLEDGE_CATEGORIES, toCard, toInboundSupersedesEntries, withInboundSupersedes, knowledgeCountBySource, knowledgeSubgroups, knowledgeSearch, completedQueueLines, activityLines, queueCards, todoCards, type Card } from './viewmodel.js';
 import { bannerLines } from './banner.js';
@@ -343,16 +343,28 @@ const catId = (type: string) => `cat:${type}`;
 const srcId = (type: string, source: string) => `src:${type}:${source}`;
 const subId = (type: string, source: string, key: string) => `sub:${type}:${source}:${key}`;
 
-/** Prefix-star a query into AND-joinable rank terms (mid-word matching). */
-function rankTermsOf(query: string): string[] {
-  return query
+/** Prefix-star a query into AND-joinable rank terms (mid-word matching).
+ *  Dedupe (via the store's OWN rankTermDedupeKey — one definition, not two)
+ *  runs BEFORE the cap: a repeated search word must not eat a slot a
+ *  distinct word needed (Sol fix round item 3). Exported for direct testing
+ *  (file header: testability lives in state.ts, never the renderer). */
+export function rankTermsOf(query: string): string[] {
+  const words = query
     .trim()
     .split(/\s+/)
     .filter((t) => t.length > 0 && t.length < 64)
-    .map((t) => `${t.replace(/\*+$/, '')}*`)
-    // clamp to the store's rank_terms cap so a long query never throws a ZodError
-    // in the live search path and crashes the TUI every frame (audit finding 9/43)
-    .slice(0, MAX_RANK_TERMS);
+    .map((t) => `${t.replace(/\*+$/, '')}*`);
+  const seen = new Set<string>();
+  const deduped: string[] = [];
+  for (const term of words) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  // clamp to the store's rank_terms cap so a long query never throws a ZodError
+  // in the live search path and crashes the TUI every frame (audit finding 9/43)
+  return deduped.slice(0, MAX_RANK_TERMS);
 }
 
 /**

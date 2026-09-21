@@ -227,6 +227,127 @@ test('rank: bm25 over rank_terms orders matching records first; freeform questio
   }
 });
 
+test('rankTerms.parse dedupes case-insensitively before the MAX_RANK_TERMS cap (§3.4)', () => {
+  assert.deepEqual(
+    storeMod.rankTerms.parse(['mech', 'mech', 'Mech', 'repair']),
+    ['mech', 'repair'],
+    'case-insensitive dedupe, first occurrence wins, order otherwise preserved'
+  );
+  // a prefix term is distinct from the bare term it shares text with (a
+  // multi-word phrase term is not representable here: rank_terms are single
+  // keywords, no whitespace — §3.4, pre-existing and unrelated to dedupe)
+  assert.deepEqual(
+    storeMod.rankTerms.parse(['mech', 'mech*', 'mech*']),
+    ['mech', 'mech*'],
+    'a prefix term dedupes against itself but is not merged into the bare term'
+  );
+  // duplicates must not eat cap slots: MAX_RANK_TERMS+5 copies of the same
+  // term dedupe down to one, well under the cap
+  const overCapDuplicates = Array(storeMod.MAX_RANK_TERMS + 5).fill('dup');
+  assert.deepEqual(storeMod.rankTerms.parse(overCapDuplicates), ['dup']);
+});
+
+test('rankTermDedupeKey folds ONLY Unicode punctuation/separators — under-dedupe, never over-merge (Sol fix round two, item 1)', () => {
+  // '+' is a MATH SYMBOL (Sm), not punctuation or a separator — unicode61
+  // leaves it as a token character, so this key must too: 'C++' and 'C' stay
+  // two distinct terms (the round-one key wrongly folded '+' away and merged
+  // them onto 'c')
+  assert.deepEqual(storeMod.rankTerms.parse(['C++', 'C']), ['C++', 'C'], "'C++' and 'C' are never merged — '+' is a symbol, not punctuation");
+  // two different emoji are both category So (Symbol, other) — untouched by
+  // the fold, so they must never collapse onto a shared/empty key (the
+  // round-one key's NFKD+mark-strip did exactly that)
+  assert.deepEqual(storeMod.rankTerms.parse(['🎉', '🚀']), ['🎉', '🚀'], 'two different emoji stay two distinct terms');
+  // fullwidth Latin letters are distinct codepoints from ASCII without
+  // NFKC/NFKD compatibility folding, which this key deliberately does not do
+  assert.deepEqual(storeMod.rankTerms.parse(['ＡＢＣ', 'abc']), ['ＡＢＣ', 'abc'], 'a fullwidth form and its ASCII equivalent stay two distinct terms');
+  // '-' (Pd), '.' (Po) and '_' (Pc) are all Unicode PUNCTUATION — all three
+  // fold to a single space, so all three spellings dedupe to one term
+  assert.deepEqual(storeMod.rankTerms.parse(['foo-bar', 'foo.bar', 'foo_bar']), ['foo-bar'], 'different punctuation separators still dedupe to one term');
+  // a prefix term ('mech*') stays a DISTINCT key from its bare form ('mech')
+  // — '*' is punctuation too, but the star is stripped and re-added AROUND
+  // the fold, never folded away
+  assert.deepEqual(storeMod.rankTerms.parse(['mech', 'mech*']), ['mech', 'mech*'], 'bare and prefix forms are never merged');
+  // plain case-fold still holds (unchanged behavior from the first fix round)
+  assert.deepEqual(storeMod.rankTerms.parse(['Mech', 'mech']), ['Mech'], 'case-insensitive dedupe, first occurrence wins');
+  // INVERTED from the round-one pin, on purpose: diacritic folding is
+  // unicode61's remove_diacritics behaviour, whose exact tables this key
+  // does not reproduce (no NFKD, no mark-stripping) — a double count on a
+  // genuine diacritic variant is a recorded residual, but silently DROPPING
+  // a caller's distinct term (the round-one bug) is not acceptable
+  assert.deepEqual(storeMod.rankTerms.parse(['café', 'cafe']), ['café', 'cafe'], 'café/cafe stay two distinct terms — diacritic folding is a residual, not merged here');
+});
+
+test('rank: a duplicated rank term must not change a competing record\'s score, order or above_threshold (regression pin, Sol fix round item 1)', () => {
+  const { dir, store } = tempStore();
+  try {
+    // Doc A is STRONG on 'xword' (repeated 10x) and weak on 'yword' (once);
+    // Doc B is the mirror — weak on 'xword' (2x), strong on 'yword' (10x).
+    // Calibrated (probed against this exact content) so that under the TRUE
+    // (deduped) terms ['xword','yword'] doc B narrowly outranks doc A, but
+    // double-counting a repeated 'xword' inflates doc A's score far more
+    // than doc B's (A's xword contribution is the large one being doubled)
+    // — enough to FLIP the order. A tie, or a uniform scale-up, would not
+    // catch the defect; only two records that each match BOTH terms with
+    // opposite strengths can.
+    store.create(article({ slug: 'doc-a', title: 'Doc A', what_it_does: 'xword '.repeat(10) + 'yword '.repeat(1) + 'filler text here for length.' }));
+    store.create(article({ slug: 'doc-b', title: 'Doc B', what_it_does: 'xword '.repeat(2) + 'yword '.repeat(10) + 'filler text here for length.' }));
+
+    // Reach the store's OWN rank_terms parsing and its OWN private
+    // ftsMatchExpr (same established internal-access pattern as the
+    // inbound-links test above) so this pin can never pass by
+    // re-implementing a separate, possibly-also-buggy scoring path.
+    const internal = store as unknown as {
+      db: { prepare: (sql: string) => { all: (...a: unknown[]) => { body: string; score: number }[] } };
+      ftsMatchExpr: (terms: string[], matchAll: boolean | undefined) => string;
+    };
+    function scoresFor(rankTermsInput: string[]): Record<string, number> {
+      const terms = storeMod.rankTerms.parse(rankTermsInput);
+      const match = internal.ftsMatchExpr(terms, undefined);
+      const rows = internal.db
+        .prepare(
+          `SELECT r.body AS body, -bm25(records_fts) AS score FROM records r JOIN records_fts f ON f.record_id = r.id WHERE records_fts MATCH ? ORDER BY bm25(records_fts) ASC`
+        )
+        .all(match);
+      return Object.fromEntries(rows.map((r) => [(JSON.parse(r.body) as { slug: string }).slug, r.score]));
+    }
+
+    const singleScores = scoresFor(['xword', 'yword']);
+    const dupScores = scoresFor(['xword', 'xword', 'yword']);
+    // (b) EXACT per-record score equality is legitimate here (not just
+    // "close enough"): after the fix, rankTerms.parse reduces
+    // ['xword','xword','yword'] to the BYTE-IDENTICAL deduped array
+    // ['xword','yword'], so ftsMatchExpr necessarily builds the identical
+    // MATCH expression and bm25() runs against the identical query.
+    assert.deepEqual(dupScores, singleScores, 'duplicate rank_terms produce byte-identical per-record scores');
+
+    // (a) identical order via the PUBLIC query() path
+    const idsOf = (rows: unknown[]) => rows.map((r) => (r as { slug: string }).slug);
+    const singleOrder = idsOf(store.query({ types: ['feature_article'], rank_terms: ['xword', 'yword'] }));
+    const dupOrder = idsOf(store.query({ types: ['feature_article'], rank_terms: ['xword', 'xword', 'yword'] }));
+    assert.deepEqual(singleOrder, ['doc-b', 'doc-a'], 'sanity: doc B narrowly outranks doc A on the true (deduped) scores');
+    assert.deepEqual(dupOrder, singleOrder, 'same order whether or not a term is duplicated');
+
+    // (c) above_threshold identical, via the PUBLIC countAboveScore() path,
+    // at a threshold strictly between BOTH true scores and where a
+    // double-counted 'xword' would have pushed them (probed: true scores
+    // ~0.00000298/0.00000333, doubled-xword scores ~0.00000495/0.00000469)
+    const threshold = Math.max(singleScores['doc-a'], singleScores['doc-b']) * 1.2;
+    assert.equal(
+      store.countAboveScore({ types: ['feature_article'], rank_terms: ['xword', 'yword'] }, threshold),
+      0,
+      "sanity: neither record's TRUE score crosses this threshold"
+    );
+    assert.equal(
+      store.countAboveScore({ types: ['feature_article'], rank_terms: ['xword', 'xword', 'yword'] }, threshold),
+      0,
+      "a duplicated term must not push a record's score across a threshold its true score does not cross"
+    );
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('fallback rank without rank_terms: file-key overlap count, then updated_at desc (§3.4)', () => {
   const { dir, store } = tempStore();
   try {
