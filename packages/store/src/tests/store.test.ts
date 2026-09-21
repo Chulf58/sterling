@@ -1402,6 +1402,265 @@ test('enqueueSystemTodo: file_keys ORDER does not create a false distinction', (
 });
 
 // ---------------------------------------------------------------------------
+// PATH PRUNING FOR reconcile_needed (board 7e779e1f). Transferring a file
+// between owning articles (knowledge_array_remove off the old owner +
+// knowledge_append onto the new one) used to leave the OLD owner's open item
+// still naming the transferred path, and an ATTESTED close of that item
+// refused WHOLE — even for the item's other, untouched keys — because
+// refuseAttestationScope's SUBSET check (correctly) sees a path the owner no
+// longer owns. These pin the store half of the fix: a same-store versioned
+// in-place write that makes a record stop claiming a path prunes that path
+// from the record's own open reconcile_needed item, in the SAME transaction,
+// through applyInPlace/pruneReconcileNeeded.
+// ---------------------------------------------------------------------------
+
+test('pruneReconcileNeeded: a write that stops claiming ONE of an item\'s TWO paths shrinks it in place — same id, text regenerated', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }, { path: 'src/b.ts', role: 'impl' }] }));
+    const item = store.enqueueSystemTodo(
+      sysTodo({
+        feature_link: art.id,
+        file_keys: ['src/a.ts', 'src/b.ts'],
+        text: "reconcile article 'csv-export' — owned file(s) changed content in direct mode (settled): src/a.ts, src/b.ts",
+      })
+    ).record;
+
+    const receipt: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
+    store.updateRecord(art.id, article({ files: [{ path: 'src/b.ts', role: 'impl' }] }), { prunedReceipt: receipt });
+
+    assert.equal(receipt.length, 1, 'one item touched');
+    assert.equal(receipt[0].id, item.id);
+    assert.equal(receipt[0].removed, false, 'one path remains — the item survives');
+    assert.deepEqual(receipt[0].pruned_paths, ['src/a.ts']);
+    assert.deepEqual(receipt[0].remaining_file_keys, ['src/b.ts']);
+
+    const [survivor] = store.query({ types: ['todo'], cap: 100 }) as unknown as { id: string; file_keys: string[]; text: string }[];
+    assert.equal(survivor.id, item.id, 'SAME id — SABOTAGE: a remove+reinsert instead of an in-place shrink makes this go RED');
+    assert.deepEqual(survivor.file_keys, ['src/b.ts'], 'the pruned path is gone from file_keys');
+    assert.match(survivor.text, /src\/b\.ts/, 'the surviving path is still named');
+    assert.doesNotMatch(survivor.text, /src\/a\.ts/, 'the pruned path is gone from the regenerated text too — SABOTAGE: not regenerating text through buildReconcileText makes this go RED');
+  } finally {
+    cleanup();
+  }
+});
+
+test('pruneReconcileNeeded: a write that stops claiming an item\'s ONLY path removes it through the NORMAL removal path (drain log gets it)', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }, { path: 'src/b.ts', role: 'impl' }] }));
+    const item = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts'] })).record;
+
+    const receipt: { id: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
+    store.updateRecord(art.id, article({ files: [{ path: 'src/b.ts', role: 'impl' }] }), { prunedReceipt: receipt });
+
+    assert.equal(receipt.length, 1);
+    assert.equal(receipt[0].id, item.id);
+    assert.equal(receipt[0].removed, true, 'the item\'s only path was pruned — nothing left to reconcile');
+    assert.deepEqual(receipt[0].remaining_file_keys, []);
+    assert.equal(store.get(item.id), undefined, 'the item is really gone — SABOTAGE: leaving a zero-key item behind makes this go RED');
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 0);
+    const drain = store.listQueueDrain(10);
+    assert.equal(drain.length, 1, 'the removal went through the NORMAL removal path (queue_drain_log recorded it) — SABOTAGE: a bare DELETE bypassing remove() makes this go RED');
+    assert.equal(drain[0].system_reason, 'reconcile_needed');
+    assert.deepEqual(drain[0].file_keys, ['src/a.ts']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('pruneReconcileNeeded: a shrink by a path the item does NOT name leaves the item completely untouched', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }, { path: 'src/b.ts', role: 'impl' }] }));
+    // The item names only 'src/a.ts' — the write below drops 'src/b.ts', which
+    // this item never claimed.
+    const item = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts'] })).record;
+    const before = store.get(item.id) as unknown as { version: number; file_keys: string[]; text: string };
+
+    const receipt: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
+    store.updateRecord(art.id, article({ files: [{ path: 'src/a.ts', role: 'impl' }] }), { prunedReceipt: receipt });
+
+    assert.equal(receipt.length, 0, 'nothing named in this item was dropped — SABOTAGE: pruning by owner alone (ignoring which paths the item names) makes this go RED');
+    const after = store.get(item.id) as unknown as { version: number; file_keys: string[]; text: string };
+    assert.equal(after.version, before.version, 'no write landed on the item at all');
+    assert.deepEqual(after.file_keys, ['src/a.ts']);
+    assert.equal(after.text, before.text);
+  } finally {
+    cleanup();
+  }
+});
+
+test('renameFileKey: a rename is NOT a shrink — the item\'s path follows the rename, nothing is pruned', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }] }));
+    const item = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts'] })).record;
+
+    store.renameFileKey('src/a.ts', 'src/a2.ts');
+
+    const after = store.get(item.id) as unknown as { file_keys: string[]; text: string };
+    assert.deepEqual(after.file_keys, ['src/a2.ts'], 'the item\'s OWN path followed the rename (renameFileKey\'s pre-existing behaviour) — SABOTAGE: a prune firing on the rename\'s apparent shrink would instead DROP this path, making this go RED');
+    assert.equal(store.query({ types: ['todo'], cap: 100 }).length, 1, 'still exactly one item — never removed as a false "zero paths left" prune');
+    // EXTENDED (review round, MEDIUM): the canonical text must follow the
+    // rename too — a rewrite that moves file_keys but leaves text naming the
+    // OLD path is stale prose the next reader cannot trust. SABOTAGE: renaming
+    // file_keys without regenerating text through buildReconcileText leaves
+    // 'src/a.ts' in the text, going RED on the second assertion below.
+    assert.match(after.text, /src\/a2\.ts/, 'the regenerated text names the NEW path');
+    assert.doesNotMatch(after.text, /src\/a\.ts/, 'the regenerated text no longer names the OLD path');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// REVIEW ROUND (board 7e779e1f) — three findings on the prune diff, all
+// accepted. This block covers the two renameFileKey findings:
+//
+//   HIGH   renameFileKey read record_file_keys BEFORE taking the write lock
+//          (BEGIN IMMEDIATE), so a reconcile_needed item minted for the OLD
+//          path by a concurrent writer in that gap was invisible to the
+//          rename's own row list — the owner moved to the NEW path while the
+//          item kept naming the OLD one, reproducing the exact unclosable
+//          state this whole change exists to fix. FIXED by moving the query
+//          inside this.tx(), after BEGIN IMMEDIATE takes the lock.
+//
+//   MEDIUM deepReplaceString maps file_keys with NO DEDUPE and only replaces
+//          an exact string match — an item already naming BOTH the old and
+//          new path collides into a duplicate entry, and the canonical text
+//          (asserted above) was never regenerated at all. FIXED by deduping
+//          and regenerating text through buildReconcileText specifically for
+//          a reconcile_needed system todo, inside renameFileKey's own patch —
+//          deepReplaceString itself is UNCHANGED, so every other record type
+//          and lane keeps its exact pre-existing behaviour.
+// ---------------------------------------------------------------------------
+
+test('renameFileKey HIGH fix: an item enqueued on a SECOND connection, committed immediately before the rename call, still ends up naming the NEW path — the read happens under the write lock, not before it', () => {
+  const { dir, store } = tempStore();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }] }));
+
+    // A second, independent connection to the SAME db file — production
+    // shape, not a same-connection artifact (mirrors the I-29 drainResolves
+    // race test above). Its write COMMITS before renameFileKey is ever
+    // called on connection 1.
+    //
+    // WHAT THIS DOES NOT PIN: the true TOCTOU window the HIGH finding named
+    // was a read that ran OUTSIDE any transaction, followed later by BEGIN
+    // IMMEDIATE — a gap a black-box test cannot force a real second
+    // connection's commit INTO without a test-only seam (which the review
+    // explicitly said not to add). That window is closed BY CONSTRUCTION
+    // now (the SELECT runs after BEGIN IMMEDIATE has already taken the
+    // write lock, so no commit can land between the read and the rewrite),
+    // not by this test. What this DOES pin is the externally-observable
+    // outcome the closed window guarantees: an item that exists before
+    // renameFileKey is called is never missed by it.
+    const second = new SterlingStore(join(dir, 'sterling.db'));
+    let itemId: string;
+    try {
+      itemId = second.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts'] })).record.id;
+    } finally {
+      second.close();
+    }
+
+    store.renameFileKey('src/a.ts', 'src/a2.ts');
+
+    const after = store.get(itemId) as unknown as { file_keys: string[] };
+    assert.deepEqual(after.file_keys, ['src/a2.ts']);
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('renameFileKey MEDIUM fix: a reconcile_needed item colliding on the rename target DEDUPES its file_keys, and its text is regenerated to match', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a2.ts', role: 'impl' }] }));
+    // The item already names BOTH the pre-rename path and its target — the
+    // collision case deepReplaceString's plain element-wise map cannot
+    // dedupe on its own.
+    const item = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts', 'src/a2.ts'] })).record;
+
+    store.renameFileKey('src/a.ts', 'src/a2.ts');
+
+    const after = store.get(item.id) as unknown as { file_keys: string[]; text: string };
+    assert.deepEqual(
+      after.file_keys,
+      ['src/a2.ts'],
+      "SABOTAGE: a non-deduping rewrite leaves ['src/a2.ts','src/a2.ts'] here, going RED"
+    );
+    assert.match(after.text, /src\/a2\.ts/);
+    assert.doesNotMatch(after.text, /src\/a\.ts/, 'the stale pre-rename path name must not survive in the regenerated text');
+  } finally {
+    cleanup();
+  }
+});
+
+test('renameFileKey: deepReplaceString itself is UNCHANGED for every OTHER lane — a plain decision\'s file_keys still map element-wise with no dedupe pass', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    // A decision naming the SAME path twice in file_keys (legacy/malformed
+    // data, but nothing refuses it at this layer) is not a reconcile_needed
+    // system todo, so the MEDIUM fix's dedupe/regenerate branch must not
+    // touch it — only that ONE lane's rename-time patch changed.
+    const d = store.create(decision({ file_keys: ['src/a.ts', 'src/a.ts'] }));
+    store.renameFileKey('src/a.ts', 'src/a2.ts');
+    const after = store.get(d.id) as unknown as { file_keys: string[] };
+    assert.deepEqual(after.file_keys, ['src/a2.ts', 'src/a2.ts'], 'unchanged deepReplaceString behaviour outside the reconcile_needed lane — SABOTAGE: a blanket dedupe applied to every renamed record makes this go RED');
+  } finally {
+    cleanup();
+  }
+});
+
+test('pruneReconcileNeeded: a write that both claims the item in resolves AND shrinks is drained ONCE — no throw, never reported as pruned', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }, { path: 'src/b.ts', role: 'impl' }] }));
+    const item = store.enqueueSystemTodo(sysTodo({ feature_link: art.id, file_keys: ['src/a.ts', 'src/b.ts'] })).record;
+
+    const resolvedReceipt: { id: string; file_keys?: string[] }[] = [];
+    const prunedReceipt: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
+    assert.doesNotThrow(() =>
+      store.updateRecord(art.id, article({ files: [{ path: 'src/b.ts', role: 'impl' }] }), {
+        resolves: [item.id],
+        resolvedReceipt,
+        prunedReceipt,
+      })
+    );
+
+    assert.equal(resolvedReceipt.length, 1, 'drained via the explicit claim');
+    assert.equal(resolvedReceipt[0].id, item.id);
+    assert.equal(prunedReceipt.length, 0, 'the SAME item is never ALSO reported as pruned — SABOTAGE: pruning before checking drain state makes this go RED');
+    assert.equal(store.get(item.id), undefined, 'gone either way');
+  } finally {
+    cleanup();
+  }
+});
+
+test('pruneReconcileNeeded: a non-reconcile_needed lane item is never touched by an owner\'s shrink', () => {
+  const { store, cleanup } = storeHarness();
+  try {
+    const art = store.create(article({ files: [{ path: 'src/a.ts', role: 'impl' }, { path: 'src/b.ts', role: 'impl' }] }));
+    const parked = store.enqueueSystemTodo(
+      sysTodo({ system_reason: 'file_parked', feature_link: art.id, file_keys: ['src/a.ts'], text: 'src/a.ts is parked on a branch' })
+    ).record;
+    const before = store.get(parked.id) as unknown as { version: number; file_keys: string[] };
+
+    const receipt: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
+    store.updateRecord(art.id, article({ files: [{ path: 'src/b.ts', role: 'impl' }] }), { prunedReceipt: receipt });
+
+    assert.equal(receipt.length, 0, 'file_parked is not the reconcile_needed lane — SABOTAGE: pruning any system lane by feature_link alone makes this go RED');
+    const after = store.get(parked.id) as unknown as { version: number; file_keys: string[] };
+    assert.equal(after.version, before.version);
+    assert.deepEqual(after.file_keys, ['src/a.ts']);
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // STABLE state_review IDENTITY (board e939fd21). Its file_keys are chosen by
 // the CALLER (tools.ts) as unverifiedPaths-else-first-3-owned, so re-detecting
 // the SAME article's state-honesty debt can present a DIFFERENT file_keys set

@@ -2597,6 +2597,46 @@ export class SterlingTools {
   }
 
   /**
+   * THE PRUNED-PATH DRIFT VERDICT (board 7e779e1f) — "did this path, as the
+   * record's OWN prose stood right before this write, actually disagree with
+   * the working tree?" Reuses classifyOwnedFileDrift in 'recheck' mode (the
+   * ONE per-file predicate; never a second copy) against `oldOwner` — the
+   * pre-write record `knowledgeUpdate` already read at the top of the call —
+   * so the baseline compared against is the OLD one, not whatever this write
+   * just re-baselined it to.
+   *
+   * No DriftBudget: a prune touches at most a handful of paths in one write
+   * (never a whole page of queue items), so the budget axes that bound
+   * reconcileTruthAtRead's page-wide re-check do not apply here.
+   *
+   * Returns 'unknown' — never a fabricated true/false — whenever the
+   * evidence to answer is unavailable: an unresolved/unmapped working tree,
+   * no recorded baseline for this path (verdict.kind 'unavailable'), an
+   * unreadable file, or a path currently absent with no way to tell parked
+   * from deleted. Only 'reconcile'/'deletion_candidate' report `true` and
+   * only 'clean' reports `false` — pruning never asserts a verdict this
+   * predicate itself would not stand behind.
+   */
+  private classifyPrunedPathDrift(oldOwner: DurableRecord, path: string): boolean | 'unknown' {
+    const rec = oldOwner as unknown as Record<string, unknown>;
+    const tree = this.treeRootFor(rec);
+    if (tree.unresolved || !tree.root) return 'unknown';
+    const baselines = (rec as { file_baselines?: Record<string, string> }).file_baselines;
+    const absenceAttestedPaths = new Set(Object.keys((rec as { absence_attestations?: Record<string, unknown> }).absence_attestations ?? {}));
+    const { verdict } = this.classifyOwnedFileDrift(path, {
+      mode: 'recheck',
+      treeRoot: tree.root,
+      baselines,
+      baselinedAt: (rec.updated_at as string | undefined) ?? '',
+      honorMtimePrefilter: false,
+      absenceAttestedPaths,
+    });
+    if (verdict.kind === 'reconcile' || verdict.kind === 'deletion_candidate') return true;
+    if (verdict.kind === 'clean') return false;
+    return 'unknown';
+  }
+
+  /**
    * The staleness verdict knowledge_query never surfaced (reported 2026-08-29:
    * "no equivalent staleness annotation at all" on knowledge_query). Nothing new
    * is COMPUTED here — the baselines exist, H7 and the read-time drift wires
@@ -4809,6 +4849,13 @@ export class SterlingTools {
     // reconstruct from what it sent, and digestRecord's field whitelist would
     // otherwise drop it.
     if (record.resolved_items !== undefined) digested.resolved_items = record.resolved_items;
+    // pruned_reconcile_items (board 7e779e1f) SURVIVES THE DIGEST for the
+    // same reason resolved_items does: it is a fact about the WRITE (which
+    // paths this record stopped claiming pruned which open item, and whether
+    // each pruned path actually drifted) that the caller cannot reconstruct
+    // from what it sent, and digestRecord's field whitelist would otherwise
+    // drop it.
+    if (record.pruned_reconcile_items !== undefined) digested.pruned_reconcile_items = record.pruned_reconcile_items;
     return digested;
   }
 
@@ -6952,6 +6999,24 @@ export class SterlingTools {
      * replacement lane.
      */
     resolved_items?: { id: string; system_reason?: string; file_keys?: string[] }[];
+    /**
+     * PATH-PRUNE DISCLOSURE (board 7e779e1f): when this write makes the
+     * record stop claiming a path, and an open reconcile_needed item pinned
+     * to it named that path, the path is pruned from the item's own
+     * file_keys in the SAME transaction (SterlingStore.pruneReconcileNeeded)
+     * — never a second write, and never through this call's own `resolves`.
+     * Pruning is bookkeeping, NOT evidence anyone reconciled anything, so
+     * `drifted` is disclosed per pruned path rather than implied by the
+     * prune itself: `true` when the OLD baseline (this record as it stood
+     * BEFORE this write) no longer matches the working tree, `false` when it
+     * still does, `'unknown'` when the evidence to say either is unavailable
+     * (no recorded old baseline for the path, an unresolved/unmapped working
+     * tree, an unreadable file). Sourced from `SterlingStore.updateRecord`'s
+     * own `prunedReceipt` out-param — the committed state at prune time —
+     * with the drift verdict computed here, never in the store, because it
+     * needs the filesystem/git tree the store layer never touches.
+     */
+    pruned_reconcile_items?: { id: string; removed: boolean; paths: { path: string; drifted: boolean | 'unknown' }[] }[];
   } {
     const old = this.resolveRecordId(id, toolName);
     this.refuseStaleAddress(old, id, toolName);
@@ -7141,6 +7206,12 @@ export class SterlingTools {
     // item immediately before removing it and pushes the COMMITTED snapshot
     // here instead.
     const resolvedReceipt: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[] = [];
+    // OUT-PARAM for SterlingStore.applyInPlace's own path-prune (board
+    // 7e779e1f) — filled ONLY on the ordinary in-place branch below, since
+    // that is the only branch calling store.updateRecord; the replaced
+    // (attestation) and append-join branches never shrink a files[]/location
+    // claim, so leaving this empty for them discloses nothing false.
+    const prunedReceipt: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[] = [];
     // The store's own validateRecord re-parses the merged record (`next`) and,
     // on a caller-supplied bad element (e.g. a history entry passed as a bare
     // string), throws zod's raw ZodError across the store boundary — the
@@ -7218,6 +7289,7 @@ export class SterlingTools {
           ...(cas !== undefined ? { expected_version: cas } : {}),
           ...(claims.length ? { resolves: claims.map((claim) => claim.id), resolvedReceipt } : {}),
           ...(relationRemoval ? { remove_relation: relationRemoval } : {}),
+          prunedReceipt,
         });
       }
     } catch (err) {
@@ -7262,11 +7334,26 @@ export class SterlingTools {
     const resolvedItems = resolvedReceipt.length
       ? resolvedReceipt.map((item) => ({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [] }))
       : undefined;
+    // Sourced from `prunedReceipt` — the store's own committed prune, taken
+    // strictly after the resolves drain above, so an item this same write
+    // ALSO named in `resolves` is reported once, as drained, never as pruned
+    // too (board 7e779e1f: SterlingStore.pruneReconcileNeeded's own doc
+    // comment). The drift verdict is computed HERE, against `old` — the
+    // record exactly as it stood before this write — because that is the
+    // baseline a pruned path's "did it actually drift" question is asked of.
+    const prunedItems = prunedReceipt.length
+      ? prunedReceipt.map((item) => ({
+          id: item.id,
+          removed: item.removed,
+          paths: item.pruned_paths.map((path) => ({ path, drifted: this.classifyPrunedPathDrift(old, path) })),
+        }))
+      : undefined;
     const echo = replaced
       ? {
           ...claimsCheck,
           ...updated,
           ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
+          ...(prunedItems ? { pruned_reconcile_items: prunedItems } : {}),
           identity_moved: {
             previous_id: old.id,
             note: `an attestation update is a CONCEPT REPLACEMENT, not an in-place version bump (an inspection verdict is immutable by construction): this is a NEW record with a new id, and '${old.id}' was retired pointing at it. Cite '${updated.id}' from here on.`,
@@ -7276,6 +7363,7 @@ export class SterlingTools {
           ...claimsCheck,
           ...updated,
           ...(resolvedItems ? { resolved_items: resolvedItems } : {}),
+          ...(prunedItems ? { pruned_reconcile_items: prunedItems } : {}),
           previous_version: previousVersion ?? (typeof bumpedTo === 'number' ? bumpedTo - 1 : undefined),
         };
     if (SterlingTools.SAME_SUBJECT_TYPES.includes(old.type)) {
@@ -9763,7 +9851,9 @@ export class SterlingTools {
           `(${unowned.join(', ')}) — an attestation can only claim "the prose already describes these bytes" for paths the prose ` +
           `actually owns, and stamping a baseline for an unowned path would mint provenance nothing reads. Either bring the path under ` +
           `the record's ownership (an article's files[], a reference document's location) and reconcile it, or close the item some ` +
-          `other way. Nothing was written.`
+          `other way — for instance, a knowledge_update on '${slug ?? article.id}' naming this item in resolves:['${itemId}'] closes it ` +
+          `WHEN that write genuinely reconciles the record, which also prunes any path the record no longer claims from this item's own ` +
+          `file_keys, so a later close of what remains need not pass through this refusal at all. Nothing was written.`
       );
     }
     // THE PATH-COUNT CAP, checked whole before any evidence is gathered and again

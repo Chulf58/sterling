@@ -6066,6 +6066,17 @@ var SterlingStore = class _SterlingStore {
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
    *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
    * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
    * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
    * caller that deliberately preserves the stored `updated_at` — see
@@ -6138,8 +6149,10 @@ var SterlingStore = class _SterlingStore {
       for (const tag of new Set(validated.stack_tags)) {
         this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
       }
+      const beforeFileKeys = new Set(entry.fileKeys(current));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      for (const path of new Set(entry.fileKeys(stored))) {
+      for (const path of afterFileKeys) {
         this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
       }
       for (const link of validated.links)
@@ -6154,6 +6167,14 @@ var SterlingStore = class _SterlingStore {
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
         this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = /* @__PURE__ */ new Set();
+        for (const path of beforeFileKeys)
+          if (!afterFileKeys.has(path))
+            droppedPaths.add(path);
+        if (droppedPaths.size > 0)
+          this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
     });
     return served;
@@ -6187,6 +6208,72 @@ var SterlingStore = class _SterlingStore {
       if (receipt)
         receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
       this.remove(claimed, at);
+    }
+  }
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
+    const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    for (const r of rows) {
+      const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+        continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0)
+        continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      const owner = this.get(ownerId);
+      const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -6998,15 +7085,28 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable("renameFileKey");
     const from = normalizeRepoPath(oldPath);
     const to = normalizeRepoPath(newPath);
-    const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+    let count = 0;
     this.tx(() => {
+      const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+      count = rows.length;
       for (const { record_id } of rows) {
         if (!this.get(record_id))
           continue;
-        this.applyInPlace("renameFileKey", record_id, (current) => deepReplaceString(current, from, to), {}, { allowRetired: true });
+        this.applyInPlace("renameFileKey", record_id, (current) => {
+          const patched = deepReplaceString(current, from, to);
+          const c = current;
+          if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
+            const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
+            const featureLink = patched.feature_link;
+            const owner = featureLink ? this.get(featureLink) : void 0;
+            const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: featureLink }, fileKeys);
+            return { ...patched, file_keys: fileKeys, text };
+          }
+          return patched;
+        }, {}, { allowRetired: true, suppressReconcilePrune: true });
       }
     });
-    return rows.length;
+    return count;
   }
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
    *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
