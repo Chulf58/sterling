@@ -1,10 +1,10 @@
 # Sterling takeover 2026-09 — scale-down to the OpenSterling boundary
 
-Projection of the board + decisions as of the evening of 2026-09-19; the store is the source of truth; regenerate at each slice boundary.
+Projection of the board + decisions as of 2026-09-21; the store is the source of truth; regenerate at each slice boundary.
 
 ## Where this plan lives
 
-Board objective: `sterling-takeover-2026-09` (`board_query objective:"sterling-takeover-2026-09"`). Governing decisions: `2ad87dd1`, `38c9e860`, `276cd235`, and session posture `ff9937f3`. This file: `docs/STERLING-TAKEOVER-PLAN.md`.
+Board objective: `sterling-takeover-2026-09` (`board_query objective:"sterling-takeover-2026-09"`). Governing decisions: `2ad87dd1`, `38c9e860`, `276cd235`. Decision `dispatch-to-codex-while-claude-usage-is-short` (`ff9937f3`) LAPSED on 2026-09-21 — user-stated verbatim: "If the rotation note says anything about only using Codex agents, that isnt true anymore and Claude usage had reset" — so Claude subagents are the default again per `docs/conductor-contract.md`, with every Codex lane through the `codex` MCP tool. This file: `docs/STERLING-TAKEOVER-PLAN.md`.
 
 ## User rulings (verbatim)
 
@@ -22,6 +22,7 @@ Board objective: `sterling-takeover-2026-09` (`board_query objective:"sterling-t
 - 2026-09-19 (board item slice-8): "move over what we agreed from opensterling project, agents, skills and whatever"
 - 2026-09-19: "Have Astra review and advice on everything regarding the knowledge delivery. It is the core of Sterling" (decision `knowledge-delivery-target-design-no-delayed-delivery`)
 - 2026-09-19: user chose "Checkpoint, then scale down" for the open delivery findings (board `7b4d9f3a`)
+- 2026-09-21: "If the rotation note says anything about only using Codex agents, that isnt true anymore and Claude usage had reset" (decision `dispatch-to-codex-while-claude-usage-is-short`)
 
 ## Boundary: what stays, what goes
 
@@ -47,7 +48,7 @@ Implementor owns the change and tests; researcher is read-only; scout returns a 
 
 Local SQLite only. Claude Code, Sterling, Codex and projects run in WSL2; Windows launchers open WSL. `packages/store` uses `journal_mode=DELETE` for `/mnt/<drive>` stores.
 
-Terra lanes that must run the test suite use the user-approved `--dangerously-bypass-approvals-and-sandbox`, because Codex's sandbox blocks their child processes; Sol remains read-only.
+Terra lanes that must run the test suite use the user-approved `--dangerously-bypass-approvals-and-sandbox`, because Codex's sandbox blocks their child processes; Sol remains read-only. Superseded in practice 2026-09-20: every Codex lane now runs through the `codex` MCP tool (CLAUDE.md, decision `codex-lane-operating-practice-profiles-json-and-worker-instructions`); spawning test suites stay with the conductor or a Claude implementor.
 
 ### Sequencing
 
@@ -111,7 +112,17 @@ Not closed by this slice: the acceptance run itself. The fix is verified by test
 
 ### Slice 7 — Dome Farmer defects that survive the cut
 
-NOT STARTED. Re-verify post-cut groups, including new item `01fbe880`: `knowledge_create` accepts dangling link IDs. I-01's repeated capture root cause is `h10-direct-capture.mjs:1761`: pending is carried only when the other duties are satisfied. Then address the remaining reconciliation minting, array/history, maintenance-close, reference-delta and librarian-drain groups.
+COMPLETE 2026-09-21; board item `b0bb9d96` closed. Every group was re-verified against HEAD before any fix, and several recorded root causes turned out wrong.
+
+- (e) I-01, H10 re-demanding capture while `capture_pending` was live — `d8537b5`, decision `stop-consumes-settled-and-queued-work-never-live-declarations`. The real cause was an ordinary quiet Stop deleting the session-event register, not the recorded one.
+- (b) I-14 and the dangling-link hole — `674a50c`, decision `edge-removal-is-explicit-and-versioned-validation-is-on-admit`. `knowledge_array_remove` on `links[]` now deletes the relation row in a versioned transaction (no `knowledge_unlink` tool was built), and link targets are validated on admit. Verified live 2026-09-21: the bogus edge on `h10-touches-from-git-settled-snapshot` (`c87e6e0d`) was removed and read back as exactly one link; board `01fbe880` closed on that repair.
+- (b) I-36 / (c) I-26, directory claims — by design, now pinned: `90606c4` adds tests (5b) atomic repair of several directory claims by one `knowledge_update`, and (5c) incremental `array_remove` still refused. The earlier "deadlock" claim was false. The governing decision the code cites eight times was foreign to this store and was re-captured under the same slug (`0bd2dbe7`).
+- (a) I-29, the reconcile mint storm — `4288bf9`, decision `reconcile-needed-identity-is-reason-plus-owner-file-keys-unioned` (`97fd507a`). Two un-coordinated minters met a dedup key that compared the exact `file_keys` set, so duplicates coexisted. Identity is now (reason, feature_link) with keys unioned into the oldest open item inside one `BEGIN IMMEDIATE` transaction, in the store's one enqueue choke point; `settlement.mjs` lost its hand-rolled widen/sweep; `knowledge_update`'s receipt gained `resolved_items`. The read-time mint is deliberately kept.
+- (d) I-13 / I-27 — fixed earlier by `f9a3c4b`. I-32 is intentional and pinned.
+- I-38, `file_parked` advisory only — accepted as the design under the scale-down ruling; decision `file-parked-stays-advisory-no-refusal-on-dropping-a-parked-claim` (`f96f1d4a`), a conductor application of the standing ruling that the user may overrule.
+- (f) I-42 premise did not match the code; (g) I-34 moot.
+
+Left open on purpose, NOT boarded yet (tracking is the user's call): any versioned write re-baselines every owned file, including ones it never reconciled, so unpaid reconcile debt can vanish (finding `a-re-baseline-can-auto-drain-a-reconcile-needed-item-before`, `07de1244`). Pre-existing and unrelated: `scripts/tests/agent-coverage-scan.test.mjs` F1 fails on a clean HEAD.
 
 ### Slice 8 — port what OpenSterling already settled: agents and skills
 
@@ -129,16 +140,20 @@ DISAGREED, conductor call stands: H29 consult-result checking is not rebuilt bec
 
 **Codex execution provenance — 2026-09-19.** Anti-pattern `codex-exec-resume-drops-session-model` (`23030b62`): `codex exec resume` ignores the session model and uses config-default `gpt-6-astra` unless passed `-m`; `--last` can select another lane. Part of a fix round and one re-check therefore ran on Astra, partly self-reviewing Astra's fixes, and the review was redone independently on Sol. A background `codex exec` with prompt as an argument and no stdin redirect also waits forever (two lanes idle for over an hour); use `- < brief` or `</dev/null`.
 
+**Astra — I-29 design sparring, 2026-09-21.** Question: one reconcile item per owner at the enqueue choke point (A), and reads stop minting (B). Astra: A agree-with-change (atomic union; settlement was replacing, not widening; a widening item needs an honest close), B disagree — between-session changes DO reach settlement, but settlement excludes records declaring a `working_tree`, so B would shrink queue coverage. Action: A built with those changes; B dropped, the conductor agreeing on the merits. One disagreement kept: Astra preferred binding a `resolves` close to the reviewed item version; the conductor shipped receipt disclosure (`resolved_items`) instead.
+**Sol — I-29 pre-commit review, 2026-09-21.** REQUEST_CHANGES: HIGH `resolved_items` built from pre-transaction snapshots; MEDIUM first multi-file insert bypassed the text builder; LOW stale comments. One fix round, re-check APPROVE. Residual (MEDIUM): the attestation-replace branch's `resolved_items` is a fresher read, not an atomic one.
+
 ## Open questions and user actions
 
-- Domain-store copy or symlink from `C:/Users/chulf/.sterling/domains` into WSL remains open.
+- Domain-store copy or symlink from `C:/Users/chulf/.sterling/domains` into WSL remains open. Observed 2026-09-21: `~/.sterling/domains/` in WSL already holds all seven domain stores, and its `sterling` domain (30 records) is AHEAD of the Windows-side copy (16), so a copy from Windows would now lose data — re-scope before acting.
 - SpaceExplorer (`C:/Users/chulf/Comsoft`) needs a prune-or-re-init decision.
 - Dome Farmer's Blender MCP still needs WSL `uv` and networking to the Windows addon.
 - Shared-core boundaries with OpenSterling still need explicit agreement before convergence work.
+- This clone is `machine_role: authoring` but `store_authority: secondary`: none of the 408 record ids cited by `rulings.md` (generated 2026-09-08) resolve in this project store or its domain stores — the ruling corpus the code cites lives in another machine's store (decision 'Citation and projection authority is per-store', `a446753c`). Whether to import it is the user's decision. The configured `backup_path` listed no files on 2026-09-21.
 
 ## Next order
 
-Slices 3b and 6 are closed. Next is the **Dome Farmer acceptance session** — a real `/sterling:update` run on Dome Farmer and SpaceExplorer, which is now both Slice 6's acceptance and Slice 2's (Astra's round-1 ask: acceptance = a working consumer session on the real thing). Then Slice 7, including board `01fbe880` and I-01 at `h10-direct-capture.mjs:1761`.
+Slices 3b, 6 and 7 are closed. Next is the **Dome Farmer acceptance session** — a real `/sterling:update` run on Dome Farmer and SpaceExplorer, which is both Slice 6's acceptance and Slice 2's. It needs an EXIT AND RELAUNCH first: commits `674a50c` and `4288bf9` changed MCP-server and hook code the running session does not have loaded. After it: the small bug batch (board `081508d0` slug, `7e779e1f` ownership transfer, `3bb97546` H10 discharge, `bc287279` eval scorer), then the article-coverage pass, then pull quality at scale (`58eaafa5`).
 
 Article coverage is now three boarded gaps of one class — `f72e5982` (extensible-set registries), `0dca9d42` (`packages/mcp-server`, `packages/store`) and `b0e8325a` (the `/sterling:update` surface, found during Slice 6's reconcile: `matched_filter:0`, no owning article at all) — best taken in one authoring pass rather than three. The remaining Slice 1 domain-store action stays open.
 
