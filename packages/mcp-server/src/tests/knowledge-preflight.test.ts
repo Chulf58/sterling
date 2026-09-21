@@ -662,6 +662,183 @@ test(
   }
 );
 
+// --- V4 one-hit minimum pins (measured 2026-09-21, research findings on the
+// preflight-floor counterfactual and its validation): knowledgePreflight now
+// admits a candidate on ONE matched term once hasDiscriminatingHit and
+// hasRecordCentralityHit both already pass — sameSubjectDigest (the write-time
+// same_subject surface, pinned separately in same-subject-surfacing.test.ts)
+// keeps the AXIS_MIN_HITS=2 floor unchanged. The centrality pass below relies
+// on the SAME prefix quirk the validation finding documents for p-009: a
+// record narrow text containing both an inflected pair ('manifold' /
+// 'manifolds') as separate top-K central terms lets one query word cover both
+// via symmetric prefix matching, so hasRecordCentralityHit's minTerms=2 floor
+// is satisfied even though axisHits only ever counts ONE distinct matched term.
+
+test(
+  'AC-h1 (V4 one-hit): a record whose single shared term is discriminating and passes centrality is now returned — previously excluded by the two-hit floor',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = tools.knowledgeCreate('anti_pattern', {
+        title: 'Manifold subsystem',
+        trigger:
+          'manifold manifold manifold manifolds manifolds manifolds other padding words here to fill space and avoid collision',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      const result = preflight(
+        tools,
+        'Investigate the manifold behavior during unrelated deployment scheduling review.'
+      );
+      assert.equal(
+        result.answerability,
+        'verify_targets',
+        'a single discriminating, central hit is now sufficient to qualify a candidate'
+      );
+      const match = result.matches.find((m) => m.id === record.id);
+      assert.ok(match, 'the one-hit record surfaces as a match');
+      assert.deepEqual(match!.matched_on, ['manifold'], 'exactly one matched term, not two');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'AC-h2 (discriminating floor still applies, centrality genuinely passes): a record whose only hit is a GENERIC dev term is NOT returned, even though that same hit already clears centrality — the discriminating floor alone must be what blocks it',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // REBUILT (fix round, cross-family review HIGH finding): the prior
+      // fixture failed hasRecordCentralityHit too (the query covered only
+      // one central term), so it stayed 'ungoverned' even with the
+      // discriminating floor stubbed out — a hollow proof. Repeats BOTH
+      // 'test' and 'tests' (mirroring the p-009 quirk documented in the
+      // validation finding) so the single query word 'test' symmetric-prefix
+      // covers two central terms ('test', 'tests') and centrality passes
+      // GENUINELY on its own — see the single-protection proof below.
+      tools.knowledgeCreate('anti_pattern', {
+        title: 'Xylophone resonance study',
+        trigger:
+          'test test test tests tests tests padding filler placeholder more random content here',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      });
+      const query = 'Please test the widget before shipping it forward for review.';
+      // Fixture guard (kept blind to the centrality helper, per this file's
+      // own spec: assert through knowledgePreflight's own result only): AC-a
+      // above already pins that this store returns 'verify_targets' whenever
+      // centrality genuinely passes on a record's dominant vocabulary; the
+      // single-protection proof that THIS fixture's centrality independently
+      // passes on 'test'/'tests' was run out-of-band against a temporarily
+      // neutralized discriminating check (fix-round session evidence) rather
+      // than baked in here as a direct import of the centrality helper.
+      const result = preflight(tools, query);
+      assert.equal(
+        result.answerability,
+        'ungoverned',
+        "a lone GENERIC hit ('test') is still rejected by hasDiscriminatingHit even though centrality independently passes"
+      );
+      assert.deepEqual(result.matches, []);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'AC-h3 (centrality floor still applies): a record whose only hit is a discriminating but PERIPHERAL term is NOT returned, even under the one-hit minimum',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // Single-protection fixture (confirmed genuine, fix-round session
+      // evidence): 'gizmo' independently clears hasDiscriminatingHit (it is
+      // not in GENERIC_DEV_TERMS) — only hasRecordCentralityHit rejects it,
+      // since 'gizmo' never appears among the record's top-K central terms.
+      tools.knowledgeCreate('anti_pattern', {
+        title: 'Boolean modifier mesh manifold topology solver',
+        trigger:
+          'boolean modifier boolean modifier mesh manifold mesh manifold topology solver topology solver gizmo',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      });
+      const result = preflight(tools, 'Please check the gizmo compatibility with unrelated hardware today.');
+      assert.equal(
+        result.answerability,
+        'ungoverned',
+        "'gizmo' is discriminating but never central to the record's own dominant vocabulary — hasRecordCentralityHit still rejects it"
+      );
+      assert.deepEqual(result.matches, []);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test('AC-h4 (input guard unchanged): a one-word question still answers insufficient/too_little_vocabulary, even with a store record that would otherwise one-hit-qualify', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('anti_pattern', {
+      title: 'Manifold subsystem',
+      trigger:
+        'manifold manifold manifold manifolds manifolds manifolds other padding words here to fill space and avoid collision',
+      guidance: 'guidance',
+      wrong_way: 'wrong way',
+      right_way: 'right way text',
+      source_evidence: 'evidence',
+    });
+    const result = preflight(tools, 'manifold');
+    assert.equal(
+      result.answerability,
+      'insufficient',
+      'one MATCHING word in a candidate is now enough, but a one-word INPUT is a separate guard and stays insufficient'
+    );
+    assert.equal(result.reason, 'too_little_vocabulary');
+    assert.deepEqual(result.matches, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test(
+  'AC-h5 (order pin): a two-hit record still sorts ahead of a one-hit record newly admitted by the relaxed floor',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const twoHit = tools.knowledgeCreate('decision', {
+        title: 'Widget calibration',
+        statement: 'Widget calibration procedure text short.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const oneHit = tools.knowledgeCreate('anti_pattern', {
+        title: 'Manifold subsystem',
+        trigger:
+          'manifold manifold manifold manifolds manifolds manifolds other padding words here to fill space and avoid collision',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      const result = preflight(
+        tools,
+        'Investigate the widget calibration behavior during unrelated deployment scheduling review manifold.'
+      );
+      assert.equal(result.matches.length, 2, 'both the two-hit decision and the one-hit anti_pattern qualify');
+      assert.equal(result.matches[0].id, twoHit.id, 'hit count desc is still the primary sort key');
+      assert.equal(result.matches[1].id, oneHit.id, 'the one-hit addition lands after every existing (higher-hit) match');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
 test(
   'sort pin 5 (id ascending is the final tie-break — cross-family review LOW finding): equal hits, equal ' +
     'centrality and equal updated_at — order is decided by id ascending',
@@ -695,3 +872,71 @@ test(
     }
   }
 );
+
+// --- PREFLIGHT_MATCH_CAP pins (fix round, cross-family review MEDIUM finding):
+// the relaxed one-hit floor makes a very large qualifying set plausible (up to
+// 6 types x 40 candidates surviving the floors). `matches` is capped AFTER the
+// sort at 20; `matched_total` always reports the true pre-cap count;
+// `capped: true` is present only when the cap actually bound; the verdict is
+// decided from the full set, not the window.
+
+function seedCapCandidate(tools: SterlingTools, i: number) {
+  return tools.knowledgeCreate('decision', {
+    title: `Zephyr triton calibration variant ${i}`,
+    statement: `Zephyr triton procedure for variant ${i} short text.`,
+    alternatives_rejected: [],
+    rationale: 'rationale',
+  }).record;
+}
+
+const CAP_QUERY = 'Investigate the zephyr triton behavior for deployment scheduling.';
+
+test('AC-h6 (cap): more than PREFLIGHT_MATCH_CAP qualifying records returns exactly 20, in sort order, with matched_total the true count and capped:true', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const records = [];
+    for (let i = 0; i < 25; i++) {
+      records.push(seedCapCandidate(tools, i));
+    }
+    const result = preflight(tools, CAP_QUERY) as unknown as {
+      answerability: string;
+      matched_total: number;
+      capped?: boolean;
+      matches: { id: string }[];
+    };
+    assert.equal(result.matched_total, 25, 'matched_total reports the true pre-cap count, not the windowed length');
+    assert.equal(result.capped, true, 'capped is present and true once the cap bound');
+    assert.equal(result.matches.length, 20, '`matches` is truncated to the cap');
+    assert.equal(result.answerability, 'verify_targets', 'the verdict is decided from the full 25-record set, not the 20-record window');
+    // Every fixture ties on hits, centrality and updated_at (same harness
+    // clock) — the sort's final tie-break, id ascending, decides order, so
+    // the returned window is exactly the 20 smallest ids among the 25.
+    const expectedWindow = records.map((r) => r.id as string).sort().slice(0, 20);
+    assert.deepEqual(result.matches.map((m) => m.id), expectedWindow, 'the window holds the first 20 in sort order, not an arbitrary 20');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-h7 (cap, negative control): a small qualifying set carries matched_total but no capped flag at all', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 3; i++) {
+      seedCapCandidate(tools, i);
+    }
+    const result = preflight(tools, CAP_QUERY) as unknown as {
+      matched_total: number;
+      capped?: boolean;
+      matches: { id: string }[];
+    };
+    assert.equal(result.matched_total, 3);
+    assert.equal(result.matches.length, 3);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result, 'capped'),
+      false,
+      'capped is OMITTED (never `false`) when the window is already complete — mirrors inbound_supersedes-style presence-only disclosure'
+    );
+  } finally {
+    cleanup();
+  }
+});

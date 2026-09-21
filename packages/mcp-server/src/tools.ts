@@ -556,6 +556,18 @@ export interface KnowledgePreflightResult {
   answerability: 'ungoverned' | 'verify_targets' | 'insufficient';
   reason?: 'too_little_vocabulary';
   terms: string[];
+  /** Count of qualifying records BEFORE the PREFLIGHT_MATCH_CAP window,
+   *  among the candidates actually evaluated — always present, window
+   *  semantics matching knowledge_query's matched_filter (a capped `matches`
+   *  array is a WINDOW, never an inventory). NOT a true/exact/full count: the
+   *  matcher evaluates at most 40 FTS candidates per record type, so a
+   *  qualifying record beyond a type's first 40 is never seen and this
+   *  figure can undercount. */
+  matched_total: number;
+  /** Present (true) only when matched_total exceeds the cap and `matches`
+   *  was truncated to it — omitted, never `false`, when the window is
+   *  already complete. */
+  capped?: true;
   matches: {
     id: string;
     type: string;
@@ -4960,13 +4972,56 @@ export class SterlingTools {
    * this', a false negative dressed as a verdict; and
    * the no-match verdict is 'ungoverned' (renamed from 'ready', whose
    * query-envelope reading is the opposite).
+   *
+   * MATCHED-HITS FLOOR: candidates need only PREFLIGHT_MIN_HITS (1) matched
+   * term here, against AXIS_MIN_HITS (2) for the write-time same_subject
+   * surface below — measured relaxation (research findings on the
+   * preflight-floor counterfactual and its validation): an explicit pull the
+   * conductor asked for tolerates a weaker total-hit floor than unsolicited
+   * write-time advice nobody asked for. hasDiscriminatingHit and
+   * hasRecordCentralityHit stay mandatory for both callers, unchanged, and
+   * are INDEPENDENT record-level floors — NOT an intersection requirement.
+   * hasDiscriminatingHit only asks whether the matched hit(s) escape
+   * GENERIC_DEV_TERMS; hasRecordCentralityHit separately asks whether the
+   * OUTGOING TEXT's own words (every word >= AXIS_MIN_TERM_LEN, generic or
+   * not, via symmetric prefix matching — packages/store/src/axis.ts) cover
+   * the record's central terms. Nothing requires the discriminating hit
+   * ITSELF to be one of the covered central terms: a record can pass on a
+   * peripheral discriminating hit while an unrelated, even generic, outgoing
+   * word happens to prefix-cover its central vocabulary (cross-family review
+   * MEDIUM finding, fix round). The INPUT guard just below is separate: it
+   * demands >=2 extractable terms IN THE QUESTION TEXT itself (a one-word
+   * question is still insufficient) even though a candidate may now qualify
+   * on a single MATCHED term. RESULT SIZE: the sorted match list is capped at
+   * PREFLIGHT_MATCH_CAP after sorting (see below) — `matched_total` always
+   * reports the pre-cap count of qualifying records AMONG THE CANDIDATES
+   * ACTUALLY EVALUATED (not a true/exact/full count: each type's own query is
+   * itself capped at 40 FTS candidates, so a qualifying record beyond a
+   * type's first 40 is never seen and never counted), `capped` is present
+   * (true) only when the cap bound, and answerability is decided from that
+   * same evaluated set, not the PREFLIGHT_MATCH_CAP window.
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
-      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matches: [] };
+      return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [] };
     }
-    const matches = this.axisCandidateMatches(text, terms).map(({ record, hits }) => {
+    const allMatches = this.axisCandidateMatches(text, terms, SterlingTools.PREFLIGHT_MIN_HITS);
+    const matchedTotal = allMatches.length;
+    // Cap AFTER the sort (axisCandidateMatches already returns its sorted
+    // order) so one-hit candidates from the relaxed floor are removed BEFORE
+    // any higher-hit candidate — the lowest-ranked survivors are cut first.
+    // When more than PREFLIGHT_MATCH_CAP higher-hit candidates themselves
+    // qualify, some of those are cut too; the cap bounds the WINDOW, not the
+    // rank at which cutting starts. The per-survivor inbound-supersedes lookup below
+    // runs only for the records actually returned in this window, not the
+    // full candidate set: the relaxed one-hit floor makes that full set
+    // large enough (up to 6 types x 40 candidates) that computing it for
+    // every survivor before capping would be wasted work on records the
+    // caller never sees.
+    const windowed = allMatches.slice(0, SterlingTools.PREFLIGHT_MATCH_CAP);
+    const capped = matchedTotal > windowed.length;
+    const matches = windowed.map(({ record, hits }) => {
       // board c6e3561f disclosure-carry: a matched record carries the same
       // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
       // omitted when nothing supersedes it.
@@ -4982,8 +5037,35 @@ export class SterlingTools {
         ...(inbound.length ? { inbound_supersedes: inbound } : {}),
       };
     });
-    return { terms, matches, answerability: matches.length ? 'verify_targets' : 'ungoverned' };
+    // Answerability reflects the FULL match set (matchedTotal), never the
+    // capped window — a window of 20 out of 25 is still "the store governs
+    // this", not a truncated maybe.
+    return {
+      terms,
+      matched_total: matchedTotal,
+      ...(capped ? { capped: true as const } : {}),
+      matches,
+      answerability: matchedTotal ? 'verify_targets' : 'ungoverned',
+    };
   }
+
+  /** PULL floor (knowledgePreflight only): one matched term suffices once
+   *  hasDiscriminatingHit and hasRecordCentralityHit both already pass —
+   *  measured 2026-09-21 (research findings on the preflight-floor
+   *  counterfactual and its validation) as the one relaxation of the four
+   *  tried whose false-positive cost stayed small on the benchmark's
+   *  preflight cases. An explicit pull the conductor asked for can tolerate a
+   *  weaker total-hit floor than unsolicited write-time advice; see
+   *  sameSubjectDigest below, which still passes AXIS_MIN_HITS (2). */
+  private static readonly PREFLIGHT_MIN_HITS = 1;
+
+  /** Post-sort disclosure cap on knowledgePreflight's `matches` window
+   *  (fix-round finding, cross-family review): the relaxed one-hit floor
+   *  above makes a very large response plausible (up to 6 types x 40
+   *  candidates surviving the floors). Applied AFTER axisCandidateMatches'
+   *  sort, so an overflow drops the lowest-ranked (often one-hit) survivors
+   *  first, mirroring SAME_SUBJECT_CAP's role for the write-time surface. */
+  private static readonly PREFLIGHT_MATCH_CAP = 20;
 
   /**
    * The candidate-matching CORE shared by knowledgePreflight and same-subject
@@ -4991,10 +5073,18 @@ export class SterlingTools {
    * (extractAxisTerms already run by the caller -> store.query the six
    * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
    * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
-   * Callers differ only in what they do with the (record, hits) pairs and in
-   * which candidates they exclude — never in how a candidate qualifies.
+   * Callers differ only in what they do with the (record, hits) pairs, in
+   * which candidates they exclude, and — since PREFLIGHT_MIN_HITS above — in
+   * the MINIMUM MATCHED-HITS floor each passes explicitly: no default here,
+   * so a caller can never inherit a floor value silently. hasDiscriminatingHit
+   * and hasRecordCentralityHit stay mandatory for every caller and never vary
+   * by minHits.
    */
-  private axisCandidateMatches(text: string, terms: string[]): { record: DurableRecord; hits: string[] }[] {
+  private axisCandidateMatches(
+    text: string,
+    terms: string[],
+    minHits: number
+  ): { record: DurableRecord; hits: string[] }[] {
     // rank_terms is schema-bound to <=64 chars (store's §3.4 QueryOptions
     // parse) — extractAxisTerms has no upper bound (only AXIS_MIN_TERM_LEN, a
     // floor), so a long unbroken run of the same character in authored
@@ -5048,7 +5138,7 @@ export class SterlingTools {
       .map((record) => ({ record, hits: axisHits(record, terms) }))
       .filter(
         ({ record, hits }) =>
-          hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
+          hits.length >= minHits && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
       )
       .map((c) => ({
         ...c,
@@ -5096,7 +5186,7 @@ export class SterlingTools {
   private sameSubjectDigest(text: string, excludeIds: Set<string>): SameSubjectEntry[] {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) return [];
-    return this.axisCandidateMatches(text, terms)
+    return this.axisCandidateMatches(text, terms, AXIS_MIN_HITS)
       .filter(({ record }) => !excludeIds.has(record.id))
       .slice(0, SterlingTools.SAME_SUBJECT_CAP)
       .map(({ record, hits }) => ({

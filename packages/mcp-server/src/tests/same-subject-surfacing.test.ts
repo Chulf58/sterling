@@ -388,6 +388,42 @@ test('AC6 NON-BLOCKING (regression control): create, update, and supersede all s
 //     an 8th caps its same_subject disclosure at no more than 5 entries.
 // ===========================================================================
 
+// ===========================================================================
+// 8 — MIN-HITS-UNCHANGED (regression pin, added alongside knowledgePreflight's
+// V4 one-hit relaxation, research findings on the preflight-floor
+// counterfactual and its validation): sameSubjectDigest keeps passing
+// AXIS_MIN_HITS (2) into the shared matcher — a record whose only shared
+// vocabulary with the new write is ONE discriminating, central term (the same
+// shape knowledgePreflight now admits) must still be excluded here.
+// ===========================================================================
+
+test('AC8 MIN-HITS-UNCHANGED: a one-hit, discriminating, centrality-passing record is NOT suggested by same_subject at write time (unlike the relaxed preflight floor)', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const recExisting = mkDecision(
+      tools,
+      'Manifold telemetry housekeeping',
+      'manifold manifold manifolds manifolds auxiliary auxiliary secondary secondary tertiary tertiary quaternary quinary senary septenary'
+    );
+
+    const created = createDecision(
+      tools,
+      'Adopt a fresh manifold release plan',
+      'Adopt a fresh manifold release plan for unrelated widget calibration efforts.'
+    ) as Loose;
+    assert.equal((created.record as Loose).status, 'active');
+
+    const list = sameSubjectOf(created);
+    const ids = idsOf(list);
+    assert.ok(
+      !ids.includes(recExisting.id as string),
+      'a lone shared discriminating+central term is enough for preflight but not for same_subject — the write-time floor stays at 2'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC7 CAP: same_subject caps its disclosure at no more than 5 entries even when 7+ active records share the subject', () => {
   const { tools, cleanup } = harness();
   try {
