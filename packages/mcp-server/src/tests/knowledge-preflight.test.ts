@@ -479,3 +479,219 @@ test(
     }
   }
 );
+
+// --- candidate-sort tie-break pins (decision 17fa1c59, STEP 1): the sort shared by
+// knowledgePreflight and the same_subject write suggestions (axisCandidateMatches,
+// tools.ts ~:5031-5037) must go hit count desc, then record-centrality hits desc,
+// then updated_at desc, then id asc — never fall back to the fixed per-type query
+// concatenation order (anti_pattern, decision, feature_article, ...) on a tie
+// (measured cause: research_finding a6503bf7, mechanism 4, benchmark cases p-003/p-006).
+//
+// Fixture math below is verified directly against axisHits/recordCentralityHits
+// (packages/store/src/axis.ts), not guessed: a record with <= AXIS_RECORD_TOP_K (6)
+// distinct extractable narrow terms has EVERY one of them central (documented "known
+// limit" on hasRecordCentralityHit); a record whose narrow text adds >=6 higher-frequency
+// filler words crowds its shared terms out of that top-6, leaving only its TITLE-arm
+// terms central (decision foreign_00b23915's title-union) — this is what lets two
+// fixtures share an equal raw hit count while differing in centrality.
+const QUERY_TEXT = 'Quaternion manifold topology geodesic curvature analysis.';
+const FILLER_TERMS =
+  'vertex vertex vertex lattice lattice lattice tensor tensor tensor scalar scalar scalar ' +
+  'vector vector vector matrix matrix matrix';
+
+function seedFeatureArticle(tools: SterlingTools, title: string) {
+  return tools.knowledgeCreate('feature_article', {
+    slug: 'quaternion-manifold-topology',
+    title,
+    what_it_does: 'Owns the math.',
+    intended_behavior: 'Stable output.',
+    files: [{ path: 'src/quat.ts', role: 'impl' }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: new Date().toISOString(), event: 'seed' }],
+    live_test_refs: [],
+  }).record;
+}
+
+test(
+  'sort pin 1 (centrality, not type order): equal hit counts break by record-centrality hits ' +
+    'descending — an article tied with a decision on hits, but with MORE central hits, sorts first',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // decision: 4 raw hits (quaternion, manifold, topology, geodesic all present in
+      // title+statement) but only 2 are CENTRAL — the statement's six filler words
+      // (freq 3 each) crowd topology/geodesic out of the record's own top-6
+      // narrow-central set, leaving only quaternion/manifold central via the title arm.
+      const decision = tools.knowledgeCreate('decision', {
+        title: 'quaternion manifold',
+        statement: `${FILLER_TERMS} topology geodesic`,
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      // feature_article: same 4 raw hits, but its narrow text (slug+family+title) is
+      // small enough that all 4 are automatically central.
+      const article = seedFeatureArticle(tools, 'quaternion manifold topology geodesic');
+      const result = preflight(tools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2, 'both the decision and the article qualify as candidates');
+      assert.equal(
+        result.matches[0].id,
+        article.id,
+        'equal hits (4=4): the article, with MORE central hits (4 vs 2), sorts first — the fixed type ' +
+          'order (anti_pattern, decision, feature_article, ...) would have put the decision first on this tie'
+      );
+      assert.equal(result.matches[1].id, decision.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 2 (recency, not type order): equal hits AND equal centrality break by updated_at ' +
+    'descending — the more recently updated record sorts first regardless of type',
+  () => {
+    const { store, cleanup } = harness();
+    try {
+      const OLDER = '2026-08-01T00:00:00.000Z';
+      const NEWER = '2026-09-01T00:00:00.000Z';
+      const olderTools = new SterlingTools({ store, now: () => OLDER });
+      const newerTools = new SterlingTools({ store, now: () => NEWER });
+      // decision is earlier than feature_article in axisCandidateMatches' fixed
+      // per-type query order — under the old hit-count-only sort, a tie would fall
+      // to that concatenation order and the OLDER decision would wrongly win.
+      const decision = olderTools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology geodesic',
+        statement: 'Quaternion manifold topology geodesic rule.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const article = seedFeatureArticle(newerTools, 'quaternion manifold topology geodesic');
+      const result = preflight(newerTools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(
+        result.matches[0].id,
+        article.id,
+        'equal hits (4=4) and equal centrality (4=4): the more recently updated record (the article) ' +
+          'sorts first, even though it is LATER in the fixed per-type concatenation order'
+      );
+      assert.equal(result.matches[1].id, decision.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 3 (primary key unchanged): more raw hits still outranks fewer hits with higher centrality',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // anti_pattern: 5 raw hits (quaternion, curvature, geodesic, manifold, topology)
+      // but only 2 are central — the filler-diluted trigger crowds the rest out of
+      // its own top-6 narrow-central set.
+      const moreHits = tools.knowledgeCreate('anti_pattern', {
+        title: 'quaternion manifold',
+        trigger: `topology geodesic curvature ${FILLER_TERMS} topology geodesic`,
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      // decision: only 3 raw hits (quaternion, manifold, topology) but ALL 3 are
+      // central (small, undiluted narrow text).
+      tools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology',
+        statement: 'Rule applies always.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      });
+      const result = preflight(tools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(
+        result.matches[0].id,
+        moreHits.id,
+        'raw hit count is still the PRIMARY sort key: 5 hits beats 3, even though the 3-hit record ' +
+          'has more of its hits marked central (3 vs 2)'
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 4 (updated_at compared numerically, not lexicographically — cross-family review MEDIUM finding): ' +
+    'equal hits and equal centrality, updated_at values differing ONLY in fractional-second precision — the ' +
+    'string-larger-but-epoch-older record must NOT win',
+  () => {
+    const { store, cleanup } = harness();
+    try {
+      // z.string().datetime() (packages/schemas/src/envelope.ts) permits variable
+      // UTC precision, so both of these are schema-valid — but '...:00Z' sorts
+      // AFTER '...:00.001Z' lexicographically ('Z' > '.' at that byte) even
+      // though '...:00.001Z' is 1ms LATER in real time (Date.parse difference
+      // verified: 1767261600000 vs 1767261600001). A lexicographic compare picks
+      // the wrong record; a numeric epoch compare does not.
+      const STRING_LARGER_BUT_OLDER = '2026-01-01T10:00:00Z';
+      const STRING_SMALLER_BUT_NEWER = '2026-01-01T10:00:00.001Z';
+      const olderEpochTools = new SterlingTools({ store, now: () => STRING_LARGER_BUT_OLDER });
+      const newerEpochTools = new SterlingTools({ store, now: () => STRING_SMALLER_BUT_NEWER });
+      const decision = olderEpochTools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology geodesic',
+        statement: 'Quaternion manifold topology geodesic rule.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const article = seedFeatureArticle(newerEpochTools, 'quaternion manifold topology geodesic');
+      const result = preflight(newerEpochTools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(
+        result.matches[0].id,
+        article.id,
+        "equal hits (4=4) and equal centrality (4=4): the article's updated_at (...:00.001Z) is 1ms LATER " +
+          "by epoch than the decision's (...:00Z), even though the decision's string sorts lexicographically " +
+          'larger — the article must sort first'
+      );
+      assert.equal(result.matches[1].id, decision.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 5 (id ascending is the final tie-break — cross-family review LOW finding): equal hits, equal ' +
+    'centrality and equal updated_at — order is decided by id ascending',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // Same fixed NOW for both (harness's default clock) — updated_at ties too,
+      // so nothing but id can decide the order. Ids are server-minted UUIDs the
+      // public create path gives no way to choose, so the expected order is
+      // read back from the created records and compared against their own
+      // ascending sort, per the reviewer's suggested approach.
+      const decision = tools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology geodesic',
+        statement: 'Quaternion manifold topology geodesic rule.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const article = seedFeatureArticle(tools, 'quaternion manifold topology geodesic');
+      const result = preflight(tools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(decision.updated_at, article.updated_at, 'sanity: both records share the same updated_at');
+      const expectedOrder = [decision.id, article.id].sort();
+      assert.deepEqual(
+        result.matches.map((m) => m.id),
+        expectedOrder,
+        'with hits, centrality and updated_at all tied, the listed order equals the ids sorted ascending — ' +
+          'reversing the id branch would list them the other way around'
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);

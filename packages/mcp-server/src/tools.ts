@@ -5028,13 +5028,41 @@ export class SterlingTools {
       // in the shared matcher changes.
       ...this.store.query({ types: ['open_question'], rank_terms: queryTerms, cap: 40 }),
     ];
+    // decision pull-ranking-at-scale-order-of-work-coverage-before-columns-no-narrowing-ladder
+    // (17fa1c59) STEP 1; measured cause: research_finding
+    // why-dome-farmer-pull-cases-miss-mechanisms-september-2026 (a6503bf7),
+    // mechanism 4, benchmark cases p-003/p-006: hit count alone left ties to
+    // fall back to the fixed type-order concatenation above, e.g. a
+    // feature_article tied with a decision on hit count sorted below it purely
+    // because 'decision' is queried first. Centrality is computed ONCE per
+    // surviving candidate here (not inside the comparator, which would
+    // recompute it on every pairwise call) and the four keys are type-neutral:
+    // hit count desc, then centrality-hit count desc, then updated_at desc,
+    // then id asc as the final deterministic tie-break. updated_at is parsed to
+    // its epoch ms ONCE here too, alongside centrality — not compared as a raw
+    // string: the base envelope schema's z.string().datetime() permits variable
+    // UTC fractional-second precision, so a schema-valid '...:00Z' sorts AFTER
+    // the genuinely later '...:00.001Z' under a lexicographic compare (cross-family
+    // pre-commit review, MEDIUM finding).
     return candidates
       .map((record) => ({ record, hits: axisHits(record, terms) }))
       .filter(
         ({ record, hits }) =>
           hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
       )
-      .sort((a, b) => b.hits.length - a.hits.length);
+      .map((c) => ({
+        ...c,
+        central: recordCentralityHits(c.record, text).length,
+        at: Date.parse(c.record.updated_at),
+      }))
+      .sort(
+        (a, b) =>
+          b.hits.length - a.hits.length ||
+          b.central - a.central ||
+          b.at - a.at ||
+          (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0)
+      )
+      .map(({ record, hits }) => ({ record, hits }));
   }
 
   /** research_finding carries no title — its question IS the identity; an
