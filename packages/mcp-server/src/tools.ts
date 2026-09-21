@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { ZodError, type ZodIssue } from 'zod';
-import { clipName, normalizeRepoPath, isAbsolutePathAnyHost, parseConfig, configSchema, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
+import { clipName, boardDisplayLabel, normalizeRepoPath, isAbsolutePathAnyHost, parseConfig, configSchema, RECORD_TYPES, knownFieldsFor, unknownFieldsIn, schemaFor, digestRecord, headlineRecord, recordSizes, NO_CAPTURE_LANES, type DurableRecord, type FieldShape, type NoCaptureLane, type SessionEvent, type SterlingConfig } from '@sterling/schemas';
 import {
   DEFAULT_QUERY_CAP,
   MAX_RANK_TERMS,
@@ -359,6 +359,16 @@ export interface ArtifactEvidence {
    */
   file_key_check: 'checked' | 'skipped:no_file_keys' | 'unavailable:budget';
 }
+
+/**
+ * board_get's actual return shape (board 081508d0, review round 2, MEDIUM
+ * finding): every field of the resolved `DurableRecord`, plus an OPTIONAL
+ * `label` — the CURRENT-TEXT-derived display name (boardDisplayLabel),
+ * present whenever text or slug yields one, absent only when neither does.
+ * `slug`, if present on the record, is untouched — this type adds a field,
+ * it never widens or reshapes an existing one.
+ */
+export type BoardGetResult = DurableRecord & { label?: string };
 
 /** board_query / maintenance_query's disclosed envelope (see boardQueryResult). */
 export interface BoardQueryResult {
@@ -5244,7 +5254,7 @@ export class SterlingTools {
    * enqueue would walk a -2/-3/-4… suffix chain, one store query per step; and
    * a lane that mints thousands of handles would flood the one namespace the
    * cross-type collision refusal protects. Queue items still read back a
-   * DISPLAY name through board_get (withDisplaySlug).
+   * DISPLAY name through board_get (withDisplayLabel).
    */
   private static mintHeadlineOf(type: string, rec: Record<string, unknown>): string {
     if (type === 'todo') {
@@ -8754,22 +8764,22 @@ export class SterlingTools {
   }
 
   /**
-   * A board item's human-readable name: its slug, or — for a legacy slugless
-   * item — its clipped headline, which IS the item's title in practice (board
-   * text opens with an all-caps statement of the finding). Deliberately more
-   * forgiving than headlineRecord's slug-or-nothing rule: that surface prints a
-   * name BESIDE a field the reader can already see, whereas a collision group's
-   * whole job is to let a human recognise which items collide, and a group of
-   * bare uuids is the unanswerable-question failure this rule exists to close.
+   * A board item's human-readable name: the clipped first non-blank line of
+   * its CURRENT text (boardDisplayLabel, board 081508d0), falling back to its
+   * slug only when text yields nothing at all. NEVER slug-first: a slug is
+   * minted once and never re-derived (updateTodo), so leading with it is
+   * exactly the defect this fix closes — a renamed/renumbered item shown
+   * under its stale original headline. Deliberately more forgiving than
+   * headlineRecord's name-or-nothing rule: that surface prints a name BESIDE
+   * a field the reader can already see, whereas a collision group's whole job
+   * is to let a human recognise which items collide, and a group of bare
+   * uuids is the unanswerable-question failure this rule exists to close.
    */
   private static boardItemName(rec: Record<string, unknown>): string {
-    const slug = typeof rec.slug === 'string' ? rec.slug.trim() : '';
-    if (slug) return clipName(slug);
-    const text = typeof rec.text === 'string' ? rec.text : '';
-    const headline = text.split('\n').find((line) => line.trim().length > 0)?.trim() ?? '';
+    const label = boardDisplayLabel(rec.text, rec.slug);
     // Last resort only — an item with neither slug nor text should not exist,
     // and a marker beats an empty string that reads as a missing field.
-    return headline ? clipName(headline) : '(unnamed board item)';
+    return label ? clipName(label) : '(unnamed board item)';
   }
 
   /**
@@ -9298,8 +9308,15 @@ export class SterlingTools {
    * copied from anywhere in this store resolves the same way here as
    * everywhere else. An unknown id is refused, naming the id that was not
    * found, rather than returning undefined.
+   *
+   * RETURNS `BoardGetResult`, NOT the bare `DurableRecord` its every field
+   * still is (review round 2, MEDIUM finding): the old signature promised
+   * `DurableRecord` while withDisplayLabel actually added `label` and
+   * double-cast back through `unknown` to hide the mismatch — a typed
+   * consumer had no way to read `.label` without its own escape hatch. The
+   * declared type now says what the call actually returns.
    */
-  boardGet(id: string): DurableRecord {
+  boardGet(id: string): BoardGetResult {
     let record: DurableRecord;
     try {
       record = this.resolveRecordId(id, 'board_get');
@@ -9318,62 +9335,30 @@ export class SterlingTools {
         `board_get: '${id}' resolves to a ${record.type}, not a board/queue item — board_get reads board_add/maintenance_enqueue items only; use knowledge_get for other record types`
       );
     }
-    return this.withDisplaySlug(record);
+    return this.withDisplayLabel(record);
   }
 
   /**
-   * DERIVE-ON-READ, NOT BACKFILL (S1 design call, decision
-   * human-readable-ids-for-board-items). Items created before the mint — and
-   * maintenance-queue items, which mint nothing (see mintHeadlineOf) — carry no
-   * stored slug. Rather than migrate every legacy row, board_get derives a
-   * display NAME from the item's own headline, so no surface has to print bare
-   * hex for an item that predates S1. de1a7329 set the migration-free
-   * precedent, and a backfill would also rewrite every legacy row's updated_at,
-   * reordering the board and the activity feed for a purely cosmetic gain.
-   *
-   * THE DERIVED NAME IS DISPLAY-ONLY AND NOT ADDRESSABLE, and this asymmetry is
-   * deliberate: nothing is persisted, so a legacy item is addressed by its uuid
-   * or 8-char prefix exactly as before (the migration-free round-trip). Making
-   * it addressable would mean deriving over every todo on every lookup and
-   * inventing a tie-break when a derived name shadows a REAL minted slug —
-   * paying a permanent ambiguity for items that already resolve fine.
-   *
-   * SUPPRESSED WHEN THE DERIVED NAME IS ALREADY A LIVE HANDLE (review finding
-   * 1, 2026-08-29). "Not addressable" is a property of the name, not of the
-   * derive: a derived name is a bare kebab string, byte-identical in shape to a
-   * minted handle, so a reader handed one cites it — and if some OTHER record
-   * already owns that exact string, the citation resolves through
-   * resolveRecordId to THAT record and the reader reads (or board_updates) the
-   * wrong item, silently. It is reachable: legacy item A opens "EXPORT THE
-   * BOARD AS CSV.", the same task is later re-boarded as item B, and B MINTS
-   * 'export-the-board-as-csv'. That defeats the whole point of the feature —
-   * readable-ids exists so a citation names the thing the reader means
-   * (decision human-readable-ids-for-board-items).
-   *
-   * THE CHECK IS THE RESOLVER'S OWN LOOKUP, not an approximation of it:
-   * resolveRecordId's slug rung is store.recordsBySlug(id) — one hit resolves,
-   * several refuse — so a derived name is unsafe to hand out exactly when
-   * recordsBySlug(derived) is non-empty, and this suppression set equals the
-   * resolution set by construction. It lives INSIDE the one derive path (which
-   * is why this is an instance method now): there is no unchecked derive for a
-   * future call site to reach for, so the guard cannot be forgotten the way a
-   * per-call-site check could.
-   *
-   * A SUPPRESSED ITEM READS BACK WITH NO NAME — the pre-S1 bare-hex state for
-   * that one shadowed item, which is the honest degradation: an absent name is
-   * a visible gap, while a name that means a different record is a silent wrong
-   * answer (P5, and the disclose-never-silently-serve posture of decision
-   * falsified-slug-handling-supersede-disclose-user-decided-2026).
-   *
-   * Never applied to a record with a stored slug: a minted handle always wins.
+   * ATTACH AN EXPLICIT DISPLAY LABEL, NEVER TOUCH `slug` (board 081508d0,
+   * superseding the earlier withDisplaySlug design below). The old mechanism
+   * synthesized a VALUE INTO THE `slug` FIELD for a legacy slugless item —
+   * shaped exactly like a real minted handle, which is what made it dangerous
+   * (see the retired shadow-suppression reasoning this replaces). The fix
+   * moves the derived name to its OWN field, `label`, computed the same way
+   * every other display site now does (boardDisplayLabel: the item's CURRENT
+   * text, falling back to slug only when text is blank) — and leaves `slug`
+   * exactly as stored, every time, for every item. A label CAN lexically
+   * equal some other record's real slug (it is ordinary prose, not
+   * guaranteed-distinct kebab-case) — the guarantee is STRUCTURAL, not
+   * textual: nothing feeds `label` into resolveRecordId (its rungs are `id`
+   * and `slug` only), and `board_get` never writes a fabricated value into
+   * `slug` the way the old mechanism did. There is nothing left to shadow,
+   * because there is no longer a derive-then-write step to get wrong.
    */
-  private withDisplaySlug(record: DurableRecord): DurableRecord {
+  private withDisplayLabel(record: DurableRecord): BoardGetResult {
     const r = record as unknown as { slug?: string; text?: string };
-    if (r.slug) return record;
-    const derived = SterlingTools.slugify(SterlingTools.todoHeadline(r.text ?? ''));
-    if (!derived) return record;
-    if (this.store.recordsBySlug(derived).length) return record;
-    return { ...record, slug: derived } as DurableRecord;
+    const label = boardDisplayLabel(r.text, r.slug);
+    return label ? { ...record, label } : record;
   }
 
   /**

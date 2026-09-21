@@ -175,34 +175,48 @@ function rowTitle(text: string): string {
 // SECTION T — BOARD CARDS.
 // ---------------------------------------------------------------------------
 
-test('T0 CONTROL (placed FIRST, must pass for the OPPOSITE reason, and passes at HEAD): a SLUGLESS board item still renders its bare first-text-line title and gains NOTHING — no id8, no derived name — so every composed-handle failure below is a MISSING COMPOSITION, never a broken card builder', () => {
-  // SABOTAGE that must turn this arm RED: in packages/tui/src/viewmodel.ts make
-  // todoCards fall back to `${todo.id.slice(0,8)} (${todo.id.slice(0,8)})` — or
-  // to any unconditional `title + ' (' + id8 + ')'` — when a todo has no slug.
+test('T0 (REVISED, review round 2, board 081508d0) CONTROL: a SLUGLESS board item with NON-BLANK text STILL renders `label (id8)` — the compose gate is whether a LABEL exists, never whether a SLUG exists; only an item with NEITHER a slug NOR any non-blank text line falls back to the bare (blank) line', () => {
+  // SUPERSEDES the original T0, which required NO composition for ANY
+  // slugless item ('first todo'/'second todo' stayed bare). THAT WAS ITSELF
+  // THE HIGH-SEVERITY DEFECT a cross-family review caught: gating composition
+  // on slug presence left every item that never mints one — EVERY maintenance-
+  // queue item (S1 design call, mintHeadlineOf), and any legacy pre-mint board
+  // row — permanently unlabelled even when its text was perfectly nameable.
+  // The id half is always safe to show: `id8` is a uuid-prefix address,
+  // resolvable independent of whether the item ever had a slug.
   //
-  // WHY IT IS FIRST AND WHY IT IS THE POINT: "the card shows a composed handle"
-  // has more than one possible cause. An implementation that appends ` (id8)`
-  // to EVERY card title passes T1 and T3 perfectly while breaking the frozen
-  // state.test.ts arm and, worse, handing the reader a bare hex fragment dressed
-  // as a name for exactly the items that have no name — the failure AC23's
-  // display-name suppression exists to prevent (absent name over wrong name,
-  // df361a0f). This arm must pass for the opposite reason: nothing is composed
-  // where there is nothing to compose from.
+  // SABOTAGE that must turn this arm RED: in packages/tui/src/viewmodel.ts
+  // reintroduce `todo.slug ? ... : todo.text.split('\n')[0]` (gate on slug)
+  // instead of gating on the derived LABEL.
   const { store, cleanup } = fixture();
   try {
-    seedTodo(store, { text: 'first todo', priority: 'high' });
-    seedTodo(store, { text: 'second todo' });
+    const id1 = seedTodo(store, { text: 'first todo', priority: 'high' });
+    const id2 = seedTodo(store, { text: 'second todo' });
 
-    const titles = cards(store).map((c) => c.title);
-    assert.deepEqual(
-      titles,
-      ['first todo', 'second todo'],
-      'a slugless card is byte-identical to what state.test.ts already freezes — S2 adds a name where one EXISTS, it never invents one'
+    const byId = new Map(cards(store).map((c) => [c.id, c] as const));
+    assert.equal(
+      byId.get(id1)!.title,
+      `first todo (${id8(id1)})`,
+      `THE FIX: a slugless item with real text still composes \`label (id8)\` — got "${byId.get(id1)!.title}"`
     );
-    for (const c of cards(store)) {
-      assert.ok(!c.title.includes(`(${id8(c.id)})`), `no id8 is appended to a nameless card — got "${c.title}"`);
-      assert.ok(!/\([0-9a-f]{8}\)/.test(c.title), `and nothing hex-shaped is appended either — got "${c.title}"`);
-    }
+    assert.equal(
+      byId.get(id2)!.title,
+      `second todo (${id8(id2)})`,
+      `and likewise for the second item — got "${byId.get(id2)!.title}"`
+    );
+
+    // IN-ARM CONTROL, checked in the SAME store: an item with NEITHER a slug
+    // NOR any non-blank text line has genuinely nothing to compose from, and
+    // is the one case that still keeps the bare (here, blank) text fallback —
+    // proving the gate moved to "is there a label" rather than disappearing.
+    const blankId = seedTodo(store, { text: ' ' });
+    const blankCard = cards(store).find((c) => c.id === blankId);
+    assert.ok(blankCard, 'the blank-text item still produced a card');
+    assert.ok(
+      !blankCard!.title.includes(`(${id8(blankId)})`),
+      `nothing is composed when there is truly no label to show — got "${blankCard!.title}"`
+    );
+    assert.ok(!/\([0-9a-f]{8}\)/.test(blankCard!.title), 'and nothing hex-shaped is appended either');
   } finally {
     cleanup();
   }
@@ -211,6 +225,16 @@ test('T0 CONTROL (placed FIRST, must pass for the OPPOSITE reason, and passes at
 test('T1 THE COMPOSED CARD TITLE: a board item carrying a minted handle renders `name (id8)` as its card title — name FIRST, id retained (ruling 2e8c30e4)', () => {
   // SABOTAGE that must turn this test RED: in packages/tui/src/viewmodel.ts
   // revert todoCards' title to `todo.text.split('\n')[0]`.
+  //
+  // CHANGED 2026-09-21 (board 081508d0, [display-name-derives-from-current-
+  // text-not-slug]): the composed NAME half used to be `todo.slug`
+  // ('export-the-board-as-csv'). That encoded the defect this fix closes — a
+  // slug is minted once and never re-derived, so a card titled off it goes
+  // stale the moment the item is renamed. The card composes `name (id8)`
+  // whenever a non-empty LABEL exists (review round 2: gated on the derived
+  // label, not on slug presence — T0 pins that gate); the label itself reads
+  // the item's CURRENT text headline (boardDisplayLabel), falling back to the
+  // stored slug only when text is blank.
   const { store, cleanup } = fixture();
   try {
     const id = seedTodo(store, { text: 'EXPORT THE BOARD AS CSV.\n\nbody prose.', slug: 'export-the-board-as-csv', priority: 'high' });
@@ -219,30 +243,32 @@ test('T1 THE COMPOSED CARD TITLE: a board item carrying a minted handle renders 
     assert.ok(card, 'the seeded item produced a card');
     assert.equal(
       card!.title,
-      `export-the-board-as-csv (${id8(id)})`,
-      `THE DEFECT THIS CATCHES: the title falling back to the first line of text ("EXPORT THE BOARD AS CSV.") — a todoCards that builds {id, title: todo.text.split('\\n')[0]} and never reads slug, so a TUI board row shows prose with no citable handle anywhere on it`
+      `EXPORT THE BOARD AS CSV. (${id8(id)})`,
+      `THE DEFECT THIS CATCHES (post-fix framing): the title falling back to the STALE slug ('export-the-board-as-csv') instead of the item's CURRENT text headline. Got "${card!.title}"`
     );
     // Name FIRST is load-bearing: the rejected alternative "drop the id and show
     // only the name" was rejected because the id keeps the reference ACTIONABLE,
     // and the accepted shape leads with the half a human recognises.
-    assert.ok(card!.title.startsWith('export-the-board-as-csv'), 'the NAME leads — a row a reader scans is scanned by its name');
+    assert.ok(card!.title.startsWith('EXPORT THE BOARD AS CSV.'), 'the NAME leads — a row a reader scans is scanned by its name');
     assert.ok(card!.title.endsWith(`(${id8(id)})`), 'and the id follows it in parentheses');
   } finally {
     cleanup();
   }
 });
 
-test('T2 QUEUE CARDS TOO: a maintenance item carrying a handle renders `name (id8)` on the queue row, and a handle-less queue item degrades exactly as a handle-less board item does', () => {
+test('T2 (REVISED, review round 2, board 081508d0) QUEUE CARDS TOO: a maintenance item carrying a slug renders `name (id8)` on the queue row from its CURRENT text; a slug-LESS queue item (the ordinary case — maintenance items never mint one, S1) ALSO renders `label (id8)`, because the row reader needs a name most for exactly the items that never earned a slug', () => {
   // SABOTAGE that must turn this test RED: in packages/tui/src/viewmodel.ts
-  // revert queueCards' title to `todo.text.split('\n')[0]`.
+  // revert queueCards' title to `todo.text.split('\n')[0]`, or reintroduce a
+  // `item.slug ? ... : bareText` gate.
   //
-  // WHICH ARM CARRIES THE VERDICT: the first assertion. The second (the
-  // handle-less queue item) is an IN-ARM CONTROL that must pass for the opposite
-  // reason — without it, "queue rows show a composed handle" is equally well
-  // satisfied by an unconditional append, which is the same hollow shape T0
-  // guards against on the board side. Whether maintenance items mint handles of
-  // their own is deliberately NOT settled here (S1's E3 left it open); this arm
-  // seeds one directly so the rendering contract is pinned either way.
+  // SUPERSEDED 2026-09-21 (review round 2, HIGH finding): this arm used to
+  // require the SLUG-LESS ("bare") item to keep its bare text line with NO
+  // id8 — but maintenance items structurally NEVER mint a slug at all (S1
+  // design call, mintHeadlineOf), so under the old gate EVERY ORDINARY queue
+  // row was permanently unlabelled. That in-arm control was itself testing
+  // the gap. `id8` is a uuid-prefix address, valid independent of slug, so
+  // there is no reason left to withhold it from a slug-less item with real
+  // text.
   const { store, cleanup } = fixture();
   try {
     assert.strictEqual(typeof vm.queueCards, 'function', 'viewmodel.queueCards must exist — it is the builder behind the TUI queue tab');
@@ -266,15 +292,19 @@ test('T2 QUEUE CARDS TOO: a maintenance item carrying a handle renders `name (id
     const bare = rows.find((c) => c.id === bareId.id);
     assert.ok(named && bare, 'both maintenance items produced queue cards');
 
+    // CHANGED 2026-09-21 (board 081508d0): the name half used to be the stale
+    // slug 'reconcile-the-tui-dashboard-article'; it is now the item's
+    // CURRENT text headline (boardDisplayLabel), clipped like any other name
+    // — this fixture's headline is 77 chars, so it clips to 47 + ellipsis.
     assert.equal(
       named!.title,
-      `reconcile-the-tui-dashboard-article (${id8(namedId.id)})`,
+      `reconcile article 'tui-dashboard' — files it ow… (${id8(namedId.id)})`,
       `THE DEFECT THIS CATCHES: a queueCards that builds {id, title: todo.text.split('\\n')[0]} and never reads slug — got "${named!.title}"`
     );
     assert.equal(
       bare!.title,
-      'capture something',
-      'IN-ARM CONTROL: a queue item with no handle keeps its bare text line and gains no hex fragment — nothing composed where there is nothing to compose from'
+      `capture something (${id8(bareId.id)})`,
+      `THE FIX: a slug-less queue item with real text ALSO composes \`label (id8)\` now — this is the ordinary shape of a maintenance item, which never mints a slug at all. Got "${bare!.title}"`
     );
   } finally {
     cleanup();
@@ -292,13 +322,22 @@ test('T3 CLIPPING, BOTH SIDES OF THE BOUNDARY: a 48-character name renders WHOLE
   // PRESERVE. Only the pair pins the boundary. The id8 assertion under the
   // clipped arm is what makes "names clip, ids never do" one statement rather
   // than two unrelated ones.
+  //
+  // CHANGED 2026-09-21 (board 081508d0): the boundary used to be exercised on
+  // the item's SLUG; it is now exercised on the item's TEXT headline instead
+  // (see T1's note). SLUG_48/SLUG_49 are reused here only as literal 48/49-
+  // character STRINGS — each item also carries an unrelated explicit `slug`,
+  // which is NOT what gates composition here (a non-empty label from the text
+  // alone is enough, per T0/T1); the explicit slug is just a convenient,
+  // collision-free identifier for the fixture. The clip boundary itself is
+  // measured on the TEXT.
   const { store, cleanup } = fixture();
   try {
     assert.equal(SLUG_48.length, 48, 'premise: exactly on the boundary');
     assert.equal(SLUG_49.length, 49, 'premise: exactly one past it');
 
-    const onId = seedTodo(store, { text: 'A HANDLE EXACTLY ON THE BOUNDARY.\n\nbody.', slug: SLUG_48 });
-    const overId = seedTodo(store, { text: 'A HANDLE ONE PAST THE BOUNDARY.\n\nbody.', slug: SLUG_49 });
+    const onId = seedTodo(store, { text: `${SLUG_48}\n\nbody.`, slug: 't3-on-boundary' });
+    const overId = seedTodo(store, { text: `${SLUG_49}\n\nbody.`, slug: 't3-over-boundary' });
 
     const byId = new Map(cards(store).map((c) => [c.id, c] as const));
     const on = byId.get(onId);
@@ -389,22 +428,63 @@ test('T5 END TO END THROUGH THE RENDERED ROW: the composed `name (id8)` handle r
       slug: 'reconcile-the-dashboard-article',
     } as unknown as Parameters<SterlingStore['create']>[0]);
 
+    // CHANGED 2026-09-21 (board 081508d0): the rendered row's NAME half used
+    // to be the stale slug ('export-the-board-as-csv' /
+    // 'reconcile-the-dashboard-article'); it is now the item's CURRENT text
+    // headline (boardDisplayLabel) — see T1's note. The composed-handle GATE
+    // is whether a non-empty LABEL exists, not whether a slug exists (review
+    // round 2) — both fixtures here happen to carry a slug too, but it is not
+    // what triggers composition.
     const board = buildDashboardState(store, initialUi);
     const row = board.rows.find((r) => r.id === boardId);
     assert.ok(row, 'the board tab renders a row for the item');
     assert.equal(
       rowTitle(row!.lines[0].text),
-      `export-the-board-as-csv (${id8(boardId)})`,
-      `the rendered board row must read as the composed handle. THE DEFECT THIS CATCHES: a row that reads "EXPORT THE BOARD AS CSV." with no handle anywhere on it — the surface the user was looking at when they reported having no way to know what an item refers to. Got ${JSON.stringify(row!.lines[0].text)}`
+      `EXPORT THE BOARD AS CSV. (${id8(boardId)})`,
+      `the rendered board row must read as the composed handle, sourced from the CURRENT text. THE DEFECT THIS CATCHES (post-fix framing): a row still reading the STALE slug form. Got ${JSON.stringify(row!.lines[0].text)}`
     );
 
     const queue = buildDashboardState(store, { ...initialUi, tab: QUEUE_TAB });
     assert.equal(queue.rows.length, 1, 'the queue tab renders the one maintenance item');
     assert.equal(
       rowTitle(queue.rows[0].lines[0].text),
-      `reconcile-the-dashboard-article (${id8(queue.rows[0].id)})`,
-      `the queue row does the same — the defect it catches is a row that reads its raw text line. Got ${JSON.stringify(queue.rows[0].lines[0].text)}`
+      `reconcile the dashboard article (${id8(queue.rows[0].id)})`,
+      `the queue row does the same — the defect it catches is a row still reading a stale slug instead of the current text. Got ${JSON.stringify(queue.rows[0].lines[0].text)}`
     );
+  } finally {
+    cleanup();
+  }
+});
+
+test('T6 (NEW, review round 2, board 081508d0): a QUEUE card for a SLUG-LESS system item whose text opens with LEADING BLANK LINES is STILL named — the FIRST NON-BLANK line, never a blank title from a blind `text.split(\'\\n\')[0]`', () => {
+  // SABOTAGE that must turn this arm RED: in packages/tui/src/viewmodel.ts
+  // derive queueCards' label as `item.text.split('\n')[0]` directly instead
+  // of routing through boardDisplayLabel (which skips leading blank lines).
+  //
+  // WHY THIS ARM MATTERS BESIDE T2: T2 already proves queue cards compose a
+  // handle when a slug exists. Maintenance items NEVER mint one (S1 design
+  // call) — so THIS arm, with no slug at all, is the one that actually
+  // exercises the HIGH-severity gap: every ordinary queue row's text can open
+  // with blank lines (padding, multi-line templates), and a naive first-line
+  // split would silently render a BLANK card title for every one of them.
+  const { store, cleanup } = fixture();
+  try {
+    assert.strictEqual(typeof vm.queueCards, 'function', 'viewmodel.queueCards must exist');
+    const seeded = store.create({
+      ...envelope('todo'),
+      text: '\n\n  \nreconcile article \'t6\' — owned file changed',
+      source: 'system',
+      system_reason: 'reconcile_needed',
+    } as unknown as Parameters<SterlingStore['create']>[0]) as { id: string };
+
+    const row = vm.queueCards!(store).find((c) => c.id === seeded.id);
+    assert.ok(row, 'the seeded item produced a queue card');
+    assert.equal(
+      row!.title,
+      `reconcile article 't6' — owned file changed (${id8(seeded.id)})`,
+      `THE DEFECT THIS CATCHES: a blind text.split('\\n')[0] on leading-blank-line text yields a BLANK title — got "${row!.title}"`
+    );
+    assert.ok(row!.title.trim().length > 0, 'never a blank title');
   } finally {
     cleanup();
   }

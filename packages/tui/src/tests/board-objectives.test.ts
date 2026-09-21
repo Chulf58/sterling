@@ -534,7 +534,15 @@ test('AC1/AC2 at the pure projection: todoCards(store, expanded?) returns the gr
       sorted([heads[0].id, s1.id]),
       'collapsed: the group entry plus the standalone card — no children, no maintenance item'
     );
-    assert.equal(entries.find((e) => e.id === s1.id)!.title, 'bump the changelog', "a standalone entry's title is still its todo text");
+    // CHANGED 2026-09-21 (board 081508d0, review round 2, HIGH finding): the
+    // title used to be the bare text because composition was gated on slug
+    // presence and this fixture never sets one; the gate is now "does a
+    // label exist" (it does, from the real text), so it composes `label (id8)`.
+    assert.equal(
+      entries.find((e) => e.id === s1.id)!.title,
+      `bump the changelog (${s1.id.slice(0, 8)})`,
+      "a standalone entry's title is its todo text, composed with its id — no slug required"
+    );
 
     // expanded: the children follow the header, in order, each keyed by record id
     const opened = VM.todoCards!(store, [heads[0].id]);

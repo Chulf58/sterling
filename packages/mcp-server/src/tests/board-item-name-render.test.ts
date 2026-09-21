@@ -51,7 +51,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SterlingStore } from '@sterling/store';
-import { SterlingTools } from '../tools.js';
+import { SterlingTools, type BoardGetResult } from '../tools.js';
 
 const NOW = '2026-08-29T12:00:00.000Z';
 
@@ -72,6 +72,13 @@ interface ToolsView {
   boardQueryResult(filter: Loose): { records: Loose[]; matched_filter: number; returned: number };
   maintenanceEnqueue(fields: Loose): { record: Loose };
   maintenanceQuery(filter: Loose): Loose[];
+  /** THE PROJECTION-APPLYING READ for the queue side, same seam as
+   *  boardQueryResult — maintenanceQuery ignores `projection` entirely
+   *  (it forwards to the non-enveloping boardQuery), so K2/K3 below must
+   *  route through this one or they measure the wrong seam (board 081508d0
+   *  review round 2: the ORIGINAL K2 did exactly that and passed for the
+   *  wrong reason — a full record trivially has no `name` key either). */
+  maintenanceQueryResult(filter: Loose): { records: Loose[]; matched_filter: number; returned: number };
 }
 
 function harness() {
@@ -83,7 +90,11 @@ function harness() {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { store, tools, cleanup };
+  // `real` is kept CONCRETELY typed (not narrowed through ToolsView's `Loose`
+  // escape hatch) so a test can read board_get's `.label` through its actual
+  // declared type, BoardGetResult (board 081508d0, review round 2, MEDIUM
+  // finding) — see K1 below.
+  return { store, tools, real, cleanup };
 }
 
 function boardAdd(tools: ToolsView, fields: Loose): Loose {
@@ -218,14 +229,26 @@ test('H1 THE NAME REACHES THE HEADLINE UNDER A STABLE KEY: the composed handle a
   // assertion (`some string field mentions the name`) was GREEN AT HEAD before
   // headlineRecord composed anything at all. It pinned nothing. The key
   // assertion below is the smallest thing that could not be satisfied that way.
+  //
+  // CHANGED 2026-09-21 (board 081508d0, [display-name-derives-from-current-
+  // text-not-slug]): the assertion used to require `h.name` to contain
+  // `item.slug` ('export-the-board-as-csv'). THAT ENCODED THE DEFECT ITSELF —
+  // a slug is minted once and never re-derived (updateTodo), so a name sourced
+  // from it goes stale the moment the item's text is renamed or renumbered
+  // ("Slice 7" still reading "slice-6-..."). The `name` key is unchanged and
+  // still pinned by H1; only WHAT populates it moves, from the immutable slug
+  // to the item's CURRENT text headline (boardDisplayLabel). The slug itself
+  // is still minted (PREMISE below is unchanged) — it just no longer feeds
+  // display.
   const { tools, cleanup } = harness();
   try {
     const item = boardAdd(tools, { text: 'EXPORT THE BOARD AS CSV.\n\nbody prose.', source: 'user', priority: 'high' });
-    const name = item.slug;
+    const slug = item.slug;
     assert.ok(
-      typeof name === 'string' && name.length > 0,
+      typeof slug === 'string' && slug.length > 0,
       'PREMISE (S1, already shipped): board_add mints a handle. If THIS fails, S1 regressed and every arm in this file is measuring the wrong thing'
     );
+    const label = 'EXPORT THE BOARD AS CSV.';
 
     const h = headlineOf(tools);
     assert.equal(
@@ -234,8 +257,8 @@ test('H1 THE NAME REACHES THE HEADLINE UNDER A STABLE KEY: the composed handle a
       `the headline exposes the composed handle under the key \`name\` — a headline board listing is read by machines that key off it, not only by eyes scanning a blob. Got: ${JSON.stringify(h)}`
     );
     assert.ok(
-      (h.name as string).includes(name as string),
-      `and that field carries THIS item's handle "${String(name)}" — got "${String(h.name)}"`
+      (h.name as string).includes(label),
+      `and that field carries THIS item's CURRENT TEXT headline "${label}" — never the slug, which is an immutable address (board 081508d0) — got "${String(h.name)}"`
     );
   } finally {
     cleanup();
@@ -253,11 +276,17 @@ test('H2 THE COMPOSED FORM: the headline carries the literal `name (id8)` string
   // a person reads as a unit, name first — and H2 is the only arm that can tell
   // the two apart. It is deliberately field-AGNOSTIC (it scans every string
   // value) so that the composition verdict and the key verdict fail separately.
+  //
+  // CHANGED 2026-09-21 (board 081508d0): `name` used to be `item.slug`; it is
+  // now the item's CURRENT TEXT headline (boardDisplayLabel) — see H1's note
+  // for why the old slug-sourced expectation encoded the defect. The slug is
+  // still minted (kept below only as the PREMISE that S1 is intact); it is no
+  // longer the string composed into the display form.
   const { tools, cleanup } = harness();
   try {
     const item = boardAdd(tools, { text: 'RENDER THE BOARD IN THE TUI.\n\nbody prose.', source: 'user' });
-    const name = item.slug as string;
-    assert.ok(typeof name === 'string' && name.length > 0, 'PREMISE: S1 minted a handle');
+    assert.ok(typeof item.slug === 'string' && (item.slug as string).length > 0, 'PREMISE: S1 minted a handle');
+    const name = 'RENDER THE BOARD IN THE TUI.';
 
     const expected = displayForm(name, item.id as string);
     const h = headlineOf(tools);
@@ -342,20 +371,28 @@ test('H4 CLIPPING, BOTH SIDES OF THE BOUNDARY: a 48-character name renders WHOLE
   // record. The headline's `text` field is ITSELF clipped (~80 chars) and ends
   // in an ellipsis whenever the body is long — a whole-record "contains no
   // ellipsis" check is a false positive waiting for its first long fixture.
+  //
+  // CHANGED 2026-09-21 (board 081508d0): the clip boundary is now exercised on
+  // the item's TEXT headline, not its slug — `name` no longer reads the slug
+  // at all (see H1's note). SLUG_48/SLUG_49 are reused here only as literal
+  // 48/49-character STRINGS (their content, not their slug-ness, is what this
+  // arm needs); each item also carries an explicit, unrelated `slug` purely to
+  // satisfy headlineRecord's has-a-slug gate for whether `name` is composed at
+  // all — the boundary itself is measured on the TEXT.
   const { tools, cleanup } = harness();
   try {
-    assert.equal(SLUG_48.length, 48, 'premise: this fixture handle sits exactly ON the clip boundary');
-    assert.equal(SLUG_49.length, 49, 'premise: this fixture handle sits exactly one character past it');
+    assert.equal(SLUG_48.length, 48, 'premise: this fixture string sits exactly ON the clip boundary');
+    assert.equal(SLUG_49.length, 49, 'premise: this fixture string sits exactly one character past it');
 
     // --- boundary, unclipped -------------------------------------------------
-    const onBoundary = boardAdd(tools, { text: 'A HANDLE EXACTLY ON THE BOUNDARY.\n\nbody.', source: 'user', slug: SLUG_48 });
-    assert.equal(onBoundary.slug, SLUG_48, 'PREMISE (S1 C0): an explicit non-colliding handle is accepted verbatim');
+    const onBoundary = boardAdd(tools, { text: `${SLUG_48}\n\nbody.`, source: 'user', slug: 'h4-on-boundary' });
+    assert.equal(onBoundary.slug, 'h4-on-boundary', 'PREMISE (S1 C0): an explicit non-colliding handle is accepted verbatim — unrelated to the text fixture below');
     const hOn = headlineOf(tools);
     const expectedOn = `${SLUG_48} (${id8(onBoundary.id as string)})`;
     assert.equal(
       hOn.name,
       expectedOn,
-      `a name of exactly ${NAME_CLIP} characters is rendered WHOLE — no ellipsis, nothing dropped. Expected "${expectedOn}", got ${JSON.stringify(hOn)}`
+      `a TEXT headline of exactly ${NAME_CLIP} characters is rendered WHOLE — no ellipsis, nothing dropped. Expected "${expectedOn}", got ${JSON.stringify(hOn)}`
     );
     assert.ok(!String(hOn.name).includes(ELLIPSIS), 'a name at the boundary carries no ellipsis — clipping starts PAST the budget, not at it');
     assert.equal(expectedOn.length, 59, 'self-check on the stated derivation: 48 name chars + 11 for " (id8)" = 59');
@@ -363,8 +400,8 @@ test('H4 CLIPPING, BOTH SIDES OF THE BOUNDARY: a 48-character name renders WHOLE
     tools.boardRemove(onBoundary.id as string);
 
     // --- one past the boundary, clipped -------------------------------------
-    const overBoundary = boardAdd(tools, { text: 'A HANDLE ONE PAST THE BOUNDARY.\n\nbody.', source: 'user', slug: SLUG_49 });
-    assert.equal(overBoundary.slug, SLUG_49, 'PREMISE: the full 49-character handle is what was STORED — clipping is a display act, never a storage one');
+    const overBoundary = boardAdd(tools, { text: `${SLUG_49}\n\nbody.`, source: 'user', slug: 'h4-over-boundary' });
+    assert.equal(overBoundary.slug, 'h4-over-boundary', 'PREMISE: the slug is an unrelated, untouched address — clipping is a TEXT-display act, never a storage one');
     const overId = overBoundary.id as string;
     const hOver = headlineOf(tools);
     const expectedOver = `${SLUG_49.slice(0, 47)}${ELLIPSIS} (${id8(overId)})`;
@@ -383,46 +420,67 @@ test('H4 CLIPPING, BOTH SIDES OF THE BOUNDARY: a 48-character name renders WHOLE
     assert.ok(String(hOver.name).startsWith(SLUG_49.slice(0, 20)), 'the clip keeps the LEADING characters, so the clipped name stays recognisable — a tail-clip would not');
     assert.equal(expectedOver.length, 59, 'the clipped handle lands on the same 59 characters as the unclipped boundary case — the clip is what makes the budget hold');
 
-    // The STORED handle is untouched by any of this, and still resolves.
-    assert.equal(tools.boardGet(SLUG_49).id, overId, 'the full 49-character handle is still a real address — display clipping never narrows the namespace');
+    // The STORED handle (the item's real slug, unrelated to the clipped text
+    // fixture) is untouched by any of this, and still resolves.
+    assert.equal(tools.boardGet('h4-over-boundary').id, overId, 'the stored slug is still a real address — display clipping of the TEXT-derived name never touches it');
   } finally {
     cleanup();
   }
 });
 
-test('H5 LEGACY DEGRADATION: a slugless board item projects its FULL id and NO `name` key at all — no "undefined (id8)", no "null (id8)", no bare hex dressed as a handle. An absent name over a wrong one (df361a0f)', () => {
-  // SABOTAGE that must turn this test RED: in packages/schemas/src/records.ts
-  // make the composed display string fall back to `${rec.slug ?? rec.id.slice(0,8)} (${rec.id.slice(0,8)})`
-  // when a todo has no name — i.e. print the id twice and call the first one a
-  // name.
+test('H5 (REVISED, review round 2, board 081508d0) LEGACY ROW WITH REAL TEXT: a SLUG-LESS board item STILL gets a headline `name` — derived from its own CURRENT text, unconditionally; the id half is still intact beside it', () => {
+  // SUPERSEDES the original H5, which required NO `name` key for ANY slugless
+  // item. THAT WAS ITSELF THE HIGH-SEVERITY GAP a cross-family review caught:
+  // gating composition on slug presence left every legacy pre-mint row — and,
+  // worse, EVERY maintenance-queue item, which never mints a slug at all (S1
+  // design call) — permanently nameless even though its text was perfectly
+  // nameable. `id8` is a uuid-prefix address, valid regardless of whether a
+  // slug was ever minted (it is not derived from the slug at all), so gating
+  // composition on slug presence bought nothing but a needless omission.
   //
-  // WHICH GUARD CARRIES WHICH VERDICT — two layers, deliberately, because they
-  // fail apart. The `!('name' in h)` assertion carries "the key is OMITTED, not
-  // filled with a placeholder" and is the one the named sabotage reddens. The
-  // blob assertions below carry something it cannot see: a fabricated hex-costume
-  // name emitted under some OTHER key. Neither implies the other.
+  // WHAT SURVIVES FROM THE OLD H5, now split into H5b below: the ONE case
+  // that still gets no `name` at all is a record with NEITHER a slug NOR any
+  // non-blank text line — and even then, never a fabricated "undefined/null/
+  // id8 (id8)" costume (df361a0f). That is a narrower, still-real guarantee,
+  // not the same one this arm used to make.
   //
-  // RE-AIMED 2026-08-29, AND TIGHTENED. Read through `boardQuery` this arm was
-  // inspecting a full record and therefore said nothing about headlineRecord().
-  // Through `boardQueryResult` the measured behaviour is that a slugless item
-  // gets NO `name` key whatsoever, so that is pinned outright. The original
-  // arm's either-way clause — which allowed a derived display name and then
-  // constrained it — has been REMOVED: under an outright absence pin it is
-  // unreachable, and an unreachable branch pins nothing. AC23's display-only
-  // derivation stays where AC23 puts it, on board_get, and is pinned there;
-  // a projection a reader CITES is exactly where an invented name must not
-  // appear. GREEN AND MUST STAY GREEN.
+  // SABOTAGE that must turn this test RED: reintroduce a `record.slug ? ... :
+  // ''` gate ahead of the todo branch in headlineRecord (packages/schemas/src/
+  // records.ts).
   const { store, tools, cleanup } = harness();
   try {
     const legacyId = seedLegacySluglessItem(store, tools, 'A LEGACY ITEM PREDATING THE MINT.\n\nbody prose.');
     const h = headlineOf(tools);
 
     assert.equal(h.id, legacyId, 'the legacy item is the one being projected');
+    assert.equal((h.id as string).length, 36, 'and its FULL id survives, unclipped, beside the name');
+    assert.equal(
+      h.name,
+      `A LEGACY ITEM PREDATING THE MINT. (${id8(legacyId)})`,
+      `THE FIX: a slug-less item with real text still composes a name, derived from that text — got ${JSON.stringify(h)}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('H5b (NEW, review round 2): the ONE remaining case with NO `name` at all — NEITHER a slug NOR any non-blank text line — and even then never a fabricated "undefined (id8)" / "null (id8)" / "id8 (id8)" costume (df361a0f)', () => {
+  // WHICH GUARD CARRIES WHICH VERDICT — two layers, deliberately, because they
+  // fail apart. The `!('name' in h)` assertion carries "the key is OMITTED,
+  // not filled with a placeholder". The blob assertions below carry something
+  // it cannot see: a fabricated hex-costume name emitted under some OTHER
+  // key. Neither implies the other.
+  const { store, tools, cleanup } = harness();
+  try {
+    const legacyId = seedLegacySluglessItem(store, tools, '   \n\t\n   ');
+    const h = headlineOf(tools);
+
+    assert.equal(h.id, legacyId, 'the item is the one being projected');
     assert.equal((h.id as string).length, 36, 'and its FULL id survives — a nameless item needs its id MORE than a named one does, not less');
 
     assert.ok(
       !('name' in h),
-      `a legacy item has no minted handle, so the headline composes NO name key at all — not an empty string, not a placeholder, not the id in a costume. Got ${JSON.stringify(h)}`
+      `with neither a slug nor any non-blank text, the headline composes NO name key at all — not an empty string, not a placeholder, not the id in a costume. Got ${JSON.stringify(h)}`
     );
 
     const blob = JSON.stringify(h);
@@ -498,6 +556,124 @@ test('J1 THE DIGEST CARRIES THE NAME: board_query projection:"digest" returns th
     assert.equal(digest.id, item.id, 'AND the full id is retained beside it — name first, id kept');
     assert.ok(!String(digest.slug).includes(ELLIPSIS), 'the digest handle is the ADDRESS and is never clipped — clipping belongs to the composed display form only (H4)');
     assert.equal(tools.boardGet(digest.slug as string).id, item.id, 'the name a digest read hands back is a working address — that is the whole point of minting it');
+  } finally {
+    cleanup();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// SECTION K — THE MEASURED REGRESSION (board 081508d0): a renumbered/renamed
+// item must never keep displaying the headline it was minted under.
+// ---------------------------------------------------------------------------
+
+test('K1 THE SLICE 6/7 REGRESSION, END TO END: board_add mints a slug from the ORIGINAL headline; board_update rewrites `text` to a NEW headline WITHOUT touching `slug` (updateTodo never re-mints); the headline projection now shows the NEW text, the slug stays the OLD one, and the OLD slug still resolves the item', () => {
+  // SABOTAGE that must turn this test RED: revert headlineRecord (or
+  // boardItemName) to read `record.slug` instead of the CURRENT `text` —
+  // the exact defect board 081508d0 measured live: an item whose text opened
+  // "Slice 7 — ..." still displayed as "slice-6-..." because the slug
+  // predated the renumbering.
+  const { tools, real, cleanup } = harness();
+  try {
+    const item = boardAdd(tools, { text: 'Slice 6 — foo.\n\nbody prose.', source: 'user', priority: 'high' });
+    const slug = item.slug as string;
+    assert.ok(typeof slug === 'string' && slug.startsWith('slice-6'), `PREMISE: the mint reads the ORIGINAL headline — got "${String(slug)}"`);
+
+    const updated = tools.boardUpdate(item.id as string, { text: 'Slice 7 — foo.\n\nbody prose.' });
+    assert.equal(updated.slug, slug, 'the slug is NEVER re-minted by board_update — updateTodo\'s own contract; it stays the stale "slice-6-..." address');
+
+    const headline = tools.boardQueryResult({ source: 'user', projection: 'headline' }).records[0];
+    assert.ok(
+      typeof headline.name === 'string' && (headline.name as string).startsWith('Slice 7'),
+      `THE FIX: the headline's name reads the item's CURRENT text, not its stale slug — expected a name starting "Slice 7", got "${String(headline.name)}"`
+    );
+    assert.ok(!(headline.name as string).toLowerCase().startsWith('slice-6'), 'and it no longer opens with the old, now-wrong slug-derived form');
+
+    // The slug is still the OLD one, and it still resolves the item — an
+    // ADDRESS, unlike the label, is never re-derived (out of scope: minting,
+    // BOARD_UPDATABLE_FIELDS, resolveRecordId, aliases).
+    assert.equal(tools.boardGet(slug).id, item.id, 'the OLD slug still resolves the item — it is an immutable address, never re-derived');
+    const got = tools.boardGet(slug);
+    assert.equal(got.slug, slug, 'board_get returns the real, unchanged slug');
+    assert.equal(got.label, 'Slice 7 — foo.', 'and an explicit `label` field carrying the CURRENT text headline, beside it');
+
+    // THE SAME READ, THROUGH board_get's ACTUAL DECLARED TYPE (review round 2,
+    // MEDIUM finding) — `real` is the concretely-typed SterlingTools instance,
+    // not narrowed through the ToolsView `Loose` escape hatch every other
+    // assertion in this file uses. `typed.label` below is a compile-time
+    // property access on `BoardGetResult`, not a stringly-typed lookup on an
+    // object typed `Record<string, unknown>` — if boardGet's return type ever
+    // regresses to a bare `DurableRecord`, THIS line fails to compile.
+    const typed: BoardGetResult = real.boardGet(slug);
+    assert.equal(typed.type, 'todo', 'board_get only ever resolves board/queue items — narrows the union for the two field reads below');
+    if (typed.type === 'todo') {
+      assert.equal(typed.label, 'Slice 7 — foo.', 'the declared type exposes `label` directly — no Loose cast required to read it');
+      assert.equal(typed.slug, slug, 'and `slug` is still readable as the record field it always was');
+    }
+  } finally {
+    cleanup();
+  }
+});
+
+test('K2 (REVISED, review round 2, board 081508d0): maintenance_query SHARES THE SAME RENDERER, and a SLUG-LESS system item STILL gets a headline `name` — derived from its own text, UNCONDITIONALLY, because maintenance items never mint a slug at all (S1 design call) and "slug-less" is not a reason to omit the label', () => {
+  // SUPERSEDES the original K2, which asserted the OPPOSITE — `!('name' in
+  // headline)` — reasoning that headlineRecord's slug-GATE (no slug -> no
+  // name) applied identically on both surfaces. That gate was itself a
+  // remnant of the old slug-sourced design: maintenance items structurally
+  // NEVER mint a slug (tools.ts mintHeadlineOf, S1), so under the old gate
+  // every ordinary maintenance_query headline row was permanently nameless —
+  // exactly the omission a cross-family review caught. The fix removes the
+  // slug-gate for `todo` records: the label is derived from CURRENT TEXT
+  // unconditionally, and rendered whenever it is non-empty.
+  //
+  // SABOTAGE that must turn this test RED: reintroduce a `record.slug ? ... :
+  // ''` gate ahead of the todo branch in headlineRecord.
+  //
+  // READ THROUGH maintenanceQueryResult, NOT maintenanceQuery: the latter
+  // forwards to the non-enveloping boardQuery and ignores `projection`
+  // entirely, so it always returns the FULL record — the ORIGINAL K2 read it
+  // and passed for the WRONG reason (a full record trivially lacks a `name`
+  // key too, so "no name" proved nothing about the gate). Same class of bug
+  // H0's control guards against on the board side; this file had no
+  // equivalent control on the maintenance side until now.
+  const { tools, cleanup } = harness();
+  try {
+    tools.maintenanceEnqueue({
+      reason: 'article_missing',
+      text: 'reconcile article \'k2\' — owned file changed',
+      file_keys: ['src/k2.ts'],
+    });
+    const headline = tools.maintenanceQueryResult({ projection: 'headline', cap: 10 }).records[0];
+    assert.equal(
+      typeof headline.name,
+      'string',
+      `a slug-less system item still gets a composed \`name\` — maintenance items never mint a slug at all, so gating on slug presence left every ordinary queue row permanently nameless. Got ${JSON.stringify(headline)}`
+    );
+    assert.ok(
+      (headline.name as string).startsWith("reconcile article 'k2'"),
+      `and the name is derived from the item's OWN text (there is no slug to fall back to) — got "${String(headline.name)}"`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('K3 (NEW, review round 2): a slug-less system item whose text opens with LEADING BLANK LINES is STILL named — the FIRST NON-BLANK line, never a blind `text.split(\'\\n\')[0]` that would yield a blank name', () => {
+  // SABOTAGE that must turn this test RED: derive the todo label as
+  // `record.text.split('\n')[0]` directly instead of routing through
+  // boardDisplayLabel (which explicitly skips leading blank lines).
+  const { tools, cleanup } = harness();
+  try {
+    tools.maintenanceEnqueue({
+      reason: 'article_missing',
+      text: '\n\n  \nreconcile article \'k3\' — owned file changed',
+      file_keys: ['src/k3.ts'],
+    });
+    const headline = tools.maintenanceQueryResult({ projection: 'headline', cap: 10 }).records[0];
+    assert.ok(
+      typeof headline.name === 'string' && (headline.name as string).startsWith("reconcile article 'k3' — owned file changed"),
+      `the name skips the leading blank lines and reads the first NON-BLANK one — got ${JSON.stringify(headline.name)}`
+    );
+    assert.ok(!(headline.name as string).startsWith('('), 'and it never opens with a bare id/parenthesis — the leading blank lines never leak through as the name');
   } finally {
     cleanup();
   }

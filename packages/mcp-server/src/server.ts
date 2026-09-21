@@ -548,7 +548,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_get',
     {
       description:
-        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it.",
+        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardGet(id))

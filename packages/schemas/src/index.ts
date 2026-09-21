@@ -42,6 +42,7 @@ export {
   NAME_CLIP,
   clipName,
   displayHandle,
+  boardDisplayLabel,
   AGENT_MODEL_KEY,
   REVIEWER_ROLES,
 } from './records.js';

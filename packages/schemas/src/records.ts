@@ -1027,11 +1027,58 @@ export const clipName = (name: string): string =>
  *  absent one (an id printed twice is not a name — df361a0f). */
 export const displayHandle = (name: string, id: string): string => `${clipName(name)} (${id.slice(0, 8)})`;
 
+/**
+ * A board item's DISPLAY LABEL — the first non-blank line of its CURRENT
+ * `text`, never its (immutable) `slug` (board 081508d0: `updateTodo` never
+ * re-mints a slug after text changes, so a slug-derived name goes stale the
+ * moment an item is renamed or renumbered — "Slice 7" showed as
+ * "slice-6-..." because the slug predated the renumbering). Defined ONCE
+ * here (invariant 1) so every display site — this headline projection,
+ * board_get's `label`, the TUI card titles, lane-collision names — reads one
+ * function and cannot disagree about what a reader is shown.
+ *
+ * FIRST NON-BLANK LINE, WHITESPACE NORMALIZED, PARENTHETICALS KEPT.
+ * Deliberately NOT `todoHeadline` (tools.ts): that extractor MINTS a slug
+ * base and drops a parenthetical aside so it never eats the 60-char kebab
+ * budget. A display label has no such budget to protect, and dropping the
+ * aside would throw away meaningful text the reader is actually shown.
+ *
+ * FALLS BACK TO `slug` only when `text` yields nothing at all (blank or
+ * whitespace-only) — never the reverse. Returns '' when both are empty; a
+ * caller decides its own placeholder (e.g. boardItemName's
+ * '(unnamed board item)') rather than this shared helper inventing one.
+ */
+export function boardDisplayLabel(text: unknown, slug?: unknown): string {
+  const line = s(text)
+    .split('\n')
+    .find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, ' ') : '';
+  return normalized || s(slug).trim();
+}
+
 export function headlineRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { id: record.id, priority: record.priority };
   // The human half of the line, beside — never instead of — the full id above.
-  // Omitted entirely for a legacy slugless item: absent name over wrong name.
-  const name = s(record.slug);
+  //
+  // TODO RECORDS (board_query/maintenance_query, the only callers —
+  // headlineRecord is todo-only by construction): the label is derived from
+  // the item's CURRENT text UNCONDITIONALLY (board 081508d0, review round 2,
+  // HIGH finding). A maintenance-queue item NEVER mints a slug at all (S1
+  // design call, mintHeadlineOf) — gating composition on slug presence left
+  // every ordinary maintenance_query headline row permanently nameless, which
+  // is worse than the original defect: not stale, simply ABSENT. `id8` is a
+  // uuid-prefix address, safe to show regardless of whether a slug was ever
+  // minted, so "no slug" is no longer a reason to omit the name. Composition
+  // is gated on the LABEL alone (non-empty) — falling back to the stored slug
+  // only when text itself yields nothing (boardDisplayLabel's own contract),
+  // and omitted only when NEITHER yields anything: absent name over wrong
+  // name (df361a0f) still holds for that one genuinely-nameless case.
+  //
+  // EVERY OTHER REGISTERED TYPE keeps its PRE-FIX behaviour byte for byte:
+  // name is the stored slug, full stop — headlineRecord has no other actual
+  // caller today, but its signature is general and this keeps it honest.
+  const slug = s(record.slug);
+  const name = record.type === 'todo' ? boardDisplayLabel(record.text, slug) : slug;
   if (name) out.name = displayHandle(name, s(record.id));
   if (record.objective !== undefined && record.objective !== null && record.objective !== '') out.objective = record.objective;
   if (record.system_reason !== undefined && record.system_reason !== null && record.system_reason !== '') out.system_reason = record.system_reason;

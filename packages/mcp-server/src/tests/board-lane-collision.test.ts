@@ -31,14 +31,15 @@
 //   (a) `parallel_safe_lanes` order is NOT pinned — AC2 only requires BOTH
 //       lanes be named, so the assertion is order-insensitive (sorted-array
 //       compare) rather than pinning the brief's example order literally.
-//   (b) `name` on a collision item (AC7, "human-readable name beside its
-//       id") is assumed to be the item's already-minted `slug` (S1,
-//       board-item-slug-mint.test.ts / board-item-name-render.test.ts
-//       establish `slug` as this codebase's one existing human-readable-name
-//       concept for a todo). If the real field derives the name some other
-//       way (e.g. from `text`), this is the line to move; the ANTI-bare-id
-//       verdict (name !== id, name is a non-empty string distinct from the
-//       raw uuid) is the part of AC7 pinned independently of that guess.
+//   (b) SUPERSEDED 2026-09-21 (board 081508d0): `name` on a collision item
+//       was assumed to be the item's already-minted `slug`. That reading was
+//       itself the defect the fix closes — a slug is minted once and never
+//       re-derived (updateTodo), so a collision name sourced from it goes
+//       stale the moment the item is renamed or renumbered. `name` now reads
+//       the item's CURRENT text via the shared boardDisplayLabel helper
+//       (falling back to slug only when text is blank — see GAP3a/GAP3b).
+//       The ANTI-bare-id verdict (name !== id, non-empty, not a raw uuid) is
+//       unaffected and stays pinned independently of this.
 //   (c) the scan is keyed on EXACT shared file_keys path strings (not globs
 //       or prefixes) — the brief says "sharing a file_keys path", read
 //       literally as string equality, matching how file_keys is filtered
@@ -217,8 +218,20 @@ test('AC1/AC2/AC7: two USER items sharing a file_keys path produce a collision g
     );
 
     // AC7 — every item in the group carries {id, name}, name human-readable,
-    // never a bare id. See ASSUMPTION (b): name is checked against the
-    // item's already-minted slug, the one existing "name" concept for a todo.
+    // never a bare id.
+    //
+    // CHANGED 2026-09-21 (board 081508d0): ASSUMPTION (b) at the file header —
+    // "name is the item's already-minted slug" — is now WRONG, and was itself
+    // the defect this fix closes: a slug is minted once and never re-derived
+    // (updateTodo), so a collision name sourced from it goes stale on a rename
+    // (the "Slice 7 showed as slice-6-..." report). `boardItemName` now reads
+    // the item's CURRENT text (boardDisplayLabel) first, falling to slug only
+    // when text is blank — see GAP3a/GAP3b below, which already pinned the
+    // text-fallback shape this arm now expects as the PRIMARY behaviour.
+    const expectedName: Record<string, string> = {
+      [a.id as string]: 'IMPLEMENT THE SHARED MODULE.',
+      [b.id as string]: 'WIRE THE SHARED MODULE.',
+    };
     for (const rawItem of [a, b]) {
       const entry = group.items.find((i) => i.id === rawItem.id);
       assert.ok(entry, `AC7: item ${String(rawItem.id)} is present in the group`);
@@ -226,7 +239,11 @@ test('AC1/AC2/AC7: two USER items sharing a file_keys path produce a collision g
       assert.ok(entry!.name.length > 0, 'AC7: name is non-empty');
       assert.notEqual(entry!.name, entry!.id, 'AC7: name is never the bare id repeated');
       assert.ok(!/^[0-9a-f-]{36}$/.test(entry!.name), 'AC7: name is not itself a uuid dressed up as a name');
-      assert.equal(entry!.name, rawItem.slug as string, "AC7 (assumption b): name is the item's minted slug — the codebase's one existing human-readable-name concept for a todo");
+      assert.equal(
+        entry!.name,
+        expectedName[rawItem.id as string],
+        "AC7 (revised): name is the item's CURRENT TEXT headline, never the immutable slug"
+      );
     }
   } finally {
     cleanup();

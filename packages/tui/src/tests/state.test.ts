@@ -27,8 +27,11 @@ const NOW = '2026-06-10T12:00:00.000Z';
  * passing one run and failing the next with elements 0/1 swapped).
  *
  * DIRECTION, derived from the assertions rather than from taste: `todoCards`
- * is asserted to be `['first todo', 'second todo']`, rows[0] is asserted to be
- * t1 (the `priority: high` one), and the body-line hit-tests treat line 4 as
+ * is asserted to be `['first todo (id8)', 'second todo (id8)']` (board
+ * 081508d0, review round 2 — the composed `label (id8)` form now, not the
+ * bare text: composition is gated on the derived label, not on slug
+ * presence), rows[0] is asserted to be t1 (the `priority: high` one), and the
+ * body-line hit-tests treat line 4 as
  * t1 and line 5 as t2 — i.e. RENDERED order == INSERTION order. Under
  * `updated_at DESC` the row that sorts FIRST needs the LATEST stamp, so the
  * FIRST record seeded gets the latest stamp and each later seed a strictly
@@ -157,9 +160,16 @@ function article(store: SterlingStore, slug: string, title: string, what: string
 }
 
 test('view models: board filters source=user', () => {
-  const { store, cleanup } = fixture();
+  // CHANGED 2026-09-21 (board 081508d0, review round 2, HIGH finding): titles
+  // used to be the bare text ('first todo'/'second todo') because composition
+  // was gated on slug presence, and neither seed has a slug. That gate itself
+  // was the defect — every slug-less item with real text (which includes
+  // every maintenance-queue item, S1) was left permanently unlabelled. The
+  // gate is now "does a label exist" (it always does, for non-blank text), so
+  // both titles now compose `label (id8)`.
+  const { store, t1, t2, cleanup } = fixture();
   try {
-    assert.deepEqual(todoCards(store).map((c) => c.title), ['first todo', 'second todo']);
+    assert.deepEqual(todoCards(store).map((c) => c.title), [`first todo (${t1.id.slice(0, 8)})`, `second todo (${t2.id.slice(0, 8)})`]);
   } finally {
     cleanup();
   }
@@ -1082,13 +1092,16 @@ test('P2 regression: project-local readers (todoCards) stay project-only — nev
   const { stores, cleanup } = mountedFixture(['node']);
   try {
     // a user todo in the PROJECT store
-    stores.create({ ...kenv('todo'), text: 'project todo', source: 'user', priority: 'high' });
+    const projectTodo = stores.create({ ...kenv('todo'), text: 'project todo', source: 'user', priority: 'high' }) as { id: string };
     // a user todo physically in the DOMAIN store — must NOT surface in the board tab
     stores.create({ ...kenv('todo', 'domain:node'), text: 'domain todo', source: 'user' });
 
     // the project-local readers take the PROJECT store, not the MountedStores fan-out
+    // CHANGED 2026-09-21 (board 081508d0, review round 2): the title used to
+    // be the bare text (no slug minted here); it now composes `label (id8)`
+    // unconditionally — see state.test.ts:159's note.
     const todoTitles = todoCards(stores.project).map((c) => c.title);
-    assert.deepEqual(todoTitles, ['project todo'], 'board reads the project store only — no domain todos');
+    assert.deepEqual(todoTitles, [`project todo (${projectTodo.id.slice(0, 8)})`], 'board reads the project store only — no domain todos');
   } finally {
     cleanup();
   }
