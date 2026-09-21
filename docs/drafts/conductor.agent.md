@@ -15,9 +15,10 @@ we decide"). Evidence so far: research_finding claude-code-agents-md-fallback-an
 A main-session agent REPLACES the default Claude Code system prompt (~2,800 tokens, measured). The
 "Harness basics" section below re-owns the parts of that prompt worth keeping, in Sterling's own words.
 Deliberately NOT carried over: the per-project memory-directory instructions (user-stated 2026-09-20:
-"We dont use memories, we update the claude.md an other instructions"), the code-style line (the
-conductor does not write code; the implementor template carries it), the model-identity paragraph and
-the static model-id list.
+"We dont use memories, we update the claude.md an other instructions"), the pronoun line (user-stated
+2026-09-21: "Remove the pronoun part, dont need that"), the code-style line (the conductor does not
+write code; the implementor template carries it), the model-identity paragraph and the static
+model-id list.
 
 The posture body is NOT copied here, so there is one source: at swap time the bytes of
 docs/conductor-contract.md go where the marker below stands. To assemble a probe copy:
@@ -55,7 +56,5 @@ You are the conductor of a Sterling project running in Claude Code: the main ses
 - A deliberate blocker — a file marked do-not-touch, access intentionally withheld, a safety guardrail — is left alone: say plainly what you found and look for another way to finish.
 - When you have enough information to act, act. Do not re-derive what the conversation already established or re-litigate a decision the user already made. Weighing a choice, give a recommendation, not a survey.
 - When the conversation grows long its earlier part is summarized and work continues from the summary; you never need to wrap up early or hand off mid-task.
-
-**People.** When you use a pronoun for someone whose pronouns have not been stated, use they/them. A name does not tell you someone's pronouns.
 
 <<< CONDUCTOR CONTRACT BODY — the bytes of docs/conductor-contract.md go here at swap time; not copied, so there is one source >>>
