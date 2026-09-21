@@ -76,9 +76,41 @@ export function scorePull(response, labels, negative = false) {
     rank_histogram: rankHistogram, mrr: { numerator: rank < 0 ? 0 : 1 / (rank + 1), denominator: 1, value: rank < 0 ? 0 : 1 / (rank + 1) },
     confusion: negative ? { tn: ids.length === 0 ? 1 : 0, fp: ids.length ? 1 : 0 } : { tp: ids.length ? 1 : 0, fn: ids.length ? 0 : 1 }, bytes: bytes(response) };
 }
+// hazardOverflowPointer's exact wording (scripts/hooks/lib/delivery.mjs, decision
+// `delivery-floor-and-transport-ceiling-constants` 97c313a8): a hazard whose own
+// whole block cannot fit the hard transport ceiling degrades to this bare notice
+// instead of a partial trigger/right_way — delivery never clips a hazard's own
+// trigger/right_way text (renderHazards' only caller, hazardParts, passes an
+// unbounded char cap; the decision's alternatives_rejected names "clipping
+// content to fit" explicitly). Consequently the wholeHazard threshold read as
+// "100% whole selected hazards" (decision `knowledge-quality-replay-benchmark`
+// 0bcada92) is unreachable by construction whenever a selected hazard exceeds
+// DELIVERY_TRANSPORT_VISIBLE_BYTES (10000) — it must not be read as a release gate.
+const HAZARD_OVERSIZE_MARKER = 'TOO LARGE to show in full (exceeds the transport limit)';
+
+/** Localizes the text belonging to ONE hazard's own rendered block (its header
+ *  through its TRIGGER/RIGHT WAY, or its degraded withheld-oversize pointer),
+ *  bounded by the next hazard header or delivery section. Used only to detect
+ *  an elision INSIDE this record's own block — never a bare "…" search over
+ *  the whole envelope, which would also match unrelated clipped content
+ *  (decision statements, article digests) rendered alongside it for the same
+ *  file: an ellipsis can legitimately occur in a hazard's own prose too. */
+function hazardBlockText(raw, id) {
+  if (!id) return null;
+  const wholeAnchor = `(full record: knowledge_get ${id})`;
+  const withheldAnchor = `${HAZARD_OVERSIZE_MARKER} · knowledge_get ${id}`;
+  const anchorIndex = raw.includes(wholeAnchor) ? raw.indexOf(wholeAnchor) : raw.includes(withheldAnchor) ? raw.indexOf(withheldAnchor) : -1;
+  if (anchorIndex < 0) return null;
+  const start = raw.lastIndexOf('⚠ ANTI-PATTERN', anchorIndex);
+  if (start < 0) return null;
+  const searchFrom = anchorIndex + 1;
+  const boundaries = [raw.indexOf('⚠ ANTI-PATTERN', searchFrom), raw.indexOf('\n▸ ', searchFrom), raw.length].filter((x) => x >= 0);
+  return raw.slice(start, Math.min(...boundaries));
+}
 export function emittedLevel(envelope, record) {
+  const raw = typeof envelope === 'string' ? envelope : JSON.stringify(envelope ?? '');
   const normalise = (value) => String(value ?? '').replace(/\s+/g, ' ').replaceAll('…', '...').trim();
-  const text = normalise(typeof envelope === 'string' ? envelope : JSON.stringify(envelope ?? ''));
+  const text = normalise(raw);
   const r = record ?? {};
   const pointer = [r.id, r.slug, r.title].filter(Boolean).map(normalise).some((x) => text.includes(x));
   // H19 renders a record's beginning under an article header and may clip the
@@ -94,8 +126,36 @@ export function emittedLevel(envelope, record) {
   // clipped orienting excerpt. They are discovery contracts, never body delivery.
   const h20PointerBlock = /STERLING MECHANISM-AXIS DELIVERY \(H20\)[\s\S]*?Pointers only;/.test(text);
   const substance = pointer && !h20PointerBlock && (passages.some((x) => text.includes(x)) || hazardSubstance);
-  const whole = substance && hazardSubstance;
-  return { pointer, substance, whole };
+  // WHOLE / CLIPPED / WITHHELD-OVERSIZE are three distinct, mutually exclusive
+  // outcomes for a selected hazard (board `knowledge-eval-scorer-wholehazard-
+  // credits-a-clipped-hazard-a`): a clipped block is never credited whole, and
+  // an honestly withheld pointer is counted separately instead of reading as
+  // silence. isHazardLabel guards non-hazard records (plain articles/decisions)
+  // out of both new counters entirely, unchanged from today's behaviour.
+  const isHazardLabel = !!r.trigger || !!r.right_way;
+  const withheldOversize = isHazardLabel && !!r.id && raw.includes(`${HAZARD_OVERSIZE_MARKER} · knowledge_get ${r.id}`);
+  const block = isHazardLabel ? hazardBlockText(raw, r.id) : null;
+  // Keyed on the single-character ellipsis (U+2026) ONLY, never a literal
+  // three-dot "..." sequence: `clip()` (scripts/hooks/lib/delivery.mjs:404-424)
+  // is the ONLY place delivery ever elides content, and it appends exactly
+  // that one code point at the truncation boundary. A hazard's own authored
+  // prose or code sample can legitimately contain "..." (an ellipsis-styled
+  // placeholder, a code comment, a Python Ellipsis literal) without ever
+  // having been clipped — a real case (`main.gd`'s pause hazard, dome-farmer)
+  // was caught matching on "# ... assert here, in the same call ..." before
+  // this was narrowed to the single character.
+  const blockElided = !!block && block.includes('…');
+  const whole = substance && hazardSubstance && !withheldOversize && !blockElided;
+  // `clipped` is keyed on hazardSubstance/blockElided directly, NOT on the
+  // broader `whole`/`substance` composite: `substance` is also gated by the
+  // unrelated h20PointerBlock check (a global, envelope-wide scan for an H20
+  // pointer contract elsewhere in the same text), which can legitimately hold
+  // a hazard's own OWN block back from `whole` for a reason that has nothing
+  // to do with clipping. `block !== null` requires the record's own hazard
+  // header to have actually rendered (TRIGGER: and RIGHT WAY: labels present)
+  // — a bare pointer mention with no rendered block is silence, not clipped.
+  const clipped = isHazardLabel && block !== null && !withheldOversize && (blockElided || !hazardSubstance);
+  return { pointer, substance, whole, clipped, withheldOversize };
 }
 function markedRecordIds(state) {
   const ids = new Set();
@@ -116,12 +176,20 @@ export function scorePush({ envelopes = [], lateEnvelopes = [], labels, recordsB
   const timely = late ? [] : envelopes;
   const discoveryLabels = required.filter((x) => x.level === 'pointer');
   const substanceLabels = required.filter((x) => x.level === 'substance' || x.level === 'hazard_whole');
-  let discovery = 0, substance = 0, whole = 0;
+  const hazardWholeLabels = required.filter((x) => x.level === 'hazard_whole');
+  let discovery = 0, substance = 0, whole = 0, clippedHazard = 0, withheldOversize = 0;
   for (const label of required) {
-    const seen = timely.map((e) => emittedLevel(e, recordsById[label.id])).reduce((a, x) => ({ pointer: a.pointer || x.pointer, substance: a.substance || x.substance, whole: a.whole || x.whole }), { pointer: false, substance: false, whole: false });
+    const seen = timely.map((e) => emittedLevel(e, recordsById[label.id])).reduce((a, x) => ({ pointer: a.pointer || x.pointer, substance: a.substance || x.substance, whole: a.whole || x.whole, clipped: a.clipped || x.clipped, withheldOversize: a.withheldOversize || x.withheldOversize }), { pointer: false, substance: false, whole: false, clipped: false, withheldOversize: false });
     if (label.level === 'pointer' && seen.pointer) discovery++;
     if ((label.level === 'substance' || label.level === 'hazard_whole') && seen.substance) substance++;
-    if (label.level === 'hazard_whole' && seen.whole) whole++;
+    if (label.level === 'hazard_whole') {
+      // Mutually exclusive per label: whole, clipped and withheld-oversize
+      // never double-count the same required hazard (board `knowledge-eval-
+      // scorer-wholehazard-credits-a-clipped-hazard-a`).
+      if (seen.whole) whole++;
+      else if (seen.withheldOversize) withheldOversize++;
+      else if (seen.clipped) clippedHazard++;
+    }
   }
   const beforeMarks = markedRecordIds(guardBefore), afterMarks = markedRecordIds(guardAfter);
   const falseMarkIds = [...afterMarks].filter((id) => !beforeMarks.has(id) && !emittedLevel(envelopes, recordsById[id]).substance);
@@ -130,7 +198,7 @@ export function scorePush({ envelopes = [], lateEnvelopes = [], labels, recordsB
   const mentioned = Object.keys(recordsById).filter((id) => text.includes(id));
   const noise = mentioned.filter((id) => !allKnown.has(id));
   const duplicateCount = required.reduce((n, l) => n + Math.max(0, text.split(l.id).length - 2), 0);
-  return { timely: { discovery: [discovery, discoveryLabels.length], substance: [substance, substanceLabels.length] }, wholeHazard: [whole, required.filter((x) => x.level === 'hazard_whole').length], falseSubstanceMarks: falseMarkIds.length, falseSubstanceMarkIds: falseMarkIds, guardOnlyMarks: falseMarkIds.length, silence: text.length === 0 ? 1 : 0, noise: noise.length, duplicates: duplicateCount, late: Object.values(lateByRecord).filter(Boolean).length, lateByRecord, lateEnvelopes: lateEnvelopes.length, bytes: bytes(envelopes) };
+  return { timely: { discovery: [discovery, discoveryLabels.length], substance: [substance, substanceLabels.length] }, wholeHazard: [whole, hazardWholeLabels.length], clippedHazard: [clippedHazard, hazardWholeLabels.length], withheldOversize: [withheldOversize, hazardWholeLabels.length], falseSubstanceMarks: falseMarkIds.length, falseSubstanceMarkIds: falseMarkIds, guardOnlyMarks: falseMarkIds.length, silence: text.length === 0 ? 1 : 0, noise: noise.length, duplicates: duplicateCount, late: Object.values(lateByRecord).filter(Boolean).length, lateByRecord, lateEnvelopes: lateEnvelopes.length, bytes: bytes(envelopes) };
 }
 
 function snapshotDb(source, target) { mkdirSync(dirname(target), { recursive: true }); const db = new DatabaseSync(source, { readOnly: true }); db.exec(`VACUUM INTO '${target.replaceAll("'", "''")}'`); db.close(); }
