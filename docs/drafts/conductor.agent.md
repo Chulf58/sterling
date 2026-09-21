@@ -12,13 +12,9 @@ Whether the conductor becomes a main-session agent (this file), an appended syst
 H1 injection is an OPEN user decision (2026-09-21: "Dont swap anything yet ... research it more before
 we decide"). Evidence so far: research_finding claude-code-agents-md-fallback-and-main-session-agent-september-2026.
 
-A main-session agent REPLACES the default Claude Code system prompt (~2,800 tokens, measured). The
-"Harness basics" section below re-owns the parts of that prompt worth keeping, in Sterling's own words.
-Deliberately NOT carried over: the per-project memory-directory instructions (user-stated 2026-09-20:
-"We dont use memories, we update the claude.md an other instructions"), the pronoun line (user-stated
-2026-09-21: "Remove the pronoun part, dont need that"), the code-style line (the conductor does not
-write code; the implementor template carries it), the model-identity paragraph and the static
-model-id list.
+A main-session agent REPLACES the default Claude Code system prompt; the "Harness basics" section
+below re-owns the parts of that prompt worth keeping. What was left out and why is in the owning
+article's history (conduct-contract-propagation), not here.
 
 The posture body is NOT copied here, so there is one source: at swap time the bytes of
 docs/conductor-contract.md go where the marker below stands. To assemble a probe copy:
