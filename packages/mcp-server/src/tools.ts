@@ -5021,17 +5021,28 @@ export class SterlingTools {
     // no longer gates LISTING here, only matched_total/answerability below.
     // sameSubjectDigest keeps passing true (unchanged, see that method).
     const allMatches = this.axisCandidateMatches(text, terms, SterlingTools.PREFLIGHT_MIN_HITS, false);
-    // Re-derive centrality per survivor ONCE here (axisCandidateMatches no
-    // longer filters on it, so its own internal centrality computation is
-    // discarded before it returns) — matched_total/answerability stay
-    // computed from the centrality-PASSING subset exactly as before the
-    // widening; a request whose only survivors fail centrality still answers
-    // 'ungoverned' with matched_total 0, even though those survivors now
-    // appear in `matches` below.
+    // Re-derive centrality per survivor EXACTLY ONCE here (fix round, Sol's
+    // pre-commit review MEDIUM finding: axisCandidateMatches no longer scores
+    // centrality for this requireCentrality=false caller — see its tail below
+    // — so the redundant per-candidate text scan this widening could have
+    // introduced, up to PREFLIGHT_MIN_HITS's ~240-candidate ceiling, never
+    // happens). `centralHits` (the covered-terms array) is kept and reused
+    // for the sort key AND the rendered `central` field below — never
+    // recomputed. hasRecordCentralityHit is a GENUINELY DIFFERENT predicate,
+    // not a shortcut derivable from `centralHits.length > 0`: read literally
+    // (packages/store/src/axis.ts's hasRecordCentralityHit/
+    // recordCentralityHits), it returns `covered.length >=
+    // Math.min(minTerms, central.length)` — with AXIS_MIN_RECORD_TERMS
+    // (minTerms) = 2, a record with zero extractable central terms passes
+    // VACUOUSLY (0 >= 0) even though its covered array is empty, and a record
+    // needing 2 covered terms is NOT passed by exactly one (the AC-h1 fixture
+    // this file already pins, via the manifold/manifolds prefix quirk, relies
+    // on covered.length reaching 2, not merely > 0) — so it stays its own
+    // call, once, alongside the reused array.
     const withCentrality = allMatches.map(({ record, hits }) => ({
       record,
       hits,
-      centralHits: recordCentralityHits(record, text).length,
+      centralHits: recordCentralityHits(record, text),
       passesCentrality: hasRecordCentralityHit(record, text),
       at: Date.parse(record.updated_at),
     }));
@@ -5042,7 +5053,7 @@ export class SterlingTools {
     // the WIDENED list (not just the centrality-passing subset above).
     const sorted = [...withCentrality].sort(
       (a, b) =>
-        b.centralHits - a.centralHits ||
+        b.centralHits.length - a.centralHits.length ||
         b.hits.length - a.hits.length ||
         b.at - a.at ||
         (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0)
@@ -5053,7 +5064,7 @@ export class SterlingTools {
     // widened list can cap even when matched_total itself is small.
     const windowed = sorted.slice(0, SterlingTools.PREFLIGHT_MATCH_CAP);
     const capped = sorted.length > windowed.length;
-    const matches = windowed.map(({ record, hits }) => {
+    const matches = windowed.map(({ record, hits, centralHits }) => {
       // board c6e3561f disclosure-carry: a matched record carries the same
       // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
       // omitted when nothing supersedes it.
@@ -5065,7 +5076,7 @@ export class SterlingTools {
         // an article's slug beats its long title as the handle.
         title: SterlingTools.axisRecordTitle(record),
         matched_on: hits,
-        central: recordCentralityHits(record, text),
+        central: centralHits,
         ...(inbound.length ? { inbound_supersedes: inbound } : {}),
       };
     });
@@ -5186,7 +5197,15 @@ export class SterlingTools {
       )
       .map((c) => ({
         ...c,
-        central: recordCentralityHits(c.record, text).length,
+        // Scored only when this caller actually gates/sorts on it
+        // (requireCentrality=true, same_subject, unchanged). A caller that
+        // does not (knowledgePreflight, requireCentrality=false) re-derives
+        // and sorts by centrality itself afterwards, over a WIDER survivor
+        // set this internal sort never influences — scoring it here too
+        // would be a wasted text scan per candidate, up to the ~240-candidate
+        // ceiling the relaxed floor admits (fix round, Sol's pre-commit
+        // review MEDIUM finding).
+        central: requireCentrality ? recordCentralityHits(c.record, text).length : 0,
         at: Date.parse(c.record.updated_at),
       }))
       .sort(

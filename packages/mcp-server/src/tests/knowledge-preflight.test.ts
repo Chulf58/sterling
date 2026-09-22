@@ -493,12 +493,19 @@ test(
   }
 );
 
-// --- candidate-sort tie-break pins (decision 17fa1c59, STEP 1): the sort shared by
-// knowledgePreflight and the same_subject write suggestions (axisCandidateMatches,
-// tools.ts ~:5031-5037) must go hit count desc, then record-centrality hits desc,
-// then updated_at desc, then id asc — never fall back to the fixed per-type query
+// --- candidate-sort tie-break pins (decision 17fa1c59, STEP 1; sort key order
+// UPDATED for knowledgePreflight by this session's B2G widening — see sort pin 3
+// below): the sort tie-break must never fall back to the fixed per-type query
 // concatenation order (anti_pattern, decision, feature_article, ...) on a tie
-// (measured cause: research_finding a6503bf7, mechanism 4, benchmark cases p-003/p-006).
+// (measured cause: research_finding a6503bf7, mechanism 4, benchmark cases
+// p-003/p-006). axisCandidateMatches' OWN internal sort (tools.ts, shared with
+// same_subject) still goes hit count desc, then record-centrality hits desc,
+// then updated_at desc, then id asc — unchanged, and still what decides
+// same_subject's order. knowledgePreflight's FINAL `matches` order is now
+// centrality hits desc FIRST, then hit count desc, then the same updated_at/id
+// tie-break — hits desc is the primary key only where centrality hits are
+// already tied (pins 1, 2, 4, 5 and AC-h5 below all tie on centrality, so they
+// hold unchanged; pin 3 does not tie and is rewritten accordingly).
 //
 // Fixture math below is verified directly against axisHits/recordCentralityHits
 // (packages/store/src/axis.ts), not guessed: a record with <= AXIS_RECORD_TOP_K (6)
@@ -867,7 +874,12 @@ test(
         'Investigate the widget calibration behavior during unrelated deployment scheduling review manifold.'
       );
       assert.equal(result.matches.length, 2, 'both the two-hit decision and the one-hit anti_pattern qualify');
-      assert.equal(result.matches[0].id, twoHit.id, 'hit count desc is still the primary sort key');
+      // Both fixtures tie on centrality hits (2=2: twoHit's short, undiluted
+      // narrow text makes both its hits central; oneHit's single query word
+      // 'manifold' symmetric-prefix-covers BOTH its central terms 'manifold'
+      // and 'manifolds') — centrality is the primary key and does not
+      // discriminate here, so hit count desc decides this tie, same as before.
+      assert.equal(result.matches[0].id, twoHit.id, 'hit count desc decides the tie once centrality hits are equal');
       assert.equal(result.matches[1].id, oneHit.id, 'the one-hit addition lands after every existing (higher-hit) match');
     } finally {
       cleanup();
