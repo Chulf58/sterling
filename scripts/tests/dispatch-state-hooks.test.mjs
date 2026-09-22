@@ -914,3 +914,50 @@ test('DSH-16: a SubagentStop arriving AFTER a TaskStop already ended the round i
     cleanup();
   }
 });
+
+// TaskStop selects by the PAIR (session_id, agent_id) — in the register AND in
+// the dispatch-state terminalization. An absent session_id would fall back to
+// agent_id-only selection and could end another session's round, so it ends
+// nothing and says so.
+test('DSH-17: a TaskStop whose hook input carries NO session_id ends nothing — register byte-identical, state record still live, disclosed', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('nosess', ['src/nosess.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_nosess', file: 'src/nosess.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-nosess' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-nosess', agent_type: d.type }), dir).code, 0);
+    const before = readFileSync(registerPath(dir), 'utf8');
+
+    const input = taskStopInput(dir, { task_id: 'agent-nosess' });
+    delete input.session_id;
+    const r = h22(input, dir);
+    assert.notEqual(r.code, 2, `never blocks: ${r.stderr}`);
+    assert.match(r.stderr, /session_id/, `the missing session_id is disclosed: ${r.stderr}`);
+    assert.equal(readFileSync(registerPath(dir), 'utf8'), before, 'no round was ended by agent_id alone');
+    assert.equal(stateFor(dir, 'toolu_nosess').terminal, undefined, 'the state record is not terminalized either');
+  } finally {
+    cleanup();
+  }
+});
+
+test("DSH-18: a TaskStop from ANOTHER session naming the same agent_id ends neither this session's round nor its state record", () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('cross', ['src/cross.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_cross', file: 'src/cross.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-cross' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-cross', agent_type: d.type }), dir).code, 0);
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-cross', session_id: 's-other' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-cross').ended, undefined, "the s1 round stays open — s-other's kill is not its kill");
+    assert.equal(stateFor(dir, 'toolu_cross').terminal, undefined, "the s1 state record is not terminalized by an agent_id match alone");
+
+    // CONTROL: the same kill from the OWNING session ends both.
+    assert.equal(h22(taskStopInput(dir, { task_id: 'agent-cross' }), dir).code, 0);
+    assert.equal(entryFor(dir, 'agent-cross').ended?.event, 'task-stop');
+    assert.equal(stateFor(dir, 'toolu_cross').terminal?.reason, 'task-stop');
+  } finally {
+    cleanup();
+  }
+});

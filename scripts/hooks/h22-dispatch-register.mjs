@@ -133,6 +133,13 @@ async function endTaskStoppedDispatch(input, lines) {
     warnNonBlocking(`H22: TaskStop stopped a local_agent task but tool_response.task_id is missing — nothing was ended; the dispatch stays presumed-active until its lease expires`);
     return;
   }
+  // The round is selected by the PAIR (session_id, agent_id). Without a
+  // session_id the selection would fall back to agent_id alone and could end
+  // another session's round, so an absent one ends nothing.
+  if (typeof input.session_id !== 'string' || input.session_id === '') {
+    warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id — nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
   try {
     const finished = await finishDispatchAndRegisterEnd(input.cwd, { session_id: input.session_id, agent_id: resp.task_id, event: 'task-stop' });
     // A killed agent never writes a final message, so the residue probe runs

@@ -1289,9 +1289,12 @@ export async function finishDispatchAndRegisterEnd(root, { session_id, agent_id,
       // agent_id (bound/started) over any terminal tombstone naming it — a
       // find() over readdir order would otherwise happily return a 7-day-old
       // tombstone as "the hit" while a live started record sits beside it.
+      // The PAIR (session_id, agent_id), the same key registerEndLocked
+      // selects the round by: an agent_id match alone could terminalize
+      // another session's live record.
       let hit = scan.records.find(({ record: r }) => {
         const boundId = r.post_binding?.agent_id ?? r.derived_binding?.agent_id ?? r.started?.agent_id;
-        return boundId === agent_id && !r.terminal;
+        return boundId === agent_id && !r.terminal && (session_id === undefined || r.session_id === session_id);
       });
       if (!hit && typeof sidecarToolUseId === 'string' && sidecarToolUseId !== '') {
         const key = dispatchStateKey(sidecarToolUseId);

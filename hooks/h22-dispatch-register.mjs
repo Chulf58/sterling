@@ -6230,7 +6230,7 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
     if (scan.availability === "ok") {
       let hit = scan.records.find(({ record: r }) => {
         const boundId = r.post_binding?.agent_id ?? r.derived_binding?.agent_id ?? r.started?.agent_id;
-        return boundId === agent_id && !r.terminal;
+        return boundId === agent_id && !r.terminal && (session_id === void 0 || r.session_id === session_id);
       });
       if (!hit && typeof sidecarToolUseId === "string" && sidecarToolUseId !== "") {
         const key = dispatchStateKey(sidecarToolUseId);
@@ -6296,6 +6296,10 @@ async function endTaskStoppedDispatch(input2, lines) {
   if (resp.task_type !== "local_agent") return;
   if (typeof resp.task_id !== "string" || resp.task_id === "") {
     warnNonBlocking(`H22: TaskStop stopped a local_agent task but tool_response.task_id is missing \u2014 nothing was ended; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  if (typeof input2.session_id !== "string" || input2.session_id === "") {
+    warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id \u2014 nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
     return;
   }
   try {
