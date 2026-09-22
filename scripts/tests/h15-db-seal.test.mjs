@@ -188,6 +188,47 @@ test('Bash: sqlite3 -readonly with a plain VACUUM (no INTO) or an ATTACH naming 
     assert.equal(r.code, 0, `${command}\n${r.stderr}`);
   }
 });
+// Sol re-check on d7feb69 (HIGH): the VACUUM INTO / ATTACH scan ran only when the positional db was
+// itself the protected one, so `sqlite3 -readonly source.db "ATTACH '.sterling/sterling.db' AS s; ..."`
+// slipped through — ATTACH opens a SECOND db read-write regardless of which db sqlite3 was opened
+// against. The scan now runs for every sqlite3 invocation, whatever its positional db.
+test('Bash: ATTACH naming a .sterling/ path is denied even when the positional db is unprotected', () => {
+  const r = run('Bash', {
+    command: `sqlite3 -readonly source.db "ATTACH '.sterling/sterling.db' AS s; DELETE FROM s.records"`,
+  });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: VACUUM INTO naming a .sterling/ path is denied even when the positional db is unprotected', () => {
+  const r = run('Bash', { command: `sqlite3 -readonly source.db "VACUUM INTO '.sterling/sterling.db.snapshot'"` });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: VACUUM with an optional schema name before INTO is still denied', () => {
+  const r = run('Bash', {
+    command: `sqlite3 -readonly .sterling/sterling.db "VACUUM main INTO '.sterling/sterling.db.snapshot'"`,
+  });
+  assert.equal(r.code, 2, r.stderr);
+});
+// Sol re-check on d7feb69 (MEDIUM): `.backup`/`.save` accept an optional DB name before FILE
+// (`.backup main .sterling/sterling.db`), so the naive "first word after the dot-command" parse
+// captured `main` as the target and let the real, store-naming FILE argument through unchecked.
+test('Bash: .backup/.save with an optional DB name before the FILE target still denies on the real target', () => {
+  for (const command of [
+    'sqlite3 -readonly source.db ".backup main .sterling/sterling.db"',
+    'sqlite3 -readonly source.db ".save main .sterling/sterling.db"',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: .backup/.save with an optional DB name before a non-store FILE target stays allowed (the schema name is not the target)', () => {
+  for (const command of [
+    'sqlite3 -readonly .sterling/sterling.db ".backup main /tmp/other.db"',
+    'sqlite3 -readonly .sterling/sterling.db ".save main /tmp/other.db"',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 0, `${command}\n${r.stderr}`);
+  }
+});
 test('Bash: sqlite3 -readonly on a same-named file outside the store is allowed (unaffected)', () => {
   const r = run('Bash', { command: 'sqlite3 -readonly fixtures/sterling.db "select 1"' });
   assert.equal(r.code, 0, r.stderr);

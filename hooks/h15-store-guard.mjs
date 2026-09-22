@@ -5563,20 +5563,21 @@ function sqlite3ReadonlyBefore(tokens, end) {
   }
   return false;
 }
-function sqlite3DotCommandTargetsStore(words) {
-  const re = /\.(?:output|once|backup|save)\b\s*['"]?([^\s'";]+)/gi;
-  for (const w of words) {
-    re.lastIndex = 0;
-    let m;
-    while (m = re.exec(w)) {
-      if (/\.sterling[\\/]/i.test(m[1])) return true;
-    }
+function sqlite3DotCommandTargetsStore(words, heredocBodies) {
+  const text = words.join("\n") + "\n" + heredocBodies.join("\n");
+  const re = /\.(?:output|once|backup|save)\b([^\n;]*)/gi;
+  let m;
+  while (m = re.exec(text)) {
+    const args = m[1].trim().match(/'[^']*'|"[^"]*"|\S+/g);
+    if (!args || args.length === 0) continue;
+    const target = args[args.length - 1].replace(/^['"]|['"]$/g, "");
+    if (/\.sterling[\\/]/i.test(target)) return true;
   }
   return false;
 }
 function sqlite3VacuumOrAttachTargetsStore(words, heredocBodies) {
   const text = words.join(" ") + " " + heredocBodies.join(" ");
-  return /vacuum\s+into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
+  return /vacuum\s+(?:\w+\s+)?into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
 }
 function isDestructiveFragment(tokens, heredocBodies = []) {
   for (let i = 0; i < tokens.length; i++) {
@@ -5593,12 +5594,12 @@ function isDestructiveFragment(tokens, heredocBodies = []) {
   const rest = tokens.slice(idx0 + 1);
   const restWords = rest.filter((t) => t.type === "word").map((t) => t.value);
   if (lv === "sqlite3") {
-    if (sqlite3DotCommandTargetsStore(restWords)) return true;
+    if (sqlite3DotCommandTargetsStore(restWords, heredocBodies)) return true;
+    if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
     const dbIdx = rest.findIndex((t) => t.type === "word" && isDbPath(t.value));
     if (dbIdx !== -1) {
       const readonly = sqlite3ReadonlyBefore(rest, dbIdx);
       if (!readonly) return true;
-      if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
     }
   } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
   if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;

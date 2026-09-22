@@ -51,16 +51,18 @@ function namesStoreComponent(absPath) {
 // together with `d`/`f`; PowerShell Remove-Item/ri/rd with `-Recurse`/`-r`/`/s` on a `.sterling` path. A PROTECTED DB
 // PATH is a token whose path components include `.sterling` (case-insensitive) AND whose basename matches DB_FILE_RE —
 // a same-named file elsewhere (`fixtures/sterling.db`) is NOT protected. EXCEPTION to (b) for `sqlite3` only (user-ruled
-// 2026-09-22, review-hardened same day): a fragment is allowed when a bare `-readonly` token precedes the PROTECTED DB
-// PATH argument and survives SQLITE3_VALUE_OPTS arity (e.g. `-separator -readonly` does NOT count — that `-readonly`
-// is `-separator`'s value); `--readonly` is not recognized (unverified on this machine, not invented). Still DENIED
-// even under `-readonly`: a `.output`/`.once`/`.backup`/`.save` dot-command whose TARGET (not mere presence) names a
-// `.sterling/` path, independent of which db sqlite3 opened; a VACUUM INTO or ATTACH (raw text, its own SQL/heredoc
-// body) naming a `.sterling/` path — -readonly's OS-level read-only open does not stop either (VACUUM INTO creates a
-// new file, ATTACH opens a second db read-write by default). A non-string `command` is DENIED outright (it cannot be
-// inspected); a missing/empty one allows. Everything else
-// allows: reads, mentions, unknown verbs, `node -e`/`python -c` one-liners (accident guard, not a sandbox), Sterling
-// scripts taking `--store <db>`.
+// 2026-09-22, review-hardened same day, twice): a fragment is allowed when a bare `-readonly` token precedes the
+// PROTECTED DB PATH argument and survives SQLITE3_VALUE_OPTS arity (e.g. `-separator -readonly` does NOT count — that
+// `-readonly` is `-separator`'s value); `--readonly` is not recognized (unverified on this machine, not invented).
+// DENIED for EVERY sqlite3 invocation regardless of `-readonly` or of which db is positionally opened — ATTACH and a
+// dot-command target a path of THEIR OWN, unrelated to the opened db: a `.output`/`.once`/`.backup`/`.save`
+// dot-command whose TARGET (the LAST argument on its line — `.backup`/`.save` accept an optional leading DB-schema
+// name that is not the target) names a `.sterling/` path; a VACUUM [SCHEMA] INTO or ATTACH (raw text, its own
+// SQL/heredoc body) naming a `.sterling/` path — VACUUM INTO creates a new file rather than writing the opened db,
+// and ATTACH opens a second db read-write by default, so neither is stopped by -readonly's OS-level read-only open
+// on the primary connection. A non-string `command` is DENIED outright (it cannot be inspected); a missing/empty one
+// allows. Everything else allows: reads, mentions, unknown verbs, `node -e`/`python -c` one-liners (accident guard,
+// not a sandbox), Sterling scripts taking `--store <db>`.
 
 /** Index just past the quote run starting at s[i] (s[i] is `'` or `"`). */
 function skipQuoted(s, i) {
@@ -327,31 +329,38 @@ function sqlite3ReadonlyBefore(tokens, end) {
   return false;
 }
 
-/** True when a `.output`/`.once`/`.backup`/`.save` dot-command's TARGET (not its mere presence) names a
- *  `.sterling/` path — these CLI dot-commands write files at the client level regardless of -readonly,
- *  and independently of which db sqlite3 opened as its positional argument (`.backup` can copy FROM an
- *  unprotected opened db INTO the store). A target elsewhere (e.g. `.output /tmp/report`) is not a match. */
-function sqlite3DotCommandTargetsStore(words) {
-  const re = /\.(?:output|once|backup|save)\b\s*['"]?([^\s'";]+)/gi;
-  for (const w of words) {
-    re.lastIndex = 0;
-    let m;
-    while ((m = re.exec(w))) {
-      if (/\.sterling[\\/]/i.test(m[1])) return true;
-    }
+/** True when a `.output`/`.once`/`.backup`/`.save` dot-command's TARGET (not its mere presence, and not
+ *  an earlier optional argument) names a `.sterling/` path — these CLI dot-commands write files at the
+ *  client level regardless of -readonly, and independently of which db sqlite3 opened as its positional
+ *  argument (`.backup`/`.save` can copy FROM an unprotected opened db INTO the store). `.backup`/`.save`
+ *  take an optional DB-schema name BEFORE the file (`.backup main .sterling/sterling.db`), so the TARGET
+ *  is the LAST whitespace/quote-separated argument on the dot-command's line, not the first — a schema
+ *  name like `main` is never mistaken for the target. A target elsewhere (e.g. `.output /tmp/report`) is
+ *  not a match. Scans the fragment's own SQL words and any heredoc bodies feeding this command. */
+function sqlite3DotCommandTargetsStore(words, heredocBodies) {
+  const text = words.join('\n') + '\n' + heredocBodies.join('\n');
+  const re = /\.(?:output|once|backup|save)\b([^\n;]*)/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const args = m[1].trim().match(/'[^']*'|"[^"]*"|\S+/g);
+    if (!args || args.length === 0) continue;
+    const target = args[args.length - 1].replace(/^['"]|['"]$/g, '');
+    if (/\.sterling[\\/]/i.test(target)) return true;
   }
   return false;
 }
 
 /** True when the fragment's SQL text (its own quoted words, plus any heredoc bodies feeding this command)
- *  contains VACUUM INTO or ATTACH naming a `.sterling/` path — raw text, scoped to the statement (up to the
- *  next `;`) it appears in. VACUUM INTO creates a NEW file rather than writing the opened db, so -readonly's
- *  OS-level read-only open does not stop it; ATTACH opens a second db read-write by default regardless of
- *  -readonly on the primary connection. A plain VACUUM (no INTO) is not matched — -readonly already blocks it
- *  at the OS level, since it writes the opened db in place. */
+ *  contains VACUUM [SCHEMA] INTO or ATTACH naming a `.sterling/` path — raw text, scoped to the statement
+ *  (up to the next `;`) it appears in, checked for EVERY sqlite3 invocation regardless of its positional
+ *  db (ATTACH opens a SECOND db, unrelated to whichever db sqlite3 was invoked against). VACUUM INTO
+ *  creates a NEW file rather than writing the opened db, so -readonly's OS-level read-only open does not
+ *  stop it; ATTACH opens that second db read-write by default regardless of -readonly on the primary
+ *  connection. A plain VACUUM (no INTO) is not matched — -readonly already blocks it at the OS level,
+ *  since it writes the opened db in place. */
 function sqlite3VacuumOrAttachTargetsStore(words, heredocBodies) {
   const text = words.join(' ') + ' ' + heredocBodies.join(' ');
-  return /vacuum\s+into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
+  return /vacuum\s+(?:\w+\s+)?into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
 }
 
 /** True when a fragment's tokens show a destructive shape aimed at the store database. `heredocBodies` are
@@ -377,17 +386,18 @@ function isDestructiveFragment(tokens, heredocBodies = []) {
     // flag decides, H15 does not parse SQL. `-readonly` must appear before the db-path argument
     // (sqlite3 reads flags left of its positional args) and survive SQLITE3_VALUE_OPTS arity
     // (skipWrappers-style); `--readonly` is not recognized because this rebuild does not invent
-    // CLI support that hasn't been checked against a real binary. A dot-command TARGETING a
-    // `.sterling/` path denies regardless of which db is open (sqlite3DotCommandTargetsStore); a
-    // -readonly invocation whose SQL/heredoc does VACUUM INTO or ATTACH naming a `.sterling/`
-    // path also denies (sqlite3VacuumOrAttachTargetsStore) — -readonly's OS-level protection does
-    // not cover either.
-    if (sqlite3DotCommandTargetsStore(restWords)) return true;
+    // CLI support that hasn't been checked against a real binary. Checked for EVERY sqlite3
+    // invocation, whatever its positional db (an ATTACH or a dot-command target names ITS OWN
+    // path, unrelated to the db sqlite3 opened): a dot-command TARGETING a `.sterling/` path
+    // (sqlite3DotCommandTargetsStore) and a SQL/heredoc VACUUM INTO or ATTACH naming a `.sterling/`
+    // path (sqlite3VacuumOrAttachTargetsStore) — -readonly's OS-level protection does not cover
+    // either. Only past both of those does the -readonly-before-the-db-path check decide.
+    if (sqlite3DotCommandTargetsStore(restWords, heredocBodies)) return true;
+    if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
     const dbIdx = rest.findIndex((t) => t.type === 'word' && isDbPath(t.value));
     if (dbIdx !== -1) {
       const readonly = sqlite3ReadonlyBefore(rest, dbIdx);
       if (!readonly) return true;
-      if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
     }
   } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
   if ((lv === 'sed' || lv === 'perl') && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
