@@ -8543,6 +8543,12 @@ try {
   const nowMs = Date.parse(now);
   const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
   const liveDispatches = classified.availability === "ok" ? classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) : [];
+  const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
+  const researchEvents = sessionEvents.filter(
+    (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
+  );
+  const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
+  const hasDeferredResearchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === "agent_dispatch");
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const deferredOwners = /* @__PURE__ */ new Map();
@@ -8633,7 +8639,7 @@ try {
     } else {
       discardTouchesClaim();
     }
-    if (!deferredPaths.length) {
+    if (!deferredPaths.length && !hasDeferredResearchEvents) {
       const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
       if (pendingDeclarations.length) {
         writeFileSync4(eventsPath, JSON.stringify(pendingDeclarations));
@@ -8669,10 +8675,6 @@ try {
   const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
-  const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
-  const researchEvents = sessionEvents.filter(
-    (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
-  );
   const conceptEvents = sessionEvents.filter((e) => e.kind === "concept_designed" && e.detail);
   const conceptFamilies = /* @__PURE__ */ new Map();
   for (const e of conceptEvents) {
@@ -8712,7 +8714,10 @@ try {
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync6(join6(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
-  const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
+  const activeResearchEvents = researchEvents.filter((e) => {
+    if (e.kind === "agent_dispatch" && researchDispatchLive) return false;
+    return !dischargedOnResearchLane(e.at);
+  });
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";

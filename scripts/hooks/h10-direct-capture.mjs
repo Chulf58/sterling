@@ -662,6 +662,49 @@ try {
   // the file-deferral join above (who owns THIS touched path).
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
+  // Research-event classification, hoisted here (ahead of clearRegisters()'s
+  // definition below, which consumes hasDeferredResearchEvents) so every
+  // reference to it executes after this `const` initializes — a call to
+  // clearRegisters() can fire before touch/debug classification below runs.
+  const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
+  const researchEvents = sessionEvents.filter(
+    (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
+  );
+  // RESEARCH RETURN GATE (user-ruled 2026-09-22, "wait for return"): H10 must not
+  // raise the research duty for a DISPATCHED research/scout agent while that
+  // agent is still running — demanding a research_finding/no_capture before the
+  // agent has reported asks for a write-up of work that does not exist yet.
+  // `agent_dispatch` events in session-events.json carry only {kind, detail, at}
+  // (H16, out of this fix's scope) — no agent_id — so an event cannot be joined
+  // to the ONE register entry it came from. The gate is therefore lane-wide
+  // rather than per-dispatch: while ANY presumed-active H22 register entry
+  // (same session, age < config.dispatch_register.stale_minutes) names a
+  // CONFIGURED research agent type, every `agent_dispatch` research event
+  // defers as a block, exactly as though it had not fired yet — with two
+  // outstanding research dispatches, one returned and one still running, the
+  // whole lane stays quiet until BOTH leave presumed-active (chosen semantics;
+  // disclosed because no join key exists to release the returned one alone).
+  // `research_tool` events (WebSearch/WebFetch) are NEVER gated — those calls
+  // are synchronous conductor actions, already complete by construction.
+  // NARROWER than decision foreign_ec9eacaa's rejected "defer research/concept
+  // duties when ANY dispatch is live": that alternative was rejected because a
+  // live FILE-owning dispatch has nothing to do with a file-less research debt;
+  // this gate fires only for a dispatch that IS ITSELF a configured research
+  // agent — the actual source of the pending duty, not an unrelated one. Bounded
+  // exactly like the file deferral: once the lease expires (default 60m) with no
+  // SubagentStop, the entry drops out of presumed-active and the duty re-arms
+  // rather than deferring forever (P5) — an unattributed agent_id (H22
+  // 'unattributable') still lands in the register with a null agent_type, which
+  // never matches `researchAgents.has(...)`, so it can never gate this lane.
+  const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
+  // A gated agent_dispatch event's debt cannot evaporate (P5 / decision
+  // b2474b26 stop-consumes-settled-and-queued-work-never-live-declarations):
+  // session-events.json must survive a quiet Stop it deferred, exactly as
+  // touches.json survives one deferred by a live file-owning dispatch, or the
+  // event that would re-arm the duty on the agent's return is lost the moment
+  // this Stop clears the register. Consumed by clearRegisters() below.
+  const hasDeferredResearchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === 'agent_dispatch');
+
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
   // the dispatch prompt names the plain repo-relative path — an exact-string
@@ -844,7 +887,12 @@ try {
     } else {
       discardTouchesClaim();
     }
-    if (!deferredPaths.length) {
+    // RESEARCH RETURN GATE EXTENSION: a live research-agent dispatch defers
+    // its OWN agent_dispatch event(s) the same way deferredPaths defers a
+    // touch — session-events.json must survive UNTOUCHED, not just reduced to
+    // any surviving capture_pending declaration, or the event that re-arms the
+    // research duty once the agent returns is destroyed by this very release.
+    if (!deferredPaths.length && !hasDeferredResearchEvents) {
       // A quiet Stop has consumed no capture work, so a capture_pending
       // declaration remains live for work that arrives later in this session.
       // Do not retain settled work evidence: research satisfaction anchors to
@@ -952,10 +1000,6 @@ try {
 
   // Classify session events.
   const debugEvents = sessionEvents.filter((e) => e.kind === 'debug_scope');
-  const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
-  const researchEvents = sessionEvents.filter(
-    (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
-  );
   // Concept duty (decision foreign_7208729b): concept_designed events, deduped to the
   // EARLIEST event per family — detail is the concept FAMILY slug.
   // FAIL-CLOSED on a missing/malformed `at` (2026-08-22): the old `e.at ?? now`
@@ -1171,7 +1215,13 @@ try {
   // the latest `--lane research`/`--lane all` declaration is discharged; one
   // arriving AFTER it, one whose `at` is missing or malformed (never trusted as
   // comparable), or one facing only a capture-lane declaration keeps the duty armed.
-  const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
+  const activeResearchEvents = researchEvents.filter((e) => {
+    // RESEARCH RETURN GATE (see the `researchDispatchLive` comment above): a
+    // dispatched research agent's own event waits for its return before it can
+    // arm the duty at all; a research_tool event is never gated.
+    if (e.kind === 'agent_dispatch' && researchDispatchLive) return false;
+    return !dischargedOnResearchLane(e.at);
+  });
 
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
