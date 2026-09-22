@@ -468,7 +468,7 @@ test('never-clobber: a pre-existing marker-less CLAUDE.md survives the FIRST ini
 // init-impl.mjs walks. NOT pinned to HEAD (Sol re-check finding 1): once the split lands, HEAD
 // IS the split template and carries no {{CONVENTIONS_SECTION}} at all, so `git show HEAD:...`
 // would silently stop testing anything. Instead walk `git log` NEWEST FIRST and take the first
-// blob that still contains the placeholder — exactly the selection historicalHeadSegmentSets()
+// blob that still contains the {{CONVENTIONS_SECTION}} token — the same selection historicalHeadSegmentSets()
 // makes for a real legacy project — and fail loudly if none exists.
 function pristineMonolithBlob() {
   const log = spawnSync('git', ['log', '--format=%H', '--', 'templates/target-claude-md.md'], { cwd: root, encoding: 'utf8' });
