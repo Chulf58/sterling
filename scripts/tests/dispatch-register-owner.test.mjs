@@ -19,9 +19,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import fsModule, { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync, renameSync } from 'node:fs';
-import { syncBuiltinESMExports } from 'node:module';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import * as REG from '../lib/dispatch-register.mjs';
@@ -72,12 +70,6 @@ function readRaw(dir) {
 }
 
 // A pid that is provably not running: a child that has already exited.
-function deadPid() {
-  const r = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' });
-  assert.ok(r.pid, 'harness: the probe child must report a pid');
-  return r.pid;
-}
-
 function forgeLock(lockDir, owner) {
   mkdirSync(lockDir, { recursive: true });
   writeFileSync(join(lockDir, 'owner.json'), JSON.stringify(owner));
@@ -558,46 +550,6 @@ test('R1-A32: a lock whose owner.at is a DAY old but whose pid is ALIVE is never
   }
 });
 
-test('R1-A33 CONTROL: the SAME day-old lock whose owner pid is provably DEAD on this host IS taken over', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    forgeLock(lockDir, { pid: deadPid(), host: hostname(), at: new Date(Date.now() - 24 * 60 * MIN).toISOString(), nonce: 'forged' });
-    let ran = false;
-    const value = await REG.withOwnerMkdirLock(lockDir, () => { ran = true; return 'took-over'; }, { retryMs: 10, timeoutMs: 500 });
-    assert.equal(ran, true, 'a verified-dead owner is not a live holder');
-    assert.equal(value, 'took-over');
-  } finally {
-    cleanup();
-  }
-});
-
-test('R1-A34: a lock owned by ANOTHER HOST is never taken — a pid number is unverifiable off-host', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    forgeLock(lockDir, { pid: deadPid(), host: `${hostname()}-some-other-machine`, at: new Date(Date.now() - 24 * 60 * MIN).toISOString(), nonce: 'forged' });
-    let ran = false;
-    const r = await refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(r.code, 'register_lock_held', `a foreign-host owner must refuse, got ${JSON.stringify(r)}`);
-    assert.equal(ran, false);
-  } finally {
-    cleanup();
-  }
-});
-
-test('R1-A35: a FRESH lock held by a live pid also refuses — the bar is liveness, and freshness alone never grants entry', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    forgeLock(lockDir, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'forged' });
-    const r = await refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => 'ran', { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(r.code, 'register_lock_held');
-  } finally {
-    cleanup();
-  }
-});
-
 // MUTUAL EXCLUSION, in-process and deterministic: this is the property the
 // whole primitive exists for, and a no-op lock fails it immediately.
 test('R1-A36: two concurrent withOwnerMkdirLock calls never overlap their critical sections', async () => {
@@ -629,250 +581,31 @@ test('R1-A36: two concurrent withOwnerMkdirLock calls never overlap their critic
 });
 
 // ===========================================================================
-// withOwnerMkdirLock — OWNERLESS reclaim + release-only-its-own (decision
-// `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`).
-// Measured incident: an EMPTY lock dir (a writer died between mkdir and the
-// owner.json write) jammed sterling-main's register for 3.5 days. Age is set
-// with utimesSync on the directory, never by sleeping.
+// REMOVED 2026-09-22 ahead of the kernel-held register lock (decision
+// `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`,
+// REVISED block). Each pinned an internal of the mkdir reclaim protocol that
+// the rebuild deletes; the surviving behaviour each one carried is ported to
+// the named replacement pin:
+//   R1-A33 (a dead-pid owner.json is taken over) — there is no owner file and
+//     no takeover; "a dead holder frees the lock" is now KL-a (process.exit and
+//     SIGKILL, real processes).
+//   R1-A34 (a foreign-host owner is never taken) — no owner, no host; a kernel
+//     lock cannot be held from another host at all.
+//   R1-A35 (a fresh live-pid owner refuses) — folded into R1-A32 below, which
+//     now holds the lock for real instead of forging an owner.json.
+//   LK-1, LK-2 (an OWNERLESS / unreadable-owner lock dir older than 60s is
+//     reclaimed) — no reclaim exists. The surviving behaviour, "a leftover
+//     empty lock dir never jams the register", is ported to KL-L1 (removed as
+//     residue, said once) and KL-L2 (non-empty: never blocks, left, warned).
+//   LK-3 (a YOUNG ownerless dir still holds) — inverted by design: the legacy
+//     dir holds nothing at any age (KL-L1/KL-L2).
+//   LK-4 (a live-pid owner is never reclaimed however old) — the surviving
+//     property, "a live holder is never displaced", is KL-c (a paused holder
+//     keeps the lock; the contender refuses at its bound).
+//   LK-5, LK-8 (release never deletes a successor's lock dir) — release is the
+//     holder's own COMMIT/close on its own connection; there is no path it
+//     could delete. Exclusion across a release is KL-b / KL-b2 and R1-A36.
+//   LK-6, LK-7 (a creator paused/displaced between mkdir and its owner write
+//     never enters fn) — there is no mkdir/owner-write window; acquisition is
+//     the single BEGIN IMMEDIATE. "Never two writers" is KL-b / KL-b2.
 // ===========================================================================
-
-function ageDir(p, ageMs) {
-  const t = (Date.now() - ageMs) / 1000;
-  utimesSync(p, t, t);
-}
-
-async function captureStderr(fn) {
-  const orig = process.stderr.write;
-  let text = '';
-  process.stderr.write = (chunk, ...rest) => {
-    text += String(chunk);
-    const cb = rest.find((r) => typeof r === 'function');
-    if (cb) cb();
-    return true;
-  };
-  try {
-    const value = await fn();
-    return { value, text };
-  } finally {
-    process.stderr.write = orig;
-  }
-}
-
-test('LK-1: an OWNERLESS lock dir older than the bound (10 min) IS reclaimed, loudly — stderr names the dir and its age', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    mkdirSync(lockDir, { recursive: true });
-    ageDir(lockDir, 10 * MIN);
-    let ran = false;
-    const { value, text } = await captureStderr(() =>
-      REG.withOwnerMkdirLock(lockDir, () => { ran = true; return 'reclaimed'; }, { retryMs: 10, timeoutMs: 500 })
-    );
-    assert.equal(ran, true, 'an ownerless 10-minute-old lock dir is a crashed writer, not a holder');
-    assert.equal(value, 'reclaimed');
-    assert.ok(text.includes(lockDir), `the reclaim line names the directory: ${JSON.stringify(text)}`);
-    assert.match(text, /ownerless/i, 'the reclaim line says WHY it was reclaimed');
-    const stated = Number(/\b(\d+)s old\b/.exec(text)?.[1]);
-    assert.ok(stated >= 600 && stated < 700, `the reclaim line states the age (~600s, forged 10 min back): ${JSON.stringify(text)}`);
-    assert.equal(existsSync(lockDir), false, 'the reclaimer releases normally afterwards');
-  } finally {
-    cleanup();
-  }
-});
-
-test('LK-2: an old lock dir whose owner.json is UNREADABLE (a crash mid-write) is ownerless too — reclaimed', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    mkdirSync(lockDir, { recursive: true });
-    writeFileSync(join(lockDir, 'owner.json'), '{"pid": 12');
-    ageDir(lockDir, 10 * MIN);
-    let ran = false;
-    const { text } = await captureStderr(() =>
-      REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 500 })
-    );
-    assert.equal(ran, true);
-    assert.ok(text.includes(lockDir));
-  } finally {
-    cleanup();
-  }
-});
-
-test('LK-3 CONTROL: an ownerless lock dir YOUNGER than the bound (5s) is still held — refusal register_lock_held, dir untouched, no reclaim line', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    mkdirSync(lockDir, { recursive: true });
-    ageDir(lockDir, 5000);
-    let ran = false;
-    const { value: r, text } = await captureStderr(() =>
-      refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }))
-    );
-    assert.equal(r.code, 'register_lock_held', `a young ownerless dir may be a writer between mkdir and owner write: ${JSON.stringify(r)}`);
-    assert.equal(ran, false);
-    assert.equal(existsSync(lockDir), true, 'the young dir is left in place');
-    assert.doesNotMatch(text, /ownerless/i, 'no reclaim was announced');
-  } finally {
-    cleanup();
-  }
-});
-
-test('LK-4: a LIVE-pid owner is never reclaimed however old — dir mtime AND owner.at a day old still refuse', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    forgeLock(lockDir, { pid: process.pid, host: hostname(), at: new Date(Date.now() - 24 * 60 * MIN).toISOString(), nonce: 'live-old' });
-    ageDir(lockDir, 24 * 60 * MIN);
-    let ran = false;
-    const r = await refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(r.code, 'register_lock_held');
-    assert.equal(ran, false);
-    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).nonce, 'live-old', 'the live holder is untouched');
-  } finally {
-    cleanup();
-  }
-});
-
-test("LK-5: a release after a successor reclaimed the lock does NOT delete the successor's lock — and says so", async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    const { value, text } = await captureStderr(() =>
-      REG.withOwnerMkdirLock(lockDir, () => {
-        // Simulate the successor: our lock dir was reclaimed and re-acquired.
-        rmSync(lockDir, { recursive: true, force: true });
-        forgeLock(lockDir, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'successor' });
-        return 'done';
-      }, { retryMs: 10, timeoutMs: 500 })
-    );
-    assert.equal(value, 'done');
-    assert.equal(existsSync(lockDir), true, "the successor's lock dir survives our release");
-    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).nonce, 'successor');
-    assert.ok(text.includes(lockDir), `the skipped release is disclosed: ${JSON.stringify(text)}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// RACE INJECTION: the lock module imports node:fs named exports; patching the
-// builtin's default export and calling syncBuiltinESMExports() makes the module
-// see the wrapper, so a race is forced at an exact syscall — no sleeping, no
-// test seam in production code. `orig` is captured before patching, so the
-// wrapper's own fs work never re-enters itself.
-function patchFs(name, makeWrapper) {
-  const orig = fsModule[name];
-  fsModule[name] = makeWrapper(orig);
-  syncBuiltinESMExports();
-  return () => {
-    fsModule[name] = orig;
-    syncBuiltinESMExports();
-  };
-}
-
-test("LK-6: a creator PAUSED between mkdir and its owner write, whose lock was reclaimed and re-owned by a successor, never enters fn and never overwrites the successor's owner.json", async () => {
-  const { dir, cleanup } = project([]);
-  const ownerPath = join(REG.registerLockDir(dir), 'owner.json');
-  let unpatch = () => {};
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    let fired = false;
-    unpatch = patchFs('writeFileSync', (orig) => (p, ...rest) => {
-      if (!fired && p === ownerPath) {
-        fired = true;
-        // The pause: a successor reclaims our (ownerless) dir and fully acquires.
-        renameSync(lockDir, `${lockDir}.test-reclaimed`);
-        rmSync(`${lockDir}.test-reclaimed`, { recursive: true, force: true });
-        mkdirSync(lockDir);
-        orig(ownerPath, JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'successor' }));
-      }
-      return orig(p, ...rest);
-    });
-    let ran = false;
-    const { value: r } = await captureStderr(() =>
-      refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 500 }))
-    );
-    unpatch();
-    assert.equal(fired, true, 'harness: the pause was injected');
-    assert.equal(ran, false, 'two writers must never run: the paused creator lost its lock');
-    assert.equal(r.code, 'register_lock_held', `the paused creator refuses as lock-held: ${JSON.stringify(r)}`);
-    assert.equal(JSON.parse(readFileSync(ownerPath, 'utf8')).nonce, 'successor', "the successor's owner.json is untouched");
-  } finally {
-    unpatch();
-    cleanup();
-  }
-});
-
-test('LK-7: a FRESH creator displaced by a takeover that could not restore it (a contender re-occupied the path, owner not yet written) aborts without entering fn — the post-write inode check closes it', async () => {
-  const { dir, cleanup } = project([]);
-  const ownerPath = join(REG.registerLockDir(dir), 'owner.json');
-  let unpatch = () => {};
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    const displaced = `${lockDir}.stale-displaced`;
-    let fired = false;
-    unpatch = patchFs('writeFileSync', (orig) => (p, ...rest) => {
-      if (!fired && p === ownerPath) {
-        fired = true;
-        // A stale-examining contender renamed our fresh dir away, and a third
-        // contender mkdir'd the canonical path before the restore; that third
-        // contender has not written its owner.json yet.
-        renameSync(lockDir, displaced);
-        mkdirSync(lockDir);
-      }
-      return orig(p, ...rest);
-    });
-    let ran = false;
-    const { value: r } = await captureStderr(() =>
-      refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 500 }))
-    );
-    unpatch();
-    assert.equal(fired, true, 'harness: the displacement was injected');
-    assert.equal(ran, false, "the displaced creator must not run inside the contender's dir");
-    assert.equal(r.code, 'register_lock_held', `the displaced creator refuses as lock-held: ${JSON.stringify(r)}`);
-    assert.equal(existsSync(lockDir), true, "the contender's canonical dir is not deleted");
-    assert.equal(existsSync(displaced), true, 'the displaced dir is not touched either');
-  } finally {
-    unpatch();
-    cleanup();
-  }
-});
-
-test("LK-8: ownership swapped RIGHT AFTER release reads the owner token (between the check and the delete) — the successor's lock survives", async () => {
-  const { dir, cleanup } = project([]);
-  let unpatch = () => {};
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    let armed = false;
-    let swapped = false;
-    unpatch = patchFs('readFileSync', (orig) => (p, ...rest) => {
-      const out = orig(p, ...rest);
-      if (armed && !swapped && typeof p === 'string' && p.startsWith(lockDir) && p.endsWith('owner.json')) {
-        swapped = true;
-        rmSync(lockDir, { recursive: true, force: true });
-        forgeLock(lockDir, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'successor' });
-      }
-      return out;
-    });
-    const { value } = await captureStderr(() =>
-      REG.withOwnerMkdirLock(lockDir, () => { armed = true; return 'done'; }, { retryMs: 10, timeoutMs: 500 })
-    );
-    unpatch();
-    assert.equal(value, 'done');
-    assert.equal(swapped, true, 'harness: the swap fired during release');
-    assert.equal(existsSync(lockDir), true, "the successor's lock dir survives our release");
-    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).nonce, 'successor');
-  } finally {
-    unpatch();
-    cleanup();
-  }
-});
-
-// R1-A37 ("withRegisterLock and withLedgerLock are the same primitive over
-// DIFFERENT dirs") and R1-A38 ("the compatibility lock refusal carries its
-// own code") are DELETED — both pinned ONLY withLedgerLock / the legacy
-// 'review-ledger.lock' compatibility path, which is deleted (no caller
-// anywhere, grepped scripts/ packages/ hooks/ excluding tests and bundles).
-// withOwnerMkdirLock's own forged-lock-refusal behavior (what R1-A37's
-// register half exercised) stays covered by this file's other lock tests
-// (e.g. the concurrency arms above) and scripts/tests/h22-register-
-// concurrency.test.mjs.
