@@ -193,12 +193,26 @@ export function readRegister(root) {
 // measured: an empty lock dir jammed a register for 3.5 days). A lock WITH a
 // live-looking owner is NEVER taken by age: elapsed time is not proof of
 // death. Such a lock refuses (coordination, not evidence); the operator
-// removes it by hand only after confirming no writer runs. Release removes
-// the lock dir only while this holder's own nonce is still inside, so a
-// delayed holder can never delete a successor's lock.
+// removes it by hand only after confirming no writer runs.
+// OWNERSHIP IS PROVEN AFTER THE OWNER WRITE, not assumed from the mkdir: the
+// creator keeps the inode it created, writes owner.json with an EXCLUSIVE
+// create ('wx'), then re-verifies that the canonical path is still that inode
+// and still carries its own nonce. Any miss (a paused creator reclaimed and
+// re-owned, or a fresh creator displaced by a takeover that could not restore
+// it) refuses as lock-held WITHOUT entering fn and without touching whatever
+// now sits at the canonical path. RELEASE is takeover-shaped: rename the
+// canonical dir to a private tombstone, verify the TOMBSTONE carries our
+// nonce, then delete it; a tombstone that is not ours goes back while the
+// canonical path is free, and is disclosed otherwise.
 // NOT GUARANTEED: that a holder paused longer than OWNERLESS_RECLAIM_MS
 // between mkdir and its owner write keeps the lock — age cannot tell that
-// pause from a crash (accepted residual risk).
+// pause from a crash (accepted residual risk; it now costs that holder its
+// round, never a second concurrent writer). A displaced creator whose
+// owner.json landed in a contender's still-ownerless dir leaves that dir
+// holding its live pid until its process exits (then the dead-pid path
+// reclaims it). A rename back onto the canonical path can replace a
+// contender's EMPTY dir (POSIX rename); that contender's post-write check
+// then fails, so the cost is a lost round, never two writers.
 //
 // ASYNC ONLY: withOwnerMkdirLock always returns a promise — a held lock
 // REJECTS with the refusal object rather than throwing synchronously. Every
@@ -308,8 +322,10 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
         try {
           renameSync(lockDir, tombstone);
           renamed = true;
-        } catch {
-          // lost the rename race (or it is already gone) — fall through
+        } catch (renameErr) {
+          // ENOENT: another contender moved it first — a lost race, retry.
+          // Anything else is a real I/O failure and is surfaced (P5).
+          if (renameErr?.code !== 'ENOENT') throw renameErr;
         }
         if (renamed) {
           const tombstoneOwner = readOwner(tombstone);
@@ -326,14 +342,16 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
             }
             try {
               rmSync(tombstone, { recursive: true, force: true });
-            } catch {
-              // best-effort cleanup of OUR OWN tombstone; harmless if it lingers
+            } catch (rmErr) {
+              // The takeover itself succeeded (lockDir is free); a lingering
+              // tombstone blocks nothing, but it is disclosed, not swallowed.
+              process.stderr.write(`dispatch-register: reclaimed lock at ${lockDir} but could not delete its tombstone ${tombstone} (${rmErr?.code ?? rmErr}) — remove it by hand\n`);
             }
           } else {
             try {
               renameSync(tombstone, lockDir);
             } catch (restoreErr) {
-              if (restoreErr?.code === 'EEXIST') {
+              if (restoreErr?.code === 'EEXIST' || restoreErr?.code === 'ENOTEMPTY') {
                 process.stderr.write(
                   `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) — left as a tombstone at ${tombstone}; verify and remove by hand\n`
                 );
@@ -343,7 +361,9 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
                   `lock takeover at ${lockDir} raced a third contender — refusing this call rather than proceeding on unverified state`
                 );
               }
-              // any other restore failure — fall through as a lost race too
+              // ENOENT: the tombstone itself vanished — nothing left to
+              // restore, a lost race. Anything else is surfaced (P5).
+              if (restoreErr?.code !== 'ENOENT') throw restoreErr;
             }
           }
         }
@@ -359,28 +379,74 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
     }
   }
 
+  // PROVE OWNERSHIP before entering fn (see the header): the inode we
+  // created, an exclusive owner write, then re-verification.
+  const createdIno = statIno(lockDir);
   const nonce = randomBytes(8).toString('hex');
-  writeFileSync(
-    join(lockDir, 'owner.json'),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce })
-  );
+  const lost = (why) =>
+    refusal(lockCodeFor(), { lock_dir: lockDir, owner: null }, `lock at ${lockDir} was lost before this holder's owner write took hold (${why}) — refusing rather than running beside another holder`);
+  try {
+    writeFileSync(
+      join(lockDir, 'owner.json'),
+      JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce }),
+      { flag: 'wx' }
+    );
+  } catch (writeErr) {
+    if (writeErr?.code === 'EEXIST') throw lost('another holder already owns the canonical path');
+    if (writeErr?.code === 'ENOENT') throw lost('the directory this call created was moved away');
+    throw writeErr;
+  }
+  if (createdIno === null || statIno(lockDir) !== createdIno || readOwner(lockDir)?.nonce !== nonce) {
+    process.stderr.write(
+      `dispatch-register: lock at ${lockDir} is no longer the directory this call created (pid ${process.pid}) — not entering the critical section and not touching the directory now at that path; if it holds this pid's owner.json it becomes reclaimable once this process exits\n`
+    );
+    throw lost('the canonical path is a different incarnation');
+  }
 
   try {
     return await fn();
   } finally {
-    // RELEASE ONLY OUR OWN: a lock reclaimed while we held it now belongs to
-    // a successor, and deleting it would let two writers in at once.
-    if (readOwner(lockDir)?.nonce === nonce) {
-      try {
-        rmSync(lockDir, { recursive: true, force: true });
-      } catch {
-        // best-effort; a failed release leaves a diagnosable lock, never a crash
-      }
-    } else {
-      process.stderr.write(
-        `dispatch-register: release skipped at ${lockDir} — this holder's owner token is no longer inside (the lock was reclaimed); leaving it to its current holder\n`
-      );
+    releaseOwnLock(lockDir, nonce);
+  }
+}
+
+// RELEASE ONLY OUR OWN, takeover-shaped: move the canonical dir to a private
+// tombstone FIRST, so what we inspect is exactly what we will delete — a
+// read-then-delete of the canonical path could delete a successor that
+// arrived between the two. Failures are disclosed on stderr, never thrown:
+// this runs in fn's finally, and a throw here would replace fn's own result
+// or error; a lock left behind by a failed release carries this live pid and
+// becomes reclaimable once the process exits.
+function releaseOwnLock(lockDir, nonce) {
+  const tombstone = `${lockDir}.release-${randomBytes(8).toString('hex')}`;
+  try {
+    renameSync(lockDir, tombstone);
+  } catch (e) {
+    process.stderr.write(
+      e?.code === 'ENOENT'
+        ? `dispatch-register: release found no lock at ${lockDir} — it was removed while this holder held it\n`
+        : `dispatch-register: release could not move the lock at ${lockDir} (${e?.code ?? e}) — left in place\n`
+    );
+    return;
+  }
+  if (readOwner(tombstone)?.nonce === nonce) {
+    try {
+      rmSync(tombstone, { recursive: true, force: true });
+    } catch (e) {
+      process.stderr.write(`dispatch-register: released the lock at ${lockDir} but could not delete its tombstone ${tombstone} (${e?.code ?? e}) — remove it by hand\n`);
     }
+    return;
+  }
+  // Not ours: a successor holds it. Put it back while the path is free.
+  if (existsSync(lockDir)) {
+    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's, and the path is already re-occupied — the moved lock is left at ${tombstone}; verify and remove by hand\n`);
+    return;
+  }
+  try {
+    renameSync(tombstone, lockDir);
+    process.stderr.write(`dispatch-register: release skipped at ${lockDir} — this holder's owner token is no longer inside (the lock was reclaimed); restored it to its current holder\n`);
+  } catch (e) {
+    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's and could not restore it (${e?.code ?? e}) — it is left at ${tombstone}; verify and remove by hand\n`);
   }
 }
 

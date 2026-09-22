@@ -8131,7 +8131,8 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
         try {
           renameSync2(lockDir, tombstone);
           renamed = true;
-        } catch {
+        } catch (renameErr) {
+          if (renameErr?.code !== "ENOENT") throw renameErr;
         }
         if (renamed) {
           const tombstoneOwner = readOwner(tombstone);
@@ -8147,13 +8148,15 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
             }
             try {
               rmSync(tombstone, { recursive: true, force: true });
-            } catch {
+            } catch (rmErr) {
+              process.stderr.write(`dispatch-register: reclaimed lock at ${lockDir} but could not delete its tombstone ${tombstone} (${rmErr?.code ?? rmErr}) \u2014 remove it by hand
+`);
             }
           } else {
             try {
               renameSync2(tombstone, lockDir);
             } catch (restoreErr) {
-              if (restoreErr?.code === "EEXIST") {
+              if (restoreErr?.code === "EEXIST" || restoreErr?.code === "ENOTEMPTY") {
                 process.stderr.write(
                   `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
 `
@@ -8164,6 +8167,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
               }
+              if (restoreErr?.code !== "ENOENT") throw restoreErr;
             }
           }
         }
@@ -8178,25 +8182,66 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       await sleepAsync(retryMs);
     }
   }
+  const createdIno = statIno(lockDir);
   const nonce = randomBytes(8).toString("hex");
-  writeFileSync2(
-    join4(lockDir, "owner.json"),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce })
-  );
+  const lost = (why) => refusal(lockCodeFor(), { lock_dir: lockDir, owner: null }, `lock at ${lockDir} was lost before this holder's owner write took hold (${why}) \u2014 refusing rather than running beside another holder`);
+  try {
+    writeFileSync2(
+      join4(lockDir, "owner.json"),
+      JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce }),
+      { flag: "wx" }
+    );
+  } catch (writeErr) {
+    if (writeErr?.code === "EEXIST") throw lost("another holder already owns the canonical path");
+    if (writeErr?.code === "ENOENT") throw lost("the directory this call created was moved away");
+    throw writeErr;
+  }
+  if (createdIno === null || statIno(lockDir) !== createdIno || readOwner(lockDir)?.nonce !== nonce) {
+    process.stderr.write(
+      `dispatch-register: lock at ${lockDir} is no longer the directory this call created (pid ${process.pid}) \u2014 not entering the critical section and not touching the directory now at that path; if it holds this pid's owner.json it becomes reclaimable once this process exits
+`
+    );
+    throw lost("the canonical path is a different incarnation");
+  }
   try {
     return await fn();
   } finally {
-    if (readOwner(lockDir)?.nonce === nonce) {
-      try {
-        rmSync(lockDir, { recursive: true, force: true });
-      } catch {
-      }
-    } else {
-      process.stderr.write(
-        `dispatch-register: release skipped at ${lockDir} \u2014 this holder's owner token is no longer inside (the lock was reclaimed); leaving it to its current holder
+    releaseOwnLock(lockDir, nonce);
+  }
+}
+function releaseOwnLock(lockDir, nonce) {
+  const tombstone = `${lockDir}.release-${randomBytes(8).toString("hex")}`;
+  try {
+    renameSync2(lockDir, tombstone);
+  } catch (e) {
+    process.stderr.write(
+      e?.code === "ENOENT" ? `dispatch-register: release found no lock at ${lockDir} \u2014 it was removed while this holder held it
+` : `dispatch-register: release could not move the lock at ${lockDir} (${e?.code ?? e}) \u2014 left in place
 `
-      );
+    );
+    return;
+  }
+  if (readOwner(tombstone)?.nonce === nonce) {
+    try {
+      rmSync(tombstone, { recursive: true, force: true });
+    } catch (e) {
+      process.stderr.write(`dispatch-register: released the lock at ${lockDir} but could not delete its tombstone ${tombstone} (${e?.code ?? e}) \u2014 remove it by hand
+`);
     }
+    return;
+  }
+  if (existsSync4(lockDir)) {
+    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's, and the path is already re-occupied \u2014 the moved lock is left at ${tombstone}; verify and remove by hand
+`);
+    return;
+  }
+  try {
+    renameSync2(tombstone, lockDir);
+    process.stderr.write(`dispatch-register: release skipped at ${lockDir} \u2014 this holder's owner token is no longer inside (the lock was reclaimed); restored it to its current holder
+`);
+  } catch (e) {
+    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's and could not restore it (${e?.code ?? e}) \u2014 it is left at ${tombstone}; verify and remove by hand
+`);
   }
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
