@@ -7563,9 +7563,10 @@ function openStore(cwd) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join3, resolve as resolve2, dirname as dirname3, isAbsolute } from "node:path";
 import { hostname } from "node:os";
-import { join as join3, dirname as dirname3 } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -7687,7 +7688,7 @@ function render(x) {
 function registerPath(root) {
   return join3(root, ".sterling", "transient", "dispatch-register.json");
 }
-function registerLockDir(root) {
+function legacyRegisterLockDir(root) {
   return join3(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
@@ -7738,8 +7739,54 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-function lockCodeFor() {
-  return "register_lock_held";
+var SQLITE_BUSY = 5;
+function currentUid() {
+  if (typeof process.getuid !== "function") {
+    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
+  }
+  return process.getuid();
+}
+function registerLockRoot() {
+  const uid = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === "string" && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join3(xdg, "sterling-locks");
+    } catch (e) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid}`;
+}
+function registerLockPath(root) {
+  const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
+  return join3(registerLockRoot(), `${hash}.db`);
+}
+function ensureLockRoot(dir) {
+  mkdirSync2(dir, { recursive: true, mode: 448 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
+  }
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
+  }
+  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
+}
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
+}
+function sleepAsync(ms) {
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
+}
+var heldConnections = /* @__PURE__ */ new Set();
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
+`);
 }
 function isPidAlive(pid) {
   try {
@@ -7749,99 +7796,99 @@ function isPidAlive(pid) {
     return e?.code !== "ESRCH";
   }
 }
-function readOwner(lockDir) {
+function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync2(join3(lockDir, "owner.json"), "utf8"));
-  } catch {
-    return null;
+    return JSON.parse(readFileSync2(join3(legacy, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
+    throw e;
   }
 }
-function looksDeadOwner(o) {
-  return !!o && o.host === hostname() && !isPidAlive(o.pid);
-}
-function statIno(p) {
+function legacyLockHolder(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
   try {
-    return statSync2(p).ino;
-  } catch {
+    entries = readdirSync(legacy);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
     return null;
   }
+  if (entries.length === 0) {
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === "ENOENT") return null;
+      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
+      throw e;
+    }
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
+`);
+    return null;
+  }
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
+  }
+  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
 }
-function sleepAsync(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
-async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
-  const start = Date.now();
-  for (; ; ) {
-    try {
-      mkdirSync2(dirname3(lockDir), { recursive: true });
-      mkdirSync2(lockDir);
-      break;
-    } catch (e) {
-      if (e?.code !== "EEXIST") throw e;
-      const owner = readOwner(lockDir);
-      if (looksDeadOwner(owner)) {
-        const examinedIno = statIno(lockDir);
-        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
-        let renamed = false;
-        try {
-          renameSync(lockDir, tombstone);
-          renamed = true;
-        } catch {
+  const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname3(lockPath));
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    const start = Date.now();
+    for (; ; ) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited2 = Date.now() - start;
+        if (waited2 >= timeoutMs) {
+          throw refusal(
+            "register_lock_held",
+            { lock_path: lockPath, waited_ms: waited2 },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
+          );
         }
-        if (renamed) {
-          const tombstoneOwner = readOwner(tombstone);
-          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
-          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
-            try {
-              rmSync(tombstone, { recursive: true, force: true });
-            } catch {
-            }
-          } else {
-            try {
-              renameSync(tombstone, lockDir);
-            } catch (restoreErr) {
-              if (restoreErr?.code === "EEXIST") {
-                process.stderr.write(
-                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
-`
-                );
-                throw refusal(
-                  lockCodeFor(),
-                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
-                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
-                );
-              }
-            }
-          }
-        }
+        await sleepAsync(retryMs);
+        continue;
       }
-      if (Date.now() - start >= timeoutMs) {
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      db.exec("ROLLBACK");
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs) {
+        const { pid, host, at } = held.owner;
         throw refusal(
-          lockCodeFor(),
-          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
-          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+          "register_lock_held",
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
         );
       }
       await sleepAsync(retryMs);
     }
-  }
-  writeFileSync(
-    join3(lockDir, "owner.json"),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
-  );
-  try {
-    return await fn();
-  } finally {
+    heldConnections.add(db);
     try {
-      rmSync(lockDir, { recursive: true, force: true });
-    } catch {
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+`);
+      }
     }
+  } finally {
+    db.close();
   }
-}
-function withRegisterLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
 function statusReason(entry, ctx) {
   if (!entry) return "clock-unreadable";
@@ -7887,7 +7934,7 @@ var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3, renameSync as renameSync2 } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync as renameSync2 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { join as join4, dirname as dirname4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
@@ -7908,7 +7955,7 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync3(lockPath).mtimeMs > LOCK_STALE_MS) {
+        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
           console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
           rmSync2(lockPath, { recursive: true, force: true });
           continue;
@@ -8067,7 +8114,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync3(join4(root, path)).mtime.toISOString();
+        at = statSync2(join4(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -8104,7 +8151,7 @@ function gitTrackedSubset(root, paths) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync as readdirSync2 } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync3, readdirSync as readdirSync2 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync4(path)) return null;
@@ -8141,7 +8188,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync4(path).size > TAIL_BYTES;
+  const exhausted = statSync3(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
