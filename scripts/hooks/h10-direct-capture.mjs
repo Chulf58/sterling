@@ -1234,16 +1234,29 @@ try {
   //     discharge here; the event leaves this Stop only via
   //     `individuallyResearchSatisfied` below (a REAL finding), never via a
   //     declaration made while the dispatch was still running.
-  //   - NOT currently live: join to the register's OWN `ended.at` when one
-  //     exists — the LATEST ended timestamp among this session's research-type
-  //     entries, lane-wide (no per-event join key exists — same accepted
-  //     coarseness `researchDispatchLive` itself already carries). The
-  //     discharge anchor is whichever is LATER, the event's own `at` or that
-  //     return timestamp, so a dispatch this session never tracked (no
-  //     register entry at all, or one with no valid `ended.at`) falls back to
-  //     the event's own `at` — the pre-existing, unaffected behavior.
+  //   - NOT currently live: discharge ONLY with VALID return evidence — join
+  //     to the register's OWN `ended.at` when one exists (the LATEST ended
+  //     timestamp among this session's research-type entries, lane-wide — no
+  //     per-event join key exists, the same accepted coarseness
+  //     `researchDispatchLive` itself already carries) and only when the
+  //     declaration is at or after it.
+  //   - NO valid return evidence at all — the register is absent/unreadable
+  //     (`classified.availability !== 'ok'`), the entry's lease expired with
+  //     no SubagentStop ever recorded (status 'unknown', never
+  //     'inactive-confirmed'), or an ended entry exists with no valid
+  //     `ended.at` — is NEVER treated as "falls back to the event's own
+  //     `at`" (review fix, second HIGH found on commit 7f9f0b5): that fallback
+  //     reintroduced the exact original bug, since the event's dispatch-time
+  //     `at` is always earlier than any later declaration by construction and
+  //     would always look discharged. Absent proof the dispatch actually
+  //     returned, the event simply stays ARMED and is evaluated as an
+  //     ordinary unmet research event (P5: uncertain is never silently
+  //     discharged).
   // `research_tool` events are NEVER touched by this — they are synchronous,
-  // already complete at their own `at` by construction.
+  // already complete at their own `at` by construction. Findings
+  // (`individuallyResearchSatisfied` / the group `researchSatisfied` check)
+  // keep their existing, unrelated satisfaction rule — only the no_capture
+  // DISCHARGE anchor changes here.
   const endedResearchReturnAts = (classified.availability === 'ok' ? classified.entries : [])
     .filter((r) => r.status === 'inactive-confirmed' && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at))
     .map((r) => r.entry.ended.at);
@@ -1251,8 +1264,8 @@ try {
   const dischargedOnResearchLaneForDispatch = (e) => {
     if (e.kind !== 'agent_dispatch') return dischargedOnResearchLane(e.at);
     if (researchDispatchLive) return false;
-    const anchor = latestResearchReturnAt && (!isValidAt(e.at) || latestResearchReturnAt > e.at) ? latestResearchReturnAt : e.at;
-    return dischargedOnResearchLane(anchor);
+    if (!latestResearchReturnAt) return false; // no valid return evidence — never discharge, stays armed
+    return dischargedOnResearchLane(latestResearchReturnAt);
   };
   const activeResearchEvents = researchEvents.filter((e) => {
     // RESEARCH RETURN GATE (see the `researchDispatchLive` comment above): a

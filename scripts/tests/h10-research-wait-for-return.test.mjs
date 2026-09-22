@@ -310,6 +310,62 @@ test('RETURN-ANCHORED DISCHARGE: a no_capture declared AFTER the dispatch actual
 });
 
 // ===========================================================================
+// NO-VALID-RETURN-EVIDENCE FIX (Sol review, second HIGH found on commit
+// 7f9f0b5): when an agent_dispatch's register entry carries no valid
+// `ended.at`, the discharge anchor must NOT fall back to the event's own
+// dispatch-time `at` — that fallback reintroduces the ORIGINAL bug, since a
+// dispatch-time anchor is always earlier than any later declaration by
+// construction and would always look "discharged". Without proof the
+// dispatch actually returned (a lease-expired entry with no SubagentStop
+// ever recorded, or a register that cannot be read at all), the event must
+// stay ARMED and re-arm as an ordinary unmet research event — never silently
+// discharged on uncertain evidence (P5).
+// ===========================================================================
+
+test('NO-VALID-RETURN-EVIDENCE FIX: a lease-expired dispatch with NO SubagentStop ever recorded must not be discharged by a no_capture declared during its run — the duty blocks', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const DISPATCH_AT = '2026-06-10T10:00:00.000Z';
+    const NO_CAPTURE_AT = '2026-06-10T10:05:00.000Z'; // declared while the dispatch was still (apparently) running
+    writeSessionEvents(dir, [aEvent('researcher', DISPATCH_AT), { kind: 'no_capture', detail: 'nothing seen so far', lane: 'research', at: NO_CAPTURE_AT }]);
+    // 90 real minutes old (past the default 60-minute lease) and NEVER ended —
+    // classifyRegister reads this as 'unknown', not 'presumed-active' and not
+    // 'inactive-confirmed': no valid return evidence exists at all.
+    writeRegisterRaw(dir, [{ agent_id: 'sub-researcher-stale', agent_type: 'researcher', session_id: 's1', files: [], at: agoISO(90) }]);
+
+    const nag = stopOnce(dir);
+    assert.equal(
+      nag.code,
+      2,
+      'FALLBACK-TO-DISPATCH-TIME SHAPE if this is 0: no `ended.at` exists anywhere in the register, so the declaration has nothing valid to anchor against — falling back to the event\'s own (always-earlier) dispatch time would silently discharge it exactly like the original bug'
+    );
+    assert.match(nag.stderr, /research/i, 'the nag is the research duty');
+  } finally {
+    cleanup();
+  }
+});
+
+test('NO-VALID-RETURN-EVIDENCE FIX: an unreadable dispatch register plus a no_capture declaration must not discharge the event — the duty blocks', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const DISPATCH_AT = '2026-06-10T10:00:00.000Z';
+    const NO_CAPTURE_AT = '2026-06-10T10:05:00.000Z';
+    writeSessionEvents(dir, [aEvent('researcher', DISPATCH_AT), { kind: 'no_capture', detail: 'nothing seen so far', lane: 'research', at: NO_CAPTURE_AT }]);
+    writeRegisterRaw(dir, 'not valid json{'); // classifyRegister -> availability 'corrupt', no entries readable at all
+
+    const nag = stopOnce(dir);
+    assert.equal(
+      nag.code,
+      2,
+      'FALLBACK-TO-DISPATCH-TIME SHAPE if this is 0: an unreadable register can prove no return happened — the declaration must not discharge the event on the strength of its own (always-earlier) dispatch time'
+    );
+    assert.match(nag.stderr, /research/i, 'the nag is the research duty');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
 // STALE SATISFACTION FIX (Sol review, HIGH found on commit 5306735): a
 // research event that is already INDIVIDUALLY satisfied by an earlier finding
 // must be consumed on the deferring Stop that discovers it, exactly as a

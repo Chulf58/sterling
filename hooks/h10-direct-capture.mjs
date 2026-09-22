@@ -8719,8 +8719,8 @@ try {
   const dischargedOnResearchLaneForDispatch = (e) => {
     if (e.kind !== "agent_dispatch") return dischargedOnResearchLane(e.at);
     if (researchDispatchLive) return false;
-    const anchor = latestResearchReturnAt && (!isValidAt(e.at) || latestResearchReturnAt > e.at) ? latestResearchReturnAt : e.at;
-    return dischargedOnResearchLane(anchor);
+    if (!latestResearchReturnAt) return false;
+    return dischargedOnResearchLane(latestResearchReturnAt);
   };
   const activeResearchEvents = researchEvents.filter((e) => {
     if (e.kind === "agent_dispatch" && researchDispatchLive) return false;
