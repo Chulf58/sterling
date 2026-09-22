@@ -10,10 +10,13 @@
 //     the settled snapshot, that register entry mints nothing. The snapshot
 //     advances ONLY after a successful settlement; a failed mint leaves it
 //     where it was so the next Stop retries the same range.
-// (b) GAUGE. Fill is measured against context_watch.windows[model]; a model
-//     with no entry reports the fill as UNRELIABLE (no percentage against a
-//     default). A model id carrying a context-variant suffix ("[1m]") resolves
-//     to its base entry. The 50% target is a WARNING to finish and commit —
+// (b) GAUGE. Fill is measured by a three-step lookup: windows[model], then
+//     windows[baseModel] (a context-variant suffix like "[1m]" strips to its
+//     base entry), then windows.default as a real fallback (decision
+//     context-window-default-is-a-real-fallback, user-ruled 2026-09-22) — a
+//     per-model entry always wins over the default when one exists. Only a
+//     model matching NONE of the three reports the fill as UNRELIABLE (no
+//     percentage guessed). The 50% target is a WARNING to finish and commit —
 //     never a demand to clear.
 //
 // Every fixture is a real git repo in the OS tmpdir. The FIRST Stop on a clean
@@ -316,22 +319,34 @@ test('gauge (1): the SHIPPED window map reports a claude-fable-5-1 session again
   }
 });
 
-test('gauge (2): a model id with a context-variant suffix ("claude-opus-5[1m]") resolves to its base entry, and the shipped map has claude-opus-5 at 1,000,000', () => {
-  const { dir, cleanup } = makeGitProject(SHIPPED_WINDOWS);
+test('gauge (2): a model id with a context-variant suffix ("claude-opus-5[1m]") resolves to its BASE entry, not the default — proven by giving them DIFFERENT values (Sol review: an equal default would pass even with the baseModel lookup deleted)', () => {
+  // default deliberately != claude-opus-5's window, so a fill/window/message
+  // match against 1,000,000 can only come from the base-model lookup, never
+  // from falling through to windows.default (which is 200,000 here).
+  const { dir, cleanup } = makeGitProject({ ...SHIPPED_WINDOWS, default: 200_000 });
   try {
     writeTranscript(dir, 132_400, 'claude-opus-5[1m]');
     const r = runStop(dir);
     assert.equal(r.code, 0, r.stderr);
+    // 13.24% is below every threshold — no systemMessage is printed at all;
+    // only assert the sample the hook persisted regardless of stdout.
+    const message = r.stdout.trim() ? JSON.parse(r.stdout).systemMessage ?? '' : '';
     const s = pressureSample(dir);
-    assert.equal(s.window, 1_000_000, 'the [1m] variant resolves to the claude-opus-5 entry');
+    assert.equal(s.window, 1_000_000, 'the [1m] variant resolves to the claude-opus-5 BASE entry, not the 200,000 default');
     assert.ok(Math.abs(s.fill_pct - 13.24) < 0.01, `fill ~13.2%, got ${s.fill_pct}`);
+    assert.equal(s.window_source, undefined, 'a resolved base-model entry is not a default fallback');
+    assert.doesNotMatch(message, /\(window from context_watch\.windows\.default\)/, 'a mapped base entry carries no guessed-denominator note');
   } finally {
     cleanup();
   }
 });
 
-test('gauge (3): an UNKNOWN model reports the fill as unreliable — no percentage measured against the default window', () => {
-  const { dir, cleanup } = makeGitProject({ default: 200_000 });
+test('gauge (3): an UNKNOWN model with NO default configured reports the fill as unreliable — no percentage measured against a guessed window', () => {
+  // Changed for decision context-window-default-is-a-real-fallback (user-ruled
+  // 2026-09-22): windows.default is now a real fallback, so this UNRELIABLE
+  // pin must remove the default key to still exercise the "no window at all"
+  // path — see gauge (5) below for the unmapped-model-WITH-a-default case.
+  const { dir, cleanup } = makeGitProject({});
   try {
     writeTranscript(dir, 132_400, 'claude-novel-9');
     const r = runStop(dir);
@@ -379,6 +394,45 @@ test('gauge (4): past the 50% target H10 WARNS to finish and commit through an i
     assert.match(drained.stdout, /60\.0%/);
     assert.equal(existsSync(join(dir, '.sterling', 'transient', 'notices')) && readdirSync(join(dir, '.sterling', 'transient', 'notices')).length, 0, 'notice files delete only after emission');
     assert.equal(runStop(dir).code, 0, 'once per session');
+  } finally {
+    cleanup();
+  }
+});
+
+test('gauge (5): an UNMAPPED model with a default configured falls back to context_watch.windows.default and the line names it (decision context-window-default-is-a-real-fallback)', () => {
+  const { dir, cleanup } = makeGitProject({ default: 1_000_000 });
+  try {
+    writeTranscript(dir, 600_000, 'claude-novel-9');
+    const r = runStop(dir);
+    assert.equal(r.code, 0, r.stderr);
+    const message = JSON.parse(r.stdout).systemMessage;
+    assert.doesNotMatch(message, /UNRELIABLE/i, 'a default window means the fill IS reported');
+    assert.match(message, /60\.0%/, 'fill is measured against the default window');
+    assert.match(message, /1000000/, 'names the default window it measured against');
+    assert.match(message, /\(window from context_watch\.windows\.default\)/, 'flags the guessed denominator so it reads differently from a mapped one');
+    const s = pressureSample(dir);
+    assert.equal(s.window, 1_000_000);
+    assert.equal(s.window_source, 'default');
+    assert.equal(s.unmapped_model, undefined, 'a resolved default is not the unmapped-model case');
+    assert.ok(Math.abs(s.fill_pct - 60) < 0.01, `fill 60%, got ${s.fill_pct}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('gauge (6): a MAPPED model wins over a configured default — the per-model window is used and the default note is absent', () => {
+  const { dir, cleanup } = makeGitProject({ default: 1_000_000, 'claude-custom-1': 250_000 });
+  try {
+    writeTranscript(dir, 150_000, 'claude-custom-1');
+    const r = runStop(dir);
+    assert.equal(r.code, 0, r.stderr);
+    const message = JSON.parse(r.stdout).systemMessage;
+    assert.match(message, /60\.0%/, 'fill measured against the PER-MODEL window (150k/250k), not the 1M default');
+    assert.match(message, /250000/, 'names the per-model window');
+    assert.doesNotMatch(message, /\(window from context_watch\.windows\.default\)/, 'a mapped entry is not a guessed denominator');
+    const s = pressureSample(dir);
+    assert.equal(s.window, 250_000);
+    assert.equal(s.window_source, undefined, 'no window_source is recorded when a per-model entry resolves the window');
   } finally {
     cleanup();
   }

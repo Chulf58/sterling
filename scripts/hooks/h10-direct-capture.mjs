@@ -250,17 +250,23 @@ try {
         store.recordCheckSkipped('conductor-pressure', reason ?? 'format_unparseable', undefined, now);
         sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, reason, at: now };
       } else {
-        // WINDOW = context_watch.windows[model], never a default (slice 4): a
-        // wrong denominator that still yields a BELIEVABLE percentage is the
-        // dangerous case (2026-08-11: 48% accepted at ~10% of real capacity;
-        // 2026-09-19: 66.2% reported for a claude-opus-5[1m] session at ~13%).
-        // A context-variant suffix ("claude-opus-5[1m]") falls back to its base
-        // entry; the transcript usually carries the BASE id for both variants,
-        // so the base entry must hold the window this project's sessions run.
-        // No entry → the fill is UNRELIABLE: no percentage, no level, and the
-        // unmapped model rides the sample so the release path says so once.
+        // WINDOW = windows[model] ?? windows[baseModel] ?? windows.default (decision
+        // context-window-default-is-a-real-fallback, user-ruled 2026-09-22, reversing
+        // slice 4's "never a default"): a per-model entry always wins when present —
+        // the wrong-denominator-with-a-believable-percentage risk that motivated slice 4
+        // (2026-08-11: 48% accepted at ~10% of real capacity; 2026-09-19: 66.2% reported
+        // for a claude-opus-5[1m] session at ~13%) is real, but the user ruled the
+        // fallback worth having; a degraded path must still announce itself (P5), so a
+        // sample resolved through the default carries window_source: 'default' and the
+        // pressure line names it. A context-variant suffix ("claude-opus-5[1m]") falls
+        // back to its base entry; the transcript usually carries the BASE id for both
+        // variants, so the base entry must hold the window this project's sessions run.
+        // No entry AND no default → the fill is UNRELIABLE: no percentage, no level, and
+        // the unmapped model rides the sample so the release path says so once.
         const baseModel = model ? String(model).replace(/\[[^\]]*\]$/, '') : null;
-        const windowSize = model ? cw.windows[model] ?? cw.windows[baseModel] : undefined;
+        const perModelWindow = model ? cw.windows[model] ?? cw.windows[baseModel] : undefined;
+        const windowSize = model ? perModelWindow ?? cw.windows.default : undefined;
+        const usedDefault = Boolean(model && perModelWindow === undefined && cw.windows.default !== undefined);
         const fill = windowSize ? fillPct(usage, windowSize) : null;
         if (!windowSize) {
           store.recordCheckSkipped('conductor-pressure', `window_unmapped:${model ?? 'no-model-id'}`, undefined, now);
@@ -271,10 +277,10 @@ try {
           // Evidence of MISCONFIGURATION, not pressure: classify unknown + check_skipped
           // (loud, fail-open) instead of false-hard-blocking every session on this machine.
           store.recordCheckSkipped('conductor-pressure', `window_mismatch:${model ?? 'unknown-model'}:${fill.toFixed(1)}pct`, undefined, now);
-          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', at: now };
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', ...(usedDefault ? { window_source: 'default' } : {}), at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...(usedDefault ? { window_source: 'default' } : {}), at: now };
         }
       }
       mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
@@ -318,10 +324,15 @@ try {
   // open work and commit it — never a demand to clear. Fill is OCCUPIED
   // context: the latest assistant turn's input + cache tokens (lib/transcript
   // fillPct), which already reflects compaction — not a cumulative sum.
+  // P5: a window resolved through context_watch.windows.default is a guessed
+  // denominator, not a mapped one — the pressure line says so briefly so a
+  // reader can tell the two apart (decision context-window-default-is-a-real-
+  // fallback, user-ruled 2026-09-22).
+  const defaultWindowNote = () => (pressure.window_source === 'default' ? ' (window from context_watch.windows.default)' : '');
   const pressurePart = () =>
     pressure.level === 'hard'
-      ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target → finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${boundaryLine()}`
-      : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% → prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
+      ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target → finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}`
+      : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% → prefer finishing open work, delegate reads to subagents.${defaultWindowNote()}${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
       const m = JSON.parse(readFileSync(pressureMarker, 'utf8'));
@@ -331,10 +342,12 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  // WINDOW-GAUGE WARNING (retro slice 2; slice 4): an unmapped model means the
-  // fill cannot be measured — say so loudly once, until the config gains the
-  // entry. No percentage is printed against a default. Same marker pattern as
-  // pressure (latest-value cell keyed by session_id; P4 by supersession).
+  // WINDOW-GAUGE WARNING (retro slice 2; slice 4; reversed by decision
+  // context-window-default-is-a-real-fallback, user-ruled 2026-09-22): fires
+  // only when a model has NEITHER a per-model entry NOR context_watch.windows.default
+  // — the fill truly cannot be measured. Say so loudly once, until the config
+  // gains an entry or a default. Same marker pattern as pressure (latest-value
+  // cell keyed by session_id; P4 by supersession).
   const gaugeMarker = join(input.cwd, '.sterling', 'transient', 'gauge-warned.json');
   const gaugeSpent = () => {
     try {

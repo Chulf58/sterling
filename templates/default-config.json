@@ -2,7 +2,7 @@
   "toolchains": [],
   "context_watch": {
     "windows": {
-      "default": 200000,
+      "default": 1000000,
       "claude-fable-5": 1000000,
       "claude-fable-5-1": 1000000,
       "claude-opus-5": 1000000,
