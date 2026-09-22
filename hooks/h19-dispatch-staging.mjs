@@ -7901,7 +7901,8 @@ function extractPathCandidates(text) {
 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync4, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
-import { join as join4, resolve as resolve2 } from "node:path";
+import { join as join4, resolve as resolve2, dirname as dirname3, isAbsolute } from "node:path";
+import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 
@@ -8067,22 +8068,40 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_ROOT = "/tmp/sterling-locks";
 var SQLITE_BUSY = 5;
+function currentUid() {
+  if (typeof process.getuid !== "function") {
+    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
+  }
+  return process.getuid();
+}
+function registerLockRoot() {
+  const uid = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === "string" && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join4(xdg, "sterling-locks");
+    } catch (e) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid}`;
+}
 function registerLockPath(root) {
   const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
-  return join4(LOCK_ROOT, `${hash}.db`);
+  return join4(registerLockRoot(), `${hash}.db`);
 }
-function ensureLockRoot() {
-  mkdirSync3(LOCK_ROOT, { recursive: true, mode: 448 });
-  const st = lstatSync(LOCK_ROOT);
+function ensureLockRoot(dir) {
+  mkdirSync3(dir, { recursive: true, mode: 448 });
+  const st = lstatSync(dir);
   if (!st.isDirectory() || st.isSymbolicLink()) {
-    throw new Error(`dispatch-register: ${LOCK_ROOT} is not a real directory \u2014 refusing to take the register lock through it`);
+    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
   }
-  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
-    throw new Error(`dispatch-register: ${LOCK_ROOT} is owned by uid ${st.uid}, not this user (${process.getuid()}) \u2014 refusing to take the register lock through it`);
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
   }
-  if ((st.mode & 63) !== 0) chmodSync(LOCK_ROOT, 448);
+  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
 }
 function isBusy(e) {
   return e?.errcode === SQLITE_BUSY;
@@ -8090,39 +8109,66 @@ function isBusy(e) {
 function sleepAsync(ms) {
   return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
-var warnedLegacyDirs = /* @__PURE__ */ new Set();
 var heldConnections = /* @__PURE__ */ new Set();
-function clearLegacyLockDir(root) {
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
+`);
+}
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== "ESRCH";
+  }
+}
+function readLegacyOwner(legacy) {
+  try {
+    return JSON.parse(readFileSync2(join4(legacy, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
+    throw e;
+  }
+}
+function legacyLockHolder(root) {
   const legacy = legacyRegisterLockDir(root);
   let entries;
   try {
     entries = readdirSync(legacy);
   } catch (e) {
-    if (e?.code === "ENOENT") return;
-    if (!warnedLegacyDirs.has(legacy)) {
-      warnedLegacyDirs.add(legacy);
-      process.stderr.write(`dispatch-register: legacy lock path ${legacy} exists but could not be listed (${e?.code ?? e}) \u2014 it no longer locks anything; left in place
-`);
-    }
-    return;
+    if (e?.code === "ENOENT") return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
+    return null;
   }
   if (entries.length === 0) {
-    rmdirSync(legacy);
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === "ENOENT") return null;
+      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
+      throw e;
+    }
     process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
 `);
-    return;
+    return null;
   }
-  if (!warnedLegacyDirs.has(legacy)) {
-    warnedLegacyDirs.add(legacy);
-    process.stderr.write(`dispatch-register: legacy lock dir ${legacy} is NOT empty (${entries.join(", ")}) \u2014 it no longer locks anything and was left in place; remove it by hand once no pre-rebuild session is running
-`);
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
   }
+  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
 }
 async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
-  ensureLockRoot();
   const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname3(lockPath));
   const db = new DatabaseSync3(lockPath);
   try {
     db.exec("PRAGMA busy_timeout=0");
@@ -8130,23 +8176,35 @@ async function withRegisterLock(root, fn, opts = {}) {
     for (; ; ) {
       try {
         db.exec("BEGIN IMMEDIATE");
-        break;
       } catch (e) {
         if (!isBusy(e)) throw e;
-        const waited = Date.now() - start;
-        if (waited >= timeoutMs) {
+        const waited2 = Date.now() - start;
+        if (waited2 >= timeoutMs) {
           throw refusal(
             "register_lock_held",
-            { lock_path: lockPath, waited_ms: waited },
-            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited}ms`
+            { lock_path: lockPath, waited_ms: waited2 },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
           );
         }
         await sleepAsync(retryMs);
+        continue;
       }
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      db.exec("ROLLBACK");
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs) {
+        const { pid, host, at } = held.owner;
+        throw refusal(
+          "register_lock_held",
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
+        );
+      }
+      await sleepAsync(retryMs);
     }
     heldConnections.add(db);
     try {
-      clearLegacyLockDir(root);
       return await fn();
     } finally {
       heldConnections.delete(db);
@@ -8419,7 +8477,7 @@ async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, 
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
-import { join as join5, dirname as dirname3 } from "node:path";
+import { join as join5, dirname as dirname4 } from "node:path";
 function deliveryDir(cwd) {
   return join5(cwd, ".sterling", "transient", "delivery");
 }
@@ -8500,7 +8558,7 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync4(dirname3(path), { recursive: true });
+  mkdirSync4(dirname4(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync3(tmp, JSON.stringify(guard));
   renameSync3(tmp, path);

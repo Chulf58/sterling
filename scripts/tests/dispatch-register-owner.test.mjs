@@ -109,7 +109,9 @@ test('R1-A03: registerPath names the register in .sterling/transient; the lock i
   const { dir, cleanup } = project([]);
   try {
     assert.equal(REG.registerPath(dir), join(dir, '.sterling', 'transient', 'dispatch-register.json'));
-    assert.ok(REG.registerLockPath(dir).startsWith('/tmp/sterling-locks/'), REG.registerLockPath(dir));
+    const lockPath = REG.registerLockPath(dir);
+    assert.ok(!lockPath.startsWith(dir), `the lock is outside the project tree: ${lockPath}`);
+    assert.match(lockPath, /\/sterling-locks(-\d+)?\/[0-9a-f]{64}\.db$/, `a per-user lock root (layout pinned in dispatch-register-kernel-lock KL-0/KL-0b): ${lockPath}`);
     assert.equal(REG.legacyRegisterLockDir(dir), join(dir, '.sterling', 'transient', 'dispatch-register.lock'));
   } finally {
     cleanup();

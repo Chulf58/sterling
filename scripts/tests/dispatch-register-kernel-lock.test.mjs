@@ -3,7 +3,7 @@
 // CONTRACT SOURCE: decision
 // `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`
 // (REVISED block): the register lock is a SQLite `BEGIN IMMEDIATE` transaction
-// on a never-unlinked lock database at /tmp/sterling-locks/<hash of the
+// on a never-unlinked lock database at <per-user lock root>/<hash of the
 // resolved project root>.db, held for the whole critical section. The kernel
 // drops the lock when the holder dies, so there is no reclaim, no rename, no
 // owner file and no tombstone.
@@ -20,9 +20,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, statSync, symlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, hostname } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join, dirname, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import * as REG from '../lib/dispatch-register.mjs';
@@ -107,29 +108,91 @@ function assertNoResidue(dir) {
 }
 
 // ===========================================================================
-// Location — native ext4 under /tmp, never the project tree (drvfs on /mnt/c).
+// Location — native Linux storage in a PER-USER lock root, never the project
+// tree (drvfs on /mnt/c). The expected root is computed here independently of
+// the module: $XDG_RUNTIME_DIR/sterling-locks when that is set, absolute and
+// ours; /tmp/sterling-locks-<uid> otherwise — so another user can never squat
+// the name.
 // ===========================================================================
 
-test('KL-0: the lock database lives at /tmp/sterling-locks/<hash>.db — stable per resolved root, distinct across roots, never inside the project', async () => {
+async function withEnv(xdg, fn) {
+  const had = Object.prototype.hasOwnProperty.call(process.env, 'XDG_RUNTIME_DIR');
+  const prev = process.env.XDG_RUNTIME_DIR;
+  if (xdg === undefined) delete process.env.XDG_RUNTIME_DIR;
+  else process.env.XDG_RUNTIME_DIR = xdg;
+  try {
+    return await fn();
+  } finally {
+    if (had) process.env.XDG_RUNTIME_DIR = prev;
+    else delete process.env.XDG_RUNTIME_DIR;
+  }
+}
+
+const UID = process.getuid();
+const TMP_ROOT = `/tmp/sterling-locks-${UID}`;
+
+test('KL-0: the lock database lives at <per-user root>/<hash>.db — stable per resolved root, distinct across roots, never inside the project', async () => {
   const a = project();
   const b = project();
   const alias = `${a.dir}-alias`;
+  const xdg = mkdtempSync(join(tmpdir(), 'sterling-xdg-'));
   try {
     symlinkSync(a.dir, alias);
-    const p = REG.registerLockPath(a.dir);
-    assert.match(p, /^\/tmp\/sterling-locks\/[0-9a-f]{32,}\.db$/, `lock path shape: ${p}`);
-    assert.equal(REG.registerLockPath(a.dir), p, 'stable for the same root');
-    assert.equal(REG.registerLockPath(alias), p, 'the RESOLVED root is hashed — a symlinked path to the same project shares its lock');
-    assert.notEqual(REG.registerLockPath(b.dir), p, 'a different project gets a different lock');
-    assert.ok(!p.startsWith(a.dir), 'the lock is never inside the project tree');
-
-    await REG.withRegisterLock(a.dir, () => 'ok', { timeoutMs: 200 });
-    const mode = statSync('/tmp/sterling-locks').mode & 0o777;
-    assert.equal(mode, 0o700, `the lock directory is private (0700), got ${mode.toString(8)}`);
+    await withEnv(xdg, async () => {
+      const p = REG.registerLockPath(a.dir);
+      assert.equal(dirname(p), join(xdg, 'sterling-locks'), `an owned, absolute XDG_RUNTIME_DIR hosts the root: ${p}`);
+      assert.match(basename(p), /^[0-9a-f]{64}\.db$/, `lock file shape: ${p}`);
+      assert.equal(REG.registerLockPath(a.dir), p, 'stable for the same root');
+      assert.equal(REG.registerLockPath(alias), p, 'the RESOLVED root is hashed — a symlinked path to the same project shares its lock');
+      assert.notEqual(REG.registerLockPath(b.dir), p, 'a different project gets a different lock');
+      assert.ok(!p.startsWith(a.dir), 'the lock is never inside the project tree');
+      await REG.withRegisterLock(a.dir, () => 'ok', { timeoutMs: 200 });
+      const mode = statSync(dirname(p)).mode & 0o777;
+      assert.equal(mode, 0o700, `the lock root is private (0700), got ${mode.toString(8)}`);
+    });
   } finally {
     rmSync(alias, { force: true });
+    rmSync(xdg, { recursive: true, force: true });
     a.cleanup();
     b.cleanup();
+  }
+});
+
+test('KL-0b: without a usable XDG_RUNTIME_DIR (unset, relative, or owned by another user) the root is /tmp/sterling-locks-<uid> — never a shared, squattable /tmp name', async () => {
+  const { dir, cleanup } = project();
+  try {
+    for (const xdg of [undefined, 'run/user/relative', '/']) {
+      await withEnv(xdg, async () => {
+        assert.equal(dirname(REG.registerLockPath(dir)), TMP_ROOT, `XDG_RUNTIME_DIR=${xdg} falls back to the per-uid /tmp root`);
+      });
+    }
+    await withEnv(undefined, async () => {
+      assert.equal(await REG.withRegisterLock(dir, () => 'ok', { timeoutMs: 200 }), 'ok');
+      assert.equal(statSync(TMP_ROOT).mode & 0o777, 0o700, 'the fallback root is private (0700) too');
+      rmSync(REG.registerLockPath(dir), { force: true });
+    });
+  } finally {
+    cleanup();
+  }
+});
+
+test('KL-0c: a lock root that is a SYMLINK is refused loudly — the lock is never taken through a path someone else could point elsewhere', async () => {
+  const { dir, cleanup } = project();
+  const xdg = mkdtempSync(join(tmpdir(), 'sterling-xdg-'));
+  const elsewhere = mkdtempSync(join(tmpdir(), 'sterling-elsewhere-'));
+  try {
+    symlinkSync(elsewhere, join(xdg, 'sterling-locks'));
+    await withEnv(xdg, async () => {
+      let ran = false;
+      const r = await refusalOf(() => REG.withRegisterLock(dir, () => { ran = true; }, { timeoutMs: 0 }));
+      assert.equal(ran, false);
+      assert.match(String(r.err?.message), /not a real directory/, `refused, naming why: ${r.err?.message}`);
+      assert.deepEqual(readdirSync(elsewhere), [], 'nothing was created through the symlink');
+    });
+  } finally {
+    rmSync(xdg, { recursive: true, force: true });
+    rmSync(elsewhere, { recursive: true, force: true });
+    cleanup();
   }
 });
 
@@ -268,7 +331,7 @@ test('KL-c2: an error thrown inside the section propagates unchanged AND release
 });
 
 // ===========================================================================
-// Legacy mkdir lock directory — ignored for locking; an EMPTY one is residue.
+// Legacy mkdir lock directory — an EMPTY one is residue; a LIVE owner holds.
 // ===========================================================================
 
 test('KL-L1: a leftover EMPTY legacy dispatch-register.lock dir never blocks — it is removed as residue and said once on stderr', async () => {
@@ -291,18 +354,81 @@ test('KL-L1: a leftover EMPTY legacy dispatch-register.lock dir never blocks —
   }
 });
 
-test('KL-L2: a NON-empty legacy lock dir (an old owner.json) never blocks either — it is LEFT in place and warned about', async () => {
+function deadPid() {
+  const r = spawnSync(process.execPath, ['-e', 'process.exit(0)'], { encoding: 'utf8' });
+  assert.ok(r.pid, 'harness: the probe child must report a pid');
+  return r.pid;
+}
+
+function legacyOwner(dir, owner) {
+  const legacy = REG.legacyRegisterLockDir(dir);
+  mkdirSync(legacy);
+  writeFileSync(join(legacy, 'owner.json'), typeof owner === 'string' ? owner : JSON.stringify(owner));
+  return legacy;
+}
+
+// TRANSITION: a session still on a PRE-rebuild bundle takes only the mkdir
+// lock. A non-empty legacy dir whose owner.json names a LIVE pid on this host
+// may have that old writer inside its critical section, so it is HELD.
+test('KL-L2: a legacy lock dir owned by a LIVE pid on this host is HELD — the contender waits its bound, refuses register_lock_held naming the legacy dir, never enters, and does not keep the kernel lock', async () => {
   const { dir, cleanup } = project();
   try {
-    const legacy = REG.legacyRegisterLockDir(dir);
-    mkdirSync(legacy);
-    writeFileSync(join(legacy, 'owner.json'), JSON.stringify({ pid: process.pid, host: 'h', at: new Date().toISOString(), nonce: 'old' }));
+    const legacy = legacyOwner(dir, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'old-writer' });
     let ran = false;
-    const { text } = await captureStderr(() => REG.withRegisterLock(dir, () => { ran = true; }, { timeoutMs: 0 }));
-    assert.equal(ran, true, 'a live-looking legacy owner is not a holder of the kernel lock');
-    assert.equal(existsSync(join(legacy, 'owner.json')), true, 'a non-empty legacy dir is never deleted');
-    assert.ok(text.includes(legacy), `the leftover is warned about by path: ${JSON.stringify(text)}`);
+    const t0 = Date.now();
+    const r = await refusalOf(() => REG.withRegisterLock(dir, () => { ran = true; }, { timeoutMs: 200, retryMs: 20 }));
+    const waited = Date.now() - t0;
+    assert.equal(r.code, 'register_lock_held', `expected register_lock_held, got ${JSON.stringify(r)}`);
+    assert.equal(ran, false, 'two writers must never run: the old writer may be inside its section');
+    assert.equal(r.facts?.lock_path, legacy, 'the refusal names the legacy dir actually held');
+    assert.equal(r.facts?.owner?.pid, process.pid);
+    assert.ok(waited >= 180, `it re-checked within the same bound before refusing: ${waited}ms`);
+    assert.equal(existsSync(join(legacy, 'owner.json')), true, "the old writer's lock is never touched");
+
+    const db = new DatabaseSync(REG.registerLockPath(dir));
+    try {
+      db.exec('BEGIN IMMEDIATE');
+      db.exec('ROLLBACK');
+    } finally {
+      db.close();
+    }
   } finally {
     cleanup();
   }
 });
+
+test('KL-L3: a live legacy holder that FINISHES within the bound lets the waiting contender in — the re-check is inside the same bound', async () => {
+  const { dir, cleanup } = project();
+  try {
+    const legacy = legacyOwner(dir, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'old-writer' });
+    setTimeout(() => rmSync(legacy, { recursive: true, force: true }), 100);
+    let ran = false;
+    const v = await REG.withRegisterLock(dir, () => { ran = true; return 'entered'; }, { timeoutMs: 2000, retryMs: 20 });
+    assert.equal(v, 'entered');
+    assert.equal(ran, true);
+  } finally {
+    cleanup();
+  }
+});
+
+for (const [label, owner] of [
+  ['a DEAD pid on this host', () => ({ pid: deadPid(), host: hostname(), at: new Date().toISOString(), nonce: 'dead' })],
+  ['an unreadable owner.json', () => '{"pid": 12'],
+  ['another host', () => ({ pid: process.pid, host: `${hostname()}-elsewhere`, at: new Date().toISOString(), nonce: 'far' })],
+]) {
+  test(`KL-L4: a non-empty legacy lock dir with ${label} does NOT block — no old writer can be inside it; it is left in place and warned about once`, async () => {
+    const { dir, cleanup } = project();
+    try {
+      const legacy = legacyOwner(dir, owner());
+      let ran = false;
+      const { text } = await captureStderr(() => REG.withRegisterLock(dir, () => { ran = true; }, { timeoutMs: 0 }));
+      assert.equal(ran, true, `${label} is not a live holder`);
+      assert.equal(existsSync(join(legacy, 'owner.json')), true, 'a non-empty legacy dir is never deleted');
+      assert.equal(text.split('\n').filter((l) => l.includes(legacy)).length, 1, `warned exactly once, by path: ${JSON.stringify(text)}`);
+      const again = await captureStderr(() => REG.withRegisterLock(dir, () => 'again', { timeoutMs: 0 }));
+      assert.equal(again.text, '', 'once per process, not once per acquisition');
+    } finally {
+      cleanup();
+    }
+  });
+}

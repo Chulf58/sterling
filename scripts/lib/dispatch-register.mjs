@@ -46,7 +46,8 @@
 // delivered there (C5, correctness review).
 
 import { mkdirSync, readFileSync, writeFileSync, rmSync, rmdirSync, renameSync, existsSync, lstatSync, readdirSync, realpathSync, chmodSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, resolve, dirname, isAbsolute } from 'node:path';
+import { hostname } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash } from 'node:crypto';
 import { refusal, disclosure, render } from './review-errors.mjs';
@@ -189,14 +190,18 @@ export function readRegister(root) {
 // withRegisterLock — the ONE register lock, KERNEL-HELD (decision
 // `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`,
 // REVISED block). The lock is a SQLite `BEGIN IMMEDIATE` transaction on a
-// small lock database that is never unlinked, at
-// /tmp/sterling-locks/<sha256 of the resolved project root>.db — native ext4,
-// never the project tree, because the tree may sit on /mnt/c drvfs, whose
-// byte-range locking is unvalidated. The register DATA stays in
-// .sterling/transient/. The transaction is held for the whole of fn; COMMIT in
-// the finally releases it, closing the connection releases it too, and the
-// kernel releases it when the holding process dies. Nothing is ever written
-// to the lock database, so no journal is ever created.
+// small lock database that is never unlinked, at <lock root>/<sha256 of the
+// resolved project root>.db — native Linux storage, never the project tree,
+// because the tree may sit on /mnt/c drvfs, whose byte-range locking is
+// unvalidated. The lock root is PER USER, so no other user can squat its name:
+// $XDG_RUNTIME_DIR/sterling-locks when XDG_RUNTIME_DIR is set, absolute, a
+// real directory and owned by this user, otherwise /tmp/sterling-locks-<uid>.
+// The root must be a real directory (never a symlink) owned by this user, and
+// is kept 0700. The register DATA stays in .sterling/transient/. The
+// transaction is held for the whole of fn; COMMIT in the finally releases it,
+// closing the connection releases it too, and the kernel releases it when the
+// holding process dies. Nothing is ever written to the lock database, so no
+// journal is ever created.
 //
 // INVARIANT: at most one cooperating writer per resolved project root is
 // inside fn at a time, and a lock is only ever released by its own holder's
@@ -207,47 +212,84 @@ export function readRegister(root) {
 // OUTSIDE the lock, never blocking the event loop), then REJECTS with the
 // register_lock_held refusal — fn never runs unlocked (P5).
 //
-// A leftover mkdir lock dir from the retired protocol
-// (.sterling/transient/dispatch-register.lock) is ignored for locking. Under
-// the lock, an EMPTY one is removed as residue and said once on stderr; a
-// non-empty one is left in place and warned about.
+// TRANSITION — the retired mkdir lock (.sterling/transient/
+// dispatch-register.lock), still taken by any session running a PRE-rebuild
+// bundle. It is checked under the kernel lock before fn runs:
+//   - EMPTY: residue (or an old writer between its mkdir and owner write,
+//     whose owner write then fails and refuses) — rmdir'd, said on stderr.
+//   - NON-EMPTY with an owner.json naming a LIVE pid on this host: an old
+//     writer may be inside its critical section, so it is treated as HELD —
+//     the kernel lock is released and the attempt retries within the SAME
+//     bound, then refuses register_lock_held with facts.lock_path = the
+//     legacy dir (old holds last milliseconds, so a retry normally succeeds).
+//   - NON-EMPTY otherwise (dead pid, another host, missing or unreadable
+//     owner.json): no old writer can be inside it — left in place, warned
+//     once per process, and fn proceeds.
 //
-// NOT GUARANTEED: exclusion against a writer still running a PRE-rebuild
-// bundle (it takes the mkdir lock, not this one) — hook processes are
-// short-lived, so this ends when every session has relaunched onto the new
-// bundles; exclusion across two WSL distros or machines sharing one /mnt/c
-// tree (each has its own /tmp); one lock for two spellings of one drvfs path
-// that differ only in case (realpath does not fold case); fairness or FIFO
-// order among contenders; that a holder paused longer than a contender's
-// bound finishes before that contender gives up (the contender refuses, it
-// never proceeds). Not reentrant: calling it again from inside fn waits on
-// itself and refuses at the bound.
+// NOT GUARANTEED: exclusion against a pre-rebuild writer that takes the mkdir
+// lock AFTER the check above, while a rebuilt writer is inside fn — the old
+// code knows nothing of the kernel lock, so the transition guard is one-way
+// (it ends when every session has relaunched onto the new bundles); a legacy
+// owner.json whose dead pid was reused by an unrelated live process is
+// treated as held until that process exits; exclusion between processes whose
+// XDG_RUNTIME_DIR differs (they resolve different lock roots — hooks inherit
+// the one session's environment); exclusion across two WSL distros or
+// machines sharing one /mnt/c tree — each has its own lock root, and that is
+// a documented operating contract (one live session per worktree, on one
+// distro), not something this lock enforces; one lock for two spellings of one
+// drvfs path that differ only in case (realpath does not fold case); fairness
+// or FIFO order among contenders; that a holder paused longer than a
+// contender's bound finishes before that contender gives up (the contender
+// refuses, it never proceeds). Not reentrant: calling it again from inside fn
+// waits on itself and refuses at the bound.
 //
 // ASYNC ONLY: always returns a promise — a held lock REJECTS with the refusal
 // object rather than throwing synchronously. fn may be sync or async.
 // ---------------------------------------------------------------------------
 
-const LOCK_ROOT = '/tmp/sterling-locks';
 const SQLITE_BUSY = 5;
+
+function currentUid() {
+  if (typeof process.getuid !== 'function') {
+    throw new Error('dispatch-register: process.getuid() is unavailable — the register lock root is per POSIX user (Sterling runs under WSL2)');
+  }
+  return process.getuid();
+}
+
+function registerLockRoot() {
+  const uid = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === 'string' && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join(xdg, 'sterling-locks');
+    } catch (e) {
+      // An absent or unreachable XDG_RUNTIME_DIR is simply not usable; any
+      // other failure is surfaced (P5).
+      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid}`;
+}
 
 export function registerLockPath(root) {
   const hash = createHash('sha256').update(realpathSync(resolve(root))).digest('hex');
-  return join(LOCK_ROOT, `${hash}.db`);
+  return join(registerLockRoot(), `${hash}.db`);
 }
 
-// The lock directory is shared /tmp territory: it must be a real directory
-// (never a symlink) owned by this user, and private. Anything else refuses
-// loudly rather than locking through a path another user controls.
-function ensureLockRoot() {
-  mkdirSync(LOCK_ROOT, { recursive: true, mode: 0o700 });
-  const st = lstatSync(LOCK_ROOT);
+// The lock root must be a real directory (never a symlink) owned by this
+// user, and private. Anything else refuses loudly rather than locking through
+// a path another user controls.
+function ensureLockRoot(dir) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const st = lstatSync(dir);
   if (!st.isDirectory() || st.isSymbolicLink()) {
-    throw new Error(`dispatch-register: ${LOCK_ROOT} is not a real directory — refusing to take the register lock through it`);
+    throw new Error(`dispatch-register: ${dir} is not a real directory — refusing to take the register lock through it`);
   }
-  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
-    throw new Error(`dispatch-register: ${LOCK_ROOT} is owned by uid ${st.uid}, not this user (${process.getuid()}) — refusing to take the register lock through it`);
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) — refusing to take the register lock through it`);
   }
-  if ((st.mode & 0o077) !== 0) chmodSync(LOCK_ROOT, 0o700);
+  if ((st.mode & 0o077) !== 0) chmodSync(dir, 0o700);
 }
 
 function isBusy(e) {
@@ -258,8 +300,6 @@ function sleepAsync(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-const warnedLegacyDirs = new Set();
-
 // Every connection currently holding the lock, kept strongly reachable for
 // the whole hold. Measured 2026-09-22: a holder whose fn awaited a promise
 // nothing referenced had its suspended frame — and with it the connection —
@@ -268,36 +308,79 @@ const warnedLegacyDirs = new Set();
 // its process death ends a hold.
 const heldConnections = new Set();
 
-// Runs INSIDE the lock hold, so two writers never race the rmdir.
-function clearLegacyLockDir(root) {
+const warnedLegacyDirs = new Set();
+
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}\n`);
+}
+
+// ESRCH = provably not running; EPERM (another user's process) and anything
+// else unverifiable count as alive.
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code !== 'ESRCH';
+  }
+}
+
+function readLegacyOwner(legacy) {
+  try {
+    return JSON.parse(readFileSync(join(legacy, 'owner.json'), 'utf8'));
+  } catch (e) {
+    if (e?.code === 'ENOENT' || e instanceof SyntaxError) return null;
+    throw e;
+  }
+}
+
+// Runs INSIDE the kernel lock hold, so two rebuilt writers never race it.
+// Returns the live legacy holder, or null when fn may proceed (see the
+// TRANSITION block in the header).
+function legacyLockHolder(root) {
   const legacy = legacyRegisterLockDir(root);
   let entries;
   try {
     entries = readdirSync(legacy);
   } catch (e) {
-    if (e?.code === 'ENOENT') return;
-    if (!warnedLegacyDirs.has(legacy)) {
-      warnedLegacyDirs.add(legacy);
-      process.stderr.write(`dispatch-register: legacy lock path ${legacy} exists but could not be listed (${e?.code ?? e}) — it no longer locks anything; left in place\n`);
-    }
-    return;
+    if (e?.code === 'ENOENT') return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) — no live pre-rebuild owner can be verified in it; left in place, proceeding`);
+    return null;
   }
   if (entries.length === 0) {
-    rmdirSync(legacy);
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === 'ENOENT') return null;
+      // An old writer's owner.json landed between the listing and the rmdir.
+      if (e?.code === 'ENOTEMPTY' || e?.code === 'EEXIST') return legacyLockHolder(root);
+      throw e;
+    }
     process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} — residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}\n`);
-    return;
+    return null;
   }
-  if (!warnedLegacyDirs.has(legacy)) {
-    warnedLegacyDirs.add(legacy);
-    process.stderr.write(`dispatch-register: legacy lock dir ${legacy} is NOT empty (${entries.join(', ')}) — it no longer locks anything and was left in place; remove it by hand once no pre-rebuild session is running\n`);
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
   }
+  const why =
+    owner === null
+      ? 'has no readable owner.json'
+      : owner.host !== hostname()
+        ? `names another host (${owner.host})`
+        : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(', ')}) but ${why}, so no pre-rebuild writer can be inside it — left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
 }
 
 export async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1000;
-  ensureLockRoot();
   const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname(lockPath));
   const db = new DatabaseSync(lockPath);
   try {
     db.exec('PRAGMA busy_timeout=0');
@@ -305,7 +388,6 @@ export async function withRegisterLock(root, fn, opts = {}) {
     for (;;) {
       try {
         db.exec('BEGIN IMMEDIATE');
-        break;
       } catch (e) {
         if (!isBusy(e)) throw e;
         const waited = Date.now() - start;
@@ -317,11 +399,26 @@ export async function withRegisterLock(root, fn, opts = {}) {
           );
         }
         await sleepAsync(retryMs);
+        continue;
       }
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      // A pre-rebuild writer may be inside its critical section: let go of
+      // the kernel lock while it finishes, and re-check within the bound.
+      db.exec('ROLLBACK');
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs) {
+        const { pid, host, at } = held.owner;
+        throw refusal(
+          'register_lock_held',
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) — gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
+        );
+      }
+      await sleepAsync(retryMs);
     }
     heldConnections.add(db);
     try {
-      clearLegacyLockDir(root);
       return await fn();
     } finally {
       heldConnections.delete(db);

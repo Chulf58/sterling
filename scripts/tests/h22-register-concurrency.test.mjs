@@ -140,7 +140,7 @@
 // dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own,
 // REVISED): withOwnerMkdirLock/registerLockDir are DELETED. The register lock
 // is withRegisterLock(projectDir, fn, {retryMs, timeoutMs}) — a SQLite BEGIN
-// IMMEDIATE on /tmp/sterling-locks/<hash>.db, released by COMMIT/close or by
+// IMMEDIATE on <per-user lock root>/<hash>.db, released by COMMIT/close or by
 // the kernel on holder death. holdRegisterLock() below now takes that real
 // lock instead of forging an owner.json; R1-A95/R1-A96/D2/D3 keep their
 // contract (refusal code, exclusion, skip-and-disclose-once) unchanged. The
