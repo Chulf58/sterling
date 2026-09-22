@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // S2 FROZEN RED PINS — stable-identity wave, schema v2 + store write path
-// (board 62b5976b, decision stable-identity-design-v2 / 2176748e-72f6-4cfc-
-// a790-7fd67c7ee6aa, concept article record-identity / 6a4059f7). SPEC-ONLY:
+// (board 62b5976b, decision stable-identity-design-v2 / foreign_2176748e-72f6-4cfc-
+// a790-7fd67c7ee6aa, concept article record-identity / foreign_6a4059f7). SPEC-ONLY:
 // authored FROM THE DESIGN ALONE, before any of this exists on SterlingStore.
 // Every test below is expected to fail RED on its own assertion (a thrown
 // "not found" error naming the missing primitive, a schema-validation
@@ -540,7 +540,7 @@ test('S2-5c [stable-identity-design-v2]: retireInFavorOf (duplicate consolidatio
 
     store.retireInFavorOf(dup.id, survivor.id, LATER);
 
-    // test-repair 2026-08-22: retire stops the record being SERVED (decision 9948475b; store.test.ts
+    // test-repair 2026-08-22: retire stops the record being SERVED (decision foreign_9948475b; store.test.ts
     // pins the same served-count rule), so the served count drops by one — which still proves no new
     // record was minted (supersede would net UNCHANGED: one retired, one minted). [stable-identity-design-v2]
     assert.equal(store.count({ types: ['decision'] }), before - 1, 'retire is duplicate consolidation — no new record is minted, and the retired duplicate stops being served');

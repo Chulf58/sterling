@@ -8,7 +8,6 @@
 //   - h1-session-start.mjs    — SessionStart residue before the register wipe
 //   - h22-dispatch-register.mjs — SubagentStop kill-signature residue,
 //     SubagentStart resource-claim write + "you do not hold" notice
-//   - h26-dispatch-overlap.mjs — outgoing-brief resource-claim overlap check
 //
 // Dependency-light by design (invariant 4): node builtins plus the sibling
 // negation module only; no config reads here — callers pass stale_minutes and

@@ -17,14 +17,9 @@ import {
   validateRecord,
   normalizeRepoPath,
   linkSchema,
-  handoffSchema,
-  runRecordSchema,
   LIFECYCLE_VALUES,
   FRESHNESS_VALUES,
   type DurableRecord,
-  type Handoff,
-  type MachineState,
-  type RunRecord,
   type Lifecycle,
   type Freshness,
 } from '@sterling/schemas';
@@ -196,7 +191,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
 // ---------------------------------------------------------------------------
 // Schema-version guard (stable-identity S1, extended by S2; decision
 // [stable-identity-design-v2] / 2176748e): refuse-until-migrated. PRAGMA
-// user_version (research_finding 5555895c: a 32-bit application-owned integer
+// user_version (research_finding foreign_5555895c: a 32-bit application-owned integer
 // at header offset 60 — NEVER SQLite's own PRAGMA schema_version) is checked at
 // the very top of open, before the DDL or any other write lands, so a store
 // from a NEWER, unsupported schema is refused with nothing touched.
@@ -271,16 +266,9 @@ export class SchemaMigrationRequiredError extends Error {
   }
 }
 
-/** Run-protocol exit as recorded by agent_exit / consumed by run_signal (§5.2). */
-export interface RecordedExit {
-  signal: string;
-  payload?: Record<string, unknown>;
-  phase_id?: string;
-  agent_role?: string;
-  at: string;
-}
-
-const ACTIVE_STATES = ['running', 'completing', 'awaiting_merge_gate', 'halted'];
+// RecordedExit / ACTIVE_STATES (the staged pipeline's run-protocol exit shape
+// and active-state list) were removed with the run/handoff protocol above
+// (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
 // ---------------------------------------------------------------------------
 // AC8: catalog status + bootstrap + dedup enqueue (run r-ea9e, phase 3)
@@ -355,9 +343,56 @@ function deepReplaceString(value: unknown, from: string, to: string): unknown {
 // it, and callers building rank_terms (the TUI search) clamp to it so they never
 // hand the store an over-long list that throws at parse (audit finding 9/43).
 export const MAX_RANK_TERMS = 16;
+
+/**
+ * The dedupe KEY for one rank term: lowercased, with runs of Unicode
+ * punctuation (\p{P}) and separators (\p{Z}) folded to one space — the
+ * characters FTS5's default unicode61 tokenizer treats as token separators.
+ * Symbols, marks, letters and digits are left alone, and there is no NFKD or
+ * mark stripping: merging two terms FTS treats as different queries ("C++"
+ * onto "C", two emoji onto one empty key) silently DROPS a caller's term,
+ * which is worse than the double count this exists to fix. So the key
+ * under-dedupes by design. A term that folds to nothing keys on itself. A
+ * trailing '*' is set aside before the fold and re-appended, using
+ * ftsMatchExpr's own prefix test, so "mech*" stays distinct from "mech".
+ * NOT guaranteed: diacritic variants ("café"/"cafe") and locale case-folding
+ * (Turkish dotted/dotless I) may still double-count; and JS's current Unicode
+ * tables are newer than unicode61's 6.1, so a rare newer-script case pair or
+ * punctuation mark could still be merged here while FTS keeps it apart.
+ * Exported so the TUI's rank-term builder uses this same key.
+ */
+export function rankTermDedupeKey(term: string): string {
+  const isPrefix = term.endsWith('*') && term.length > 1;
+  const base = isPrefix ? term.slice(0, -1) : term;
+  const folded = base
+    .toLowerCase()
+    .replace(/[\p{P}\p{Z}]+/gu, ' ')
+    .trim();
+  const key = folded.length > 0 ? folded : base;
+  return isPrefix ? `${key}*` : key;
+}
+
 export const rankTerms = z
   .array(z.string().regex(/^\S{1,64}$/, 'rank_terms must be single keywords (no whitespace, ≤64 chars)'))
-  .max(MAX_RANK_TERMS);
+  // Dedupe BEFORE the cap, on rankTermDedupeKey, first occurrence wins,
+  // original order otherwise preserved — the ORIGINAL term text is what is
+  // kept and sent to FTS, only the comparison is folded. This is the ONE
+  // place rank_terms are normalized — every caller (query(), countAboveScore())
+  // reaches the FTS match expression only through rankTerms.parse(), so a
+  // duplicate can never reach ftsMatchExpr and double a record's bm25
+  // contribution.
+  .transform((terms) => {
+    const seen = new Set<string>();
+    const deduped: string[] = [];
+    for (const term of terms) {
+      const key = rankTermDedupeKey(term);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(term);
+    }
+    return deduped;
+  })
+  .pipe(z.array(z.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
 // One definition of the §3.4 default cap (invariant 1), for the same reason as
 // MAX_RANK_TERMS: it was written literally in BOTH query() here and
@@ -382,6 +417,36 @@ export const DEFAULT_QUERY_CAP = 20;
 export interface RecordWriteOptions {
   expected_version?: number;
   resolves?: string[];
+  /**
+   * An explicit removal from the authoritative relation graph. This is kept
+   * separate from the record body because links[] updates are deliberately
+   * additive: a normal content write must never silently drop an edge.
+   * Supersedes is excluded in applyInPlace; lifecycle transitions remain owned
+   * by supersede()/retireInFavorOf().
+   */
+  remove_relation?: { rel: string; target_id: string };
+  /**
+   * OUT PARAMETER (board b0bb9d96 fix-round HIGH): when supplied, drainResolves
+   * pushes one snapshot per claimed item onto this array, read INSIDE the
+   * write's own transaction, immediately before that item's removal — the
+   * COMMITTED state at close time, never a pre-transaction validation read.
+   * Without this, a caller that built its own "what did resolves close"
+   * disclosure from an earlier read could describe an item's file_keys as they
+   * were when validated rather than as they were the instant they were
+   * deleted — and this lane's own fold can widen an item's file_keys between
+   * those two moments. The caller supplies an empty array and reads it back
+   * after the call returns.
+   */
+  resolvedReceipt?: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[];
+  /**
+   * OUT PARAMETER (board 7e779e1f): when supplied, a same-store versioned
+   * in-place write that makes THIS record stop claiming a path prunes that
+   * path from the record's own open reconcile_needed item(s) — see
+   * pruneReconcileNeeded — and pushes one entry per item actually touched.
+   * Empty when the write claims no fewer paths than before, or claims fewer
+   * but no open item names any of them.
+   */
+  prunedReceipt?: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[];
 }
 
 export interface QueryOptions {
@@ -432,7 +497,7 @@ export type ToolStore = Pick<
   // cannot serve because it matches a full id only.
   | 'recordIdIndex'
   // knowledge_create resolves an exact slug through this to REFUSE a second
-  // feature_article under a slug that already exists (decision 3db7095f built it
+  // feature_article under a slug that already exists (decision foreign_3db7095f built it
   // for H19's one-hop pointers and noted "a second consumer does not exist yet"
   // — this is that second consumer). Deterministic, so the refusal can never be
   // a ranking artefact.
@@ -440,11 +505,11 @@ export type ToolStore = Pick<
   // knowledge_create's cross-type slug uniqueness + knowledge_get's slug
   // resolution (board 1e639f32) — the type-agnostic sibling of articlesBySlug.
   | 'recordsBySlug'
-  // knowledge_get's dead-slug fallthrough ONLY (decision df361a0f) — the
+  // knowledge_get's dead-slug fallthrough ONLY (decision foreign_df361a0f) — the
   // superseded-only counterpart of recordsBySlug, consulted after both
   // live-slug and id-prefix resolution fail.
   | 'supersededRecordsBySlug'
-  // knowledge_get's terminus disclosure (decision de1a7329) — the pinned
+  // knowledge_get's terminus disclosure (decision foreign_de1a7329) — the pinned
   // record stays version-pinned; this is the only way the tool layer learns
   // where a superseded record's chain currently ends.
   | 'resolveTerminus'
@@ -477,15 +542,7 @@ export type ToolStore = Pick<
   // existed' through the drain-log trace (board 97d773ef).
   | 'drainLogEntry'
   | 'addLink'
-  | 'getRun'
-  | 'casTransition'
-  | 'casTransitionMerge'
-  | 'recordPendingExit'
-  | 'getPendingExit'
   | 'recordCheckSkipped'
-  | 'appendRunEscalation'
-  | 'writeHandoff'
-  | 'readHandoffs'
   // knowledge_split's multi-record write (children + parent supersession)
   // needs one atomic boundary spanning several store calls (decision
   // compaction-tooling-windowed-read-plus-split) — see withTransaction above.
@@ -1014,6 +1071,25 @@ export class JournalDemotionRefusedError extends Error {
   }
 }
 
+/**
+ * THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), used by every
+ * minter — settlement.mjs's grouped mint AND enqueueSystemTodo's own
+ * fold-to-union below — so a surviving item's prose always names the FULL set
+ * of files it now covers, never just the first one a caller happened to pass.
+ * A pure function of its inputs: no store read, no clock, so it stays
+ * testable in isolation and safe to call from a standalone .mjs hook bundle
+ * (invariant 4 — hooks are dependency-light, bundled at build time). `owner`
+ * carries only what the two mintable record types expose for this purpose;
+ * an unresolvable owner (deleted concurrently) is the caller's problem to
+ * degrade, not this function's — it renders whatever it is given.
+ */
+export function buildReconcileText(owner: { type: 'feature_article' | 'reference_material'; slug?: string; title?: string }, fileKeys: string[]): string {
+  const files = [...fileKeys].sort();
+  return owner.type === 'reference_material'
+    ? `reconcile reference '${owner.title ?? ''}' — its document changed content in direct mode (settled): ${files.join(', ')}; refresh summary + source_date (§3.2.5)`
+    : `reconcile article '${owner.slug ?? ''}' — owned file(s) changed content in direct mode (settled): ${files.join(', ')}`;
+}
+
 export class SterlingStore {
   private db: DatabaseSync;
 
@@ -1240,7 +1316,7 @@ export class SterlingStore {
     // than busy_timeout — and for the hooks that is a FAIL-OPEN, because a
     // hook's uncaught throw exits 1, the runner reads any non-2 exit as
     // NON-BLOCKING, and openStore sits outside several hooks' fail-closed try
-    // (anti-pattern e13f0fb5). Fixing it here rather than in one hook is
+    // (anti-pattern foreign_e13f0fb5). Fixing it here rather than in one hook is
     // deliberate: every openStore caller inherits it.
     //
     // The condition is exact, not a heuristic. Control reaches this point only
@@ -1781,7 +1857,7 @@ export class SterlingStore {
    * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
    * neither is ever caller-supplied.
    */
-  private static readonly METADATA_WRITE_FIELDS: readonly string[] = ['file_baselines', 'baseline_attestations'];
+  private static readonly METADATA_WRITE_FIELDS: readonly string[] = ['file_baselines', 'baseline_attestations', 'absence_attestations'];
 
   /**
    * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
@@ -1888,6 +1964,17 @@ export class SterlingStore {
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
    *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
    * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
    * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
    * caller that deliberately preserves the stored `updated_at` — see
@@ -1904,7 +1991,7 @@ export class SterlingStore {
     id: string,
     buildPatch: (current: DurableRecord) => Record<string, unknown>,
     opts: RecordWriteOptions,
-    internal: { allowRetired?: boolean; activityAt?: string } = {}
+    internal: { allowRetired?: boolean; activityAt?: string; suppressReconcilePrune?: boolean } = {}
   ): DurableRecord {
     this.assertWritable(op);
     let served!: DurableRecord;
@@ -1923,6 +2010,28 @@ export class SterlingStore {
           `${op}: stale expected_version — the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ` +
             `${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`
         );
+      }
+
+      // An edge removal is an explicit operation, not an implication of the
+      // candidate's links[] body. Parse it here (inside the write transaction)
+      // and reserve lifecycle edges for their specialized transitions.
+      const removedRelation = opts.remove_relation === undefined ? undefined : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === 'supersedes') {
+        throw new Error(
+          `${op}: rel 'supersedes' cannot be removed as a raw edge — it is the authoritative carrier of a lifecycle transition. ` +
+            `Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`
+        );
+      }
+      if (removedRelation) {
+        const exists = this.db
+          .prepare('SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?')
+          .get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(
+            `${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists — ` +
+              `nothing was written; re-read the record and retry.`
+          );
+        }
       }
 
       const candidate = buildPatch(current);
@@ -2009,14 +2118,34 @@ export class SterlingStore {
       for (const tag of new Set(validated.stack_tags)) {
         this.db.prepare('INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)').run(id, tag);
       }
+      // BEFORE/AFTER, computed with the SAME registered per-type extractor
+      // (never a hand-listed field) — the path-set diff pruneReconcileNeeded
+      // acts on below (board 7e779e1f). `current` is the pre-write read at the
+      // top of this call; `stored` is what is about to be persisted.
+      const beforeFileKeys = new Set(entry.fileKeys(current as unknown as Record<string, unknown>));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
       this.db.prepare('DELETE FROM record_file_keys WHERE record_id = ?').run(id);
-      for (const path of new Set(entry.fileKeys(stored))) {
+      for (const path of afterFileKeys) {
         this.db.prepare('INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)').run(id, path);
       }
-      // Additive on relations: an edge named in the patch is ensured, never
-      // silently dropped — removing an edge is knowledge_unlink's business, not
-      // a side effect of a content update.
+      // Additive on relations: an edge named in a content patch is ensured,
+      // never silently dropped. Only opts.remove_relation, supplied by the
+      // explicit knowledge_array_remove path, may delete one.
       for (const link of validated.links) this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        // Exact source + relation type + target identity: target alone can name
+        // several semantically distinct edges. This runs in the same transaction
+        // as the snapshot, version bump and activity row above.
+        const deleted = this.db
+          .prepare('DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?')
+          .run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(
+            `${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal — ` +
+              `the transaction was rolled back; re-read and retry.`
+          );
+        }
+      }
       // EXACTLY ONE records_fts row per id, current version only (contract 7):
       // the row is replaced, so the prior generation's text stops ranking.
       this.db.prepare('UPDATE records_fts SET text = ? WHERE record_id = ?').run(entry.fts(stored), id);
@@ -2025,7 +2154,17 @@ export class SterlingStore {
       // activity row from it would place a write that happened NOW at the previous
       // write's instant.
       this.logActivity('updated', validated, internal.activityAt ?? (stored.updated_at as string) ?? now);
-      if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now);
+      // ORDER WITH resolves (board 7e779e1f): drain explicit claims FIRST —
+      // an item this SAME write already closed by name is gone from `records`
+      // before the prune scan below ever runs, so it can never be double-
+      // reported as both drained and pruned, and a prune can never make a
+      // just-claimed id vanish out from under drainResolves.
+      if (opts.resolves?.length) this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = new Set<string>();
+        for (const path of beforeFileKeys) if (!afterFileKeys.has(path)) droppedPaths.add(path);
+        if (droppedPaths.size > 0) this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
       // The echo goes through the SAME derivation get() serves, so a write
       // echo can never disagree with the next read of the same record.
       served = this.withDerivedReliedBy(this.hydrateAll([stored as DurableRecord])[0]);
@@ -2039,10 +2178,20 @@ export class SterlingStore {
    * already-closed claim throws, which rolls the ENTIRE write back — an
    * unclaimed write must never appear to succeed against a dead reference, and
    * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
    */
-  private drainResolves(op: string, ids: string[], at: string): void {
+  private drainResolves(op: string, ids: string[], at: string, receipt?: { id: string; system_reason?: string; file_keys?: string[]; text?: string }[]): void {
     for (const claimed of new Set(ids)) {
-      const item = this.get(claimed);
+      const item = this.get(claimed) as (DurableRecord & { system_reason?: string; file_keys?: string[]; text?: string }) | undefined;
       if (!item) {
         throw new Error(
           `${op}: resolves claim '${claimed}' names no open item — it was never created, or it is already closed. ` +
@@ -2054,7 +2203,100 @@ export class SterlingStore {
           `${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) — the whole write rolled back`
         );
       }
+      if (receipt) receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
       this.remove(claimed, at);
+    }
+  }
+
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  private pruneReconcileNeeded(
+    ownerId: string,
+    droppedPaths: Set<string>,
+    at: string,
+    receipt?: { id: string; system_reason?: string; removed: boolean; pruned_paths: string[]; remaining_file_keys: string[] }[]
+  ): void {
+    const rows = this.db
+      .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'")
+      .all() as { body: string; scope: string }[];
+    for (const r of rows) {
+      const t = SterlingStore.decodeLiveRecord('pruneReconcileNeeded', r) as DurableRecord & {
+        source?: string;
+        system_reason?: string;
+        feature_link?: string;
+        file_keys?: string[];
+        text?: string;
+      };
+      if (t.source !== 'system' || t.system_reason !== 'reconcile_needed' || t.feature_link !== ownerId) continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0) continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles,
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      // Regenerated through the SAME builder the fold uses — the owner's
+      // current slug/title (this write's own UPDATE already committed above,
+      // so this read sees the post-write body), never a hand-rendered string.
+      const owner = this.get(ownerId) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+      const text = buildReconcileText(
+        owner
+          ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+          : { type: 'feature_article', slug: ownerId },
+        keptFiles
+      );
+      this.applyInPlace(
+        'pruneReconcileNeeded',
+        t.id,
+        (cur) => ({ ...(cur as unknown as Record<string, unknown>), file_keys: keptFiles, text }),
+        {},
+        { suppressReconcilePrune: true }
+      );
     }
   }
 
@@ -2080,10 +2322,22 @@ export class SterlingStore {
    *      file absorbed the second file's drift into a fresh baseline: the finding
    *      neither queued nor survived.
    *
-   * The key is therefore (system_reason, feature_link, file_keys SET), and the
-   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
-   * concurrent caller blocks on the write lock and then SEES the committed row
-   * instead of racing it.
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
    *
    * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
    * severity — edited today, deleted tomorrow, both reconcile_needed, the first
@@ -2167,7 +2421,7 @@ export class SterlingStore {
     // change" and silently swallowed). A GENUINE change — the state is fixed, a
     // different file's role goes unverified, the wording itself changes — still
     // differs after normalizing this one token and still escalates exactly as
-    // before. Every OTHER lane keeps EXACT text equality (decision 194f43e4's
+    // before. Every OTHER lane keeps EXACT text equality (decision foreign_194f43e4's
     // escalating-severity behavior, e.g. edited→deleted, is unaffected).
     const textsEquivalent = (a: string, b: string): boolean => {
       if (candidate.system_reason !== 'state_review') return a === b;
@@ -2175,8 +2429,24 @@ export class SterlingStore {
       return strip(a) === strip(b);
     };
 
+    // ONE OPEN reconcile_needed ITEM PER feature_link (board b0bb9d96 / I-29):
+    // unlike every other lane, this identity is NOT the exact file_keys set —
+    // it is (system_reason, feature_link) alone, exactly like the state_review
+    // lane exception above but for a different reason (state_review has no
+    // meaningful file_keys at all; reconcile_needed's file_keys is real data
+    // that must be UNIONED, never discarded). Two un-coordinated minters
+    // (read-time per-file, settlement grouped-per-article) used to coexist as
+    // duplicates because the universal key included the exact file set; this
+    // relaxes the match for this lane only and folds the result below.
+    const isReconcileFold = candidate.system_reason === 'reconcile_needed' && !!candidate.feature_link;
+
     let existing: (DurableRecord & { text?: string; file_keys?: string[] }) | undefined;
     let textUpdated = false;
+    // Set ONLY by the zero-match multi-file canonicalization below (board
+    // b0bb9d96 fix-round MEDIUM) — the text this call ACTUALLY inserted, so
+    // the echo built after the transaction can agree with the row rather than
+    // silently reporting the caller's pre-canonicalization `candidate.text`.
+    let insertedText: string | undefined;
     this.tx(() => {
       // The read happens INSIDE the write transaction — that is the whole point.
       // Scanning open todos is cheap: the queue is small by design, and a queue
@@ -2184,6 +2454,106 @@ export class SterlingStore {
       const rows = this.db
         .prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'")
         .all() as { body: string; scope: string }[];
+
+      if (isReconcileFold) {
+        const matches: (DurableRecord & { text?: string; file_keys?: string[] })[] = [];
+        for (const r of rows) {
+          const t = SterlingStore.decodeLiveRecord('enqueueSystemTodo', r) as DurableRecord & {
+            source?: string;
+            system_reason?: string;
+            feature_link?: string;
+            file_keys?: string[];
+            text?: string;
+          };
+          if (t.source !== 'system') continue;
+          if (t.system_reason !== 'reconcile_needed' || t.feature_link !== candidate.feature_link) continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          // CANONICALIZE A MULTI-FILE FIRST INSERT THROUGH buildReconcileText
+          // TOO (board b0bb9d96 fix-round MEDIUM): a caller can mint the FIRST
+          // item for an article already carrying more than one file in
+          // file_keys (settlement's grouped mint is exactly this shape) while
+          // its own caller-authored `text` names only one of them — nothing
+          // downstream widens this item to correct that, since there is no
+          // existing item to fold against. A SINGLE-file first insert keeps
+          // today's caller-authored text unchanged: that per-file wording
+          // (e.g. "no longer exists" vs "changed on disk", state_review's
+          // escalating phrasing) is real information a generic union
+          // rendering would flatten, and with exactly one file there is
+          // nothing for a union to be MORE truthful about.
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link as string) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+            const canonicalText = buildReconcileText(
+              owner
+                ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+                : { type: 'feature_article', slug: candidate.feature_link },
+              fileKeys
+            );
+            this.insertRecord({ ...candidate, text: canonicalText } as DurableRecord);
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate);
+          }
+          return;
+        }
+        // OLDEST open item keeps its id — anything already pointing at it
+        // (a citation, a prior resolves: claim in flight) must not break.
+        // created_at is a string ISO timestamp; a tie (same millisecond) is
+        // broken by id so the sort is total and deterministic either way.
+        matches.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set<string>(survivor.file_keys ?? []);
+        for (const f of folded) for (const k of f.file_keys ?? []) unionSet.add(k);
+        for (const k of candidate.file_keys ?? []) unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles = [...(survivor.file_keys ?? [])].sort();
+        const filesChanged = JSON.stringify(priorFiles) !== JSON.stringify(unionFiles);
+        // WIDENING (a real union — more than the survivor's own single file,
+        // or a legacy duplicate being folded in) demands the shared builder's
+        // truthful union text; it may not go on naming only the first file.
+        // A same-file re-report with NO folding keeps this lane's ordinary
+        // escalating-severity behaviour (decision foreign_194f43e4) — same file,
+        // worse news, plain text equality decides whether it updates.
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? '';
+        if (widening) {
+          const owner = this.get(candidate.feature_link as string) as (DurableRecord & { slug?: string; title?: string }) | undefined;
+          nextText = buildReconcileText(
+            owner
+              ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+              : { type: 'feature_article', slug: candidate.feature_link },
+            unionFiles
+          );
+        }
+        const textChanged = !textsEquivalent(survivor.text ?? '', nextText);
+        if (textChanged || filesChanged) {
+          // The versioned core, joining THIS transaction (tx is reentrant): version
+          // bump + prior snapshot + FTS refresh, none of which a bare body UPDATE did.
+          existing = this.applyInPlace(
+            'enqueueSystemTodo',
+            survivor.id,
+            (cur) => ({
+              ...(cur as unknown as Record<string, unknown>),
+              updated_at: candidate.updated_at,
+              ...(textChanged ? { text: nextText } : {}),
+              ...(filesChanged ? { file_keys: unionFiles } : {}),
+            }),
+            {}
+          ) as DurableRecord & { text?: string; file_keys?: string[] };
+          textUpdated = textChanged;
+        } else {
+          existing = survivor;
+        }
+        // Fold every OTHER open reconcile_needed item for this feature_link
+        // through the store's OWN removal path (never a bare DELETE), so the
+        // audit trail (queue_drain_log) is kept exactly as it is for any
+        // other closed system todo — union-then-remove, same transaction.
+        for (const f of folded) this.remove(f.id, candidate.updated_at);
+        return;
+      }
+
       for (const r of rows) {
         // Through the decoder like every other live materializing read: a match
         // here is RETURNED to the caller as the deduped record, so a drifted
@@ -2242,7 +2612,15 @@ export class SterlingStore {
     return existing
       ? { record: this.hydrateAll([existing as DurableRecord])[0], deduped: true, text_updated: textUpdated }
       : {
-          record: this.hydrateAll([SterlingStore.storableBody(candidate as unknown as Record<string, unknown>) as DurableRecord])[0],
+          // The echo must agree with the ROW this call actually inserted, not
+          // with the caller's pre-canonicalization `candidate` — see
+          // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+          record: this.hydrateAll([
+            SterlingStore.storableBody({
+              ...(candidate as unknown as Record<string, unknown>),
+              ...(insertedText !== undefined ? { text: insertedText } : {}),
+            }) as DurableRecord,
+          ])[0],
           deduped: false,
           text_updated: false,
         };
@@ -2472,7 +2850,7 @@ export class SterlingStore {
 
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
    * uses this ONLY after live-slug and id-prefix resolution both fail, so it
    * can never shadow a live record: a slug still carried by a non-superseded
@@ -2497,7 +2875,7 @@ export class SterlingStore {
   }
 
   /**
-   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)
    * record resolves to itself at hops:0. Unknown id -> null. Never throws
@@ -2532,7 +2910,7 @@ export class SterlingStore {
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
    * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
    * it only ever has something to say about a record that was itself retired
    * via supersede(). A record can also be named the target of a rel:'supersedes'
    * link WITHOUT ever being retired — a clause-level or partial override
@@ -2871,7 +3249,7 @@ export class SterlingStore {
     // THE REPLACEMENT MUST BE ALIVE. Retiring A in favour of B and then B in
     // favour of A left both records retired, each forwarding to a dead one — a
     // supersession cycle where the reader is sent nowhere, which is exactly
-    // what `in_favor_of` is required for in the first place (decision 9948475b).
+    // what `in_favor_of` is required for in the first place (decision foreign_9948475b).
     // A replacement this store cannot see is the PROMOTION shape (the survivor
     // is the copy in a domain store) and stays allowed: relations carry no
     // foreign key by design, and MountedStores has already resolved it.
@@ -3029,352 +3407,17 @@ export class SterlingStore {
   }
 
   // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
   // -------------------------------------------------------------------------
-
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input: unknown): RunRecord {
-    const run = runRecordSchema.parse(input);
-    // The active-run check and the INSERT run inside one BEGIN IMMEDIATE tx
-    // (audit finding 29/43): otherwise two concurrent createRuns both see no
-    // active run and both insert, breaking the one-active-run invariant. The
-    // write lock serializes them; the loser sees the winner's run and throws.
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) — one active run at a time`);
-      }
-      this.db
-        .prepare('INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)')
-        .run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-
-  /** By id, or the single active run when no id is given. */
-  getRun(id?: string): RunRecord | undefined {
-    const row = (
-      id
-        ? this.db.prepare('SELECT body FROM runs WHERE id = ?').get(id)
-        : this.db
-            .prepare(
-              `SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => '?').join(',')}) ORDER BY updated_at DESC LIMIT 1`
-            )
-            .get(...ACTIVE_STATES)
-    ) as { body: string } | undefined;
-    return row ? (runRecordSchema.parse(JSON.parse(row.body)) as RunRecord) : undefined;
-  }
-
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  private static parsePendingQueue(raw: string | null): RecordedExit[] {
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as RecordedExit | RecordedExit[];
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-
-  private static serializePendingQueue(queue: RecordedExit[]): string | null {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed: MachineState, next: unknown): RunRecord {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(run.id) as
-        | { pending_exit: string | null }
-        | undefined;
-      const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db
-        .prepare('UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
-        .run(run.machine_state, tail, JSON.stringify(run), new Date().toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(
-          `CAS rejected: run '${run.id}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
-        );
-      }
-    });
-    return run;
-  }
-
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed: MachineState, runId: string, mutate: (fresh: RunRecord) => RunRecord, attempts = 5): RunRecord {
-    this.assertWritable('casTransitionMerge');
-    for (let i = 0; i < attempts; i++) {
-      // Re-read the live schema version at the TOP of every retry iteration
-      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
-      // each attempt, so a migration by another process landing mid-retry could
-      // otherwise let this stale-schema handle read a newer body, parse it
-      // through the OLD schema, and rewrite it dropping newly-added fields. The
-      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
-      // window spanning the whole loop by throwing the SAME live-drift error.
-      this.assertLiveSchemaVersion('casTransitionMerge');
-      const row = this.db.prepare('SELECT body, machine_state, pending_exit FROM runs WHERE id = ?').get(runId) as
-        | { body: string; machine_state: string; pending_exit: string | null }
-        | undefined;
-      if (!row) throw new Error(`casTransitionMerge: no run '${runId}'`);
-      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
-      // body (board 4c3a0c37): the top-of-loop guard closes the retry-spanning
-      // gap but not the intra-iteration race where a migration commits between
-      // that guard's PRAGMA and this SELECT — the row just read would then be a
-      // NEW-schema body parsed through the OLD schema. This second check catches
-      // a migration before/during the read (and is what pin group D exercises,
-      // where the injector lands a migration on THIS read while no write lock is
-      // held, so it commits and is caught here). The narrower window this guard
-      // did NOT cover — a SCHEMA-ONLY migration landing AFTER this check and
-      // before the UPDATE, which the body-CAS cannot see because it leaves this
-      // row's body unchanged — is now closed by the tx() wrapper on the UPDATE
-      // below (board 4c3a0c37, Codex outside-family review).
-      this.assertLiveSchemaVersion('casTransitionMerge');
-      if (row.machine_state !== observed) {
-        throw new Error(
-          `CAS rejected: run '${runId}' is not in observed state '${observed}' — stale caller; re-read run_state, never re-apply (§5.2)`
-        );
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body)) as RunRecord;
-      const next = runRecordSchema.parse(mutate(current)) as RunRecord;
-      const tail = SterlingStore.serializePendingQueue(SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
-      // review). tx() takes BEGIN IMMEDIATE — serializing against any concurrent
-      // migration — and RE-ASSERTS the live schema version INSIDE that write lock
-      // before the UPDATE runs, so no migration can commit between the check and
-      // the write. This closes the schema-only-migration window a body-CAS alone
-      // cannot: a migration that bumps user_version WITHOUT rewriting this row
-      // would otherwise pass `body = row.body` and land a stale-schema write that
-      // drops newly-added run-schema fields. A drift throws /Live schema version
-      // drift/ from inside tx() and nothing is written; the machine_state
-      // precondition still fires inside the lock via the UPDATE's
-      // `AND machine_state = ?` predicate (a miss retries, and the fresh read on
-      // the next pass throws CAS rejected); a concurrent BODY change still misses
-      // `AND body = ?` and retries. The runs-body SELECT stays OUTSIDE this lock
-      // deliberately — moving it inside would make pin group D's cross-connection
-      // migration injector busy-fail against BEGIN IMMEDIATE instead of drifting.
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(
-          this.db
-            .prepare(
-              'UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?'
-            )
-            .run(next.machine_state, tail, JSON.stringify(next), new Date().toISOString(), runId, row.body, observed, row.pending_exit).changes
-        );
-      });
-      if (changes === 1) return next;
-      // body or queue changed under us (a concurrent hook write / agent exit) —
-      // retry against the fresh row; a machine_state change is caught above.
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId: string, exit: RecordedExit): void {
-    this.tx(() => {
-      const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
-        | { pending_exit: string | null }
-        | undefined;
-      if (!row) throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(
-          `recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? 'unknown'} on phase '${dup.phase_id ?? '?'}' ` +
-            `('${dup.signal}') — one exit per dispatched agent; call run_signal (or consume-exit) first`
-        );
-      }
-      this.db
-        .prepare('UPDATE runs SET pending_exit = ? WHERE id = ?')
-        .run(SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId: string): RecordedExit | undefined {
-    const row = this.db.prepare('SELECT pending_exit FROM runs WHERE id = ?').get(runId) as
-      | { pending_exit: string | null }
-      | undefined;
-    if (!row) throw new Error(`getPendingExit: no run '${runId}'`);
-    return SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId: string, input: unknown, at: string): Handoff {
-    this.assertWritable('writeHandoff');
-    const handoff = handoffSchema.parse(input);
-    if (!this.db.prepare('SELECT 1 FROM runs WHERE id = ?').get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    // Wrapped in tx() (board d5942fa0 pin group B / TOCTOU fix) so the write
-    // inherits the live schema-version recheck INSIDE the lock — the pre-lock
-    // assertWritable() above stays as a fast fail, tx() is the guarantee.
-    this.tx(() => {
-      this.db
-        .prepare('INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)')
-        .run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-
-  readHandoffs(runId: string, filter: { phase_id?: string; files?: string[] } = {}): Handoff[] {
-    const rows = (
-      filter.phase_id
-        ? this.db.prepare('SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at').all(runId, filter.phase_id)
-        : this.db.prepare('SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at').all(runId)
-    ) as { body: string }[];
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId: string, mutate: (run: RunRecord) => RunRecord, attempts = 5): RunRecord {
-    this.assertWritable('updateRunOptimistic');
-    for (let i = 0; i < attempts; i++) {
-      // Re-read the live schema version at the TOP of every retry iteration
-      // (board 4c3a0c37, HIGH): the optimistic CAS loop re-reads the fresh row
-      // each attempt, so a migration by another process landing mid-retry could
-      // otherwise let this stale-schema handle read a newer body, parse it
-      // through the OLD schema, and rewrite it dropping newly-added fields. The
-      // pre-loop assertWritable is only a fast fail; this closes the TOCTOU
-      // window spanning the whole loop by throwing the SAME live-drift error.
-      this.assertLiveSchemaVersion('updateRunOptimistic');
-      const row = this.db.prepare('SELECT body FROM runs WHERE id = ?').get(runId) as { body: string } | undefined;
-      if (!row) throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      // Re-check the live schema version AFTER the SELECT and BEFORE parsing the
-      // body (board 4c3a0c37): catches a migration landing before/during this
-      // read (pin group D's injector fires here, while no write lock is held).
-      // The narrower window this guard did NOT cover — a SCHEMA-ONLY migration
-      // landing AFTER this check and before the UPDATE, invisible to the body-CAS
-      // because it leaves this row's body unchanged — is now closed by the tx()
-      // wrapper on the UPDATE below (board 4c3a0c37, Codex outside-family review).
-      this.assertLiveSchemaVersion('updateRunOptimistic');
-      const current = JSON.parse(row.body) as RunRecord;
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error('updateRunOptimistic: machine_state changes go through casTransition only (§5.2)');
-      }
-      // Atomic version-check + UPDATE (board 4c3a0c37, Codex outside-family
-      // review). tx()'s BEGIN IMMEDIATE serializes against any concurrent
-      // migration and re-asserts the live schema version INSIDE the write lock
-      // before the UPDATE, so a schema-only migration cannot slip between the
-      // check and the write and land a field-dropping stale write past the
-      // body-CAS. A drift throws /Live schema version drift/ and nothing is
-      // written; a concurrent BODY change still misses `AND body = ?` and
-      // retries. The runs-body SELECT stays OUTSIDE this lock deliberately —
-      // moving it inside would make pin group D's cross-connection migration
-      // injector busy-fail against BEGIN IMMEDIATE instead of drifting.
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(
-          this.db
-            .prepare('UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?')
-            .run(JSON.stringify(next), new Date().toISOString(), runId, row.body).changes
-        );
-      });
-      if (changes === 1) return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId: string, entry: unknown): void {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId: string, articleId: string): void {
-    this.updateRunOptimistic(runId, (run) =>
-      (run.reconcile_needed ?? []).includes(articleId)
-        ? run
-        : { ...run, reconcile_needed: [...(run.reconcile_needed ?? []), articleId] }
-    );
-  }
-
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId: string, amendment: { path: string; reason: string; at: string }): void {
-    this.updateRunOptimistic(runId, (run) =>
-      (run.scope_amendments ?? []).some((a) => a.path === amendment.path)
-        ? run
-        : { ...run, scope_amendments: [...(run.scope_amendments ?? []), amendment] }
-    );
-  }
-
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId: string, phaseId: string, items: { record_id: string; reason: string }[]): void {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId: string, agentType: string): number {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 },
-    }));
-    return next.dispatch_counts[agentType];
-  }
 
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
@@ -3420,20 +3463,62 @@ export class SterlingStore {
     this.assertWritable('renameFileKey');
     const from = normalizeRepoPath(oldPath);
     const to = normalizeRepoPath(newPath);
-    const rows = this.db.prepare('SELECT record_id FROM record_file_keys WHERE path = ?').all(from) as { record_id: string }[];
+    let count = 0;
     this.tx(() => {
+      // QUERIED UNDER THE LOCK (board 7e779e1f review round, HIGH). Reading
+      // record_file_keys BEFORE BEGIN IMMEDIATE left a window where a
+      // concurrent enqueue for `from` could commit between this read and the
+      // rewrite below: the rename would then move the owner to `to` while the
+      // just-minted item kept naming `from` — unowned by anyone — reproducing
+      // the exact unclosable state this whole change exists to fix. BEGIN
+      // IMMEDIATE (inside this.tx(), above) takes the write lock BEFORE this
+      // SELECT runs, so no committed concurrent insert can land between the
+      // read and the rewrite: the window is closed by construction, not by a
+      // test-only seam.
+      const rows = this.db.prepare('SELECT record_id FROM record_file_keys WHERE path = ?').all(from) as { record_id: string }[];
+      count = rows.length;
       for (const { record_id } of rows) {
         if (!this.get(record_id)) continue;
         this.applyInPlace(
           'renameFileKey',
           record_id,
-          (current) => deepReplaceString(current as unknown, from, to) as Record<string, unknown>,
+          (current) => {
+            const patched = deepReplaceString(current as unknown, from, to) as Record<string, unknown>;
+            // A reconcile_needed system todo's file_keys/text are DERIVED
+            // state, not raw ownership (board 7e779e1f review round, MEDIUM):
+            // deepReplaceString's plain element-wise map can COLLIDE two
+            // entries into one path (an item already naming both `from` and
+            // `to`) with no dedupe, and it never touches `text` at all, so the
+            // canonical wording keeps naming the path that no longer exists
+            // whether or not a collision happened. Regenerated through the
+            // SAME buildReconcileText every other mutator of this lane uses —
+            // deepReplaceString itself is UNCHANGED, so every OTHER record
+            // type and every OTHER lane (a plain decision's file_keys, a
+            // feature_article's files[]/file_baselines) keeps its exact
+            // pre-existing map-only behaviour.
+            const c = current as unknown as { type?: string; source?: string; system_reason?: string };
+            if (c.type === 'todo' && c.source === 'system' && c.system_reason === 'reconcile_needed') {
+              const fileKeys = [...new Set((patched.file_keys as string[] | undefined) ?? [])].sort();
+              const featureLink = patched.feature_link as string | undefined;
+              const owner = featureLink
+                ? (this.get(featureLink) as (DurableRecord & { slug?: string; title?: string }) | undefined)
+                : undefined;
+              const text = buildReconcileText(
+                owner
+                  ? { type: owner.type as 'feature_article' | 'reference_material', slug: owner.slug, title: owner.title }
+                  : { type: 'feature_article', slug: featureLink },
+                fileKeys
+              );
+              return { ...patched, file_keys: fileKeys, text };
+            }
+            return patched;
+          },
           {},
-          { allowRetired: true }
+          { allowRetired: true, suppressReconcilePrune: true }
         );
       }
     });
-    return rows.length;
+    return count;
   }
 
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
@@ -3475,54 +3560,12 @@ export class SterlingStore {
     return this.hydrateAll([stored as DurableRecord])[0];
   }
 
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId: string, summaries: NonNullable<RunRecord['summaries']>): RunRecord {
-    const run = this.getRun(runId);
-    if (!run) throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== 'completing') {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' — disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: 'awaiting_merge_gate', summaries });
-    this.tx(() => {
-      const res = this.db
-        .prepare('UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?')
-        .run(next.machine_state, JSON.stringify(next), new Date().toISOString(), runId, 'completing');
-      if (res.changes === 0) throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare('DELETE FROM handoffs WHERE run_id = ?').run(runId);
-      this.db.prepare('DELETE FROM check_skipped WHERE run_id = ?').run(runId);
-    });
-    return next;
-  }
-
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId: string): void {
-    const run = this.getRun(runId);
-    if (!run) throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== 'rejected' && run.machine_state !== 'merged') {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal — rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare('DELETE FROM handoffs WHERE run_id = ?').run(runId);
-      this.db.prepare('DELETE FROM check_skipped WHERE run_id = ?').run(runId);
-    });
-  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
 
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check: string, reason: string, runId: string | undefined, at: string): void {
@@ -3536,10 +3579,13 @@ export class SterlingStore {
       this.db
         .prepare('INSERT INTO check_skipped (run_id, check_name, reason, at) VALUES (?, ?, ?, ?)')
         .run(runId ?? null, check, reason, at);
-      // Run-scoped rows are disposed with the run (disposeRunRows). NULL-run rows
-      // (direct-mode knowledge_create/board_remove) have no disposal event, so cap
-      // them like queue_drain_log — else they accrete unbounded (audit finding
-      // 30/43, P4). Keep the 50 newest NULL-run rows as the audit tail.
+      // A runId is always undefined now — the run/handoff protocol (and its
+      // disposeRunRows disposal event) was removed per decision
+      // sterling-claude-code-scale-down-boundary (2ad87dd1), so every row is
+      // this NULL-run "direct-mode" shape (knowledge_create/board_remove
+      // callers). These rows have no disposal event, so cap them like
+      // queue_drain_log — else they accrete unbounded (audit finding 30/43,
+      // P4). Keep the 50 newest NULL-run rows as the audit tail.
       if (!runId) {
         this.db
           .prepare(
@@ -3609,7 +3655,7 @@ export class SterlingStore {
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
    */
   enqueueRefreshReferenceOnce(nowISO: string): void {
     const pending = this.query({ types: ['todo'], cap: 200 }).filter(

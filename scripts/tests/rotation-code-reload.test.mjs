@@ -6,7 +6,7 @@
 // scripts/tests/hooks-full.test.mjs (rotation-note + H1 restore ACs) and
 // scripts/tests/update.test.mjs (runUpdate over an injected exec).
 //
-// Anti-pattern ee89c3fd caution observed throughout: child-process stderr is
+// Anti-pattern foreign_ee89c3fd caution observed throughout: child-process stderr is
 // flattened to one line (flat()) before it is interpolated into any assertion
 // message.
 

@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // PIN GROUP B — migration preflight report (stable-identity wave S1,
-// decision stable-identity-design-v2 / 2176748e, board dee719dd). SPEC-ONLY:
+// decision stable-identity-design-v2 / foreign_2176748e, board dee719dd). SPEC-ONLY:
 // scripts/migration-preflight.mjs DOES NOT EXIST YET. Every test below
 // spawns it as a child process; until the file exists, node itself refuses
 // to run it (a MODULE_NOT_FOUND-shaped failure printed to stderr, non-zero

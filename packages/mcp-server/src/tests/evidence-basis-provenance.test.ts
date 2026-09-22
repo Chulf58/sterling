@@ -8,7 +8,7 @@
 // PROVENANCE RULE this dispatch asks to pin through the MCP tool surface.
 //
 // RESOLVED 2026-08-22 BY DEBUGGER ADJUDICATION (no product defect; the
-// original draft's refusal guess for AC3(a) was wrong): decision e09b2afc's
+// original draft's refusal guess for AC3(a) was wrong): decision foreign_e09b2afc's
 // own rationale states, verbatim, "No cross-field constraint (measured_by
 // without evidence_basis is legal): over-constraining optional metadata
 // trains omission." AC3(a) is a PERMISSIVE pin, not a refusal: writing
@@ -81,7 +81,7 @@ function mkResearchFindingFields(overrides: Loose = {}): Loose {
 // AC3(a) — evidence_basis:'measured' WITHOUT measured_by SUCCEEDS by design
 // ===========================================================================
 
-test("AC3(a) decision: evidence_basis:'measured' WITHOUT measured_by SUCCEEDS by design (decision e09b2afc: no cross-field constraint), both fields round-trip as given", () => {
+test("AC3(a) decision: evidence_basis:'measured' WITHOUT measured_by SUCCEEDS by design (decision foreign_e09b2afc: no cross-field constraint), both fields round-trip as given", () => {
   const { tools, cleanup } = harness();
   try {
     const created = tools.knowledgeCreate(
@@ -91,7 +91,7 @@ test("AC3(a) decision: evidence_basis:'measured' WITHOUT measured_by SUCCEEDS by
     assert.equal(
       created.record.status,
       'active',
-      "EXPECTED GREEN (decision e09b2afc: \"No cross-field constraint (measured_by without evidence_basis is legal): over-constraining optional metadata trains omission\"): 'measured' without measured_by is a legal, permitted write"
+      "EXPECTED GREEN (decision e09b2afc: \"No cross-field constraint (measured_by without evidence_basis is legal): over-constraining optional metadata trains omission\"): 'measured' without measured_by is a legal, permitted write" // not-a-citation: fixture id
     );
     assert.equal(created.record.evidence_basis, 'measured');
     assert.equal(created.record.measured_by, undefined, 'measured_by was never supplied and is not synthesized or required');

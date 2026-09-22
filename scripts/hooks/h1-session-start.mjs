@@ -4,10 +4,9 @@
 // invisible; this is its visibility pressure. Banner art goes to stderr
 // (adjudicated 2026-06-12): a SessionStart hook sees no CLI flags or pipe
 // state, so suppression is env-only (STERLING_NO_BANNER=1).
-import { randomUUID, createHash } from 'node:crypto';
-import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync, realpathSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { readFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readStdin, allow, exitAfterWrite, openStore, loadConfig } from './lib/common.mjs';
@@ -25,13 +24,13 @@ import {
 } from './lib/plan-lock.mjs';
 import { probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { withRegisterLock, readRegister, registerPath, sessionBoundarySweep } from '../lib/dispatch-register.mjs';
-import { classifyLedgerEntry, readLedger } from './lib/review-ledger-entry.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { renderUnavailable } from './lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './lib/undeclared-source-scan.mjs';
 import { ProjectRegistry, registryPath } from '@sterling/store';
 import { buildIdPath, runtimeMarkerPath, runtimeMarkerSchema, stalenessVerdict } from '@sterling/schemas';
 import { parseInstalledHeader, extractBakedCommandPaths, isLocallyModified, loadRegistry, sha256 } from '../lib/agent-distribution.mjs';
+import { gitTouches, writeInitialGitSettled } from './lib/settlement.mjs';
 
 // IN-FLIGHT DISPATCH REGISTER DELETION — COOPERATING WRITER (decision
 // register-writers-cooperating-lock, 1e0ba0d0). H1 is a register writer like
@@ -100,66 +99,34 @@ async function deleteRegisterUnderLock(cwd) {
   }
 }
 
-// Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): the
-// delegation bullet below states config.delegation.max_concurrent, never a
-// hardcoded literal — a same-day ruling on this machine (5 → 15) was
-// re-injected as the stale "FIVE" the next session, which is exactly the
-// drift a config-driven number closes. Absent config → shipped default 5.
-function conventions(maxConcurrent) {
-  return [
-    'Sterling conventions (injected by H1):',
-    '- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don\'t know, checking" and check.',
-    '- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.',
-    '- Canonical naming: one name per concept, from the registries; phase execution, intake, steps — kill synonyms on sight.',
-    // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
-    // reach every project at its next session start with no per-project copy and no
-    // stamp-contract propagation — the same reason the todo/queue routing lines live on
-    // the commands. Stated because the user was otherwise re-declaring them per project.
-    // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
-    // rule read "3-5 active at all times" in a consuming project and the user withdrew it
-    // within a day — "i am afraid that a session will feel force to spend up subagents even
-    // if they see necessary" — and the same concern was raised again here on 2026-07-29:
-    // "i am afraid that the conductor feel force to dispatch subagents without any value,
-    // for the sake of just doing it to keep the claude.md happy". Leading with "up to N"
-    // reads as a target; leading with the ceiling reads as a limit. Both halves of the
-    // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
-    // because a rule that only pushes one way is the rule that produced the fear.
-    `- Delegation: ${maxConcurrent} concurrent subagents is a CEILING, not a target — there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real — speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice — it fills the session's scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.`,
-    '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind — being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" — it is the conductor reading files by hand that an agent should have read for it.',
-    // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
-    // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
-    // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
-    // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
-    '- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS — an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise — adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch — hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent\'s claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor\'s attention spent where it should not be (decision 677f1639).',
-    // Slice ordering (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22): the
-    // stable-identity campaign ran its critical path single-file for hours with free seats while
-    // later slices' independent pieces were already dispatchable — the user had to interrupt
-    // to demand the frontier be widened. This states WHAT TO PICK; 677f1639 above states WHEN
-    // to check. Sharpened by an external-model (Codex) consult, adjudicated: pure unlock-count
-    // starved risky-but-low-unlock proof slices and mandatory low-unlock slices, and re-picking
-    // on every freed seat could interrupt coherent in-flight work for no reason.
-    '- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement — a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) — never disturb coherent in-flight work just because a seat freed. The frontier — ready work across the board, the maintenance queue, and future slices\' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice\'s commit boundary) — must GROW while an objective\'s slice list is still expanding; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies — a free seat alone never implies dispatch (the quota pathology stays forbidden).',
-    // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
-    // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
-    // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
-    // results default to a digest receipt), but the dispatch shape stands: drafting a
-    // slice's reconciles still spends conductor attention per write, and the librarian
-    // batches them off the critical path. Drafting stays with the conductor.
-    '- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text — the librarian never authors knowledge — then BATCHES the slice\'s drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 — the old ~50KB full-record echo is opt-in via projection:\'full\' — so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor\'s next work — never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).',
-    '- The Workflow tool stays OPT-IN and needs the user\'s explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting — its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.',
-    // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
-    // stops were rejected verbatim ("demands attention all the time"); the three subagent
-    // purposes are the user's own words. Ships here so every project gets it next session.
-    '- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended — never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure → rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor\'s context window (decision aac19532).',
-    // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
-    // the rationale lives in the store (decision + the paired-exploration research_finding), and
-    // conventions injected on every session stay short to stay read.
-    '- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user\'s prior agreement for that specific spawn — and never a silent inherit of the session model.',
-    '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself — measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.',
-    '- CODEX (sparring partner) IS THE DEFAULT for repo-grounded read-only work AND code review: the DEFAULT independent reviewer on every significant code-touching diff, beside the mandatory roster reviewer (an outside model family catches shared-blind-spot defects a same-family reviewer cannot); and the DEFAULT ENGINE for repo-grounded read-only investigation (diagnosis, subsystem reading, bypass hunting) since it reads the repo itself in its own sandbox at zero marginal cost. THE DIVIDING LINE: repo-grounded READ-ONLY work goes to Codex; implementation and writes NEVER do (Codex runs outside the entire hook enforcement surface); store/KB-context work stays on Claude agents (Codex has no knowledge tools). On a plan-cap hit, fall back to a Claude dispatch and say so. ADVISORY, NEVER GATING — it never writes and disagreement never blocks work (decision codex-preferred-for-read-shaped-analysis).',
-    '- QUESTION DISCIPLINE: every decision put to the user goes through the AskUserQuestion tool form — a question asked in prose (even a numbered section) reads as rhetorical and gets missed (user-stated 2026-08-11). Ask ONE highest-leverage question through that form; consolidate the CONSIDERATIONS into that single question, never several questions into one form. When a prompt may time out unanswered, prefer the safe default and proceed unattended, disclosing the assumption — but ONLY for a REVERSIBLE choice needing no user authorization, and NEVER for a gate/grill decision, which is re-asked or waited out instead (user, 2026-07-02).',
-    '- SOLVE, DON\'T BOARD: for findings INSIDE the current task\'s scope or an already-selected board item, evaluate and fix in-session; board only what genuinely cannot be done now, saying why — many smells dissolve on two minutes of checking (user-stated 2026-07-27). UNRELATED findings are surfaced for the user\'s disposition, never fixed inline (surface smells, don\'t fix them). Small board items get NO per-item slice ceremony: fix directly, one commit per task, one review pass (user-decided 2026-08-21).',
-  ].join('\n');
+// CONDUCTOR CONTRACT INJECTION (slice 3, objective sterling-takeover-2026-09,
+// board d0f3647a). Replaces the ~11KB "Sterling conventions" block that
+// restated CLAUDE.md prose from a hardcoded array of strings (compare git
+// history above this line) — the conventions/posture text now lives ONCE, in
+// docs/conductor-contract.md, and H1 injects its bytes verbatim rather than a
+// second, drifting copy. Read from the CLONE (pluginRoot()), never from the
+// project cwd: the contract is Sterling's own working posture, ships with the
+// plugin, and must reach every project the same way CLAUDE.md's conduct rules
+// do — no per-project copy, no stamp-contract propagation.
+// FAILS LOUD, NEVER SILENTLY EMPTY (P5): a missing/unreadable/empty file
+// renders a one-line CONDUCTOR CONTRACT UNAVAILABLE notice instead of quietly
+// contributing nothing to the injection, which would look like "no posture to
+// state" rather than "the file could not be read".
+function conductorContractBlock() {
+  const root = pluginRoot();
+  if (!root) {
+    return 'CONDUCTOR CONTRACT UNAVAILABLE (H1): the Sterling plugin root could not be resolved, so docs/conductor-contract.md could not be read. The conductor has no posture contract this session.';
+  }
+  const contractPath = join(root, 'docs', 'conductor-contract.md');
+  try {
+    const text = readFileSync(contractPath, 'utf8');
+    if (!text.trim()) {
+      return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} exists but is empty. The conductor has no posture contract this session.`;
+    }
+    return text;
+  } catch (e) {
+    return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} could not be read (${e?.code ?? e?.message ?? e}). The conductor has no posture contract this session.`;
+  }
 }
 
 // swappable art slot (§6 H1): fixed-width ≤40 cols, fits the 35% split pane
@@ -202,7 +169,7 @@ function paint(rows) {
  *  walk-up that works from scripts/hooks/ (source, tests) and hooks/ (bundle).
  *
  *  WALK-UP FIRST; THE ENV SEAM IS CONSULTED ONLY WHEN THE WALK-UP FINDS NO
- *  PLUGIN TREE (decision 95c2c109 F2's shape, extended from H15 to H1 by board
+ *  PLUGIN TREE (decision foreign_95c2c109 F2's shape, extended from H15 to H1 by board
  *  fb7c43fb N-3). This ordering is the security property, not a preference:
  *  every consumer of this root READS CODE from it (plugin.json, the agent
  *  template registry), RESOLVES THE SERVER against it, and — sharpest —
@@ -222,7 +189,7 @@ function pluginRoot() {
 /** The walk-up alone — never the env seam, not even as a last resort. Used
  *  where the root is about to be PRINTED AS A COMMAND (the receipt remedy
  *  below): an env-supplied value is agent-influenceable under the threat model
- *  decision 95c2c109 F2 closed in H15, so the paste-ready line must come from
+ *  decision foreign_95c2c109 F2 closed in H15, so the paste-ready line must come from
  *  the running hook's own location only, and an unresolvable walk-up prints the
  *  placeholder rather than falling back to anything. */
 function walkUpPluginRoot() {
@@ -294,195 +261,37 @@ function computeH1DeadDispatchResidue(cwd, source) {
   return lines;
 }
 
-/**
- * SURVIVING REVIEW RECEIPTS (decision review-ledger-receipt-expiry, 0408b295;
- * board 09e03d76). A receipt still sitting in .sterling/review-ledger.json at
- * SessionStart is one that OUTLIVED the session that earned it — the exact
- * shape scripts/commit-reviewed.mjs now refuses to stamp (foreign session_id
- * or branch: disclosed, never silently spent). Withholding the stamp without
- * this report would just move the leak: the receipt would sit there unspendable
- * and invisible. This is the surface that names it.
- *
- * READ-ONLY, deliberately: H1 wipes the transient registers but NEVER the
- * ledger. A receipt is real reviewer evidence, and deciding it is worthless is
- * a human judgement — the ledger's survival across the session boundary is the
- * whole point of it living at the store root (decision review-receipt-ledger).
- * Age-independent for the same reason the dead-dispatch residue above is: at a
- * session boundary EVERY receipt present is by construction from an earlier
- * session, so there is no TTL to wait out. Pure filesystem, fail-open.
- */
-/** Sanitize ONE receipt-derived value before it is interpolated into
- *  additionalContext (Codex review, MEDIUM). A ledger entry is JSON on disk and
- *  every field in it is arbitrary: a newline-bearing agent_type, session_id,
- *  branch or file path would inject VERBATIM LINES into a block the model reads
- *  as H1's own prose — a value forging the surface that reports it. Control
- *  characters (newlines included) collapse to a space and the result is clamped,
- *  so one hostile or corrupt field can neither counterfeit a line nor flood the
- *  injection. Callers have already narrowed to a non-empty string, so this never
- *  calls String() on an arbitrary value (the {toString:null} throw class). */
-const RECEIPT_FIELD_CLAMP = 120;
-function safeReceiptField(v) {
-  if (typeof v !== 'string') return '';
-  // Code-point filter rather than a control-character regex class: it states
-  // the ranges as numbers (no escape sequence to get subtly wrong, and no
-  // literal control character in the source), and it covers C0 — LF and CR
-  // included, which is the whole point, a newline is what fabricates a line — plus
-  // DEL and the C1 block some terminals still act on.
-  const cleaned = [...v]
-    .map((ch) => {
-      const c = ch.codePointAt(0);
-      return c < 0x20 || c === 0x7f || (c >= 0x80 && c <= 0x9f) ? ' ' : ch;
-    })
-    .join('')
-    .trim();
-  return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}…(truncated)` : cleaned;
-}
-
-// R1 REBUILD: reads through the shape owner's classifyLedgerEntry/readLedger
-// (scripts/hooks/lib/review-ledger-entry.mjs) instead of re-parsing the
-// ledger by hand. A survivor is a receipt/legacy entry that is neither
-// discharged (already adjudicated — reporting it forever would re-open a
-// settled decision) nor consumed (already spent, working as designed) nor an
-// external_review entry (never spendable, never un-consumed). RESERVED
-// entries ARE survivors — a crashed/interrupted commit-reviewed run leaves
-// exactly this shape, and saying nothing at the one session boundary a human
-// could act on is the state nobody recovers from — but they carry the
-// `reconcile` remedy, never `discharge` (which refuses a reserved entry
-// outright). MALFORMED entries are NEVER silently dropped either (RW-6): an
-// entry classifyLedgerEntry refuses is unspendable AND undischargeable
-// (discharge/reconcile both need parsed facts this entry does not have), so
-// silence would leave it in the ledger forever while H1 reports nothing
-// survives — and the ledger is agent-writable, so a corrupted key becomes the
-// cheapest way to hide a receipt from the one surface that reports them. It
-// gets its own disclosure line (renderMalformedLine below), never the ordinary
-// receipt line, and never either remedy.
-function renderSurvivorLine(survivor) {
-  const isLegacy = survivor.kind === 'legacy';
-  const legacy = isLegacy ? survivor.legacy : null;
-  const receipt = isLegacy ? null : survivor.receipt;
-  const startStr = isLegacy ? legacy.at : receipt.started_at;
-  const finishedStr = isLegacy ? null : receipt.finished_at;
-  const startMs = typeof startStr === 'string' ? Date.parse(startStr) : NaN;
-  // PREFER THE COMPLETION INSTANT, same bounded logic as commit-reviewed's
-  // staleness advisory (useCompleted): the dispatch instant reads
-  // artificially fresh for a long review. finished_at is the honest
-  // review-END moment when present — but only trusted inside [at, now]: an
-  // out-of-range value (ending before it started, or in the future) is
-  // untrusted and this silently falls back to the start instant, exactly
-  // like commit-reviewed's clamp. Fail-open: a missing/unparseable value on
-  // either side degrades toward whichever side still parses, never throws.
-  const rawCompletedMs = typeof finishedStr === 'string' ? Date.parse(finishedStr) : NaN;
-  const nowMs = Date.now();
-  const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
-  const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
-  const useCompleted = !Number.isNaN(completedMs);
-  const recordedAt = useCompleted ? completedMs : startMs;
-  // Same 'X.Xh' convention as commit-reviewed's staleness advisory, so one
-  // receipt reads identically on both surfaces.
-  const age = Number.isNaN(recordedAt) ? 'age unknown (no usable timestamp)' : `${((nowMs - recordedAt) / 3_600_000).toFixed(1)}h old`;
-  const e = isLegacy
-    ? { agent_type: legacy.agent_type, session_id: legacy.session_id, branch: legacy.branch, files: legacy.files }
-    : { agent_type: receipt.reviewer?.agent_type, session_id: receipt.identity?.session_id, branch: receipt.identity?.branch, files: receipt.territory?.files };
-  // EVERY receipt-derived string below goes through safeReceiptField before it
-  // reaches the injected block — agent_type, session_id, branch and file paths
-  // alike. A field that sanitizes down to empty is treated as absent, so a
-  // control-character-only value cannot smuggle in a blank label either.
-  const type = safeReceiptField(e.agent_type) || 'unknown reviewer';
-  const session = safeReceiptField(e.session_id);
-  const branch = safeReceiptField(e.branch);
-  const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(', ');
-  const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
-  // R1-C81: a LEGACY (v1) entry is NAMED as such and carries the exact
-  // discharge handle — a v1 entry has no entry_id, so --entry-id cannot
-  // address it and the handle exists nowhere else on disk.
-  const label = isLegacy ? 'LEGACY ' : '';
-  const handleSuffix = isLegacy ? `; discharge handle: ${legacy.handle}` : '';
-  // R1-C82: a RESERVED entry is flagged distinctly so its paragraph (below)
-  // reads as "this one needs reconcile, not discharge" rather than a generic
-  // survivor line.
-  const reservedSuffix = !isLegacy && receipt.status === 'reserved' ? ' [RESERVED — mid-spend, see reconcile below]' : '';
-  return `- ${label}${type} — ${age}${origin ? ` (earned in ${origin})` : ' (no recorded session/branch — a pre-expiry receipt)'}${files.length ? `; files: ${files.slice(0, 5).join(', ')}` : ''}${handleSuffix}${reservedSuffix}`;
-}
-
-// RW-6: an entry classifyLedgerEntry refuses (row.kind === 'malformed') gets
-// its OWN line — never the ordinary survivor line, which would offer a
-// discharge/reconcile remedy the entry cannot actually take (both address an
-// entry through PARSED facts this one does not have; printing either sends
-// the operator at a guaranteed refusal, the same defect RW-1 exists for in
-// its other spelling). The entry_id names the row when the raw JSON still
-// carries one as a string (the common case: one field failed validation,
-// the rest of the shape is intact) — otherwise (not-an-object, or a shape so
-// broken entry_id itself never parsed) the row's own index into rawEntries is
-// the only stable locator left. facts.field/reason is the owner's own,
-// code-controlled label for which key failed — never ledger content, so no
-// sanitization gap, but it is routed through safeReceiptField anyway for the
-// same defense-in-depth the rest of this file applies.
-function renderMalformedLine(row, rawEntries) {
-  const raw = rawEntries[row.index];
-  const rawId = typeof raw?.entry_id === 'string' ? safeReceiptField(raw.entry_id) : '';
-  const id = rawId || `index ${row.index}`;
-  const field = safeReceiptField(row.facts?.field ?? row.facts?.reason ?? '') || 'unknown';
-  return render(
-    disclosure(
-      'ledger_entry_malformed',
-      row.facts ?? {},
-      `H1: ledger entry ${id} is unreadable — the shape owner refuses it (offending field: ${field}); no automated command can address it. Open .sterling/review-ledger.json and inspect this entry yourself.`
-    )
-  );
-}
-
-function reviewReceiptLines(cwd) {
-  const { availability, entries, rawEntries } = readLedger(cwd);
-  if (availability !== 'ok') return { survivors: [], hasReserved: false, malformed: [] };
-  const survivors = [];
-  const malformed = [];
-  let hasReserved = false;
-  for (const row of entries) {
-    // DISCHARGED RECEIPTS ARE NOT SURVIVORS (decision 57984926 §3): already
-    // adjudicated, with an accountable reason recorded IN the entry.
-    // EXTERNAL REVIEW ENTRIES ARE NOT SURVIVING RECEIPTS (decision 57984926
-    // §4): never spendable, so never un-consumed either. A CONSUMED receipt
-    // has already been spent successfully — working as designed, not debt.
-    if (row.kind === 'external_review') continue;
-    if (row.kind === 'malformed') {
-      malformed.push(renderMalformedLine(row, rawEntries));
-      continue;
-    }
-    if (row.kind === 'legacy') {
-      if (row.legacy.status === 'discharged') continue;
-      survivors.push({ kind: 'legacy', legacy: row.legacy });
-      continue;
-    }
-    const receipt = row.receipt;
-    if (receipt.status === 'discharged' || receipt.status === 'consumed') continue;
-    if (receipt.status === 'reserved') hasReserved = true;
-    survivors.push({ kind: 'receipt', receipt });
-  }
-  return { survivors: survivors.map(renderSurvivorLine), hasReserved, malformed };
-}
-
 const input = readStdin();
 
-// CURRENT-SESSION MARKER (decision review-ledger-receipt-expiry, 0408b295).
-// SessionStart is the ONE moment the platform hands Sterling a session_id at a
-// known point in a session's life. scripts/commit-reviewed.mjs is a bare CLI —
-// no hook stdin, no injected env — so without this cell it cannot tell whether
-// a review receipt was earned in THIS session or an earlier one, and receipt
-// expiry has nothing to compare against. A latest-value cell keyed by session
-// and superseded by the next SessionStart (the shape H10's pressure/gauge/
-// delegation markers already use): P4 by supersession, never by a remembered
-// cleanup step. Gated on .sterling/config.json's EXISTENCE, the same gate H22
-// uses, so H1 never creates a store directory in a non-Sterling project (P1).
-// Fail-open: a failed write costs only expiry precision — commit-reviewed then
-// reads no marker, cannot judge session identity, and treats every receipt as
-// unjudgeable-hence-eligible, i.e. exactly the pre-expiry behavior.
+// H10's missing-snapshot policy intentionally yields no git candidates. Seed
+// before startup/clear work begins, so only post-start edits reach first Stop.
+// The exclusive writer makes an existing (or racing) snapshot immutable here.
+if (input.source === 'startup' || input.source === 'clear') {
+  try {
+    const git = gitTouches(input.cwd, new Date().toISOString());
+    if (git.ok) writeInitialGitSettled(input.cwd, git.next);
+  } catch {
+    // Non-git projects and failed probes are silently skipped by design.
+  }
+}
+
+// CURRENT-SESSION MARKER. SessionStart is the ONE moment the platform hands
+// Sterling a session_id at a known point in a session's life. This latest-
+// value cell is read by scripts/lib/dispatch-register.mjs's readSessionId
+// (the shape H10's pressure/gauge/delegation markers already use): P4 by
+// supersession, never by a remembered cleanup step. Originally written for
+// scripts/commit-reviewed.mjs's now-deleted receipt-expiry check; it survives
+// because dispatch-register.mjs's inFlightAdvisory (consumed by the surviving
+// build-hooks.mjs / check-projection-fresh.mjs) still reads it as the
+// session_id for its own in-flight-dispatch filtering when the caller has no
+// session of its own — removing the writer would silently widen those two
+// scripts from session-scoped to NO-SESSION-JOIN mode. Gated on
+// .sterling/config.json's EXISTENCE, the same gate H22 uses, so H1 never
+// creates a store directory in a non-Sterling project (P1). Fail-open: a
+// failed write costs only that advisory's session precision.
 //
-// PUBLISHED ATOMICALLY (tmp + rename, the primitive both ledger writers already
-// use — Codex review, MEDIUM). A bare writeFileSync can be read TORN by a
-// concurrent scripts/commit-reviewed.mjs; its JSON.parse then fails, the
-// identity channel goes dark, and a PRESENT-FOREIGN receipt stamps — the exact
-// outcome receipt expiry exists to prevent, reached through a race rather than
-// through a missing field. rename() on the same filesystem is atomic, so a
+// PUBLISHED ATOMICALLY (tmp + rename). A bare writeFileSync can be read TORN
+// by a concurrent reader; rename() on the same filesystem is atomic, so a
 // reader sees either the previous marker or this one, never half of one. The
 // pid in the staging name keeps two concurrent SessionStarts from clobbering
 // each other's tmp file.
@@ -498,11 +307,9 @@ try {
     renameSync(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
-  // fail-open — never break SessionStart for a marker (P1). But a PREVIOUS
-  // session's marker surviving a failed write is stale positive evidence: it
-  // would make every receipt promoted THIS session read as foreign and hard-
-  // refuse the commit gate on a false premise. Absence is the honest state —
-  // commit-reviewed then cannot judge session identity and stays eligible.
+  // fail-open — never break SessionStart for a marker (P1). A PREVIOUS
+  // session's marker surviving a failed write is stale positive evidence, so
+  // absence is the honest state on any failure.
   // recursive AS WELL AS force: `force` suppresses ENOENT only, so a marker
   // path occupied by a non-empty DIRECTORY (a corrupted tree, a botched manual
   // fix) would survive every cleanup AND block every future write — permanently
@@ -527,85 +334,7 @@ const dispatchResidueLines = (() => {
     return [];
   }
 })();
-const receiptLines = (() => {
-  try {
-    return reviewReceiptLines(input.cwd);
-  } catch {
-    return { survivors: [], hasReserved: false, malformed: [] };
-  }
-})();
-// THE REMEDY PRINTS THE RESOLVED CLONE PATH, NOT A PLACEHOLDER (decision
-// 95c2c109, MEDIUM a): `<clone>` is outside H15's sanctionable word syntax, so
-// a conductor pasting the line as printed was DENIED — the sanctioned route was
-// on the allowlist while the displayed command still could not run (the other
-// half of anti_pattern 43bebe5c). H1 knows its own clone: pluginRoot() is the
-// same walk-up the rest of this hook trusts. Forward slashes keep the word
-// inside H15's syntax on WSL/Linux; on native Windows the drive colon still
-// falls outside it — the disclosed parity item in sanctioned-provenance.mjs,
-// not solved here. Unresolvable root → a placeholder that SAYS it is one,
-// never a fabricated path. TWO FENCES (security review + Codex, 2026-09-05):
-// the root comes from walkUpPluginRoot(), never pluginRoot() — which prefers
-// the same walk-up but still falls back to the seam when no plugin tree sits
-// above this hook, and STERLING_PLUGIN_ROOT is agent-influenceable under the
-// threat model F2 closed in H15; a remedy pointing at a foreign tree is one
-// H15 then refuses,
-// which recreates the very "printed remedy cannot run" defect this fixes; and
-// a root outside H15's own sanctionable word syntax (no `;`, newline, backtick,
-// `$` or space) is never echoed into a paste-ready command — the placeholder
-// prints instead.
-const REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
-const remedyClone = (() => {
-  try {
-    const r = walkUpPluginRoot();
-    if (!r) return null;
-    const posix = String(r).split('\\').join('/').replace(/\/+$/, '');
-    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
-  } catch {
-    return null;
-  }
-})();
-const receiptContext = receiptLines.survivors.length
-  ? `\n\nSURVIVING REVIEW RECEIPTS (H1): ${receiptLines.survivors.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json — earned by a reviewer dispatch that ended, but never stamped into a commit.\n` +
-    receiptLines.survivors.join('\n') +
-    `\nA receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) — its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.\n` +
-    // THE REMEDY MUST BE THE SANCTIONED ONE. This used to say "remove it by
-    // hand", which is (a) DENIED — H15 seals .sterling/ from the shell, so the
-    // conductor cannot take that route, the same "sanctioned recovery route
-    // unreachable by its operator" shape decision 1434cd54 Ruling 2 records —
-    // and (b) destructive: a hand-edit destroys the evidence decision 57984926
-    // promises to preserve, records no disposition, and races the discharge
-    // verb's atomic locked replace. A hook that prints a denied remedy
-    // manufactures a workaround. `scripts/review-ledger.mjs` is a
-    // SANCTIONED_SCRIPTS entry as of the same slice, so the route below actually
-    // runs. ONE TEXT FOR BOTH LEDGER SHAPES (v1 and v2 share this report path):
-    // a wording fix applied to one shape would leave the other — the v1
-    // receipts, which decision 57984926 keeps alive on purpose — still printing
-    // the denied remedy.
-    `Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):\n` +
-    `  node ${remedyClone ?? '<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>'}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"\n` +
-    `A LEGACY v1 receipt (no schema_version) has no entry_id — select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` +
-    // R1-C82: a RESERVED entry (a crashed/interrupted commit-reviewed spend)
-    // is NEVER offered the discharge remedy — discharge refuses a reserved
-    // entry outright ([entry_not_active]), so printing it here would send the
-    // operator at a guaranteed refusal. `reconcile` either finalizes it
-    // against the commit that actually landed or releases it back to active.
-    (receiptLines.hasReserved
-      ? `\nOne or more of the receipts above are RESERVED (mid-spend, marked above): discharge refuses a reserved entry outright — the remedy is\n` +
-        `  node ${remedyClone ?? '<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>'}/scripts/review-ledger.mjs reconcile\n`
-      : '')
-  : '';
-// RW-6: an entry the shape owner REFUSES is NEVER silently dropped from this
-// report — it is unspendable AND undischargeable (both remedies above need
-// parsed facts this entry does not have), so silence would leave it in the
-// ledger forever while this surface says nothing survives, and the ledger is
-// agent-writable — a single corrupted key is otherwise the cheapest way to
-// hide a receipt from the one place that reports them. INDEPENDENT of the
-// survivors block above: a ledger can hold zero survivors and one malformed
-// row, or both at once.
-const malformedContext = receiptLines.malformed.length
-  ? `\n\nMALFORMED REVIEW LEDGER ENTRIES (H1): ${receiptLines.malformed.length} entry(ies) in .sterling/review-ledger.json do not parse as any recognized shape (receipt, external review, or legacy). Neither the discharge nor the reconcile command above can address one of these — both need parsed facts a malformed entry does not have — so open the file and inspect each one named below directly:\n` +
-    receiptLines.malformed.join('\n')
-  : '';
+
 // PLAN LOCK — RUN BEFORE EVERY EARLY RETURN, and this position is the whole
 // point (review F2). The section is the authority over what this session may
 // take on, and it CONSUMES three one-shot markers; running it after the
@@ -630,18 +359,16 @@ const store = openStore(input.cwd);
 if (!store) {
   // The receipt report rides this early exit too: H22's ledger gate is
   // .sterling/config.json (not sterling.db), so a project with a config but no
-  // initialized store CAN accumulate receipts — reporting them only on the
-  // store-present path below would leave exactly those projects silent.
   // The PLAN LOCK section rides this early exit too, leading as it does on the
   // main path: a project can hold an approved plan before its store exists, and
   // a section computed but never emitted would consume its one-shot markers
   // silently — disclosing nothing while spending the disclosure.
-  if (planLockContext || dispatchResidueLines.length || receiptContext || malformedContext) {
+  if (planLockContext || dispatchResidueLines.length) {
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: planLockContext + dispatchResidueLines.join('\n\n') + receiptContext + malformedContext,
+          additionalContext: planLockContext + dispatchResidueLines.join('\n\n'),
         },
       })
     );
@@ -652,7 +379,7 @@ if (!store) {
   // must still get it HERE, on this early exit, or its register accumulates
   // forever and every startup re-reports the same residue without ever
   // wiping. UNCONDITIONAL (C6, correctness review) — this now matches the
-  // store-present call site below EXACTLY: decision ec9eacaa deletes the
+  // store-present call site below EXACTLY: decision foreign_ec9eacaa deletes the
   // in-flight dispatch register on EVERY source, resume included (an entry
   // can only ever defer a duty on behalf of an agent this NEW session cannot
   // observe), so a source-gated call here disagreed with that same-file
@@ -665,7 +392,7 @@ if (!store) {
 // deep-queue threshold, never the conventions injection, so this read is guarded
 // and falls back to the schema default rather than throwing. Contrast the gates
 // (H3/H5/H14/H15), which fail CLOSED on exactly this input — a hook that cannot
-// evaluate must deny only where denying is its job (anti_pattern e13f0fb5).
+// evaluate must deny only where denying is its job (anti_pattern foreign_e13f0fb5).
 let config = null;
 let configUnreadable = false;
 try {
@@ -704,7 +431,7 @@ if (config !== null && (typeof config !== 'object' || Array.isArray(config))) {
   configUnreadable = true;
 }
 
-// MACHINE ROLE (todo cabbc10f, decision a9b98b7d): stated ONLY when this
+// MACHINE ROLE (todo cabbc10f, decision foreign_a9b98b7d): stated ONLY when this
 // session's project IS a Sterling clone itself — comparing the normalized
 // input.cwd to pluginRoot(). Every OTHER Sterling project (a consumer of the
 // plugin, not a clone of it) never sees this line; it exists because the
@@ -732,7 +459,7 @@ try {
   // fail-open — a malformed config or unresolved plugin root costs only this line
 }
 
-// TDD / MUTATION-VERIFICATION POSTURE (decision 752caf98
+// TDD / MUTATION-VERIFICATION POSTURE (decision foreign_752caf98
 // tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): mechanizes
 // the "check what this machine is set to" instruction CLAUDE.md states in
 // prose by reading the LIVE per-project toggles at every SessionStart, rather
@@ -741,7 +468,7 @@ try {
 // applied (unlike the MCP server's parseConfig) — a project whose config
 // predates this toggle, or config === null on a malformed read, leaves
 // config?.tdd?.enabled undefined here. Undefined is treated as the
-// DOCUMENTED SCHEMA DEFAULT (both fields default true, decision 752caf98)
+// DOCUMENTED SCHEMA DEFAULT (both fields default true, decision foreign_752caf98)
 // rather than invented: only an explicit `false` reads as OFF. Positioned
 // immediately after roleContext in the output concatenation below. Guarded
 // like every other H1 read — H1 is soft, so a malformed config costs only
@@ -777,7 +504,7 @@ try {
   // fail-open — a malformed config costs only this line
 }
 
-// CLONE-CURRENCY SIGNAL (closes the gap decision be9168e8 surfaced and parked:
+// CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
 // behind"). Probes the CLONE at pluginRoot() — not this project — so every
 // session on the machine states whether Sterling is current. Throttle: the one
@@ -839,7 +566,7 @@ try {
           currencyWarning = `⚠ Sterling is ${behind} update(s) behind — double-click sterling-update.bat (or run /sterling:update), then restart the session. A /clear is NOT enough — MCP servers survive it, so EXIT AND RELAUNCH the Claude Code CLI. `;
           currencyContext =
             `\n\nSTERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. ` +
-            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse, decision e6240afe), ` +
+            `Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it — fast-forward-or-refuse), ` +
             `and remind them a session RESTART follows a successful update — that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
         }
       }
@@ -1288,7 +1015,7 @@ const dispatchResidueContext = dispatchResidueLines.length
     dispatchResidueLines.join('\n')
   : '';
 
-// IN-FLIGHT DISPATCH REGISTER (decision ec9eacaa): deleted UNCONDITIONALLY —
+// IN-FLIGHT DISPATCH REGISTER (decision foreign_ec9eacaa): deleted UNCONDITIONALLY —
 // every source, resume included. Unlike H10's other three registers there is no
 // debt to VERIFY and no source to gate on: an entry can only ever defer a duty
 // on behalf of an agent this NEW session cannot observe, which is exactly the
@@ -1309,92 +1036,26 @@ const dispatchResidueContext = dispatchResidueLines.length
 await deleteRegisterUnderLock(input.cwd);
 
 // GRAVESTONE — an unconditional `rmSync` of the conductor-attested enforcement
-// stamp (`.sterling/transient/enforcement-stamp.json`, decision 6e132e19) stood
+// stamp (`.sterling/transient/enforcement-stamp.json`, decision foreign_6e132e19) stood
 // here. DELETED 2026-08-30 (S4) by decisions h17-demotes-to-tripwire-with-
 // minimal-b-hash-list (78dc9bd6) and b-baseline-hash-list-concrete-design
 // (fe861066): the stamp/attestation apparatus is gone whole, so there is nothing
 // left at that path for H1 to reclaim.
-// NOT REPOINTED, AND THAT IS THE RULING, NOT AN OVERSIGHT (fe861066 D2). The
-// stamp's successor — the persistent (B) baseline hash list at
-// `.sterling/enforcement-baseline.json` — is deliberately NOT transient,
-// session-scoped state: cross-session (B) tamper detection is the one strict
-// improvement it buys, and a SessionStart that deleted (or rewrote) it would
-// bless whatever is on disk at session start and reproduce exactly the
-// session-bound coverage that made the stamp worthless. It is minted ONLY by the
-// conductor-gated clearer (scripts/enforcement-reconcile.mjs). H1 must never
-// touch it; pinned by scripts/tests/h1-session-residue.test.mjs.
-
-// LEAKED H17 PER-CALL TMPDIR RECLAMATION (board 2d4cf493). H17's Bash sweep
-// writes per-call transient records into os.tmpdir() — the (A) STATE record
-// `sterling-enforce-<tag>-<runId>-call-<key>.json`, the (B) content baseline
-// `…-call-<key>.baseline.json`, and the (A) attribution record `…-call-<key>.dirty.json`
-// — each consumed and unlinked by its OWN PostToolUse (P4). A Bash call whose
-// PostToolUse never fires (the subagent process was killed, the session died
-// mid-command) LEAKS its per-call file; and unlike H17's other transient state
-// these live OUTSIDE .sterling/ in the shared os.tmpdir(), so no .sterling sweep
-// above ever reaches them.
-//
-// WHY RECLAMATION LIVES HERE, NOT IN H17 (Codex approach C, outside-family
-// design review): H17 is the VERDICT-PRODUCING deny process, and it must do
-// ZERO extra work on the audited path — verdict isolation. An H17 exit-handler
-// sweep was built and REVERTED for exactly that reason (it made every audited
-// Bash call pay for cleanup of unrelated leaks, on the hottest enforcement
-// path). H1 produces no allow/deny verdict and is lifecycle-bound to the
-// SessionStart boundary (P4), so a bounded, best-effort sweep here costs an
-// enforcement decision nothing.
-//
-// SCOPED to THIS project's tag (H17's projectTag, matched verbatim); AGE-GATED
-// by a 1h TTL so a concurrent same-project session's in-flight Pre→Post files
-// (which are seconds apart) are NEVER reclaimed; CAPPED per run — the next
-// SessionStart continues. Best-effort: it never throws, never blocks, never
-// writes to stdout (H1's stdout is JSON-only), and never changes H1's exit —
-// failing open is correct here (cleanup, not enforcement).
-const PERCALL_TMP_TTL_MS = 60 * 60 * 1000; // 1 hour
-const PERCALL_TMP_SWEEP_CAP = 500;
-try {
-  // projectTag computed EXACTLY as H17's projectTag() (scripts/hooks/
-  // h17-bash-write-sweep.mjs) — sha256 of the realpath'd cwd, first 16 hex — so
-  // the tag matched here is byte-identical to the one H17 embedded in the leaked
-  // filenames. realpath so WSL/symlink aliasing cannot split the writer's tag
-  // from the sweeper's; a raw-path fallback exactly mirrors H17's own catch.
-  let tagRoot = input.cwd;
-  try {
-    tagRoot = realpathSync(input.cwd);
-  } catch {
-    // cwd unreadable — fall back to the raw path, exactly as H17's projectTag does
-  }
-  const projectTag = createHash('sha256').update(tagRoot).digest('hex').slice(0, 16);
-  // Anchored BOTH ends; `[\s\S]` (never `.`) for the arbitrary <runId> so a
-  // newline in a runId cannot escape the end anchor. The optional
-  // `.dirty`/`.baseline` token covers all THREE per-call shapes, and the 32-hex
-  // key pins the per-call record precisely — a shorter, non-hex, no-`-call-`, or
-  // non-`.json` near-miss is deliberately NOT matched (it is not a per-call
-  // record and may be unrelated tmpdir content). projectTag is 16 hex chars, so
-  // it is regex-inert and needs no escaping.
-  const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
-  const tmp = tmpdir();
-  const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
-  let removed = 0;
-  for (const name of readdirSync(tmp)) {
-    if (removed >= PERCALL_TMP_SWEEP_CAP) break;
-    if (!percallRe.test(name)) continue;
-    const p = join(tmp, name);
-    try {
-      if (statSync(p).mtimeMs >= cutoff) continue; // younger than the TTL — may belong to a live concurrent session
-      rmSync(p, { force: true });
-      removed++;
-    } catch {
-      // one un-statable/un-removable entry (e.g. a concurrent Post consumed it) never aborts the sweep (P1)
-    }
-  }
-} catch {
-  // fail-open — the tmpdir janitor must never break, block, or delay SessionStart (P1)
-}
+// UPDATED 2026-09-19 (scale-down, decision sterling-claude-code-scale-down-
+// boundary): the stamp's would-be successor — the persistent (B) baseline hash
+// list at `.sterling/enforcement-baseline.json` — and its ONLY writer,
+// `scripts/enforcement-reconcile.mjs`, are BOTH deleted whole (commit a83f5be,
+// "delete ... enforcement self-protection"). Nothing in this codebase mints,
+// reads or clears that path any more. H1 STILL never touches it if it happens
+// to exist on disk (a leftover from before this cut, or hand-planted) — not
+// because anything still depends on it, but because a SessionStart hook has no
+// business deleting a file it does not own the meaning of; pinned as a no-op
+// invariant by scripts/tests/h1-session-residue.test.mjs.
 
 // SESSION-BOUNDARY REGISTER RESIDUE (board f474df56): H10's transient registers
 // (touches / session-events / capture-nagged) are cleared by H10's terminal Stop
 // paths — but a session that dies without one (kill, deny-then-close, or the
-// capture-pending deferral's deliberate allow-without-clear, decision bd594c03)
+// capture-pending deferral's deliberate allow-without-clear, decision foreign_bd594c03)
 // leaks them into the NEXT session: a stale nag marker silently downgrades every
 // duty's soft-block to queue items, a stale capture_pending suppresses the capture
 // nag for unrelated new work, and stale touches backdate `earliest` and pollute
@@ -1525,7 +1186,7 @@ try {
   const userTotal = store.count({ types: ['todo'], source: 'user' });
   counts.todos = userTotal;
   const userTodos = userTotal > 0 ? store.query({ types: ['todo'], source: 'user', cap: userTotal }) : [];
-  // Objective grouping (decision a8d2ce6c): the banner discloses how many of
+  // Objective grouping (decision foreign_a8d2ce6c): the banner discloses how many of
   // the open tasks are slices of larger objectives, so a sliced board reads
   // as N objectives to the human too — not only in the TUI's grouped view.
   const grouped = userTodos.filter((t) => t.objective);
@@ -1628,7 +1289,7 @@ if (drainable >= deepThreshold) {
     ' This is a persistent visibility count by design — items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.';
 }
 
-// shared project registry (decision 8f9e6db2): touch THIS project's last_seen
+// shared project registry (decision foreign_8f9e6db2): touch THIS project's last_seen
 // for the session, and make the CONDUCTOR aware of sibling projects via
 // additionalContext (NOT systemMessage — this is conductor awareness, not a
 // human banner). Only if the registry exists (init creates it) — H1 never
@@ -1659,7 +1320,7 @@ if (existsSync(registryPath())) {
  *  other error = null (indeterminate — caller must not suppress a real warning
  *  on it). Existence alone over-warns: pid numbering resets on reboot (WSL
  *  restarts routinely), so an orphan marker's pid is often REUSED by an
- *  unrelated process and the dead-writer suppression (decision 132177d2) fails
+ *  unrelated process and the dead-writer suppression (decision foreign_132177d2) fails
  *  — observed 2026-07-02. On Linux, confirm identity via /proc/<pid>/cmdline:
  *  the writer is always the MCP server, launched from .../packages/mcp-server/
  *  dist, so a live cmdline WITHOUT 'mcp-server' is a reused pid = confirmed
@@ -1714,7 +1375,7 @@ try {
   // fail-open — the staleness guard must never break SessionStart
 }
 
-// Machine-activation guard (todo 8789eccf, anti_pattern 60e8463d): installed
+// Machine-activation guard (todo 8789eccf, anti_pattern foreign_60e8463d): installed
 // agents bake node paths per machine context (d53dc92c); a WSL↔Windows context
 // flip leaves every agent hook failing non-blocking — the enforcement floor is
 // silently absent while sync-agents' hash bookkeeping reads up_to_date. Probe
@@ -1787,30 +1448,19 @@ try {
         : '') +
       `Run /sterling:sync-agents from this context, then restart. `;
     machineContext =
-      `\n\nMACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` +
-      (dead.length
-        ? `${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on ` +
-          `this machine (${dead.map((d) => d.agent).join(', ')}). Every hook of those agents fails ` +
-          `non-blocking — the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. `
-        : '') +
-      (unknown.length
-        ? `${unknown.length} installed agent file(s) could not be checked, so their activation is UNKNOWN — ` +
-          `an unreadable file is not a healthy one, and one bad file no longer silences this guard:\n` +
-          unknown.join('\n') +
-          `\n`
-        : '') +
-      `Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context ` +
-      `(re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work ` +
-      `until scripts/check-agents-visible.mjs passes.`;
+      `\n\nMACHINE-CONTEXT DRIFT (H1): ` +
+      (dead.length ? `${dead.length} inactive (${dead.map((d) => d.agent).join(', ')}); ` : '') +
+      (unknown.length ? `${unknown.length} UNKNOWN (${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}). ` : '') +
+      `Hooks for inactive agents fail non-blocking. Run /sterling:sync-agents, restart, then pass scripts/check-agents-visible.mjs before dispatching.`;
   }
 } catch {
   // fail-open — never break SessionStart (P1); the check-agents-visible gate
-  // still blocks pipeline dispatch on the same condition. LAST RESORT only: the
+  // still blocks subagent dispatch on the same condition. LAST RESORT only: the
   // enumeration, every per-file read and every damaged header each carry their
   // own catch and each degrades LOUD, so nothing routine reaches here (02a1ed39).
 }
 
-// AGENT CURRENCY (board 6ce18724, research_finding 0038af7c). The machine-
+// AGENT CURRENCY (board 6ce18724, research_finding foreign_0038af7c). The machine-
 // activation guard above asks "do these agents' hooks RUN here?"; this asks
 // "are these agents the CURRENT ones?" — a different silent failure, measured
 // 2026-08-28: /sterling:update's agent sync only visits projects in the SHARED
@@ -1819,7 +1469,7 @@ try {
 // projects on this machine at 43 and 80 days, state `stale` and never
 // REFUSED — never VISITED). H1 already reads the project at SessionStart, so
 // the detection lands where the failure actually lives, registry membership or
-// not. Distinct from the CLONE-currency signal further up (decision 558895a9),
+// not. Distinct from the CLONE-currency signal further up (decision foreign_558895a9),
 // which is correctly SILENT in the failing case because the clone is not
 // behind — another clone-currency banner would close nothing.
 //
@@ -1828,7 +1478,7 @@ try {
 // file (user-ruled 2026-08-29 — fixes (a) and (c) only).
 //
 // DEGRADE LOUD, NEVER SILENT: a clone template that cannot be read is reported
-// as UNKNOWN currency, never omitted. anti_pattern 02a1ed39 is precisely this
+// as UNKNOWN currency, never omitted. anti_pattern foreign_02a1ed39 is precisely this
 // check's failure mode — a staleness check that answered `up_to_date` NINE
 // times while the agents were dead — so a per-agent `catch` that swallows an
 // unreadable template is the defect here, not the safety net. Only the
@@ -1900,6 +1550,7 @@ try {
     }
     const stale = [];
     const modified = [];
+    const refusedModified = [];
     for (const { file, content, header } of installed) {
       if (!templateFor) {
         unknown.push(`- ${file} — currency UNKNOWN: ${cloneProblem}`);
@@ -1947,30 +1598,33 @@ try {
         // that is ALSO behind is re-rendered when its body byte-matches the fresh
         // template (header_repaired) and refused otherwise. "sync REFUSES it" was
         // true of only one of those three outcomes.
-        modified.push(
-          templateCurrent
-            ? `- ${file} — locally MODIFIED: its body no longer matches its own header content_hash, so a hand edit is what governs dispatch here; sync records it as locally_modified_up_to_date and never refreshes it (re-apply the edit on a fresh install, or delete the file and re-install)`
-            : `- ${file} — locally MODIFIED and behind the clone template: sync re-renders it only if its body byte-matches the fresh template (header_repaired) and REFUSES otherwise (refused_local_modification), so it may never refresh on its own (re-apply your edits on the fresh template, or delete the file and re-install)`
-        );
+        (templateCurrent ? modified : refusedModified).push(file);
       } else {
         stale.push(`- ${file} — STALE: installed ${String(header.installedAt).slice(0, 10)}, the clone template has changed since (an unmodified install refreshes on sight)`);
       }
     }
-    if (stale.length || modified.length || unknown.length) {
+    if (stale.length || modified.length || refusedModified.length || unknown.length) {
       const inspected = installed.length + unreadableBeforeClassification;
       const parts = [
         stale.length ? `${stale.length} stale` : null,
-        modified.length ? `${modified.length} locally modified` : null,
+        modified.length ? `${modified.length} locally modified (current template)` : null,
+        refusedModified.length ? `${refusedModified.length} refused_local_modification (behind template)` : null,
         unknown.length ? `${unknown.length} of UNKNOWN currency` : null,
       ].filter(Boolean);
-      const named = [...stale, ...modified, ...unknown];
+      const named = [...stale, ...unknown];
+      const stateLines = [
+        stale.length ? `stale: ${stale.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}` : null,
+        modified.length ? `locally modified (current template): ${modified.join(', ')}` : null,
+        refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(', ')}` : null,
+        unknown.length ? `unknown: ${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? 'agent').join(', ')}` : null,
+      ].filter(Boolean);
       agentCurrencyWarning =
         `⚠ AGENT CURRENCY: ${parts.join(', ')} of ${inspected} installed Sterling agent file(s) — ` +
         `run /sterling:sync-agents in this project, then restart. `;
       agentCurrencyContext =
-        `\n\nAGENT CURRENCY (H1, research_finding 0038af7c): of ${inspected} Sterling-generated agent file(s) in .claude/agents/, ${parts.join(', ')} against the clone's templates (${templatesDir ?? '(plugin root unresolved)'}).\n` +
-        named.join('\n') +
-        `\nThe agent sync only visits projects in the SHARED PROJECT REGISTRY, so a project the registry does not know is never refreshed however current the clone is. Run scripts/sync-agents.mjs --target ${input.cwd} from this context, tell the user a RESTART is required (project subagents load at session start), and check /sterling:projects — an absence there is the root cause, not a symptom.`;
+        `\n\nAGENT CURRENCY (H1): ${parts.join(', ')} of ${inspected} generated agent file(s): ` +
+        stateLines.join('; ') +
+        `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
     }
   }
 } catch {
@@ -1997,7 +1651,7 @@ let undeclaredSourceContext = '';
 try {
   // `config` was read ABOVE under its own guarded try/catch — null there IS
   // the malformed/missing-config case, and computeUndeclaredSourceDisclosure
-  // treats it as UNAVAILABLE, never as "zero toolchains" (decision b128f79c).
+  // treats it as UNAVAILABLE, never as "zero toolchains" (decision foreign_b128f79c).
   const report = computeUndeclaredSourceDisclosure({ cwd: input.cwd, config });
   if (report) undeclaredSourceContext = `\n\n${report}`;
 } catch (err) {
@@ -2019,37 +1673,28 @@ if (process.env.STERLING_NO_BANNER !== '1') {
   process.stderr.write(`${paint(BANNER_ROWS)}\n${versionLine}`);
 }
 
-// Concurrent-subagent ceiling (decision d7a0289f): read from config, never a
-// literal. Guarded like every other H1 config read — a malformed config
-// costs only this number, never the conventions injection (H1 is soft); the
-// fallback is the schema default (5), not a value invented here.
-let maxConcurrent = 5;
-try {
-  maxConcurrent = config?.delegation?.max_concurrent ?? 5;
-} catch {
-  maxConcurrent = 5;
-}
-
-// PAYLOAD TRIM ON /clear (board eeb8ee53): a rotation restore already sits in a
-// context that just read the whole committed CLAUDE.md to get at the note —
-// re-injecting the conventions block (which mirrors CLAUDE.md almost verbatim)
-// on EVERY /clear was ~70% duplicate payload in the one injection a fresh
-// session must read most carefully. A genuinely fresh start (source=startup)
-// has no committed-CLAUDE.md context to fall back on yet, so it keeps the full
-// conventions injection; only source=clear trims it. Everything else here
-// (machine role, sibling projects, the deep-queue banner, the rotation note
-// itself) are per-machine/per-session facts CLAUDE.md does not carry, so they
-// are unaffected. INTENTIONAL (reviewer F2 confirm): the trim keys on
-// source==='clear' alone, not on whether a rotation note is staged — a /clear
-// with NO note reloads the committed CLAUDE.md exactly the same way, so the
-// duplication this closes is present either way.
-const conventionsBlock = input.source === 'clear' ? '' : conventions(maxConcurrent);
+// CONDUCTOR CONTRACT ON EVERY SOURCE (supersedes the old PAYLOAD TRIM ON
+// /clear, board eeb8ee53): the retired conventions block was trimmed on
+// source==='clear' because it was a ~70%-duplicate restatement of the
+// committed CLAUDE.md, which the platform reloads on /clear anyway. That
+// rationale does not carry over — docs/conductor-contract.md is a SEPARATE
+// file the platform never auto-loads; H1's read of it here is the ONLY way
+// the conductor's posture reaches context, on every source (startup, resume,
+// clear, compact) alike. Trimming it on clear would mean a freshly cleared
+// session runs with no delegation/review/capture posture until the next
+// SessionStart — the opposite of "H1 injects it once per session" (CLAUDE.md
+// line 3). No config read is needed here any more: the retired block's only
+// config-driven line (the live max_concurrent ceiling) is dropped along with
+// it — the contract is a static file and cannot embed a per-machine live
+// value without going stale; the ceiling stays readable from
+// .sterling/config.json directly (delegation.max_concurrent) or the TUI.
+const conventionsBlock = conductorContractBlock();
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before the conventions, not after them.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + malformedContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

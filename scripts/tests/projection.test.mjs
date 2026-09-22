@@ -41,7 +41,7 @@ function articleRec(slug, intendedBehavior) {
 
 // The §15 set list is CLOSED here on purpose: a new extensible set must extend
 // the projection too, and this totality pin is the check that catches a miss.
-const SETS = ['signals', 'record-types', 'agents', 'hooks', 'tools', 'toolchain-adapters'];
+const SETS = ['record-types', 'agents', 'hooks', 'tools', 'toolchain-adapters'];
 
 test('§15 projection: every extensible set sectioned; owning articles quoted; gaps loud; marked generated', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-proj-'));
@@ -49,7 +49,6 @@ test('§15 projection: every extensible set sectioned; owning articles quoted; g
   writeFileSync(join(dir, '.sterling', 'config.json'), '{}');
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   try {
-    store.create(articleRec('brain-signal-protocol', 'EXTEND-SIGNALS-GUIDANCE'));
     store.create(articleRec('record-schemas-registry', 'EXTEND-RECORDS-GUIDANCE'));
     store.close();
 
@@ -70,7 +69,6 @@ test('§15 projection: every extensible set sectioned; owning articles quoted; g
     assert.match(md, /Checks:/, 'guarding checks named per set');
 
     // seeded articles feed "Extending this" verbatim from intended_behavior
-    assert.match(md, /EXTEND-SIGNALS-GUIDANCE/, 'signals article quoted');
     assert.match(md, /EXTEND-RECORDS-GUIDANCE/, 'record-types article quoted');
 
     // sets with no owning article degrade LOUD in-place, never omitted (P5)
@@ -108,7 +106,7 @@ test('§15 projection freshness check (audit finding 25/43): passes when current
   writeFileSync(join(dir, '.sterling', 'config.json'), '{}');
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   try {
-    store.create(articleRec('brain-signal-protocol', 'g'));
+    store.create(articleRec('record-schemas-registry', 'g'));
     store.close();
     // generate the projection → freshness check passes
     assert.equal(runScript([], dir).code, 0);
@@ -133,7 +131,7 @@ test('§15 projection freshness check (audit finding 25/43): passes when current
   }
 });
 
-// Consumer-machine shape (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89): the
+// Consumer-machine shape (decision foreign_e6240afe): the
 // clone HAS a store — init creates it — but no articles, because .sterling/ is
 // gitignored and knowledge never travels with the repo. Comparing the committed
 // projection against that store reported staleness that cannot exist there, and
@@ -168,7 +166,7 @@ test("store_authority 'secondary': a projection this store did not produce is re
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ store_authority: authority }));
   try {
     const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
-    store.create(articleRec('brain-signal-protocol', 'g'));
+    store.create(articleRec('record-schemas-registry', 'g'));
     store.close();
     // a committed projection stamped from ANOTHER store — mismatched by construction
     const committed = '# Architecture\n(store state as of 2099-01-01T00:00:00.000Z)\n';

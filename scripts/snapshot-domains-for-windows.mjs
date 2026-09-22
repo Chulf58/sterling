@@ -1,6 +1,6 @@
 // snapshot-domains-for-windows [S] (P5, AC8) — the WSL side of the
 // domain-knowledge snapshot bridge. A native-Windows process cannot live-read
-// the WSL-resident WAL domain stores (research_finding 5c6437d8: WAL-over-9p
+// the WSL-resident WAL domain stores (research_finding foreign_5c6437d8: WAL-over-9p
 // `database is locked`), so at native-launcher startup we VACUUM-INTO a snapshot
 // of each WSL-resident domain store into the Windows-local default path. The
 // native TUI then opens those snapshots — local NTFS, so WAL works — via P4's
@@ -12,7 +12,7 @@
 //
 // Reads <projectDir>/.sterling/config.json, resolves the project's mounted domain
 // stores (honoring config.domain_paths via resolveDomainMounts — the ONE resolver
-// the MCP server and dispose-run share, so the snapshotted set never drifts from
+// the MCP server shares, so the snapshotted set never drifts from
 // the mounted set), and for each domain SOURCE store that EXISTS on disk,
 // VACUUM-INTOs it to <destDir>/<tag>/sterling.db. A configured domain whose source
 // store is absent is SKIPPED LOUDLY (reported by name, never created, never
@@ -69,7 +69,7 @@ for (const { name, dbPath } of mounts) {
 
   const src = new SterlingStore(dbPath);
   try {
-    src.snapshot(dest); // VACUUM INTO — same mechanism as snapshotAll / dispose-run
+    src.snapshot(dest); // VACUUM INTO — same mechanism as other store snapshots
   } finally {
     src.close();
   }

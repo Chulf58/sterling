@@ -135,7 +135,7 @@ function envelope(type, at = NOW) {
 /** feature_article owning `files` (array of {path, content}); file_baselines
  * keyed per path = sha256 of the given ORIGINAL content, mirroring how a
  * real article's baseline is server-computed from content at create/reconcile
- * time (decision 57d9a52d). Duplicated from the existing suite's helper. */
+ * time (decision foreign_57d9a52d). Duplicated from the existing suite's helper. */
 function articleWithBaseline(store, slug, files, at = NOW) {
   return store.create({
     ...envelope('feature_article', at),

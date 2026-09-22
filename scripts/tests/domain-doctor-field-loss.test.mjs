@@ -50,7 +50,7 @@
 // mints a record_relations row per body link, which would trip the AC20
 // relations refusal first and the test would pass for the wrong reason.
 // (3) oneLine() flattens any child-process stream before it lands in an
-// assertion's own MESSAGE (anti_pattern ee89c3fd), never in its TARGET.
+// assertion's own MESSAGE (anti_pattern foreign_ee89c3fd), never in its TARGET.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';

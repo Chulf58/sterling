@@ -2,13 +2,13 @@
 // + SETTLEMENT-TIME MINTING). H7's direct-mode Arm 1 (h7-file-touch.mjs) no
 // longer mints reconcile_needed at touch time — it only registers the
 // touched path as a CANDIDATE (.sterling/transient/touches.json, the same
-// register H10 already reads). Minting moves to SETTLEMENT, at three
+// register H10 already reads). Minting moves to SETTLEMENT, at two
 // boundaries: (a) the direct-session Stop, after whatever capture/reconcile
 // knowledge_update calls already landed this turn (h10-direct-capture.mjs);
 // (b) pre-merge, as a HARD BACKSTOP over every file the branch actually
-// changed (direct-merge.mjs); (c) run completion — pipeline mode is
-// untouched by this change, since H7 still mints on the RUN at touch time
-// there (this module is a direct-mode-only concern). Commit alone is
+// changed (direct-merge.mjs). (The staged pipeline and its run-completion
+// boundary were removed — scale-down decision
+// sterling-claude-code-scale-down-boundary.) Commit alone is
 // deliberately NOT a settlement boundary: Sterling commits code then
 // reconciles, so the meaningful boundary is "the reconciliation window
 // settled", which a bare commit does not establish.
@@ -31,16 +31,25 @@
 // rebaselined both naturally fall out as "no mint" — no separate
 // bookkeeping needed for either case.
 //
-// NAMED HOLE (must stay explicit, per the board item's conductor caveat): a
-// session that DIES mid-work never reaches Stop-settlement (a) — its
-// touches.json candidates are simply abandoned on disk. The pre-merge
-// backstop (b) only ever sees MERGED work, so a dead session whose branch
-// never merges is covered by neither settlement boundary; H7's Arm 2
-// (read-time out-of-band drift check, unchanged) is the residual net for
-// that gap, not a settlement boundary itself.
+// NAMED HOLE (must stay explicit, per the board item's conductor caveat),
+// NARROWED by slice 4: a session that DIES mid-work never reaches
+// Stop-settlement (a), but its work is not lost — the git settled snapshot
+// (gitTouches, below) did not advance, so the NEXT Stop in this project,
+// from any session, re-derives every path changed since, and touches.json /
+// its claim are adopted by that Stop too. What stays uncovered: a dead
+// session's work in a checkout where no later Stop ever runs and whose
+// branch never merges; H7's Arm 2 (read-time drift check) is the residual
+// net there, not a settlement boundary itself.
 import { createHash, randomUUID } from 'node:crypto';
-import { readFileSync, mkdirSync, rmSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync, renameSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { join, dirname } from 'node:path';
+// THE ONE reconcile_needed text builder (board b0bb9d96 / I-29), shared with
+// enqueueSystemTodo's own fold-to-union in packages/store — a pure function,
+// safe to pull in here despite the "no mcp-server at runtime" constraint
+// above (that constraint is about mcp-server specifically; @sterling/store
+// is already a workspace dependency hooks bundle at build time).
+import { buildReconcileText } from '@sterling/store';
 
 // MUTUAL EXCLUSION around touches.json's read-modify-write (R3 round-4
 // fixer, board c198866d): the earlier attempt to close the H7-vs-H7 race by
@@ -48,9 +57,8 @@ import { join } from 'node:path';
 // already-green frozen tests that spawn the real H7 hook and then
 // `JSON.parse` touches.json expecting a top-level array — so the shape stays
 // exactly what it always was, and the race is closed with a LOCK around the
-// existing RMW instead. Same lock-dir idiom already used twice in this
-// codebase (scripts/hooks/lib/delivery.mjs's withFileLock, the H22
-// review-ledger lock): mkdirSync on a sibling `<path>.lock` DIRECTORY is
+// existing RMW instead. Same lock-dir idiom already used elsewhere in this
+// codebase (scripts/hooks/lib/delivery.mjs's withFileLock): mkdirSync on a sibling `<path>.lock` DIRECTORY is
 // atomic (EEXIST on contention) on every platform Node supports, so it
 // doubles as a lock with no extra dependency — chosen over a `wx`-flag
 // lockFILE only because it is the codebase's existing precedent for exactly
@@ -230,10 +238,7 @@ function buildReconcileItem(article, fileKeys, now) {
     links: [],
     scope: 'project',
     stack_tags: [],
-    text:
-      article.type === 'reference_material'
-        ? `reconcile reference '${article.title}' — its document changed content in direct mode (settled): ${fileKeys.join(', ')}; refresh summary + source_date (§3.2.5)`
-        : `reconcile article '${article.slug}' — owned file(s) changed content in direct mode (settled): ${fileKeys.join(', ')}`,
+    text: buildReconcileText(article, fileKeys),
     source: 'system',
     system_reason: 'reconcile_needed',
     file_keys: fileKeys,
@@ -249,23 +254,19 @@ function buildReconcileItem(article, fileKeys, now) {
  * against that article's CURRENT baseline. Paths owned by no article, or
  * showing no live drift, mint nothing.
  *
- * WIDEN-IN-PLACE, never a second item (F2, board c198866d fixer round):
- * grouping per article is a PRESENTATION choice the h7-settlement-minting
- * suite pins (AC5 — two changed paths under one article settle to ONE item),
- * so per-file items are not an option here without breaking that pin. But
- * enqueueSystemTodo dedups on the EXACT (reason, feature_link, file_keys)
- * SET (decision 194f43e4), so re-grouping the FULL current-candidate set on
- * every settlement pass would mint a NEW item every time the set's shape
- * changes (Stop-1 {A}, Stop-2 {A,B}, merge-backstop {A,B,C} — three open
- * items for one article, the moving-key pathology). Instead: find the
- * article's existing open item (if any); compute only the candidates NOT
- * already in its file_keys that are LIVE drift; if none, touch nothing (the
- * existing item already covers this article's live debt — this also means a
- * pre-existing item whose predicate has gone stale, e.g. AC6b's already-
- * reconciled row, is left untouched here, exactly as it was — direct-merge's
- * OWN isLiveReconcileDebt re-check is what excludes it from blocking, not a
- * removal performed during minting); otherwise WIDEN by removing the old
- * item and re-minting the union — one open item per article, always.
+ * PLAIN ENQUEUE PER OWNING RECORD (board b0bb9d96 / I-29): this used to
+ * hand-roll its own pre-read / widen-in-place / sweep-the-rest cycle here,
+ * duplicating exactly the identity logic enqueueSystemTodo's choke point now
+ * owns — the two coexisted as separate dedup definitions and that drift IS
+ * what let a read-time singleton and a settlement superset for the same
+ * (article, file) sit open as duplicates. The choke point now folds on
+ * (reason, feature_link) for this lane, unions file_keys in, keeps the OLDEST
+ * id and removes every other open duplicate through the store's own removal
+ * path — atomically, inside enqueueSystemTodo's own transaction — so this
+ * function only has to name what it can currently prove: which paths, for
+ * which owning record, are LIVE drift right now. AC5's grouping pin (two
+ * changed paths under one article settle to ONE item) still holds: it falls
+ * out of grouping candidates per owning record below, same as before.
  */
 export function mintSettlementReconcile(store, root, candidatePaths, now = new Date().toISOString()) {
   // Exempt paths are dropped from the candidate set UP FRONT (e1275166) — an
@@ -276,17 +277,6 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
   const exempt = loadGeneratedProjections(root);
   const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
   if (!paths.length) return [];
-
-  // Every OPEN reconcile_needed item, indexed by its owning article — only
-  // the FIRST one found per article is tracked; a pre-existing SECOND one for
-  // the same article (a legacy duplicate, or hand-created as in a fixture) is
-  // left untouched, and this pass never creates a third.
-  const openByArticle = new Map(); // article.id -> existing open item
-  for (const t of store.query({ types: ['todo'], cap: 1000 })) {
-    if (t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link && !openByArticle.has(t.feature_link)) {
-      openByArticle.set(t.feature_link, t);
-    }
-  }
 
   const byArticle = new Map(); // article.id -> { article, freshPaths: Set<string> }
   for (const rel of paths) {
@@ -301,41 +291,15 @@ export function mintSettlementReconcile(store, root, candidatePaths, now = new D
 
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
-    const existing = openByArticle.get(article.id);
-    const existingSet = new Set((existing?.file_keys ?? []).filter((k) => !exempt.has(k)));
-    // Candidates NOT already covered by the existing item, filtered to those
-    // showing LIVE drift right now (F1's deletion-is-drift folds in here too).
-    const newlyDrifted = [...freshPaths]
-      .filter((rel) => !existingSet.has(rel))
-      .filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
-    if (!newlyDrifted.length) continue; // nothing new — existing item (if any) already covers this article
-    if (!existing) {
-      const fileKeys = newlyDrifted.sort();
-      store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
-      minted.push({ article_id: article.id, paths: fileKeys });
-      continue;
-    }
-    const widened = [...new Set([...existingSet, ...newlyDrifted])].sort();
-    // R1 (board c198866d round-3 fixer): ENQUEUE the widened item FIRST, THEN
-    // sweep away the old one(s) — a crash between the two calls must leave
-    // the OLD item's debt readable, never nothing. The rows can momentarily
-    // coexist (their dedup keys differ, since file_keys differs), which is
-    // harmless redundancy, not data loss.
-    const { record: widenedRecord } = store.enqueueSystemTodo(buildReconcileItem(article, widened, now));
-    // SELF-HEALING SWEEP (micro-round fixer): remove EVERY OTHER open
-    // reconcile_needed item for THIS article, not just `existing` — if a
-    // prior settlement pass crashed after its enqueue but before its own
-    // remove, that stale duplicate is invisible to openByArticle's
-    // first-found tracking (it only ever surfaces ONE item as `existing`),
-    // so a bare store.remove(existing.id) alone could never clean it up and
-    // it would sit open forever. Sweeping by feature_link makes retry
-    // self-healing regardless of how many stale duplicates accumulated.
-    for (const t of store.query({ types: ['todo'], cap: 1000 })) {
-      if (t.source === 'system' && t.system_reason === 'reconcile_needed' && t.feature_link === article.id && t.id !== widenedRecord.id) {
-        store.remove(t.id, now);
-      }
-    }
-    minted.push({ article_id: article.id, paths: widened });
+    // LIVE drift right now (F1's deletion-is-drift folds in here too). A path
+    // already covered by an open item is harmless to re-offer — the choke
+    // point's union is idempotent on a key it already holds, so this never
+    // churns a version bump for nothing new.
+    const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
+    if (!drifted.length) continue;
+    const fileKeys = drifted.sort();
+    const { record } = store.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
+    minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
   }
   return minted;
 }
@@ -417,4 +381,140 @@ export function explainReconcileDebtLiveness(store, root, item) {
   const unbaselined = considered.filter((f) => baselines[f] === undefined);
   const code = unbaselined.length === 0 ? 'baseline_match' : matched.length === 0 ? 'baseline_absent' : 'baseline_match_and_absent';
   return { live: false, code, matched, unbaselined };
+}
+
+// ── TOUCHES FROM GIT (slice 4, board 400f578b; decision
+// sterling-claude-code-scale-down-boundary change 2) ──
+//
+// H7 only sees Edit/Write/MultiEdit, so an edit made by hand or through Bash
+// never reached settlement. At Stop, H10 also derives touched paths from git
+// and unions them with the register; settlement (mintSettlementReconcile
+// above) receives one candidate list and cannot tell the two sources apart.
+//
+// STATE: .sterling/transient/git-settled.json = { sha, dirty: {path: sha256|null}, at }
+// — the tree as it stood at the last SUCCESSFUL settlement: the HEAD commit
+// plus the content hash of every path that differed from it (tracked changes
+// in the working tree or index, and untracked non-ignored files). A path is a
+// git candidate when it differs from that snapshot: changed since `sha` and
+// not recorded at its current content in `dirty`, or recorded in `dirty` at
+// different content (a revert or a delete of earlier dirt).
+// SET BY: writeGitSettled, called by H10 ONLY after a settlement pass that
+// succeeded with nothing deferred — never before the duties for the range are
+// minted, so a failed mint re-derives the same range at the next Stop.
+// FIRST RUN (no state file): git contributes NO candidates and the register
+// is used unfiltered (exactly the pre-slice behaviour); the first successful
+// settlement then records the tree as it stands. Chosen over merge-base/HEAD~
+// baselines because pre-existing dirt and old branch commits would otherwise
+// mint a one-off storm of duties nobody incurred this session.
+// NO GIT (not a repo, git missing, a failed probe): { ok: false, reason } —
+// the caller degrades loud to the register alone.
+export const GIT_SETTLED_REL = '.sterling/transient/git-settled.json';
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+
+function gitZ(root, args) {
+  const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', timeout: 30_000, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || '').trim()}`);
+  return r.stdout.split('\0').filter(Boolean);
+}
+
+/** Paths differing from `base` (a commit or the empty tree): working tree, index, and untracked. */
+function changedSince(root, base) {
+  const diff = ['diff', '--name-only', '-z', '--no-renames', '--relative'];
+  return new Set([
+    ...gitZ(root, [...diff, base]),
+    ...gitZ(root, [...diff, '--cached', base]),
+    ...gitZ(root, ['ls-files', '--others', '--exclude-standard', '-z']),
+  ]);
+}
+
+// Sterling's own state (the store and its WAL/SHM, transient cells) changes on
+// every hook fire and is never work — excluded even where a project has not
+// gitignored .sterling/ (init normally does). Register entries are unaffected.
+const isMachinery = (rel) => rel === '.sterling' || rel.startsWith('.sterling/') || rel.startsWith('.git/');
+
+export function readGitSettled(root) {
+  try {
+    const s = JSON.parse(readFileSync(join(root, GIT_SETTLED_REL), 'utf8'));
+    return typeof s?.sha === 'string' && s.dirty && typeof s.dirty === 'object' ? s : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The git-derived touched set at this Stop. Returns
+ * { ok: true, settled, candidates: [{path, at}], changed: Set, next } or
+ * { ok: false, reason }. `changed` is every path differing from the settled
+ * snapshot (the caller filters register entries against it); `next` is the
+ * snapshot to persist once settlement succeeds.
+ */
+export function gitTouches(root, now) {
+  let head;
+  try {
+    const r = spawnSync('git', ['rev-parse', '--verify', '-q', 'HEAD'], { cwd: root, encoding: 'utf8', timeout: 30_000 });
+    if (r.status === 0) head = r.stdout.trim();
+    else if (spawnSync('git', ['rev-parse', '--is-inside-work-tree'], { cwd: root, encoding: 'utf8', timeout: 30_000 }).status === 0) head = EMPTY_TREE; // unborn branch
+    else return { ok: false, reason: 'no_git' };
+    const settled = readGitSettled(root);
+    let base = settled?.sha;
+    // An object can remain readable through reflog/object retention after an
+    // amend or rebase while no longer being reachable from HEAD.  It is still
+    // an invalid settlement baseline: treating `git diff base..HEAD` as a
+    // trustworthy commit interval would silently skip rewritten duties.
+    if (base && base !== EMPTY_TREE && (spawnSync('git', ['cat-file', '-e', `${base}^{tree}`], { cwd: root, timeout: 30_000 }).status !== 0
+      || spawnSync('git', ['merge-base', '--is-ancestor', base, head], { cwd: root, timeout: 30_000 }).status !== 0)) base = null;
+    const hashOf = (p) => hashFile(root, p) ?? null;
+    const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: new Set(), next };
+    const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
+    const pool = new Set([...(base ? changedSince(root, base) : dirtyNow), ...Object.keys(settled.dirty)]);
+    const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
+    const candidates = [...changed].map((path) => {
+      let at = settled.at;
+      try {
+        at = statSync(join(root, path)).mtime.toISOString();
+      } catch {
+        // deleted: the change happened after the last settle
+      }
+      return { path, at: typeof at === 'string' ? at : now };
+    });
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base) };
+  } catch (e) {
+    return { ok: false, reason: String((e && e.message) || e) };
+  }
+}
+
+export function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
+  const p = join(root, GIT_SETTLED_REL);
+  mkdirSync(dirname(p), { recursive: true });
+  if (ifAbsent) {
+    try {
+      writeFileSync(p, JSON.stringify(snapshot), { flag: 'wx' });
+      return true;
+    } catch (e) {
+      if (e?.code === 'EEXIST') return false;
+      throw e;
+    }
+  }
+  writeFileSync(`${p}.tmp`, JSON.stringify(snapshot));
+  renameSync(`${p}.tmp`, p);
+  return true;
+}
+
+/** Backward-compatible named initial writer for callers that need the explicit
+ * first-session intent; it shares writeGitSettled's JSON shape and semantics. */
+export function writeInitialGitSettled(root, snapshot) {
+  return writeGitSettled(root, snapshot, { ifAbsent: true });
+}
+
+/** The subset of `paths` git tracks (in the index), or null when git cannot answer. */
+export function gitTrackedSubset(root, paths) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return new Set();
+  try {
+    return new Set(gitZ(root, ['ls-files', '-z', '--', ...list.map((p) => `:(literal)${p}`)]));
+  } catch {
+    return null;
+  }
 }

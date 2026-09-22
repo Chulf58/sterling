@@ -3,7 +3,7 @@
 // SPEC ONLY. Nothing in scripts/lib/update.mjs, scripts/update.mjs,
 // scripts/sync-agents.mjs or scripts/lib/agent-distribution.mjs was read to
 // author this file (H4 read wall). The contract comes from board 6ce18724,
-// research_finding 0038af7c and the launching agent's user-ruled shape.
+// research_finding foreign_0038af7c and the launching agent's user-ruled shape.
 //
 // THE DEFECT: /sterling:update fans out over the projects in the shared project
 // registry and reports "N projects synced" — but it cannot report what it does
@@ -273,7 +273,7 @@ test('DEGRADE LOUD: an unreadable known root is reported as unreadable, and the 
 // STILL SPEC-ONLY: scripts/lib/agent-coverage.mjs and scripts/lib/update.mjs
 // were NOT read (H4 read wall). The expectations come from the fix list in the
 // dispatch brief, the interface contract at the top of this file, board 6ce18724
-// and research_finding 0038af7c.
+// and research_finding foreign_0038af7c.
 //
 // PLACEMENT NOTE: F10's case-folding half is pinned HERE rather than in
 // agent-currency-h1.test.mjs, even though the brief filed it on the H1 side. The
@@ -561,7 +561,7 @@ test('F10 WINDOWS/LINUX PARITY: on a case-INSENSITIVE filesystem a registered pa
 // review: /sterling:update on a current clone printed "Already current — nothing
 // to do" and never inspected the blind spot the mechanism exists to find. The
 // scan is useless exactly when it is needed, because the machines whose projects
-// go stale are the machines whose clone is CURRENT (research_finding 0038af7c:
+// go stale are the machines whose clone is CURRENT (research_finding foreign_0038af7c:
 // the clone was current while two projects sat 43 and 80 days frozen).
 //
 // A transient probe proved the fix; this is its permanent form.

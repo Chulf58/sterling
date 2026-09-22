@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DurableRecord } from '@sterling/schemas';
-import { REVIEWER_ROLES, parseConfig } from '@sterling/schemas';
+import { parseConfig } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
@@ -49,19 +49,6 @@ function harnessWithConfig(configOverrides: Record<string, unknown>) {
     rmSync(dir, { recursive: true, force: true });
   };
   return { store, tools, cleanup };
-}
-
-function startRun(store: SterlingStore, phases = ['p1', 'p2']) {
-  return store.createRun({
-    id: 'r-0001',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-0001',
-    machine_state: 'running',
-    phases: phases.map((id, i) => ({ id, status: i === 0 ? 'in_progress' : 'pending', signals: [], commits: [] })),
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  });
 }
 
 // test-repair 2026-08-22: stable-identity-design-v2 landed — knowledge_update/
@@ -250,7 +237,7 @@ const mkArticle = (tools: SterlingTools, slug: string, path: string) =>
 // with because the id never changes. Re-based to assert the item stays put on
 // the SAME (stable) id, still open, rather than asserting a re-point that no
 // longer has anything to do. [stable-identity-design-v2]
-test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review stays anchored to the stable id, a correct NO-OP (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
+test('knowledge_update leaves the article\'s drift maintenance items OPEN on an UNCLAIMED write — promotion_review stays anchored to the stable id, a correct NO-OP (decision foreign_68988832 flips the old auto-drain from P4 lifecycle-bind + todo 6202a0f5; explicit-claim behavior is pinned in resolves-claim.test.ts)', () => {
   const { tools, cleanup } = harness();
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -263,7 +250,7 @@ test('knowledge_update leaves the article\'s drift maintenance items OPEN on an 
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'other'`, file_keys: ['src/other.ts'], feature_link: other.id });
     assert.equal(tools.maintenanceQuery({ cap: 1000 }).length, 4);
 
-    // NO resolves named — decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1: a
+    // NO resolves named — decision foreign_68988832: a
     // write is not a claim, so nothing here is discharged by writing alone.
     const updated = tools.knowledgeUpdate(article.id, { what_it_does: 'does, now reconciled' });
     assert.equal(updated.id, article.id, 'stable-identity-design-v2: no re-mint on write, id unchanged');
@@ -345,7 +332,7 @@ test('article_oversize: over threshold, knowledge_update warns via the coherence
 test('article_oversize: a files[] change between two oversize writes refreshes the ONE open item in place — never a second (board 3acb0126)', () => {
   // The 2026-08-11 incident: dedup keyed on the exact sorted file set, so a
   // reconcile that legitimately grew files[] changed the key and minted a
-  // duplicate, contradicting decision 86216751's refreshes-in-place contract.
+  // duplicate, contradicting decision foreign_86216751's refreshes-in-place contract.
   const { tools, cleanup } = harnessWithConfig({ article_oversize_chars: 200 });
   try {
     const article = mkArticle(tools, 'thing', 'src/thing.ts');
@@ -403,13 +390,13 @@ test('article_oversize: knowledge_append and knowledge_edit carry the same warni
   }
 });
 
-test('knowledge_update no longer drains a drift item whose feature_link points to an ANCESTOR version on an UNCLAIMED write — the auto-drain-via-chain is gone (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1); explicit ancestor-chain claiming via resolves is pinned in resolves-claim.test.ts', () => {
+test('knowledge_update no longer drains a drift item whose feature_link points to an ANCESTOR version on an UNCLAIMED write — the auto-drain-via-chain is gone (decision foreign_68988832); explicit ancestor-chain claiming via resolves is pinned in resolves-claim.test.ts', () => {
   const { tools, cleanup } = harness();
   try {
     const v1 = mkArticle(tools, 'thing', 'src/thing.ts');
     const v2 = tools.knowledgeUpdate(v1.id, { what_it_does: 'v2' });
     // an item raised against the now-superseded v1 (a flag that lagged a version).
-    // OLD CONTRACT (decision 8ecd435f): reconciling v2→v3 alone drained it via
+    // OLD CONTRACT (decision foreign_8ecd435f): reconciling v2→v3 alone drained it via
     // the supersede chain, no claim needed. NEW CONTRACT: a write is not a
     // claim — it stays open until named via `resolves`.
     tools.maintenanceEnqueue({ reason: 'reconcile_needed', text: `reconcile 'thing'`, file_keys: ['src/thing.ts'], feature_link: v1.id });
@@ -903,7 +890,7 @@ test("board_query / maintenance_query take projection:'digest' — the 478 KB bo
     }
     tools.boardAdd({ text: `reconcile ${'z'.repeat(2000)}`, source: 'system', system_reason: 'reconcile_needed' });
 
-    const full = tools.boardQueryResult({ source: 'user' });
+    const full = tools.boardQueryResult({ source: 'user', projection: 'full' });
     const digest = tools.boardQueryResult({ source: 'user', projection: 'digest' });
     assert.equal(digest.returned, full.returned, 'same items');
     assert.ok(
@@ -1428,8 +1415,8 @@ test('dedup guard (board 3f9591e9 replay): one shared file_key never swallows a 
   }
 });
 
-test('knowledge_link, run_escalate, maintenance queue tools (§10)', () => {
-  const { store, tools, cleanup } = harness();
+test('knowledge_link, maintenance queue tools (§10)', () => {
+  const { tools, cleanup } = harness();
   try {
     const { record: a } = tools.knowledgeCreate('decision', { title: 'a', statement: 's', alternatives_rejected: [], rationale: 'r' });
     const { record: b } = tools.knowledgeCreate('decision', { title: 'b', statement: 's', alternatives_rejected: [], rationale: 'r' });
@@ -1438,9 +1425,8 @@ test('knowledge_link, run_escalate, maintenance queue tools (§10)', () => {
     assert.throws(() => tools.knowledgeLink(a.id, 'replaces', b.id), /invalid/i, 'rel is the closed §3.2 set');
     assert.throws(() => tools.knowledgeLink(a.id, 'cites', randomUUID()), /no target record/);
 
-    startRun(store);
-    const esc = tools.runEscalate({ kind: 'plan-broken', detail: 'assumption X contradicted' });
-    assert.equal(esc.escalations, 1);
+    // run_escalate coverage was removed with the staged pipeline (decision
+    // sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
     const { record: item } = tools.maintenanceEnqueue({ reason: 'stale_research', text: 're-verify genesys limits' });
     assert.equal((item as { source: string }).source, 'system');
@@ -1452,156 +1438,12 @@ test('knowledge_link, run_escalate, maintenance queue tools (§10)', () => {
   }
 });
 
-test('agent_exit: in-band rejection of non-enum signals; valid exit lands on the run record (§5.2)', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    assert.throws(() => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'victory' }), /enum is closed/);
-    const { recorded } = tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
-    assert.equal(recorded.signal, 'complete');
-    assert.equal(store.getPendingExit('r-0001')!.phase_id, 'p1');
-    assert.throws(
-      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'blocked', payload: { reason: 'second exit' } }),
-      /unconsumed exit/,
-      'a second exit before run_signal is a protocol violation'
-    );
-  } finally {
-    cleanup();
-  }
-});
-
-test('agent_exit: a phase_id not on the active run is refused at RECORD time — nothing enters the slot (board 7d051522)', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    // the 2026-07-03 incident: a conductor-direct subagent's exit bound to the
-    // active run with a phase that does not exist, wedging the wire for the
-    // whole phase. The seam must fail HERE, loudly, with nothing recorded.
-    assert.throws(
-      () => tools.agentExit({ phase_id: 'conductor-direct', agent_role: 'reviewer-correctness', signal: 'complete', payload: { handoff_ref: 'x/y' } }),
-      /no phase 'conductor-direct' on run 'r-0001'.*phases: p1/s,
-      'unknown phase refused, run phases named'
-    );
-    assert.equal(store.getPendingExit('r-0001'), undefined, 'nothing recorded — the slot stays empty');
-    // abnormal signals with a bogus phase are refused the same way (never wedged)
-    assert.throws(
-      () => tools.agentExit({ phase_id: 'nope', agent_role: 'coder', signal: 'blocked', payload: { reason: 'r' } }),
-      /no phase 'nope'/
-    );
-    // a valid phase still records exactly as before
-    const { recorded } = tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
-    assert.equal(recorded.phase_id, 'p1');
-  } finally {
-    cleanup();
-  }
-});
-
-test('run_signal: reads the stored exit, applies the CAS transition, advances phases', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
-    const r1 = tools.runSignal();
-    assert.deepEqual(r1.action, { action: 'spawn', phase_id: 'p2', respawn: false });
-    const after = tools.runState();
-    assert.equal(after.phases[0].status, 'complete');
-    assert.equal(after.phases[1].status, 'in_progress');
-    assert.equal(after.phases[0].signals.length, 1);
-    assert.equal(store.getPendingExit('r-0001'), undefined, 'exit consumed');
-
-    // final phase → completing + complete_run
-    tools.agentExit({ phase_id: 'p2', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p2/coder' } });
-    const r2 = tools.runSignal();
-    assert.equal(r2.action.action, 'complete_run');
-    assert.equal(tools.runState('r-0001').machine_state, 'completing');
-  } finally {
-    cleanup();
-  }
-});
-
-test('run_signal: conductor-reported agent-died, respawn then death cap; no exit at all is guided', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    assert.throws(() => tools.runSignal(), /no exit recorded.*agent-died/s);
-    const died = { signal: 'agent-died', phase_id: 'p1', payload: { observed: 'crash' as const } };
-    const r1 = tools.runSignal({ exit: died });
-    assert.equal(r1.action.action, 'spawn');
-    assert.equal((r1.action as { respawn: boolean }).respawn, true);
-    assert.equal(tools.runState().phases[0].status, 'in_progress', 'respawn keeps the phase open');
-
-    const r2 = tools.runSignal({ exit: { ...died, payload: { observed: 'empty_output' } } });
-    assert.equal(r2.action.action, 'judgment_needed');
-    assert.equal(tools.runState().escalations.length, 1, 'escalation recorded on the run record');
-  } finally {
-    cleanup();
-  }
-});
-
-test('agent_exit: a real-but-not-current phase is refused (currency, not just existence) — audit finding 3/43', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    // advance p1 → complete, p2 → in_progress
-    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
-    tools.runSignal();
-    assert.equal(tools.runState().phases[0].status, 'complete');
-    // exit naming the already-complete p1 must refuse — it EXISTS but is not current
-    assert.throws(
-      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/again' } }),
-      /is 'complete', not the current \(in_progress\) phase.*'p2'/s,
-      'stale-but-existing phase refused, current phase named'
-    );
-    assert.equal(store.getPendingExit('r-0001'), undefined, 'nothing recorded');
-    // the current phase (p2) still records exactly as before
-    const { recorded } = tools.agentExit({ phase_id: 'p2', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p2/coder' } });
-    assert.equal(recorded.phase_id, 'p2', 'the current phase still records');
-  } finally {
-    cleanup();
-  }
-});
-
-test('run_signal: an explicit exit refuses to overwrite an unconsumed recorded exit — audit finding 2/43', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    // agent recorded a valid exit
-    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'blocked', payload: { reason: 'stuck' } });
-    // conductor reports a DIFFERENT signal explicitly — must refuse, nothing consumed
-    assert.throws(
-      () => tools.runSignal({ exit: { signal: 'agent-died', phase_id: 'p1', payload: { observed: 'empty_output' } } }),
-      /already has a recorded agent exit \(signal 'blocked'.*refusing to overwrite/s,
-      'the recorded exit is protected'
-    );
-    assert.equal(store.getPendingExit('r-0001')!.signal, 'blocked', 'recorded exit survives the refusal');
-    // reacting to the recorded exit (no explicit exit) still works
-    const r = tools.runSignal();
-    assert.equal(r.run_id, 'r-0001');
-  } finally {
-    cleanup();
-  }
-});
-
-test('run_signal: a reconcile mark written concurrently (H7) SURVIVES the transition — merge-safe (audit findings 1/43, 18/43)', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
-    // an H7 file-touch lands a reconcile mark on the run body AFTER the conductor's
-    // conceptual read but BEFORE run_signal commits — the old casTransition rebuilt
-    // the body from the stale read and dropped it, weakening dispose-run's refusal.
-    const article = randomUUID();
-    store.appendRunReconcileNeeded('r-0001', article);
-    const r = tools.runSignal();
-    assert.deepEqual(r.action, { action: 'spawn', phase_id: 'p2', respawn: false }, 'the phase still advances');
-    const after = tools.runState('r-0001');
-    assert.equal(after.phases[0].status, 'complete');
-    assert.equal(after.phases[1].status, 'in_progress');
-    assert.deepEqual(after.reconcile_needed, [article], 'the concurrent reconcile mark survived run_signal (dispose-run will still refuse on it)');
-  } finally {
-    cleanup();
-  }
-});
+// The eight staged-pipeline agent_exit/run_signal tests that lived here
+// (§5.2 signal rejection, phase currency/existence, CAS transitions,
+// agent-died respawn/death-cap, exit-overwrite refusal, merge-safe reconcile
+// survival) were removed with the staged pipeline (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — agentExit, runSignal,
+// runState, getPendingExit and appendRunReconcileNeeded no longer exist.
 
 test('knowledge_create: caller cannot override the server-owned envelope (id/timestamps/status) — audit finding 14/43', () => {
   const { tools, cleanup } = harness();
@@ -1678,201 +1520,17 @@ test('maintenance_query: system_reason is filtered BEFORE the cap — matches pa
   }
 });
 
-test('run_signal: unknown signal reaching the brain halts the run loudly and durably (P5)', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    const r = tools.runSignal({ exit: { signal: 'garbage', phase_id: 'p1' } });
-    assert.equal(r.action.action, 'halt');
-    assert.equal(tools.runState('r-0001').machine_state, 'halted');
-  } finally {
-    cleanup();
-  }
-});
-
-test('handoff pair: write validates, read filters by phase and files', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    assert.throws(() => tools.handoffWrite({ handoff: { phase_id: 'p1' } }), /invalid/i);
-    tools.handoffWrite({
-      handoff: {
-        phase_id: 'p1',
-        agent_role: 'coder',
-        what_changed: [{ path: 'src\\a.ts', change_role: 'implemented' }],
-        wired: [],
-        deferred: [],
-        decisions_made: [],
-        tests_produced: [],
-        exit_signal: 'complete',
-        unresolved: [],
-      },
-    });
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 1);
-    assert.equal(tools.handoffRead({ files: ['src/a.ts'] }).length, 1);
-    assert.equal(tools.handoffRead({ phase_id: 'p2' }).length, 0);
-  } finally {
-    cleanup();
-  }
-});
-
-// --------------------------- AC2: reviewer disposition coverage enforcement (run r-d630 phase 2) ---------------------------
-// A reviewer-role handoff_write must disposition EXACTLY the record_ids the run
-// record's review_mandatory holds for that handoff's phase — set equality. A
-// missing or extra id refuses the write LOUDLY, naming the offending ids, and
-// nothing is persisted. Non-reviewer roles are entirely unaffected. Placement
-// mirrors the 32fa4a05 agent_exit off-run-phase refusal (fail-loud at the seam,
-// nothing written). REVIEWER_ROLES is imported, never redefined (invariant 1).
-
-// The four exact agent_role strings the reviewer templates emit — pinned here so
-// the wire is proven to fire for exactly these and no others (the free-string
-// hole is left to the phase-3 disposal-fold backstop per decision 628c4b7f).
-const REVIEWER_ROLE_STRINGS = ['reviewer-correctness', 'reviewer-security', 'reviewer-performance', 'reviewer-skeptic'] as const;
-
-type Disposition = { record_id: string; disposition: 'addressed' | 'not_applicable_because'; reason?: string };
-
-const handoffArgs = (agent_role: string, phase_id: string, dispositions?: Disposition[]) => ({
-  handoff: {
-    phase_id,
-    agent_role,
-    what_changed: [],
-    wired: [],
-    deferred: [],
-    decisions_made: [],
-    tests_produced: [],
-    exit_signal: 'complete',
-    unresolved: [],
-    ...(dispositions ? { dispositions } : {}),
-  },
-});
-
-test('AC2: the enforced reviewer role strings are exactly REVIEWER_ROLES — the wire fires for these four and no others', () => {
-  // The pinned template strings and the imported registry must set-equal; if a
-  // template role were renamed or a fifth reviewer added, this fails loudly.
-  assert.deepEqual([...REVIEWER_ROLES].sort(), [...REVIEWER_ROLE_STRINGS].sort());
-});
-
-test('AC2: a reviewer handoff without exact review_mandatory coverage is REFUSED loudly (missing/extra ids named) with nothing written — all four roles', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    const m1 = randomUUID();
-    const m2 = randomUUID();
-    const extra = randomUUID();
-
-    for (const role of REVIEWER_ROLE_STRINGS) {
-      // replace-by-phase: p1 requires exactly {m1, m2}
-      store.setRunReviewMandatory('r-0001', 'p1', [
-        { record_id: m1, reason: 'blocking anti-pattern' },
-        { record_id: m2, reason: 'blocking anti-pattern' },
-      ]);
-
-      // (a) no dispositions at all → both mandatory ids missing, both named
-      assert.throws(
-        () => tools.handoffWrite(handoffArgs(role, 'p1')),
-        (err: Error) => new RegExp(m1).test(err.message) && new RegExp(m2).test(err.message) && /missing/i.test(err.message),
-        `${role}: empty dispositions refused, both missing ids named`
-      );
-
-      // (b) partial coverage → the one uncovered id is named as missing
-      assert.throws(
-        () => tools.handoffWrite(handoffArgs(role, 'p1', [{ record_id: m1, disposition: 'addressed' }])),
-        (err: Error) => new RegExp(m2).test(err.message) && /missing/i.test(err.message),
-        `${role}: partial coverage refused, the missing id named`
-      );
-
-      // (c) superset → the id not in the mandatory set is named as extra
-      assert.throws(
-        () =>
-          tools.handoffWrite(
-            handoffArgs(role, 'p1', [
-              { record_id: m1, disposition: 'addressed' },
-              { record_id: m2, disposition: 'addressed' },
-              { record_id: extra, disposition: 'addressed' },
-            ])
-          ),
-        (err: Error) => new RegExp(extra).test(err.message) && /extra/i.test(err.message),
-        `${role}: superset refused, the extra id named`
-      );
-    }
-
-    // every refused write persisted NOTHING (the seam refuses before writing)
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 0, 'no refused reviewer handoff was persisted');
-  } finally {
-    cleanup();
-  }
-});
-
-test('AC2: a reviewer handoff with EXACT coverage lands — any mix of addressed / not_applicable_because+reason — all four roles', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    const m1 = randomUUID();
-    const m2 = randomUUID();
-    store.setRunReviewMandatory('r-0001', 'p1', [
-      { record_id: m1, reason: 'blocking anti-pattern' },
-      { record_id: m2, reason: 'blocking anti-pattern' },
-    ]);
-    for (const role of REVIEWER_ROLE_STRINGS) {
-      assert.doesNotThrow(
-        () =>
-          tools.handoffWrite(
-            handoffArgs(role, 'p1', [
-              { record_id: m1, disposition: 'addressed' },
-              { record_id: m2, disposition: 'not_applicable_because', reason: 'out of scope for this surface' },
-            ])
-          ),
-        `${role}: exact-coverage reviewer handoff lands`
-      );
-      assert.ok(
-        tools.handoffRead({ phase_id: 'p1' }).some((h) => (h as { agent_role?: string }).agent_role === role),
-        `${role}: the landed reviewer handoff is readable`
-      );
-    }
-  } finally {
-    cleanup();
-  }
-});
-
-test('AC2: a reviewer handoff lands with NO dispositions when the phase mandatory set is empty; a DIFFERENT phase\'s review_mandatory never binds this phase', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    // (1) no review_mandatory anywhere → empty set-equals empty → lands, no dispositions
-    assert.doesNotThrow(() => tools.handoffWrite(handoffArgs('reviewer-correctness', 'p1')));
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 1);
-
-    // (2) review_mandatory seeded ONLY for p2 must not bind a p1 handoff
-    store.setRunReviewMandatory('r-0001', 'p2', [{ record_id: randomUUID(), reason: 'blocking anti-pattern' }]);
-    assert.doesNotThrow(() => tools.handoffWrite(handoffArgs('reviewer-security', 'p1')));
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 2, "another phase's mandatory set never binds p1");
-  } finally {
-    cleanup();
-  }
-});
-
-test('AC2: non-reviewer handoffs are entirely unaffected — they land with or without dispositions regardless of review_mandatory state', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    const m1 = randomUUID();
-    // a non-empty mandatory set that a reviewer WOULD have to satisfy exactly
-    store.setRunReviewMandatory('r-0001', 'p1', [{ record_id: m1, reason: 'blocking anti-pattern' }]);
-
-    // coder with NO dispositions → lands despite the non-empty mandatory set
-    assert.doesNotThrow(() => tools.handoffWrite(handoffArgs('coder', 'p1')));
-    // test-writer WITH non-matching dispositions → dispositions ignored, lands
-    assert.doesNotThrow(() =>
-      tools.handoffWrite(handoffArgs('test-writer', 'p1', [{ record_id: randomUUID(), disposition: 'addressed' }]))
-    );
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 2, 'both non-reviewer handoffs persisted, coverage never checked');
-  } finally {
-    cleanup();
-  }
-});
+// The staged-pipeline "run_signal: unknown signal" test and the whole
+// "handoff pair" / AC2 reviewer-disposition-coverage test block that lived
+// here were removed with the staged pipeline (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — handoffWrite,
+// handoffRead, runSignal, runState and setRunReviewMandatory no longer exist.
+// REVIEWER_ROLES itself (the roster set these tests enumerated) is unrelated
+// knowledge-loop-independent roster territory; its own totality test survives
+// in packages/schemas/src/tests/schemas.test.ts.
 
 // ---------------------------------------------------------------------------
-// knowledge_get id-PREFIX resolution (decision 27f148c2) — the citation format
+// knowledge_get id-PREFIX resolution (decision foreign_27f148c2) — the citation format
 // the whole repo writes, which get() alone could not serve.
 // ---------------------------------------------------------------------------
 
@@ -1930,47 +1588,10 @@ test('knowledge_get resolves the 8-char citation prefix, at any status, and refu
   }
 });
 
-// ---------------------------------------------------------------------------
-// The run wire outside a run (decision 391fae4f): eight agents in a consuming
-// project burned tokens diagnosing `run_state: no active run`.
-// ---------------------------------------------------------------------------
-
-test('agent_exit/handoff_write/handoff_read name conductor-direct when no run is active, and record nothing', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    for (const call of [
-      () => tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } }),
-      () => tools.handoffWrite({ handoff: { phase_id: 'p1', agent_role: 'coder' } }),
-      () => tools.handoffRead({}),
-    ]) {
-      assert.throws(call, /no run is active/, 'the refusal names the real precondition, not run_state');
-      assert.throws(call, /CONDUCTOR-DIRECT mode, not a fault to diagnose/, 'and says it is a mode, not a bug to chase');
-      assert.throws(call, /final message IS your deliverable/, 'and tells the agent what to do instead');
-      assert.throws(call, /never invent a run_id/, 'and forecloses the fabricated-run_id retry that was measured');
-    }
-    assert.equal(store.getRun(), undefined, 'nothing was recorded and no implicit run was minted');
-
-    // THE MEASURED RETRY: agents fabricated a run_id when the first call failed.
-    // Keying the guard on "did the caller omit run_id" let exactly that case fall
-    // through to the bare `no run '<made up>'` this change exists to kill.
-    assert.throws(
-      () => tools.agentExit({ run_id: 'r-invented', phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'x' } }),
-      /CONDUCTOR-DIRECT mode, not a fault to diagnose/,
-      'a fabricated run_id with no active run gets the guidance, not the bare no-run error'
-    );
-    assert.throws(() => tools.handoffRead({ run_id: 'r-invented' }), /final message IS your deliverable/);
-
-    // The guidance is scoped to the runless case: with a run active, the existing
-    // off-run-phase refusal is untouched.
-    startRun(store);
-    assert.throws(
-      () => tools.agentExit({ phase_id: 'nope', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'x' } }),
-      /no phase 'nope' on run/
-    );
-  } finally {
-    cleanup();
-  }
-});
+// The "run wire outside a run" test that lived here (decision foreign_391fae4f) was
+// removed with the staged pipeline (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — agentExit,
+// handoffWrite and handoffRead no longer exist.
 
 // ---------------------------------------------------------------------------
 // FEEDBACK BATCH 2026-08-03 (§2.5, §2.7, §2.12, §3.4, §3.6, §3.9, §3.10 + board
@@ -2108,7 +1729,7 @@ test('knowledge_schema reports required vs optional, types and closed enums (§2
   }
 });
 
-test('knowledge_schema(research_finding) reports file_keys as optional; reference_material still does not (decision 8dbbc85d, board b1de6fab)', () => {
+test('knowledge_schema(research_finding) reports file_keys as optional; reference_material still does not (decision foreign_8dbbc85d, board b1de6fab)', () => {
   const { tools, cleanup } = harness();
   try {
     const rf = tools.knowledgeSchema('research_finding');
@@ -2120,7 +1741,7 @@ test('knowledge_schema(research_finding) reports file_keys as optional; referenc
 
     // control: the per-type split still holds — reference_material carries its
     // path via `location`, not file_keys, and this addition must not blur that
-    // (decision b47889b7, unchanged).
+    // (decision foreign_b47889b7, unchanged).
     const ref = tools.knowledgeSchema('reference_material');
     assert.ok(!ref.optional.includes('file_keys') && !ref.required.includes('file_keys'), 'reference_material is unaffected by this addition');
   } finally {
@@ -2128,7 +1749,7 @@ test('knowledge_schema(research_finding) reports file_keys as optional; referenc
   }
 });
 
-test('knowledge_create/knowledge_query: research_finding accepts file_keys, normalizes it, and joins by it — same as decision/anti_pattern (decision 8dbbc85d, board b1de6fab)', () => {
+test('knowledge_create/knowledge_query: research_finding accepts file_keys, normalizes it, and joins by it — same as decision/anti_pattern (decision foreign_8dbbc85d, board b1de6fab)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record } = tools.knowledgeCreate('research_finding', {
@@ -3154,7 +2775,7 @@ test("removes distinguish 'already removed' from 'never existed' via the drain-l
       file_keys: ['src/thing.ts'],
       feature_link: article.id,
     });
-    // CONDUCTOR HARNESS REPAIR 2026-08-21 (decision 68988832): the implicit
+    // CONDUCTOR HARNESS REPAIR 2026-08-21 (decision foreign_68988832): the implicit
     // auto-drain this line relied on is retired — the item is closed via the
     // explicit resolves claim, preserving this test's subject (the drain-log
     // trace distinguishing 'already removed' from 'never existed').

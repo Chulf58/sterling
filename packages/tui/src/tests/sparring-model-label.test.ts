@@ -10,8 +10,8 @@ import * as viewmodel from '../viewmodel.js';
 
 // ===========================================================================
 // SPARRING MODEL ROW — LABEL + COMMIT NOTICE (board 7423f7a2 slice 5, item 2;
-// decision 8b329d57 'codex-resumed-pinned-gpt-5-6-sol-server-side' as corrected
-// forward; decision ea68735d 'sparring-partner-partnership-shape' point 8).
+// decision foreign_8b329d57 'codex-resumed-pinned-gpt-5-6-sol-server-side' as corrected
+// forward; decision foreign_ea68735d 'sparring-partner-partnership-shape' point 8).
 //
 // SPEC-ONLY ORACLE, written blind: no state.ts / main.ts / viewmodel.ts was
 // read. The row-builder API (buildSystemTab → view.sparringRows, [0] toggle /
@@ -26,7 +26,7 @@ import * as viewmodel from '../viewmodel.js';
 //     when the call names no model — an explicit call-site model still wins
 //     (H20 injection, pinned in scripts/tests/h20-consult-model-injection.test.mjs
 //     M-1), and a running codex-reply thread keeps its opener's model because
-//     that tool's schema has no model field (research_finding be284452).
+//     that tool's schema has no model field (research_finding foreign_be284452).
 //   • committing a model raises a ui.notice stating both of those limits, at
 //     the moment the user sets the value — the user's report was "it just says
 //     default and doesn't work", so the row must now say what it actually does.
@@ -185,7 +185,7 @@ test("label 1: the sparring model row is labelled 'Default Codex model' — the 
   assert.match(
     text,
     /Default Codex model/i,
-    "the row says DEFAULT: it is the model a consult gets when the call names none — an explicit call-site model still wins (decision 8b329d57, corrected-forward mechanism)",
+    "the row says DEFAULT: it is the model a consult gets when the call names none — an explicit call-site model still wins (decision 8b329d57, corrected-forward mechanism)", // not-a-citation: fixture id
   );
   const stripped = text.replace(/Default Codex model/gi, '');
   assert.doesNotMatch(
@@ -259,7 +259,7 @@ test('label 3: committing a model sets a ui.notice saying explicit calls overrid
     assert.match(
       notice,
       /thread/i,
-      "the notice names the thread limit: codex-reply carries no model field, so an in-flight thread keeps its opener's model (research_finding be284452)",
+      "the notice names the thread limit: codex-reply carries no model field, so an in-flight thread keeps its opener's model (research_finding be284452)", // not-a-citation: fixture id
     );
     assert.match(
       notice,

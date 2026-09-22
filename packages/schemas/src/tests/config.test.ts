@@ -7,41 +7,28 @@ import { parseConfig } from '../config.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
-test('shipped default config parses and carries the spec defaults (§12, §5.1, §7.2)', () => {
+test('shipped default config parses and carries the spec defaults (§12, §7.2)', () => {
   const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')));
-  assert.equal(shipped.caps.inner_loop_n, 3, 'inner loop N default 3 (§5.1)');
-  assert.equal(shipped.caps.outer_loop_m, 2, 'outer loop M default 2');
-  assert.equal(shipped.caps.dispatch_per_agent_type, 25);
-  assert.equal(shipped.caps.phase_death_cap, 1);
-  assert.equal(shipped.context_watch.warn_pct, 60);
-  assert.equal(shipped.context_watch.block_pct, 95);
-  assert.equal(shipped.context_watch.mode, 'observe', 'MVP-spine default is observe (§6 H6)');
-  assert.equal(shipped.models.reviewers.effort, 'low', 'reviewers run low effort flat (§7.2)');
   // Exact pinned IDs, never bare tier aliases (a127e6e1's mechanism, still
   // binding). The VALUES track the newest generation per the stay-current posture
   // (738253b2) — bumped 4.x -> 5 on 2026-07-26, so this pair is expected to change
   // on each generational bump; the assertion exists to catch an accidental drift to
   // an alias or a stale pin, not to freeze a version.
-  assert.equal(shipped.models.coder.model, 'claude-sonnet-5');
-  assert.equal(shipped.models.coder_hard.model, 'claude-opus-5');
+  assert.equal(shipped.models.implementor.model, 'claude-sonnet-5');
   for (const [role, v] of Object.entries(shipped.models)) {
     assert.match(v.model, /^claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
   }
   for (const role of Object.values(shipped.models)) {
     assert.notEqual(role.effort, 'max', 'max effort is never used for subagents (§7.2 hard rule)');
   }
-  assert.ok(shipped.reviewer_selection.security_path_patterns.length >= 3, 'signal sets start over-inclusive (§7.1)');
   assert.equal(shipped.staleness.research_days.fast, 30);
 });
 
 test('empty config gets full defaults; malformed config fails loud', () => {
   const empty = parseConfig({});
-  assert.equal(empty.caps.inner_loop_n, 3);
-  assert.equal(empty.context_watch.mode, 'observe');
-  assert.equal(empty.prep_cap, 20);
-  assert.throws(() => parseConfig({ caps: { inner_loop_n: 'three' } }));
-  assert.throws(() => parseConfig({ context_watch: { mode: 'silent' } }));
-  assert.throws(() => parseConfig({ models: { coder: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
+  assert.equal(empty.context_watch.conductor.soft_pct, 35);
+  assert.throws(() => parseConfig({ context_watch: { conductor: { soft_pct: 'thirty' } } }));
+  assert.throws(() => parseConfig({ models: { implementor: { model: 'sonnet', effort: 'max' } } }), /invalid/i);
 });
 
 // ------------------- session_events config (run r-0501, AC7 / interface slice 3) -------------------
@@ -100,72 +87,6 @@ test('templates/default-config.json carries the shipped models_catalog block and
   assert.equal(shipped.models_catalog?.staleness_days, 45, 'the shipped models_catalog.staleness_days is 45');
 });
 
-// ------------------- difficulty.split_interface_threshold (run r-68eb, brief afd9b684, AC4 — p1 config half) -------------------
-
-// split_interface_threshold is the gate-confirmed RENAME of the dead blast_radius_hard_threshold:
-// the old key is GONE from the schema and a legacy config still carrying it must still parse
-// (configSchema objects are non-strict — unknown keys strip). Accessed through a cast so referencing
-// the not-yet-existing field does not require it at compile time — the assertions below fail cleanly
-// (not the package build) until parseConfig grows the field. The old key is intentionally typed here
-// so the "legacy key stripped from the parsed output" assertion compiles.
-type CfgWithSplit = {
-  difficulty?: {
-    split_interface_threshold?: number;
-    thin_knowledge_retrieval_threshold?: number;
-    blast_radius_hard_threshold?: number;
-  };
-};
-
-test('difficulty.split_interface_threshold: default 3 from an empty config', () => {
-  const empty = parseConfig({}) as unknown as CfgWithSplit;
-  assert.ok(empty.difficulty, 'parseConfig defaults must add a difficulty block');
-  assert.equal(empty.difficulty?.split_interface_threshold, 3, 'split_interface_threshold defaults to 3 (user-confirmed "more than 3")');
-});
-
-test('difficulty.split_interface_threshold: an explicit value is tunable; non-int / non-positive fail loud', () => {
-  const tuned = parseConfig({ difficulty: { split_interface_threshold: 5 } }) as unknown as CfgWithSplit;
-  assert.equal(tuned.difficulty?.split_interface_threshold, 5, 'an explicit split_interface_threshold overrides the default 3');
-  assert.throws(
-    () => parseConfig({ difficulty: { split_interface_threshold: 'many' } }),
-    /invalid/i,
-    'split_interface_threshold must be a number — a non-number fails loud'
-  );
-  assert.throws(
-    () => parseConfig({ difficulty: { split_interface_threshold: 0 } }),
-    'split_interface_threshold is zod-positive — 0 is rejected'
-  );
-  assert.throws(
-    () => parseConfig({ difficulty: { split_interface_threshold: -3 } }),
-    'split_interface_threshold is zod-positive — a negative is rejected'
-  );
-  assert.throws(
-    () => parseConfig({ difficulty: { split_interface_threshold: 2.5 } }),
-    'split_interface_threshold is a zod int — a fractional value is rejected'
-  );
-});
-
-test('difficulty: a legacy config carrying the dead blast_radius_hard_threshold still parses; the old key is stripped and split_interface_threshold defaults', () => {
-  const legacy = parseConfig({ difficulty: { blast_radius_hard_threshold: 7 } }) as unknown as CfgWithSplit;
-  assert.ok(legacy.difficulty, 'a legacy difficulty block survives parsing (non-strict object)');
-  assert.equal(legacy.difficulty?.split_interface_threshold, 3, 'the new field is present and defaulted even when only the legacy key was supplied');
-  assert.equal(
-    legacy.difficulty?.blast_radius_hard_threshold,
-    undefined,
-    'the renamed-away blast_radius_hard_threshold is stripped — it is gone from the parsed output'
-  );
-});
-
-test('difficulty.thin_knowledge_retrieval_threshold is untouched by the rename (stays default 2)', () => {
-  const empty = parseConfig({}) as unknown as CfgWithSplit;
-  assert.equal(empty.difficulty?.thin_knowledge_retrieval_threshold, 2, 'thin_knowledge_retrieval_threshold is untouched — default 2');
-});
-
-test('templates/default-config.json ships difficulty.split_interface_threshold (3) and still parses', () => {
-  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithSplit;
-  assert.ok(shipped.difficulty, 'the shipped default-config carries a difficulty block');
-  assert.equal(shipped.difficulty?.split_interface_threshold, 3, 'the shipped split_interface_threshold is 3');
-});
-
 test('conductor pressure thresholds (recalibrated 2026-08-11, user-decided): defaults 35/50, tunable, shipped in the default config', () => {
   const empty = parseConfig({});
   assert.equal(empty.context_watch.conductor.soft_pct, 35, 'soft default 35');
@@ -187,100 +108,46 @@ test('conductor pressure: shipped windows map carries verified per-model context
   assert.equal(shipped.context_watch.windows.default, 200_000, 'unknown models stay conservative — mismatch degrades loud, never false-blocks');
 });
 
-// ------------------- delegation_watch config (H10 delegation-watch advisory, decision 677f1639) -------------------
+// ------------------- delivery.total_cap_bytes (H19 delivery per-delivery cap) -------------------
 
-// delegation_watch is a NEW top-level config block (a sibling of context_watch,
-// not nested under it — mirrors the context_watch.conductor precedent in shape
-// only). Accessed through a cast so referencing it here does not require the
-// field to exist at compile time — the assertions below fail cleanly (not the
-// package build) until parseConfig grows the block.
-type CfgWithDelegationWatch = {
-  delegation_watch?: { min_hand_work?: number; max_dispatches?: number };
-};
+// delegation_watch (H10's hand-work-vs-dispatch advisory) was deleted along
+// with H10's delegation-watch Stop seam in Slice 4 (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — its config block and
+// this section's former tests went with it. total_cap_bytes is a NEW field
+// nested inside the existing delivery block (see the injection_rung/
+// payload_char_cap tests elsewhere in this file for that block's other
+// fields). scripts/hooks/lib/delivery.mjs's DELIVERY_TOTAL_CAP_DEFAULT (3000)
+// mirrors this schema default; an absent/invalid value falls back there.
+type CfgWithDelivery = { delivery?: { total_cap_bytes?: number; injection_rung?: string } };
 
-test('delegation_watch: defaults {min_hand_work:15, max_dispatches:0} from an empty config', () => {
-  const empty = parseConfig({}) as unknown as CfgWithDelegationWatch;
-  assert.ok(empty.delegation_watch, 'parseConfig defaults must add a delegation_watch block');
-  assert.equal(empty.delegation_watch?.min_hand_work, 15, 'min_hand_work defaults to 15');
-  assert.equal(empty.delegation_watch?.max_dispatches, 0, 'max_dispatches defaults to 0');
+test('delivery.injection_rung: defaults to read, and the shipped template says read', () => {
+  const empty = parseConfig({}) as unknown as CfgWithDelivery;
+  assert.equal(empty.delivery?.injection_rung, 'read', 'new projects inject before action by default');
+  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithDelivery;
+  assert.equal(shipped.delivery?.injection_rung, 'read', 'the template must not override the schema default with prompt');
 });
 
-test('delegation_watch: explicit values are honored; a non-number fails loud', () => {
-  const tuned = parseConfig({ delegation_watch: { min_hand_work: 20, max_dispatches: 2 } }) as unknown as CfgWithDelegationWatch;
-  assert.equal(tuned.delegation_watch?.min_hand_work, 20, 'an explicit min_hand_work overrides the default 15');
-  assert.equal(tuned.delegation_watch?.max_dispatches, 2, 'an explicit max_dispatches overrides the default 0');
-  assert.throws(
-    () => parseConfig({ delegation_watch: { min_hand_work: 'many' } }),
-    /invalid/i,
-    'min_hand_work must be a number — a non-number fails loud'
-  );
-  assert.throws(
-    () => parseConfig({ delegation_watch: { max_dispatches: 'none' } }),
-    /invalid/i,
-    'max_dispatches must be a number — a non-number fails loud'
-  );
+test('delivery.total_cap_bytes: defaults to 3000 from an empty config; 0 is a valid explicit "off"', () => {
+  const empty = parseConfig({}) as unknown as CfgWithDelivery;
+  assert.equal(empty.delivery?.total_cap_bytes, 3000, 'total_cap_bytes defaults to 3000');
+  const off = parseConfig({ delivery: { total_cap_bytes: 0 } }) as unknown as CfgWithDelivery;
+  assert.equal(off.delivery?.total_cap_bytes, 0, '0 (disabled) is a valid explicit nonnegative value');
 });
 
-test('delegation_watch: min_hand_work is zod-positive (0 and negative rejected); max_dispatches is nonnegative (negative rejected, 0 allowed)', () => {
-  assert.throws(() => parseConfig({ delegation_watch: { min_hand_work: 0 } }), 'min_hand_work must be positive — 0 is rejected');
-  assert.throws(() => parseConfig({ delegation_watch: { min_hand_work: -5 } }), 'min_hand_work must be positive — a negative is rejected');
-  assert.throws(() => parseConfig({ delegation_watch: { max_dispatches: -1 } }), 'max_dispatches must be nonnegative — a negative is rejected');
-  const zeroOk = parseConfig({ delegation_watch: { max_dispatches: 0 } }) as unknown as CfgWithDelegationWatch;
-  assert.equal(zeroOk.delegation_watch?.max_dispatches, 0, 'max_dispatches: 0 is a valid, explicit, nonnegative value');
+test('delivery.total_cap_bytes: an explicit value is honored; negative and non-number fail loud', () => {
+  const tuned = parseConfig({ delivery: { total_cap_bytes: 5000 } }) as unknown as CfgWithDelivery;
+  assert.equal(tuned.delivery?.total_cap_bytes, 5000, 'an explicit value overrides the default');
+  assert.throws(() => parseConfig({ delivery: { total_cap_bytes: -1 } }), 'negative is rejected — the field is nonnegative, not positive');
+  assert.throws(() => parseConfig({ delivery: { total_cap_bytes: 'lots' } }), 'a non-number fails loud');
 });
 
-// ------------------- delegation_watch.streak_threshold (H21 hand-work-streak advisory, decision 677f1639) -------------------
+// ------------------- sparring_partner config (decision foreign_cd019e0b, sparring-partner-partnership-shape) -------------------
 
-// streak_threshold is a NEW field on the EXISTING delegation_watch block — a
-// sibling of min_hand_work/max_dispatches, which this addition must leave
-// untouched. Accessed through a cast for the same reason as the block above:
-// the assertions fail cleanly (not the package build) until parseConfig grows
-// the field.
-type CfgWithStreakThreshold = {
-  delegation_watch?: { min_hand_work?: number; max_dispatches?: number; streak_threshold?: number };
-};
-
-test('delegation_watch.streak_threshold: defaults to 10 from an empty config; existing min_hand_work/max_dispatches untouched', () => {
-  const empty = parseConfig({}) as unknown as CfgWithStreakThreshold;
-  assert.ok(empty.delegation_watch, 'parseConfig defaults must add a delegation_watch block');
-  assert.equal(empty.delegation_watch?.streak_threshold, 10, 'streak_threshold defaults to 10');
-  assert.equal(empty.delegation_watch?.min_hand_work, 15, 'min_hand_work default is unchanged by the new sibling field');
-  assert.equal(empty.delegation_watch?.max_dispatches, 0, 'max_dispatches default is unchanged by the new sibling field');
-});
-
-test('delegation_watch.streak_threshold: an explicit value is tunable alongside the other two fields', () => {
-  const tuned = parseConfig({
-    delegation_watch: { min_hand_work: 20, max_dispatches: 2, streak_threshold: 5 },
-  }) as unknown as CfgWithStreakThreshold;
-  assert.equal(tuned.delegation_watch?.streak_threshold, 5, 'an explicit streak_threshold overrides the default 10');
-  assert.equal(tuned.delegation_watch?.min_hand_work, 20, 'sibling field min_hand_work still honored alongside the new field');
-  assert.equal(tuned.delegation_watch?.max_dispatches, 2, 'sibling field max_dispatches still honored alongside the new field');
-});
-
-test('delegation_watch.streak_threshold: positive int only — 0, negative, fractional, and non-number all rejected loud', () => {
-  assert.throws(
-    () => parseConfig({ delegation_watch: { streak_threshold: 'many' } }),
-    /invalid/i,
-    'streak_threshold must be a number — a non-number fails loud'
-  );
-  assert.throws(() => parseConfig({ delegation_watch: { streak_threshold: 0 } }), 'streak_threshold is zod-positive — 0 is rejected');
-  assert.throws(() => parseConfig({ delegation_watch: { streak_threshold: -3 } }), 'streak_threshold is zod-positive — a negative is rejected');
-  assert.throws(() => parseConfig({ delegation_watch: { streak_threshold: 2.5 } }), 'streak_threshold is a zod int — a fractional value is rejected');
-});
-
-test('templates/default-config.json still parses and carries a delegation_watch.streak_threshold of 10', () => {
-  const shipped = parseConfig(JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8'))) as unknown as CfgWithStreakThreshold;
-  assert.ok(shipped.delegation_watch, 'parseConfig always supplies a delegation_watch block, shipped config or not');
-  assert.equal(shipped.delegation_watch?.streak_threshold, 10, 'the shipped/defaulted streak_threshold is 10');
-});
-
-// ------------------- sparring_partner config (decision cd019e0b, sparring-partner-partnership-shape) -------------------
-
-// sparring_partner is a NEW top-level config block, additive-optional like
-// delegation_watch above: an absent block still parses with defaults
-// ({enabled: true}). Accessed through a cast so referencing it here does not
-// require the field to exist at compile time — the assertions below fail
-// cleanly (not the package build) until parseConfig grows the block.
+// sparring_partner is a NEW top-level config block, additive-optional: an
+// absent block still parses with defaults ({enabled: true}). Accessed through
+// a cast so referencing it here does not require the field to exist at
+// compile time — the assertions below fail cleanly (not the package build)
+// until parseConfig grows the block.
 type CfgWithSparringPartner = { sparring_partner?: { enabled?: boolean } };
 
 test('sparring_partner: absent block defaults to {enabled: true}', () => {
@@ -309,7 +176,7 @@ test('templates/default-config.json still parses and carries sparring_partner en
 });
 
 // ------------------- sparring_partner.model (slice 2, article 'sparring-partner' interaction i /
-// decision cd019e0b point 8: the System-tab model selector; optional, empty/absent = CLI default) -------------------
+// decision foreign_cd019e0b point 8: the System-tab model selector; optional, empty/absent = CLI default) -------------------
 
 // model is a NEW field on the EXISTING sparring_partner block — additive-optional,
 // a sibling of `enabled` above which this addition must leave untouched. Accessed
@@ -345,7 +212,7 @@ test('templates/default-config.json still parses with sparring_partner.model omi
   assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped enabled default is untouched by the new sibling field');
 });
 
-// ------------------- tdd / mutation_verification config toggles (decision 752caf98,
+// ------------------- tdd / mutation_verification config toggles (decision foreign_752caf98,
 // tdd-and-mutation-toggles-in-system-tab) -------------------
 //
 // tdd and mutation_verification are TWO NEW, INDEPENDENT top-level config
@@ -354,7 +221,7 @@ test('templates/default-config.json still parses with sparring_partner.model omi
 // TDD-by-default (user-affirmed 2026-08-09) and verify-by-mutation-on-ruling-
 // change (measured 2026-08-22) posture until a user explicitly turns either
 // off. Like `sparring_partner`/`difficulty` above, both blocks are NON-STRICT
-// configSchema objects — decision 752caf98 says only that the two blocks
+// configSchema objects — decision foreign_752caf98 says only that the two blocks
 // mirror sparring_partner's shape; it makes no strictness claim at all.
 // Unknown keys inside either block are silently STRIPPED on parse, the same
 // forward-compat posture the `difficulty` section above documents (an older
@@ -368,7 +235,7 @@ type CfgWithTddMutation = {
   mutation_verification?: { enabled?: boolean };
 };
 
-test('tdd: absent block defaults to {enabled: true} (TDD-by-default stays the standing posture, decision 752caf98)', () => {
+test('tdd: absent block defaults to {enabled: true} (TDD-by-default stays the standing posture, decision foreign_752caf98)', () => {
   const empty = parseConfig({}) as unknown as CfgWithTddMutation;
   assert.ok(empty.tdd, 'parseConfig defaults must add a tdd block even when absent from input');
   assert.equal(empty.tdd?.enabled, true, 'tdd.enabled defaults to true when the block is absent');
@@ -395,7 +262,7 @@ test('tdd: an unknown field inside the block is silently stripped — the block 
   assert.equal(stripped.tdd?.bogus_field, undefined, 'the unknown key is stripped from the parsed output, not thrown on');
 });
 
-test('mutation_verification: absent block defaults to {enabled: true} (verify-by-mutation stays the standing posture, decision 752caf98)', () => {
+test('mutation_verification: absent block defaults to {enabled: true} (verify-by-mutation stays the standing posture, decision foreign_752caf98)', () => {
   const empty = parseConfig({}) as unknown as CfgWithTddMutation;
   assert.ok(empty.mutation_verification, 'parseConfig defaults must add a mutation_verification block even when absent from input');
   assert.equal(empty.mutation_verification?.enabled, true, 'mutation_verification.enabled defaults to true when the block is absent');

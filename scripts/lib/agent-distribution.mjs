@@ -6,8 +6,8 @@
 //
 // State lives in the generated headers themselves — no side manifest to desync (P5).
 
-import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
@@ -164,7 +164,7 @@ export function isLocallyModified(content, header) {
 }
 
 // Machine-activation surface (P5; the 2026-07-03 dead-hooks incident,
-// anti_pattern 60e8463d): installed agents bake NODE/HOOKS_DIR into frontmatter
+// anti_pattern foreign_60e8463d): installed agents bake NODE/HOOKS_DIR into frontmatter
 // hook commands at install time (d53dc92c) — an install produced by the OTHER
 // machine context (WSL vs native Windows) is self-consistent and
 // template-current, so hash bookkeeping alone reads it up_to_date while every
@@ -229,6 +229,24 @@ export function loadRegistry(registryPath) {
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath}: unsupported shape (expected {version: 1, agents: []})`);
   }
+  const names = new Set();
+  const files = new Set();
+  for (const [index, entry] of registry.agents.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`agent registry ${registryPath}: agents[${index}] must be an object`);
+    }
+    if (typeof entry.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) {
+      throw new Error(`agent registry ${registryPath}: agents[${index}].name must be a safe agent name`);
+    }
+    if (typeof entry.file !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
+      throw new Error(`agent registry ${registryPath}: agents[${index}].file must be a template filename ending in .md`);
+    }
+    if (names.has(entry.name) || files.has(entry.file)) {
+      throw new Error(`agent registry ${registryPath}: duplicate agent name or template file at agents[${index}]`);
+    }
+    names.add(entry.name);
+    files.add(entry.file);
+  }
   return registry;
 }
 
@@ -237,24 +255,163 @@ export const RESTART_INSTRUCTION = [
   'RESTART REQUIRED — project subagents load at session start.',
   'Agents installed into .claude/agents/ are NOT visible to a',
   'session that was already running. Restart Claude Code in this',
-  'project before the first pipeline run; the run is blocked until',
-  'the runtime visibility check confirms the installed agent set.',
+  'project before dispatching any of the agents above.',
   '================================================================',
 ].join('\n');
 
-export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config }) {
+export function agentChangesRequireRestart(report) {
+  return report.some((entry) => ['installed', 'refreshed', 'header_repaired', 'machine_rebaked', 'retired'].includes(entry.status));
+}
+
+function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config }) {
   const registry = loadRegistry(registryPath);
-  mkdirSync(targetAgentsDir, { recursive: true });
-  const report = [];
-  for (const entry of registry.agents) {
+  // Render every replacement before modifying or retiring anything. In particular,
+  // a bad template/config may not turn a registry typo into an irreversible prune.
+  return registry.agents.map((entry) => {
     const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
     const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
     if (name !== entry.name) {
       throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
     }
-    writeFileSync(join(targetAgentsDir, `${name}.md`), installedContent);
-    report.push({ name, status: 'installed' });
+    return { ...entry, templateContent, installedContent };
+  });
+}
+
+export function retirementRefuseInstruction(name) {
+  return [
+    `REFUSED: '${name}' looks like a retired Sterling agent but cannot be safely removed.`,
+    'Choose one of the following:',
+    '  1) archive the file outside .claude/agents/,',
+    '  2) adopt it as your own custom agent by removing the Sterling header, or',
+    '  3) delete it.',
+  ].join('\n');
+}
+
+// Retire only recognized, unmodified generated artifacts. lstat is deliberate:
+// a symlink in .claude/agents is neither our regular file nor ours to follow.
+export function retireAgents({ targetAgentsDir, registryNames, fs = {} }) {
+  const io = { readdirSync, lstatSync, readFileSync, unlinkSync, renameSync, linkSync, ...fs };
+  const report = [];
+  let entries;
+  try {
+    entries = io.readdirSync(targetAgentsDir);
+  } catch (err) {
+    return [{ name: targetAgentsDir, status: 'retired_scan_failed', refused: true, instruction: `${retirementRefuseInstruction(targetAgentsDir)}\nUnable to scan the agent directory: ${err?.code ?? err?.message ?? err}` }];
   }
+  for (const filename of entries) {
+    if (!filename.endsWith('.md')) continue;
+    const name = filename.slice(0, -3);
+    if (registryNames.has(name)) continue;
+    const path = join(targetAgentsDir, filename);
+    let stat;
+    try {
+      stat = io.lstatSync(path);
+    } catch (err) {
+      report.push({ name, status: 'retired_read_failed', refused: true, instruction: `${retirementRefuseInstruction(name)}\nUnable to inspect the file: ${err?.code ?? err?.message ?? err}` });
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    let content;
+    try {
+      content = io.readFileSync(path, 'utf8');
+    } catch (err) {
+      report.push({ name, status: 'retired_read_failed', refused: true, instruction: `${retirementRefuseInstruction(name)}\nUnable to read the file: ${err?.code ?? err?.message ?? err}` });
+      continue;
+    }
+    if (!content.includes('<!-- sterling-generated')) continue;
+    const header = parseInstalledHeader(content);
+    if (!header) {
+      report.push({ name, status: 'retired_unrecognized', refused: true, instruction: retirementRefuseInstruction(name) });
+      continue;
+    }
+    let frontmatterName;
+    try {
+      frontmatterName = parseTemplate(content.replace(header.headerLine + '\n', ''), filename).name;
+    } catch {
+      frontmatterName = undefined;
+    }
+    if (name !== frontmatterName || name !== header.template) {
+      report.push({ name, status: 'retired_identity_mismatch', refused: true, instruction: retirementRefuseInstruction(name) });
+      continue;
+    }
+    if (isLocallyModified(content, header)) {
+      report.push({ name, status: 'retired_but_modified', refused: true, instruction: retirementRefuseInstruction(name) });
+      continue;
+    }
+    // Rename first: after this atomic move the original pathname is free for a
+    // user's concurrent replacement, and every verify/delete operation below
+    // addresses only our quarantined inode.
+    const quarantine = join(targetAgentsDir, `.sterling-retire-${name}-${randomUUID()}`);
+    const verifyQuarantine = () => {
+      const qstat = io.lstatSync(quarantine);
+      if (!qstat.isFile()) throw new Error('quarantine is not a regular file');
+      if (qstat.dev !== stat.dev || qstat.ino !== stat.ino) throw new Error('quarantine file identity changed');
+      const qcontent = io.readFileSync(quarantine, 'utf8');
+      const qheader = parseInstalledHeader(qcontent);
+      let qname;
+      try { qname = parseTemplate(qcontent.replace(qheader?.headerLine + '\n', ''), filename).name; } catch { qname = undefined; }
+      if (!qheader || qname !== name || qheader.template !== name || isLocallyModified(qcontent, qheader)) throw new Error('quarantine identity or hash verification failed');
+    };
+    try {
+      io.renameSync(path, quarantine);
+      verifyQuarantine();
+      // Deliberate test seam: production has no hook here; a test can replace
+      // the quarantined pathname between verification and deletion.
+      io.afterQuarantineVerify?.({ path, quarantine, name });
+      verifyQuarantine();
+      io.unlinkSync(quarantine);
+      report.push({ name, status: 'retired' });
+    } catch (err) {
+      // Never overwrite a file that appeared at the original path.  Restore
+      // only into an absent name; otherwise preserve the quarantine for manual
+      // inspection and fail loud.
+      let restored = false;
+      try {
+        // link is an atomic no-clobber restore: even a dangling symlink or a
+        // concurrent creation at `path` yields EEXIST instead of replacement.
+        io.linkSync(quarantine, path);
+        restored = true;
+        io.unlinkSync(quarantine);
+      } catch { /* leave quarantine in place */ }
+      report.push({ name, status: 'retired_delete_failed', refused: true, instruction: `${retirementRefuseInstruction(name)}\nUnable to retire safely (${err?.code ?? err?.message ?? err}); ${restored ? 'the candidate was restored.' : `it remains quarantined at ${quarantine}.`}` });
+    }
+  }
+  return report;
+}
+
+export function installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
+  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
+  mkdirSync(targetAgentsDir, { recursive: true });
+  const report = [];
+  for (const entry of prepared) {
+    const installedPath = join(targetAgentsDir, `${entry.name}.md`);
+    if (existsSync(installedPath)) {
+      const installed = readFileSync(installedPath, 'utf8');
+      const header = parseInstalledHeader(installed);
+      if (!header) {
+        report.push({ name: entry.name, status: 'foreign_file', refused: true, instruction: refuseInstruction(entry.name) });
+        continue;
+      }
+      if (isLocallyModified(installed, header)) {
+        if (header.templateHash === sha256(entry.templateContent)) {
+          report.push({ name: entry.name, status: 'locally_modified_up_to_date' });
+          continue;
+        }
+        const installedBody = normalize(installed).replace(header.headerLine + '\n', '');
+        const candidateBody = entry.installedContent.replace(parseInstalledHeader(entry.installedContent).headerLine + '\n', '');
+        if (installedBody === candidateBody) {
+          writeFileSync(installedPath, entry.installedContent);
+          report.push({ name: entry.name, status: 'header_repaired' });
+        } else {
+          report.push({ name: entry.name, status: 'refused_local_modification', refused: true, instruction: refuseInstruction(entry.name) });
+        }
+        continue;
+      }
+    }
+    writeFileSync(installedPath, entry.installedContent);
+    report.push({ name: entry.name, status: 'installed' });
+  }
+  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 
@@ -283,20 +440,13 @@ export function refuseInstruction(name) {
 // Statuses: installed | refreshed | header_repaired | machine_rebaked |
 // up_to_date | locally_modified_up_to_date | refused_local_modification |
 // foreign_file.
-export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config }) {
-  const registry = loadRegistry(registryPath);
+export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
+  const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
   mkdirSync(targetAgentsDir, { recursive: true });
   const report = [];
-  for (const entry of registry.agents) {
-    const templateContent = readFileSync(join(templatesDir, entry.file), 'utf8');
+  for (const entry of prepared) {
     const installedPath = join(targetAgentsDir, `${entry.name}.md`);
-    const renderCandidate = () => {
-      const { name, installedContent } = renderInstalledAgent(templateContent, entry.file, { pluginVersion, now, vars, config });
-      if (name !== entry.name) {
-        throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${name}'`);
-      }
-      return installedContent;
-    };
+    const renderCandidate = () => entry.installedContent;
     if (!existsSync(installedPath)) {
       writeFileSync(installedPath, renderCandidate());
       report.push({ name: entry.name, status: 'installed' });
@@ -310,7 +460,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       continue;
     }
     const modified = isLocallyModified(installed, header);
-    const stale = header.templateHash !== sha256(templateContent);
+    const stale = header.templateHash !== sha256(entry.templateContent);
     if (modified && stale) {
       // Provable equivalence before refusing: bodies are compared byte-for-byte
       // against the fresh render with THIS machine's vars baked, so a
@@ -332,7 +482,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       report.push({ name: entry.name, status: 'refreshed' });
     } else {
       // Unmodified + template-current — but hash bookkeeping cannot see a
-      // machine-context flip (anti_pattern 60e8463d: nine× up_to_date while
+      // machine-context flip (anti_pattern foreign_60e8463d: nine× up_to_date while
       // every hook command pointed at the other context's node). Compare the
       // baked hook command lines against a fresh render with THIS machine's
       // vars: command drift on an UNMODIFIED install is provably baked-var
@@ -351,17 +501,20 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       }
     }
   }
+  report.push(...retireAgents({ targetAgentsDir, registryNames: new Set(prepared.map((entry) => entry.name)), fs: retirementFs }));
   return { report, restartInstruction: RESTART_INSTRUCTION };
 }
 
-// Runtime visibility check (spec §12): project subagents load at session
-// start, so the installed agent set is visible only if every registered agent
-// is installed AND the current session started after the newest install.
-// The first pipeline run is blocked until this passes.
+// Runtime visibility check: project subagents load at session start, so the
+// installed agent set is visible only if every registered agent is installed
+// AND the current session started after the newest install. Nothing in the
+// current (post-scale-down, direct-mode-only) harness gates dispatch on this
+// automatically — it is a manual/CI check (scripts/check-agents-visible.mjs)
+// an operator can run to confirm a fresh install before trusting it.
 // probeExecutability (opt-in; the check-agents-visible CLI always enables it):
 // additionally verify every baked hook node path resolves on THIS machine —
 // visibility alone said 'ok' during the 2026-07-03 incident while every hook
-// failed non-blocking (enforcement silently absent, anti_pattern 60e8463d).
+// failed non-blocking (enforcement silently absent, anti_pattern foreign_60e8463d).
 // Opt-in so the lib contract (pure visibility) is unchanged for existing callers.
 export function checkAgentsVisible({ registryPath, targetAgentsDir, sessionStartedAt, probeExecutability = false }) {
   const registry = loadRegistry(registryPath);

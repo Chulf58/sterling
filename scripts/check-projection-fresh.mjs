@@ -6,7 +6,7 @@
 // updated_at — the SAME value architecture-projection.mjs stamps (max over all
 // feature_article updated_at) — and fails when they differ, naming the fix.
 //
-// rulings.md (decision 255f58b7, closes board 8f81704a) is the SECOND member of
+// rulings.md (decision foreign_255f58b7, closes board 8f81704a) is the SECOND member of
 // this arm, registered here rather than as a separate script: same failure
 // mode (regeneration not bound to a mechanical event), same header shape, same
 // store_authority carve-out — the only difference is which record types feed
@@ -76,7 +76,7 @@ try {
     // is gitignored, so records never travel with the repo). Comparing the
     // committed projection against an empty store reports staleness that
     // cannot exist there — and it aborted the consumer update sequence at its
-    // check step (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89, verified
+    // check step (decision foreign_e6240afe, verified
     // 2026-07-27 against an init'd empty root). Skip LOUD, never silently pass.
     if (newest === null) {
       console.log(`projection freshness: skipped (${proj.noRecordsSkipReason})`);

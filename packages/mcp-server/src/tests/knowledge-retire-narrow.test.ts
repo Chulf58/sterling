@@ -20,7 +20,7 @@
 // `knowledgeRetire(id, in_favor_of)` call shape and its
 // `{retired: Loose}` response shape, `res.retired.superseded_by`).
 //
-// Decision text quoted for the refusal conditions (9948475b, verbatim):
+// Decision text quoted for the refusal conditions (foreign_9948475b, verbatim):
 // "in_favor_of is REQUIRED and that is the design... Refuses self-retirement,
 // an absent survivor, an already-superseded survivor (forwarding into a
 // tombstone), and todo/note." And: "store.retireInFavorOf... status ->
@@ -49,7 +49,7 @@
 // matcher had silently been treated as absent) would have passed; replaced
 // with the argument-less `assert.throws(fn)` form so a throw is actually
 // required. Also ADDED the two refusal pins named in this file's own
-// decision-9948475b quote but never exercised until now: (e) an
+// decision-foreign_9948475b quote but never exercised until now: (e) an
 // already-superseded survivor refuses ("forwarding into a tombstone"), and
 // (f) a non-ruling type (todo, via boardAdd) refuses naming the type
 // restriction.
@@ -190,7 +190,7 @@ test('knowledge_retire (a): inbound links from a THIRD record survive retirement
     const pinnedDupe = get(tools, dupe.id as string);
     assert.ok(
       linksOf(pinnedDupe).some((l) => l.rel === 'informed_by' && l.target_id === outboundTarget.id),
-      'EXPECTED GREEN: the retired record\'s own outbound links are intact (decision 9948475b: "provenance and inbound links intact")'
+      'EXPECTED GREEN: the retired record\'s own outbound links are intact (decision 9948475b: "provenance and inbound links intact")' // not-a-citation: fixture id
     );
 
     const pinnedCiter = get(tools, citer.id as string);
@@ -251,7 +251,7 @@ test('knowledge_retire (c): in_favor_of naming a nonexistent id is refused, nami
     assert.throws(
       () => retire(tools, dupe.id as string, UNRESOLVABLE),
       new RegExp(escapeRegex(UNRESOLVABLE)),
-      'EXPECTED GREEN (decision 9948475b: "Refuses ... an absent survivor"): an in_favor_of that resolves to nothing is refused, naming the identifier AS GIVEN — the house convention every other write-tool refusal in this suite follows'
+      'EXPECTED GREEN (decision 9948475b: "Refuses ... an absent survivor"): an in_favor_of that resolves to nothing is refused, naming the identifier AS GIVEN — the house convention every other write-tool refusal in this suite follows' // not-a-citation: fixture id
     );
     assert.equal(decisionCount(tools), before, 'nothing written on the absent-survivor refusal');
     assert.equal(get(tools, dupe.id as string).status, 'active', 'the record is untouched');
@@ -273,7 +273,7 @@ test('knowledge_retire (d): in_favor_of equal to the record\'s own id (self-reti
     assert.throws(
       () => retire(tools, solo.id as string, solo.id as string),
       /self|itself|same record|own id/i,
-      'EXPECTED GREEN (decision 9948475b: "Refuses self-retirement"): a record cannot forward to itself — that would tombstone a record while claiming it as its own survivor'
+      'EXPECTED GREEN (decision 9948475b: "Refuses self-retirement"): a record cannot forward to itself — that would tombstone a record while claiming it as its own survivor' // not-a-citation: fixture id
     );
     assert.equal(decisionCount(tools), before, 'nothing written on the self-retirement refusal');
     assert.equal(get(tools, solo.id as string).status, 'active', 'the record is untouched');
@@ -285,7 +285,7 @@ test('knowledge_retire (d): in_favor_of equal to the record\'s own id (self-reti
 // ===========================================================================
 // (e) in_favor_of naming an ALREADY-SUPERSEDED survivor is refused — a
 //     retired record must forward to an ACTIVE record, never into a
-//     tombstone (decision 9948475b, verbatim: "Refuses ... an
+//     tombstone (decision foreign_9948475b, verbatim: "Refuses ... an
 //     already-superseded survivor (forwarding into a tombstone)").
 // ===========================================================================
 
@@ -311,7 +311,7 @@ test('knowledge_retire (e): in_favor_of naming an already-superseded (tombstoned
     assert.throws(
       () => retire(tools, b.id as string, a.id as string),
       /superseded|tombstone|active/i,
-      'EXPECTED GREEN (decision 9948475b: "an already-superseded survivor (forwarding into a tombstone)"): retiring INTO a tombstoned id is refused — a retired record must forward to an ACTIVE survivor'
+      'EXPECTED GREEN (decision 9948475b: "an already-superseded survivor (forwarding into a tombstone)"): retiring INTO a tombstoned id is refused — a retired record must forward to an ACTIVE survivor' // not-a-citation: fixture id
     );
     assert.equal(decisionCount(tools), before, 'nothing written on the tombstone-forwarding refusal');
     assert.equal(get(tools, b.id as string).status, 'active', 'B is untouched');
@@ -322,7 +322,7 @@ test('knowledge_retire (e): in_favor_of naming an already-superseded (tombstoned
 
 // ===========================================================================
 // (f) retiring a NON-RULING type (todo) is refused, naming the type
-//     restriction (decision 9948475b, verbatim: "Refuses ... todo/note").
+//     restriction (decision foreign_9948475b, verbatim: "Refuses ... todo/note").
 //     Reachable through this harness via `tools.boardAdd` (the same
 //     fixture shape knowledge-supersede.test.ts's AC3 todo-refusal test
 //     uses) — `note` is not exercised here since the note surface was
@@ -340,7 +340,7 @@ test('knowledge_retire (f): retiring a todo (non-ruling type) is refused, naming
     assert.throws(
       () => retire(tools, todo.id as string, survivor.id as string),
       /todo|board_remove|type/i,
-      'EXPECTED GREEN (decision 9948475b: "Refuses ... todo/note"): a todo cannot be retired — P4 removal (board_remove) is its own exit path'
+      'EXPECTED GREEN (decision 9948475b: "Refuses ... todo/note"): a todo cannot be retired — P4 removal (board_remove) is its own exit path' // not-a-citation: fixture id
     );
     assert.equal(decisionCount(tools), before, 'nothing written on the type-restriction refusal (decision count, unaffected either way, checked for parity with the other refusal tests)');
     assert.equal(tools.boardQuery({ source: 'user' }).length, 1, 'the todo is untouched');

@@ -18,10 +18,16 @@
 //   - gitProject() (git init -q -b main, user.email/user.name, base commit):
 //     same file, and scripts/tests/h1-plugin-root-sites.test.mjs's git
 //     fixture pattern.
-//   - the "reading files by hand" phrase as H1's own ordinary-banner liveness
-//     marker (present on every plain SessionStart regardless of fixture
-//     content): scripts/tests/h1-plugin-root-sites.test.mjs's LIVENESS
-//     CONTROL docstring.
+//   - "TDD posture:" as H1's own ordinary-banner liveness marker (present on
+//     every plain SessionStart regardless of fixture content, computed
+//     unconditionally and independent of the conductor-contract injection —
+//     see h1-plugin-root-sites.test.mjs's LIVENESS CONTROL docstring). CHANGED
+//     2026-09-19 (slice 3, conductor context diet): the old marker, "reading
+//     files by hand", was a phrase inside H1's hardcoded conventions block,
+//     which is deleted — H1 now injects docs/conductor-contract.md verbatim
+//     instead, and that file does not carry the phrase. "TDD posture:" is
+//     produced by an unrelated, unconditional H1 section and survives any
+//     future rewording of the contract.
 //
 // ASSUMPTIONS disclosed (see the authoring report for the same list):
 //   - the decision's own line template is quoted essentially verbatim:
@@ -260,8 +266,8 @@ test('PIN 14c: a text/file-mismatch lock reads UNCHANGED when the file itself is
 // plan-lock.mjs --show; every OTHER H1 section still prints.
 // SABOTAGE: let a JSON.parse exception on the malformed lock propagate
 // uncaught, crashing before any other section renders -> the
-// "reading files by hand" liveness match below goes red (or H1 crashes and
-// out is null entirely).
+// "TDD posture:" liveness match below goes red (or H1 crashes and out is
+// null entirely).
 // =============================================================================
 test('PIN 15: a malformed (invalid JSON) plan-lock.json renders PLAN LOCK MALFORMED naming --show, and every other H1 section still prints', () => {
   const { dir, cleanup } = gitProject();
@@ -271,7 +277,7 @@ test('PIN 15: a malformed (invalid JSON) plan-lock.json renders PLAN LOCK MALFOR
     assert.ok(out, 'H1 must not crash on a malformed lock');
     assert.match(ctx, /PLAN LOCK MALFORMED/);
     assert.match(ctx, /plan-lock\.mjs --show/);
-    assert.match(ctx, /reading files by hand/i, 'the ordinary banner section still renders alongside the malformed disclosure');
+    assert.match(ctx, /TDD posture:/, 'the ordinary banner section still renders alongside the malformed disclosure');
   } finally {
     cleanup();
   }
@@ -317,7 +323,7 @@ test('PIN 17: with no plan-lock.json at all, no PLAN LOCK line appears; the ordi
   try {
     const { ctx } = h1(dir, { source: 'startup' });
     assert.doesNotMatch(ctx, /PLAN LOCK/);
-    assert.match(ctx, /reading files by hand/i, 'ordinary banner still present');
+    assert.match(ctx, /TDD posture:/, 'ordinary banner still present');
   } finally {
     cleanup();
   }

@@ -15,7 +15,7 @@
 //     knowledge_create/update/append/edit and emit unresolved/ambiguous
 //     citations as a receipt WARNING, never a refusal" — and confirms
 //     knowledge_supersede is a write path worth surfacing.
-//   - decision c6985ed4 (sibling static-scan arm, check-record-citations.mjs):
+//   - decision foreign_c6985ed4 (sibling static-scan arm, check-record-citations.mjs):
 //     "An 8-char prefix matching more than one record fails as
 //     citation_ambiguous ('cite more of the id')" — the source of the exact
 //     ambiguous-prefix instructional phrasing pinned below.
@@ -190,7 +190,7 @@ test('AMBIG-MANY-RECORDS: an 8-hex-char prefix matching TWO live record ids warn
     assert.match(
       res.warnings[0],
       /(cite|specify|provide|include|use) more|more of the id|more characters|full id|longer (prefix|id)/i,
-      'the warning instructs the caller to cite more of the id (decision c6985ed4\'s "cite more of the id" phrasing for the sibling static-scan arm)'
+      'the warning instructs the caller to cite more of the id (decision c6985ed4\'s "cite more of the id" phrasing for the sibling static-scan arm)' // not-a-citation: fixture id
     );
   } finally {
     cleanup();

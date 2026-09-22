@@ -34,7 +34,7 @@
 //
 // FOLLOW-UP ROUND 2 (board a6b76e8c, outside-model review) — two more
 // measured repro shapes, kept here as a code-comment table since the pin
-// file is frozen to the test-writer:
+// file keeps the measured cases beside the implementation:
 //
 //   | # | prompt (to a tool-less/no-Bash agent)                | before | after |
 //   |---|-------------------------------------------------------|--------|-------|
@@ -80,7 +80,7 @@ import { PATH_CANDIDATE_RE, extractPathCandidates } from './dispatch-prompt.mjs'
 // A period is a clause boundary only when SENTENCE-ENDING (followed by
 // whitespace or end-of-string) — a bare '.' can never split mid-path, because
 // nearly every candidate mention here (a file path, an extension) contains
-// one ("util.mjs", "h26-dispatch-overlap.mjs"); splitting on it unconditionally
+// one ("util.mjs", "h22-dispatch-register.mjs"); splitting on it unconditionally
 // would sever the very mention this module exists to evaluate.
 const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
 
@@ -97,10 +97,11 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // yet; and ';' is a HARD split with the same result.
 //
 // WHY THE REACH IS NARROW, AND WHY THAT IS THE WHOLE DESIGN. Reaching backward
-// is dangerous in a way reaching forward is not: over-suppression drops
-// genuinely-claimed territory from claimed_files and SILENTLY REMOVES REAL
-// overlap warnings, which is strictly worse than the cosmetic false positive
-// being fixed (board 59c30a7f: "a naive fix is worse than the bug"). So the
+// is dangerous in a way reaching forward is not: over-suppression drops a
+// genuine claim (today: an exclusive-resource claim, dispatch-residue.mjs's
+// claimedResources) and SILENTLY REMOVES REAL overlap warnings, which is
+// strictly worse than the cosmetic false positive being fixed (board
+// 59c30a7f: "a naive fix is worse than the bug"). So the
 // backward reach fires ONLY for an ANAPHORIC TERRITORY PROHIBITION — a clause
 // that (a) carries a PROHIBITION marker (bare negators never reach backward:
 // "never"/"no"/"without" are the idiomatic class, and idioms are exactly what
@@ -123,16 +124,10 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // applied it to every match indiscriminately, and hasUnsuppressedMatch is NOT
 // a path-only surface:
 //
-//   (i) PATH-SHAPED MENTIONS ONLY. h25-dispatch-capability.mjs:119 asks this
-//   same function about TOOL CAPABILITIES (wholeTokenRe('Bash')) and
-//   lib/dispatch-residue.mjs:118 about CONFIGURED RESOURCE NAMES. "Use Bash to
-//   inspect scripts/a.mjs; do not edit it." prohibits the FILE, yet the first
-//   cut reported Bash as suppressed too — H25 then silently drops a
-//   missing-capability warning for a tool the brief explicitly requires. An
-//   anaphoric TERRITORY prohibition can only be disclaiming TERRITORY, so the
-//   reach now fires only when the matched text is itself path- or glob-shaped
-//   (isPathShapedMention, asking the SAME shared regexes — never a second path
-//   heuristic). A capability or resource mention is never suppressed by it.
+//   (i) PATH-SHAPED MENTIONS ONLY. An anaphoric TERRITORY prohibition can only
+//   disclaim TERRITORY, so the reach fires only when the matched text is itself
+//   path- or glob-shaped (isPathShapedMention, asking the SAME shared regexes
+//   — never a second path heuristic).
 //
 //   (ii) A SINGULAR PRONOUN CANNOT REFER TO SEVERAL PATHS. "Claim src/a.mjs
 //   and src/b.mjs; do not edit it." unclaimed BOTH paths on the first cut.
@@ -151,7 +146,7 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // tell — "Fix src/a.mjs while preserving the public API; do not change it."
 // suppresses src/a.mjs although "it" may mean the API. Resolving that needs
 // pronoun-referent semantics, which nothing here implements and this comment
-// does not claim (anti-pattern 586bccdc: a guard's comment must never assert a
+// does not claim (anti-pattern foreign_586bccdc: a guard's comment must never assert a
 // protection the code does not carry). The bound is narrow — it requires a
 // prohibition marker AND a territory verb (touch/edit/modify/change/write/
 // alter) AND a trailing pronoun AND no path of the prohibition's own — and
@@ -168,12 +163,17 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // hasUnsuppressedMatch's existing any-occurrence semantics are unchanged).
 //
 // ONE SHARED DETECTOR, as the board requires: this lands in
-// hasUnsuppressedMatch, so h22's write side (claimed_files,
-// claimed_glob_prefixes), h26's read side and h25 all inherit it at once — a
-// second divergent heuristic on the read and write sides WAS the original
-// c56862a9 defect. h22's `files` is untouched (it is computed with the BARE
-// extractor and means territory EXAMINED — receipts, residue probes, H10
-// deferral — see research_finding 289cd172).
+// hasUnsuppressedMatch. H25/H26 (the read/capability sides that used to share
+// it) are deleted under the scale-down (sterling-claude-code-scale-down-
+// boundary, 2ad87dd1); H22's own claimed_files/claimed_glob_prefixes write
+// side is deleted too — no non-test reader ever consumed them (research_finding
+// h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026).
+// The SURVIVING caller is scripts/hooks/lib/dispatch-residue.mjs's
+// claimedResources (exclusive-resource claims), so this detector still earns
+// its keep as ONE shared mechanism rather than two divergent ones, even with a
+// single consumer today. H22's `files` is untouched (it is computed with the
+// BARE extractor and means territory EXAMINED — receipts, residue probes, H10
+// deferral — see research_finding foreign_289cd172).
 const TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
 const ANAPHOR_RE = String.raw`(?:those|these|them|it|that)`;
 // Which of those pronouns can stand for MORE THAN ONE referent — gate (ii).
@@ -400,7 +400,7 @@ export function escapeRe(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-// GLOB LITERAL-PREFIX EXTRACTION (board a63b226d, research_finding 289cd172
+// GLOB LITERAL-PREFIX EXTRACTION (board a63b226d, research_finding foreign_289cd172
 // "a SEPARATE blind spot, in both directions"). PATH_CANDIDATE_RE
 // (dispatch-prompt.mjs:27) hard-requires a literal '.' immediately after a
 // directory prefix (the extension group) — a glob token like
@@ -418,18 +418,19 @@ export function escapeRe(s) {
 // "packages/mcp-server/**"). It does NOT attempt general glob matching (no
 // brace/char-class/single-star-without-directory support, e.g.
 // "scripts/hooks/*.mjs" or "**/*.mjs" stay unhandled) and imports no
-// globbing dependency (hooks stay dependency-light, decision f5638a84's
+// globbing dependency (hooks stay dependency-light, decision foreign_f5638a84's
 // constraint). A caller wanting the raw literal glob token back (e.g. to
 // build a suppression-check pattern against the original prompt text, the
-// same way h22/h26 already do for extractPathCandidates output) can always
-// recover it as `prefix + '**'` — GLOB_PREFIX_RE's match always ends in the
-// literal '**' it was matched on, so no second export is needed for that.
+// same way this module's own callers already do for extractPathCandidates
+// output) can always recover it as `prefix + '**'` — GLOB_PREFIX_RE's match
+// always ends in the literal '**' it was matched on, so no second export is
+// needed for that.
 //
 // MINIMUM TWO SEGMENTS (conductor-directed bound, board a63b226d follow-up
 // — the flood risk a prefix-aware overlap comparison introduces). A
 // directory-prefix claim is inherently BROADER than an exact-file claim, so
 // the depth of the prefix is the only lever that keeps the overlap
-// comparison (h26-dispatch-overlap.mjs) from crying wolf on every lane that
+// registered claims from becoming overly broad for every lane that
 // merely mentions a file somewhere under a shallow, near-universal
 // directory. A ONE-segment prefix — "scripts/**", "packages/**" — would
 // make nearly every lane in this repo overlap nearly every other one (both
@@ -443,25 +444,14 @@ export function escapeRe(s) {
 // under-warned, the accepted direction — P1), while "scripts/hooks/**" and
 // "packages/mcp-server/**" still are.
 //
-// WIRING: h22-dispatch-register.mjs's claimedFromBlocks-sibling
-// globPrefixesFromBlocks() writes the negation-checked output into its OWN
-// register field, `claimed_glob_prefixes` — deliberately NOT folded into
-// `claimed_files` (a flat FILE-path list every existing reader compares by
-// exact string equality; repoRel/normalizeRepoPath legitimately STRIPS a
-// trailing '/', so a trailing-slash marker could not even survive the same
-// toRegisterPaths() normalization every candidate already goes through).
-// h26-dispatch-overlap.mjs compares the OUTGOING dispatch's own literal
-// candidate files against a live entry's `claimed_glob_prefixes` via
-// startsWith — prefix-aware ONLY for that field, exact-string equality is
-// completely unchanged for `claimed_files`/`files`. Suppression falls out
-// for free either way: hasUnsuppressedMatch/isNegatedContext are plain
-// clause-scoped text analysis with no dependency on the mention being
-// file-shaped, so a prohibition marker ahead of a glob token suppresses it
-// exactly as it would a literal path. The SAME pre-existing gap applies
-// unchanged either way: isNegatedContext only inspects text BEFORE the
-// mention (see above), so a TRAILING marker after a glob mention leaks
-// precisely as it does for a literal path today — this addition neither
-// narrows nor widens that separate, already-known defect.
+// WIRING: h22-dispatch-register.mjs's claimed_glob_prefixes write side
+// (globPrefixesFromBlocks) that used to consume this extractor is DELETED —
+// no non-test reader ever consumed it (research_finding h22-dispatch-
+// register-consumer-map-which-parts-have-a-reader-september-2026). This
+// extractor stays exported as a pure function (scripts/tests/dispatch-
+// advisory-glob-prefix.test.mjs GROUP A) and is still used internally by
+// this module (isPathShapedMention / anaphoricProhibitionNumber, both part
+// of the shared hasUnsuppressedMatch detector dispatch-residue.mjs calls).
 const GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 
 // GATE (i)'s test — see the TRAILING PROHIBITION comment block above. Built
@@ -492,28 +482,11 @@ export function extractGlobPrefixCandidates(text) {
   return [...new Set(found.map((m) => m.slice(0, -2)))]; // strip the trailing '**', keep the '/'
 }
 
-/** Any 'reviewer-*' agent type (reviewer-correctness, reviewer-security, …). */
+/** Legacy classifier for an externally supplied `reviewer-*` agent type. */
 export function isReviewerClass(type) {
   return !!type && type.startsWith('reviewer-');
 }
 
-/**
- * Read-only dispatch classes (board a6b76e8c item 3; librarian added board
- * 7632586d item 1): an agent of one of these types has a structurally EMPTY
- * write-set — explorer, reviewer-* (any role), Explore, and Plan never touch
- * repo files at all, and librarian's own grant is knowledge-store-update-only (never
- * knowledge_create, never a repo write — decision
- * conductor-creates-records-directly-librarian-stays-update-only) — so H26
- * never warns overlap on an INCOMING dispatch of this type, and (per H26's
- * own file-overlap loop) such a dispatch's live register entry can never
- * CONTRIBUTE an overlap warning against a sibling either, since it never
- * declares write territory in the first place.
- */
-export function isReadOnlyDispatchType(type) {
-  if (!type) return false;
-  if (isReviewerClass(type)) return true;
-  // Case-insensitive for the hardcoded names only — reviewer-* prefix
-  // matching above is unchanged (review finding, board a6b76e8c fixer pass).
-  const lower = type.toLowerCase();
-  return lower === 'explorer' || lower === 'explore' || lower === 'plan' || lower === 'librarian';
-}
+// isReadOnlyDispatchType (H26's overlap-suppression classifier) deleted with
+// H26/H25 (scale-down decision sterling-claude-code-scale-down-boundary,
+// 2ad87dd1) — no surviving importer.

@@ -6,9 +6,9 @@
 // (h19-delivery, h19-drain-claim-safety, h20-deny-once, h23-output-axis, …).
 //
 // Written blind, from board a6b118e4's nine numbered mechanism points plus
-// decisions 1a5b91ae (Bash pointers always queue), db3392db (drain re-resolve),
+// decisions foreign_1a5b91ae (Bash pointers always queue), foreign_db3392db (drain re-resolve),
 // 6f3e334c (hazards as substance / decisions as capped pointers) and
-// anti_pattern 1b141d1f (a deduping notifier's SILENCE is multiply-caused —
+// anti_pattern foreign_1b141d1f (a deduping notifier's SILENCE is multiply-caused —
 // which is exactly why every verdict group below opens with a control arm).
 //
 // ===========================================================================
@@ -96,7 +96,7 @@
 // to scripts/delivery-oracle.mjs that must turn that test red. A pin whose
 // sabotage leaves it green is hollow and must be rewritten, not accepted.
 //
-// Tests are kept SMALL on purpose: anti_pattern f1d66bef — an early assertion
+// Tests are kept SMALL on purpose: anti_pattern foreign_f1d66bef — an early assertion
 // failure aborts its test and hides every later assertion in the same body.
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -309,7 +309,7 @@ test('A2: an anti_pattern and a decision whose file_keys name the path become HA
   }
 });
 
-test('A2b: hazards and rationale are NOT counted as owners — a hazard never confers ownership (decision 6f3e334c)', () => {
+test('A2b: hazards and rationale are NOT counted as owners — a hazard never confers ownership (decision foreign_6f3e334c)', () => {
   // SABOTAGE: push the hazard/decision ids into expected.owners as well.
   const deriveExpected = fn('deriveExpected');
   const { dir, store, ids, cleanup } = makeFixtureRepo();
@@ -366,7 +366,7 @@ test('A4: a working_tree-marked article is EXCLUDED with that named reason, and 
 });
 
 // --------------------------------------------------------------------------
-// A5 / A5b / A5c — RE-CUT (decision 77c5b85a: re-cut discipline). Board
+// A5 / A5b / A5c — RE-CUT (decision foreign_77c5b85a: re-cut discipline). Board
 // a6b118e4 objective knowledge-delivery-oracle; PREMISE overturned by an
 // outside-family (Codex) review reading the hook sources directly.
 //
@@ -391,7 +391,7 @@ test('A4: a working_tree-marked article is EXCLUDED with that named reason, and 
 //         in shape to a non-ignored sibling path owned by the same article
 //         (the CONTROL) — and is never recorded as an exclusion at all.
 //   A5b — that same ignored OWNED path ALSO produces the h19-bash-delivery.mjs
-//         CASE (decision 1a5b91ae is unconditional; that hook has no ignore
+//         CASE (decision foreign_1a5b91ae is unconditional; that hook has no ignore
 //         check to trigger), and gitignore_check still reads 'checked' — the
 //         check ran and found it ignored, that fact is RECORDED, it does not
 //         SUPPRESS delivery.
@@ -425,7 +425,7 @@ test('A5: a gitignored OWNED path still produces the H19 knowledge-delivery case
   }
 });
 
-test('A5b: the ignored owned path ALSO gets its h19-bash-delivery case (decision 1a5b91ae) — that hook has no ignore check to trigger, and the case still reports gitignore_check "checked"', () => {
+test('A5b: the ignored owned path ALSO gets its h19-bash-delivery case (decision foreign_1a5b91ae) — that hook has no ignore check to trigger, and the case still reports gitignore_check "checked"', () => {
   // SABOTAGE: gate h19-bash-delivery.mjs's case derivation on the same (now-removed)
   // gitIgnored short-circuit used for knowledge-delivery. This must go RED, because
   // the real hook (scripts/hooks/h19-bash-delivery.mjs) performs no ignore check at all
@@ -435,7 +435,7 @@ test('A5b: the ignored owned path ALSO gets its h19-bash-delivery case (decision
   try {
     const entries = deriveExpected(store, { repoRoot: dir });
     const c = caseFor(entries, 'build/generated.mjs', 'h19-bash-delivery.mjs');
-    assert.ok(c, 'the Bash pointer surface is audited for the ignored path too — decision 1a5b91ae is unconditional');
+    assert.ok(c, 'the Bash pointer surface is audited for the ignored path too — decision 1a5b91ae is unconditional'); // not-a-citation: fixture id
     assert.equal(c.payload_kind, 'bash');
     assert.deepEqual(sorted(c.expected.owners), [ids.alpha]);
     assert.equal(c.gitignore_check, 'checked', 'the check ran and found it ignored — that fact is recorded, it does not suppress delivery');
@@ -489,7 +489,7 @@ test('A5d: with NO git repo the ignore check degrades TOWARD SIGNALLING — the 
   }
 });
 
-test('A6: each eligible path also gets an h19-bash-delivery case (the pointer surface, decision 1a5b91ae)', () => {
+test('A6: each eligible path also gets an h19-bash-delivery case (the pointer surface, decision foreign_1a5b91ae)', () => {
   // SABOTAGE: derive file_touch cases only.
   const deriveExpected = fn('deriveExpected');
   const { dir, store, ids, cleanup } = makeFixtureRepo();
@@ -553,7 +553,7 @@ test('B0 CONTROL: an AGENT payload DOES carry tool_input.prompt', () => {
   assert.equal(stdin.tool_name, 'Task');
 });
 
-test('B1: an ASK payload carries questions[] with option label/description and NO prompt key at all (decision f5638a84)', () => {
+test('B1: an ASK payload carries questions[] with option label/description and NO prompt key at all (decision foreign_f5638a84)', () => {
   // SABOTAGE: add `prompt: questions[0].question` to the ask arm "for convenience".
   const synthesizePayload = fn('synthesizePayload');
   const probe = {
@@ -725,7 +725,7 @@ test('C2: pending.json parses per KIND, and queued_ids is the union', () => {
   }
 });
 
-test('C2b: a FRONTIER entry carries a rel and no ids — a non-article entry must not be assumed article-shaped (decision db3392db)', () => {
+test('C2b: a FRONTIER entry carries a rel and no ids — a non-article entry must not be assumed article-shaped (decision foreign_db3392db)', () => {
   // SABOTAGE: assume every queue entry has a record id and throw/skip when it does not.
   const parseDelivery = fn('parseDelivery');
   const dir = makeSandbox();
@@ -1085,7 +1085,7 @@ test('H-pre: the three shipped probes exist, carry their human-written expectati
     assert.deepEqual(sorted(json.expected_ids), sorted(p.expected_ids), `${p.file}: expected_ids are full uuids of live records`);
     assert.equal(Boolean(json.expect_deny), p.expect_deny);
     if (p.kind === 'ask') {
-      assert.equal(Object.hasOwn(json.tool_input, 'prompt'), false, 'AskUserQuestion carries no prompt field (decision f5638a84)');
+      assert.equal(Object.hasOwn(json.tool_input, 'prompt'), false, 'AskUserQuestion carries no prompt field (decision f5638a84)'); // not-a-citation: fixture id
       assert.ok(Array.isArray(json.tool_input.questions) && json.tool_input.questions.length > 0);
       assert.ok(json.tool_input.questions[0].options.some((o) => o.description && o.description.length > 40), 'option TEXT carries the governed subject — that is the measured incident (AC11)');
     } else {
@@ -1279,12 +1279,12 @@ test('I4: two runs write two DISTINCT run files — a rerun never clobbers the p
 // ===========================================================================
 // GROUP J–N — H23 OUTPUT-AXIS ARM (board 5d462868, slice 3D of objective
 // dome-farmer-issues-2026-09-05). Layer 1 previously did not audit H23 at all
-// (article 79d2a189 v6: "H23 is NOT audited"); a Codex review (thread
+// (article foreign_79d2a189 v6: "H23 is NOT audited"); a Codex review (thread
 // 01a07249) additionally found the output_axis payload arm already present as
 // DEAD CODE while the header still claimed the same limit — these groups pin
 // the arm that closes both gaps at once. Written BLIND to
 // scripts/delivery-oracle.mjs and scripts/hooks/h23-output-axis.mjs (H4); the
-// H23 predicate facts below come from decisions b266d6b7 and 284fc4b0 (both
+// H23 predicate facts below come from decisions foreign_b266d6b7 and foreign_284fc4b0 (both
 // standing) and from scripts/tests/h23-output-axis.test.mjs — h23's OWN
 // frozen suite, itself a TEST file, not implementation, and the source of the
 // AXIS_MIN_HITS(2) / three-floor / domain-vocabulary idiom reused verbatim
@@ -1315,7 +1315,7 @@ test('I4: two runs write two DISTINCT run files — a rerun never clobbers the p
 //       rel: probe.rel, tool: probe.tool, tool_response: probe.tool_response,
 //       expected: { owners: [], hazards: [...], rationale: [...] },
 //         // owners is ALWAYS empty — output-axis content matching confers
-//         // no ownership (decision b266d6b7)
+//         // no ownership (decision foreign_b266d6b7)
 //       expected_ids: <deduped union of hazards+rationale>,
 //       expected_reason?: 'owned_suppressed' | 'below_axis_floor' }
 //         // present ONLY when expected_ids is empty, naming WHICH of the
@@ -1338,11 +1338,11 @@ test('I4: two runs write two DISTINCT run files — a rerun never clobbers the p
 //   corrected here from this test-writer's earlier blind assumption
 //   'output_axis', which nothing produces and is now removed, not aliased —
 //   joining h19-bash-delivery's 'bash_pointers' and h19-knowledge-delivery's
-//   'delivery' kinds in the same pending.json (decision b266d6b7: "the same
+//   'delivery' kinds in the same pending.json (decision foreign_b266d6b7: "the same
 //   pending queue h19-bash-delivery uses"). parseDelivery additionally
 //   extracts a numeric `suppressed_count` per
 //   queued_by_kind.output_axis_pointers entry from the
-//   "(+N more matched)" tail decision 284fc4b0 mandates — the SAME regex
+//   "(+N more matched)" tail decision foreign_284fc4b0 mandates — the SAME regex
 //   scripts/tests/h23-output-axis.test.mjs already pins at the hook level
 //   (/\(\+(\d+) more matched\)/), reused verbatim below rather than
 //   re-derived, so a rename of the tail format breaks both suites identically
@@ -1584,7 +1584,7 @@ test('K3: tool "Read" synthesizes an ABSOLUTE file_path under the sandbox cwd; t
 // (Re-cut: this test-writer's first pass asserted 'output_axis', named as an
 // explicit blind assumption — WRONG. Conductor-verified against the shipped
 // hook at scripts/hooks/h23-output-axis.mjs:236: the real kind is
-// 'output_axis_pointers'. Per anti_pattern 1b141d1f, a kind nothing emits is
+// 'output_axis_pointers'. Per anti_pattern foreign_1b141d1f, a kind nothing emits is
 // HOLLOW BY CONSTRUCTION — it would pass forever while auditing nothing, so
 // this is a correctness fix, not a rename for style. No compatibility arm for
 // the old name: that name is fiction and pinning it would be pinning fiction.)
@@ -1735,7 +1735,7 @@ test('N1: a case marked seed_output_axis_guard keeps guard-conductor.json — IN
 // EXPECT a pointer and score H23's deliberate silence as a regression. Fix
 // adds both guards with a new expected_reason value: 'path_excluded'.
 //
-// Per anti_pattern 1b141d1f (silence is multiply-caused), every arm below
+// Per anti_pattern foreign_1b141d1f (silence is multiply-caused), every arm below
 // asserts the REASON, not just emptiness — an arm checking only
 // "expected_ids is empty" would have passed under the OLD buggy mirror for
 // the WRONG reason (it would read as a correct-but-coincidental match-miss,
@@ -2064,7 +2064,7 @@ test('R2: an UNSUPPORTED tool WITH agent_id present reads as "unsupported_tool",
 });
 
 // ===========================================================================
-// GROUP S — golden delivery scenarios (board ab288113, decision 08872881:
+// GROUP S — golden delivery scenarios (board ab288113, decision foreign_08872881:
 // "Golden delivery-scenario expectations stay IN the fixture JSON, guarded
 // by a SHA-256 digest pin inside the frozen test file"). Fixtures live at
 // scripts/tests/fixtures/delivery-golden/*.json, one whole scenario per
@@ -2286,7 +2286,7 @@ test('S8: an (event, tool_name) pair with no hook route — PostToolUse + Grep �
 //    second one for the project root itself. Still unconfirmed by direct
 //    read (H4).
 //  - snapshotDb is produced via `store.snapshot(path)`, an INSTANCE method,
-//    per article 79d2a189's own wording: "snapshots the WAL store via
+//    per article foreign_79d2a189's own wording: "snapshots the WAL store via
 //    SterlingStore.snapshot (VACUUM INTO)". Still unconfirmed by direct
 //    read (H4).
 //  - the fixture's `payload` field is shaped as an ordinary hook stdin body

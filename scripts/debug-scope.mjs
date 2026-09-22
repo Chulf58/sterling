@@ -1,12 +1,13 @@
-// Debug-scope registration (spec §6 H3 debug-scope mode, §8.3 step 6): the
-// explorer's map registers as the lightweight contract for an inline debug
-// play; H3 denies edits outside it. Cleared at debug capture.
+// Debug-scope registration (spec §8.3 step 6): the explorer's map registers
+// as the lightweight contract for an inline debug play; scripts/fs-move.mjs
+// and scripts/fs-remove.mjs deny operations outside it (scripts/lib/
+// debug-scope.mjs's scopeCheck). Cleared at debug capture.
 //   node scripts/debug-scope.mjs register --path <p> [--path <p>...] [--target <dir>]
 //   node scripts/debug-scope.mjs show|clear [--target <dir>]
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { arg, argAll, fail } from './lib/project.mjs';
-import { registerDebugScope, clearDebugScope, readDebugScope } from './hooks/lib/contract.mjs';
+import { registerDebugScope, clearDebugScope, readDebugScope } from './lib/debug-scope.mjs';
 
 const action = process.argv[2];
 const target = arg('--target') ?? process.cwd();

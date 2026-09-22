@@ -1,11 +1,13 @@
 // H10 — direct-path capture check + review (spec §6 H10). Stop, soft.
-// Direct mode only: artifact-produced-but-no-capture → first Stop prompts the
+// Artifact-produced-but-no-capture → first Stop prompts the
 // conductor to capture inline (exit 2, soft block); still missing on the next
 // Stop → maintenance queue (capture_owed) and the session may end. Reviewer
 // advice is NOT this hook's business (board cac61a95) — that lives in H2's
-// selection-inject surface. Test-touching work records check_skipped
-// {test-integrity} (script lands at step 8 with the pipeline baseline
-// machinery).
+// selection-inject surface. Test-touching work names modified/deleted tests
+// vs git HEAD in the capture nag (check_skipped {test-integrity} without git).
+// Touched set (slice 4): H7's tool-call register UNION the paths git reports
+// changed since the persisted settled snapshot (lib/settlement.mjs
+// gitTouches) — a hand or Bash edit arms the same duties an Edit does.
 // Article demand (§6 H10, adjudicated 2026-06-11): touched files no
 // feature_article owns, at threshold or any new unowned file (vs git HEAD;
 // no-git degrades loud) → the nag demands the OWNING ARTICLE inline; still
@@ -22,7 +24,7 @@
 // covered by a no_capture declaration (same cutoff as the capture lane above —
 // item 353416a9), not followed by a durable capture → nag once (shared
 // marker), then research_owed on release.
-// Concept duty (decision 7208729b): concept_designed events (detail
+// Concept duty (decision foreign_7208729b): concept_designed events (detail
 // = family slug) not followed by that family's concept article
 // (feature_article.concept_family) → shared nag, then one
 // concept_article_missing item per family on release.
@@ -34,11 +36,12 @@ import { join, basename } from 'node:path';
 import { readStdin, deny, allow, exitAfterWrite, openStore, loadConfig, warnNonBlocking, gitIgnored, withRetry } from './lib/common.mjs';
 import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, registerPath as ownerRegisterPath } from '../lib/dispatch-register.mjs';
 import { disclosure, render } from '../lib/review-errors.mjs';
-import { mintSettlementReconcile, withFileLock, parseTouchesContent } from './lib/settlement.mjs';
+import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
 import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
+import { publishNotice } from './lib/delivery.mjs';
 
 /**
  * DEAD-DISPATCH RESIDUE (SPEC A, boards 03ed9d35/31565253; shared lib
@@ -65,7 +68,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   // the duty-deferral tri-state above already uses.
   const { availability, entries: registerEntries } = readRegister(cwd);
   if (availability !== 'ok' || !registerEntries.length) return [];
-  let staleMinutes = 60; // schema default (decision ec9eacaa) when config cannot be read
+  let staleMinutes = 60; // schema default (decision foreign_ec9eacaa) when config cannot be read
   try {
     staleMinutes = parseConfig(loadConfig(cwd) ?? {}).dispatch_register.stale_minutes;
   } catch {
@@ -183,8 +186,6 @@ const nagMarker = join(input.cwd, '.sterling', 'transient', 'capture-nagged.json
 // site inside the try.
 
 try {
-  if (store.getRun()) allow(); // pipeline runs are H9's territory; do NOT clear registers
-
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = new Date().toISOString();
 
@@ -249,25 +250,31 @@ try {
         store.recordCheckSkipped('conductor-pressure', reason ?? 'format_unparseable', undefined, now);
         sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, reason, at: now };
       } else {
-        // A model with no windows entry falls back to the default — and a wrong
-        // denominator that still yields a BELIEVABLE percentage is the dangerous
-        // case (2026-08-11 consuming-project retrospective: 48% accepted at ~10%
-        // of real capacity). The unmapped model rides the sample so the release
-        // path can warn ONCE per session at ANY fill level, not only above 100%.
-        const mapped = Boolean(model && cw.windows[model]);
-        const windowSize = mapped ? cw.windows[model] : cw.windows.default;
-        const unmapped = !mapped && model ? { unmapped_model: model } : {};
-        const fill = fillPct(usage, windowSize);
-        if (fill > 100) {
+        // WINDOW = context_watch.windows[model], never a default (slice 4): a
+        // wrong denominator that still yields a BELIEVABLE percentage is the
+        // dangerous case (2026-08-11: 48% accepted at ~10% of real capacity;
+        // 2026-09-19: 66.2% reported for a claude-opus-5[1m] session at ~13%).
+        // A context-variant suffix ("claude-opus-5[1m]") falls back to its base
+        // entry; the transcript usually carries the BASE id for both variants,
+        // so the base entry must hold the window this project's sessions run.
+        // No entry → the fill is UNRELIABLE: no percentage, no level, and the
+        // unmapped model rides the sample so the release path says so once.
+        const baseModel = model ? String(model).replace(/\[[^\]]*\]$/, '') : null;
+        const windowSize = model ? cw.windows[model] ?? cw.windows[baseModel] : undefined;
+        const fill = windowSize ? fillPct(usage, windowSize) : null;
+        if (!windowSize) {
+          store.recordCheckSkipped('conductor-pressure', `window_unmapped:${model ?? 'no-model-id'}`, undefined, now);
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: null, model: model ?? null, reason: 'window_unmapped', ...(model ? { unmapped_model: model } : {}), at: now };
+        } else if (fill > 100) {
           // Impossible with a correct denominator — the windows map lacks this model's true
           // window (observed live 2026-08-09: 129.3% on a fable session vs the 200k default).
           // Evidence of MISCONFIGURATION, not pressure: classify unknown + check_skipped
           // (loud, fail-open) instead of false-hard-blocking every session on this machine.
           store.recordCheckSkipped('conductor-pressure', `window_mismatch:${model ?? 'unknown-model'}:${fill.toFixed(1)}pct`, undefined, now);
-          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', ...unmapped, at: now };
+          sample = { session_id: input.session_id, level: 'unknown', fill_pct: fill, model: model ?? null, window: windowSize, reason: 'window_mismatch', at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? 'hard' : fill >= cw.conductor.soft_pct ? 'soft' : 'below_soft';
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
         }
       }
       mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
@@ -307,15 +314,13 @@ try {
   })();
   const boundaryLine = () =>
     dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) → commit boundary before new work.` : '';
-  // The rotation writer lives in the plugin clone, not the target project (same
-  // resolution as the no-capture remedy below): print the absolute path when the
-  // platform provides it, so the command works from any project's shell cwd.
-  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT
-    ? `node "${join(process.env.CLAUDE_PLUGIN_ROOT, 'scripts', 'rotation-note.mjs')}"`
-    : 'node scripts/rotation-note.mjs';
+  // The hard threshold is the 50% TARGET (slice 4): a WARNING to finish the
+  // open work and commit it — never a demand to clear. Fill is OCCUPIED
+  // context: the latest assistant turn's input + cache tokens (lib/transcript
+  // fillPct), which already reflects compaction — not a cumulative sum.
   const pressurePart = () =>
     pressure.level === 'hard'
-      ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) → finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.`
+      ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target → finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${boundaryLine()}`
       : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% ≥ soft threshold ${config.context_watch.conductor.soft_pct}% → prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
@@ -326,9 +331,9 @@ try {
     }
   };
   const spendPressureMarker = (level) => writeFileSync(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  // WINDOW-GAUGE WARNING (retro slice 2): an unmapped model means every fill %
-  // this session is measured against the default window — say so loudly once,
-  // at any fill level, until the config gains the entry. Same marker pattern as
+  // WINDOW-GAUGE WARNING (retro slice 2; slice 4): an unmapped model means the
+  // fill cannot be measured — say so loudly once, until the config gains the
+  // entry. No percentage is printed against a default. Same marker pattern as
   // pressure (latest-value cell keyed by session_id; P4 by supersession).
   const gaugeMarker = join(input.cwd, '.sterling', 'transient', 'gauge-warned.json');
   const gaugeSpent = () => {
@@ -340,158 +345,28 @@ try {
   };
   const spendGaugeMarker = () => writeFileSync(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
   const gaugePart = () =>
-    `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows — measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
-  // DELEGATION WATCH (decision 8b00e77a — the mechanical half of 677f1639): measure
-  // hand-work vs dispatches from the conductor's OWN transcript. Reads are recorded
-  // nowhere else (touches.json = edits, session-events.json = research/dispatch), and
-  // the transcript is a complete, already-present record — zero new recorders. This
-  // needs the WHOLE session, so it scans the full file, not latestUsage's 1MB tail
-  // (fine at Stop: one pass, once per session end). Advisory and FAIL-OPEN in its own
-  // try — any failure records check_skipped {delegation-watch} and never costs a duty.
-  const delegationMarker = join(input.cwd, '.sterling', 'transient', 'delegation-nagged.json');
-  const delegationSpent = () => {
-    try {
-      return !!input.session_id && JSON.parse(readFileSync(delegationMarker, 'utf8')).session_id === input.session_id;
-    } catch {
-      return false;
-    }
-  };
-  // H21 companion (decision 9042abeb): the mid-session watch's whole-session
-  // article-write tally lives in its own transient file — read-only here, 0
-  // when absent or when it belongs to a different session (a leftover from a
-  // prior session must never be folded into this one's count).
-  const articleWritesPath = join(input.cwd, '.sterling', 'transient', 'article-writes.json');
-  const readArticleWrites = () => {
-    try {
-      const raw = JSON.parse(readFileSync(articleWritesPath, 'utf8'));
-      return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
-    } catch {
-      return 0;
-    }
-  };
-  const statsPath = join(input.cwd, '.sterling', 'transient', 'delegation-stats.json');
-  const writeDelegationStats = (stats) => {
-    try {
-      mkdirSync(join(input.cwd, '.sterling', 'transient'), { recursive: true });
-      writeFileSync(statsPath, JSON.stringify(stats));
-    } catch {
-      // the observation cell is best-effort — a write failure here must not
-      // cost the advisory itself, which already computed its own text
-    }
-  };
-  const delegation = (() => {
-    try {
-      // A spent marker means the advisory can never fire again this session — skip the
-      // whole-file scan (Stop fires per turn boundary, not once per session; without
-      // this guard a long session re-reads its own transcript on every Stop).
-      if (delegationSpent()) return null;
-      const dw = config.delegation_watch;
-      const tPath = input.transcript_path ?? '';
-      if (!tPath || !existsSync(tPath)) {
-        store.recordCheckSkipped('delegation-watch', 'transcript_missing', undefined, now);
-        return null;
-      }
-      const readFiles = new Set();
-      let searches = 0;
-      let dispatches = 0;
-      let maxBatch = 0;
-      let soloDispatches = 0;
-      let assistantEntries = 0;
-      let contentArrays = 0;
-      for (const line of readFileSync(tPath, 'utf8').split('\n')) {
-        if (!line.trim()) continue;
-        let entry;
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue; // individual malformed lines are skipped, never fatal
-        }
-        if (entry.type !== 'assistant') continue;
-        // Defensive: subagent turns live in separate agent-*.jsonl files today
-        // (verified 2026-08-10), but the sidechain flag exists — never count a
-        // sidechain's tool calls as conductor hand-work.
-        if (entry.isSidechain === true) continue;
-        assistantEntries++;
-        const content = entry.message?.content;
-        if (!Array.isArray(content)) continue;
-        contentArrays++;
-        // H21 companion (decision 9042abeb): max_batch is the largest number of
-        // Task/Agent blocks inside ONE assistant message; solo_dispatches counts
-        // messages carrying exactly one such block — both computed per-message,
-        // not from the running dispatch total.
-        let batchCount = 0;
-        for (const b of content) {
-          if (!b || b.type !== 'tool_use') continue;
-          if (b.name === 'Read') {
-            if (b.input?.file_path) readFiles.add(b.input.file_path);
-          } else if (b.name === 'Grep' || b.name === 'Glob') {
-            searches++;
-          } else if (b.name === 'Task' || b.name === 'Agent') {
-            dispatches++;
-            batchCount++;
-          }
-        }
-        if (batchCount > maxBatch) maxBatch = batchCount;
-        if (batchCount === 1) soloDispatches++;
-      }
-      if (assistantEntries > 0 && contentArrays === 0) {
-        // Assistant entries exist but none carried a content array — the transcript
-        // shape has drifted. A silent null here would leave the watch permanently
-        // dead with no trail (P5); mirror the pressure path's format_unparseable.
-        store.recordCheckSkipped('delegation-watch', 'format_unparseable', undefined, now);
-        return null;
-      }
-      // Report-only observation cell (decision 9042abeb, C): a latest-value
-      // snapshot written on EVERY successful scan, fired or not — the next
-      // user report is a number, not an impression.
-      const articleWrites = readArticleWrites();
-      writeDelegationStats({
-        session_id: input.session_id,
-        hand_reads: readFiles.size,
-        searches,
-        dispatches,
-        max_batch: maxBatch,
-        solo_dispatches: soloDispatches,
-        article_writes: articleWrites,
-        at: now,
-      });
-      if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
-        return { hand_reads: readFiles.size, searches, dispatches, max_batch: maxBatch, solo_dispatches: soloDispatches, article_writes: articleWrites };
-      }
-      return null;
-    } catch (e) {
-      try {
-        store.recordCheckSkipped('delegation-watch', String((e && e.message) || e), undefined, now);
-      } catch {
-        // store is the casualty — the watch stays advisory
-      }
-      return null;
-    }
-  })();
-  const spendDelegationMarker = () => writeFileSync(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const delegationPart = () =>
-    `H10 delegation watch: hand-read ${delegation.hand_reads} file(s), ${delegation.searches} search(es), ${delegation.dispatches} dispatch(es) (max batch ${delegation.max_batch}, solo ${delegation.solo_dispatches}), ${delegation.article_writes} hand-run article write(s) → delegate reads/sweeps/mechanical work (opus judgment / sonnet mechanical). (once per session)`;
+    `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows — context fill is UNRELIABLE and is not reported. Add context_watch.windows["${pressure.unmapped_model}"] = <window tokens> to .sterling/config.json. (once per session)`;
   /**
    * Every direct-mode release path exits through here. At most TWO pressure blocks per
    * session, strictly escalating: soft+dirty fires the slice-boundary nudge once; hard
    * fires once more (even after a soft block — escalation is new information). A spent
-   * hard marker ends all pressure blocking for the session. The delegation-watch
-   * advisory joins the SAME standalone deny when due (one block per Stop, P1);
+   * hard marker ends all pressure blocking for the session. The window-gauge
+   * warning joins the SAME standalone deny when due (one block per Stop, P1);
    * stop_hook_active suppresses without spending, so a suppressed advisory can still
    * fire on a later Stop of the same session.
    *
-   * Fan-out deferral/staleness disclosures (decision ec9eacaa) ride this release
+   * Fan-out deferral/staleness disclosures (decision foreign_ec9eacaa) ride this release
    * whichever way it goes: prefixed to the block when one is due, and otherwise
    * emitted as a systemMessage on the exit-0 release — a deferral is a fact to
    * disclose, never a reason to block (P5).
    */
-  // SPEND AFTER DELIVERY, shared (point D, decision ee8ab1f5; Fix 1 review
+  // SPEND AFTER DELIVERY, shared (point D, decision foreign_ee8ab1f5; Fix 1 review
   // round): write stderr synchronously; ONLY on a successful write run the
   // given spend callbacks, each independently try/caught (a marker WRITE
   // failure is caught and ignored, point E) — then exit 2 either way. A
   // throw off the write itself spends nothing. This is the ONE sequence
   // both blocking `[dispatch_status_unknown]` delivery paths use: the
-  // pressure/delegation/gauge deny below (spends only the unknown-note
+  // pressure/gauge advisory below (spends only the unknown-note
   // keys — no duty rendered there, so capture-nagged/duty-nagged are never
   // touched) and the duty-nag deny further down (spends all three).
   const writeThenSpend = (text, spends) => {
@@ -532,44 +407,50 @@ try {
   };
 
   const releaseWithPressure = () => {
+    let advisoryText = '';
+    const advisorySpends = [];
     if (!input.stop_hook_active) {
       const parts = [];
       const spent = pressureMarkerState();
       if (pressure.level === 'hard' && (!spent || spent.level !== 'hard')) {
-        spendPressureMarker('hard');
         parts.push(pressurePart());
+        advisorySpends.push(() => spendPressureMarker('hard'));
       } else if (pressure.level === 'soft' && dirtyPaths > 0 && !spent) {
-        spendPressureMarker('soft');
         parts.push(`${pressurePart()} (once per session)`);
-      }
-      if (delegation && !delegationSpent()) {
-        spendDelegationMarker();
-        parts.push(delegationPart());
+        advisorySpends.push(() => spendPressureMarker('soft'));
       }
       if (pressure.unmapped_model && !gaugeSpent()) {
-        spendGaugeMarker();
         parts.push(gaugePart());
+        advisorySpends.push(spendGaugeMarker);
       }
       // Disclosures never CAUSE a block — they only ride one that is already due.
       // FIX 1 (review round): this is a THIRD `[dispatch_status_unknown]`
-      // delivery path — a pressure/delegation/gauge block can carry the same
+      // delivery path — a pressure/gauge block can carry the same
       // disclosureParts the duty-nag and exit-0 releases carry, so it must
       // spend the unknown-note keys too (never duty-nagged/capture-nagged —
       // no duty is rendered on this path).
-      if (parts.length) writeThenSpend([...disclosureParts, ...parts].join('\n\n'), [spendDispatchUnknownKeys]);
+      advisoryText = parts.join('\n\n');
+    }
+    if (advisoryText) {
+      try {
+        publishNotice(input.cwd, advisoryText);
+        for (const spend of advisorySpends) spend();
+      } catch (e) {
+        disclose(`H10: context advisory publish failed — ${String((e && e.message) || e)}; it will retry on the next Stop\n`);
+      }
     }
     // R0: the payload and the exit are ONE state machine — a bare
     // process.stdout.write() followed by a separate allow() can exit before
     // the pipe drains (decision hook-stdout-exit-after-write-callback-bound-
     // exit-deny-stays-synchronous).
-    if (disclosureParts.length) {
+    if (disclosureParts.length || advisoryText) {
       // dispatch-unknown-noted.json is spent here too (point C, decision
       // ee8ab1f5): these rows ride disclosureParts, which leaves through BOTH
       // this exit-0 systemMessage release AND the duty-nag deny below — a
       // deny-only spend cannot guarantee once-per-session (Codex round 2,
       // adopted). Spent only inside onWritten, i.e. after the payload is
       // actually handed off.
-      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join('\n\n') }), 0, {
+      exitAfterWrite(JSON.stringify({ systemMessage: [...disclosureParts, advisoryText].filter(Boolean).join('\n\n') }), 0, {
         onWritten: spendDispatchUnknownKeys,
       });
       // This write's exit is async, so a bare `return` here would let the
@@ -643,6 +524,31 @@ try {
     },
     { onTimeout: () => store.recordCheckSkipped('h10-touches-lock', 'lock_timeout', undefined, now) }
   );
+  // TOUCHES FROM GIT (slice 4, board 400f578b): union the register with the
+  // paths git reports changed since the persisted settled snapshot, so a hand
+  // or Bash edit arms the same duties and settlement candidates an Edit does
+  // (state, first-run baseline and advancement rules: lib/settlement.mjs
+  // gitTouches). A register path git TRACKS and reports unchanged since the
+  // snapshot is dropped — an Edit that left the bytes as settled owes
+  // nothing. Git candidates live only in memory: they are re-derived every
+  // Stop until writeGitSettled (runSettlement, below) advances the snapshot,
+  // so the claim file still carries exactly what H7 wrote. No git degrades
+  // loud to the register alone (the pre-slice behaviour).
+  const git = gitTouches(input.cwd, now);
+  let lostSettlementMessage = '';
+  if (!git.ok) {
+    skipRow('h10-git-touches', git.reason);
+  } else if (git.settled) {
+    if (git.base_lost) {
+      skipRow('h10-git-touches', `settled_sha_unreachable:${git.settled.sha}`);
+      lostSettlementMessage = `⚠ H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
+    }
+    const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git.changed.has(p));
+    const tracked = gitTrackedSubset(input.cwd, unchanged) ?? new Set();
+    touches = touches.filter((t) => !tracked.has(t?.path));
+    const registered = new Set(touches.map((t) => t?.path));
+    touches = [...touches, ...git.candidates.filter((c) => !registered.has(c.path))];
+  }
   // Disposes the claimed copy once its debt is settled/nagged. Locked (micro-
   // round fixer): a concurrent Stop's claim/union write must not race a
   // delete of the SAME claim file — without the lock, one Stop could rename
@@ -697,7 +603,7 @@ try {
     sessionEvents = [];
   }
 
-  // FAN-OUT-AWARE DUTY DEFERRAL (decision ec9eacaa; register maintained by H22
+  // FAN-OUT-AWARE DUTY DEFERRAL (decision foreign_ec9eacaa; register maintained by H22
   // on SubagentStart/SubagentStop). A live dispatch OWNS the files it is
   // mid-writing: demanding their capture or their owning article at the
   // conductor's Stop reads agent work-in-progress as conductor negligence
@@ -705,7 +611,7 @@ try {
   // An entry is LIVE iff it belongs to THIS session and its age is under
   // config.dispatch_register.stale_minutes; a STALE entry defers nothing and
   // says so loudly (P5): SubagentStop was never probed for killed/aborted
-  // subagents (research_finding 20b44518), so the TTL is what stops an orphan
+  // subagents (research_finding foreign_20b44518), so the TTL is what stops an orphan
   // entry deferring a duty forever. Absent/malformed register degrades to empty
   // — byte-identical to the behavior before this block existed (the same
   // posture session-events.json takes above).
@@ -744,7 +650,7 @@ try {
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
   // Worktree subagents record their touches under
-  // .claude/worktrees/<name>/<repo-relative path> (anti_pattern b3972717) while
+  // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
   // the dispatch prompt names the plain repo-relative path — an exact-string
   // join would therefore miss the heaviest fan-out shape there is. The prefix is
   // stripped for COMPARISON ONLY: touches.json keeps exactly what H7 wrote.
@@ -791,6 +697,7 @@ try {
   // produce. Deliberately avoids the article-demand and capture-nag wording —
   // a deferred duty is not owed to the conductor right now.
   const disclosureParts = [];
+  if (lostSettlementMessage) disclosureParts.push(lostSettlementMessage);
   if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     // Board cdaf2824 (residual build, 2026-08-31): a count-only disclosure
@@ -807,13 +714,13 @@ try {
         : deferredPaths.join(', ');
     disclosureParts.push(
       `• deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(', ')}]: ${pathsDisplay} — duty re-arms when they land ` +
-        `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
+        `(repeats by design while the dispatch(es) stay live — fan-out-aware duty deferral; not a stuck nag)`
     );
   }
   // UNKNOWN — disclosed WITHOUT excluding. Only named when it actually bites
   // something this Stop touched: an unknown owner of an untouched file changes
   // no outcome and would repeat byte-identically every Stop (board cac61a95
-  // noise shape, P1) — decision ee8ab1f5 governs FREQUENCY and WORDING only,
+  // noise shape, P1) — decision foreign_ee8ab1f5 governs FREQUENCY and WORDING only,
   // never which entries qualify, so this qualification is unchanged. The
   // once-per-session key dedup (point C) applies ON TOP of biting: a note
   // fires only when the row bites AND its key is not yet spent this session.
@@ -887,8 +794,15 @@ try {
     );
   }
 
-  // Clear all three transient registers together (P4 — every terminal path).
-  // FAN-OUT DEFERRAL EXCEPTION (decision ec9eacaa, on the capture_pending
+  // Clear the transient registers at the end of the work they represent (P4).
+  // INVARIANT: at a Stop, settled work may be consumed, durably queued work may
+  // be consumed, and outstanding work plus still-effective declarations MUST
+  // survive; `capture_pending` is still effective because it covers later
+  // capture work, whereas no_capture only discharges earlier work and
+  // research/dispatch events are work evidence. This does not guarantee that a
+  // later work item is satisfied by an earlier durable record, nor that a
+  // declaration survives a real session boundary, which H1 owns.
+  // FAN-OUT DEFERRAL EXCEPTION (decision foreign_ec9eacaa, on the capture_pending
   // precedent bd594c03): while a live dispatch owns any touched file this
   // release is NOT terminal — clearing would delete the very touch entries
   // whose duty has to re-arm once the dispatch lands. The debt cannot
@@ -904,7 +818,7 @@ try {
   // pending Stop, destroying the grace bd594c03 deliberately built. Repeat nags
   // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
   // acceptable, silence is not.
-  const clearRegisters = () => {
+  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
     // F3/F4/R4 (board c198866d fixer round): the touches claim is RELEASED
     // (see releaseTouchesClaim above) rather than discarded whenever a live
     // dispatch still owns work OR this Stop's own settlement attempt failed —
@@ -918,7 +832,19 @@ try {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync(eventsPath, { force: true });
+      // A quiet Stop has consumed no capture work, so a capture_pending
+      // declaration remains live for work that arrives later in this session.
+      // Do not retain settled work evidence: research satisfaction anchors to
+      // the earliest remaining event, so that would let an earlier capture
+      // silently satisfy later research.
+      const pendingDeclarations = preservePendingDeclaration
+        ? sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail)
+        : [];
+      if (pendingDeclarations.length) {
+        writeFileSync(eventsPath, JSON.stringify(pendingDeclarations));
+      } else {
+        rmSync(eventsPath, { force: true });
+      }
     }
     rmSync(nagMarker, { force: true });
   };
@@ -945,6 +871,19 @@ try {
   const runSettlement = () => {
     try {
       mintSettlementReconcile(store, input.cwd, settlementCandidates, now);
+      // A rewritten range has no trustworthy commit delta.  We deliberately
+      // use capture_owed, the established settlement queue path, and key its
+      // text to the lost/current SHAs so retries do not mint duplicates.
+      if (git.ok && git.base_lost) {
+        const text = `capture owed: settlement history rewritten — persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
+        const exists = store.query({ types: ['todo'], cap: 1000 }).some((t) => t.source === 'system' && t.system_reason === 'capture_owed' && t.text === text);
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID(), type: 'todo', created_at: now, updated_at: now, author: 'system', status: 'active', superseded_by: null, links: [], scope: 'project', stack_tags: [], text, source: 'system', system_reason: 'capture_owed', file_keys: [] });
+      }
+      // Advance the git snapshot ONLY after the range's duties minted, and
+      // never past a path a live dispatch still owns (its debt must re-derive
+      // once the dispatch lands). A throw here marks settlementFailed like a
+      // mint failure — the snapshot stays put and the next Stop retries.
+      if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
     } catch (e) {
       settlementFailed = true;
       try {
@@ -1004,7 +943,7 @@ try {
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
   );
-  // Concept duty (decision 7208729b): concept_designed events, deduped to the
+  // Concept duty (decision foreign_7208729b): concept_designed events, deduped to the
   // EARLIEST event per family — detail is the concept FAMILY slug.
   // FAIL-CLOSED on a missing/malformed `at` (2026-08-22): the old `e.at ?? now`
   // invented an anchor. A literal '0' sank the family's window below every
@@ -1098,7 +1037,7 @@ try {
   const dischargedOnCaptureLane = (at) => dischargedByCutoff(at, captureLaneCutoff);
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
 
-  // Capture-pending declaration (board 1af5d630, decision follows e23f38f8):
+  // Capture-pending declaration (board 1af5d630, decision follows foreign_e23f38f8):
   // the capture EXISTS and its write is in flight on a named target (detail =
   // "<target> — <reason>"). Unlike no_capture it covers LATER work too — the
   // whole point is that new work keeps arriving while the capture rides a
@@ -1717,9 +1656,10 @@ try {
 
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     // No duties to enforce (e.g. only non-research dispatches recorded, or a
-    // no-capture declaration covered every touch/debug event) — settle, clear, release.
+    // no-capture declaration covered every touch/debug event). A pending
+    // capture declaration has forward scope, so retain it for later work.
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
     releaseWithPressure();
   }
 
@@ -1768,7 +1708,7 @@ try {
       .some((r) => r.created_at >= earliestResearch || r.updated_at >= earliestResearch);
   }
 
-  // Concept duty satisfaction (decision 7208729b): per FAMILY, a feature_article
+  // Concept duty satisfaction (decision foreign_7208729b): per FAMILY, a feature_article
   // carrying concept_family === family created/updated since the SESSION WINDOW
   // START for that family — min(that family's earliest concept_designed event
   // `at`, the earliest valid `at` across ALL session-register events of any
@@ -1835,8 +1775,12 @@ try {
   // writes" boundary), clear registers, release.
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    // `captured` spends a pending declaration, but a vacuous capture
+    // satisfaction has consumed no capture work. Keep that declaration's
+    // forward scope while this independent duty settles.
+    const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration });
     releaseWithPressure();
   }
 
@@ -1871,7 +1815,7 @@ try {
     // this grace is the TARGET's liveness, not a Stop count: while the register
     // still holds the dispatch the declaration names, converting to debt would
     // file mid-flight agent work as conductor negligence — the exact misreading
-    // decision ec9eacaa fixed for the file lanes, which this lane never
+    // decision foreign_ec9eacaa fixed for the file lanes, which this lane never
     // inherited. Non-terminal in exactly the shape of the first pending Stop
     // above: BOTH work registers survive, so a write landing before any later
     // Stop still settles the duty terminally with zero queue noise (the
@@ -1891,7 +1835,7 @@ try {
     }
     // "any capture_owed open" gates more than the choke's exact-key match (its
     // file_keys vary with activePaths) — kept deliberately; only the write
-    // itself routes through enqueueSystemTodo (decision 194f43e4).
+    // itself routes through enqueueSystemTodo (decision foreign_194f43e4).
     const openPending = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
@@ -1950,7 +1894,7 @@ try {
     // pre-existing hazard: a failed write would convert an unseen duty
     // straight into queued debt with the nag never having been shown.
     // Any fan-out deferral/staleness leads the block: the demands that follow are
-    // exactly the ones the deferral did NOT cover (decision ec9eacaa).
+    // exactly the ones the deferral did NOT cover (decision foreign_ec9eacaa).
     const parts = [...disclosureParts];
 
     const hasDebug = activeDebugEvents.length > 0;
@@ -1979,7 +1923,7 @@ try {
     // FIX 4 (review round): concept/article compact too — only DEFERRAL lines
     // (disclosureParts, already outside this compact/full decision) stay as
     // full lines beside the one-liner; they carry live ownership evidence
-    // (decision ee8ab1f5 (2)) that a token can't stand in for.
+    // (decision foreign_ee8ab1f5 (2)) that a token can't stand in for.
     const laneVariant = (lane) => {
       if (lane === 'capture') return hasDebug ? 'debug_scope' : integrityNote ? 'test-integrity' : 'touch';
       if (lane === 'research') return 'research';
@@ -2057,7 +2001,7 @@ try {
       }
     }
 
-    // Concept demand nag (decision 7208729b): design settled, article owed NOW.
+    // Concept demand nag (decision foreign_7208729b): design settled, article owed NOW.
     // FIX 4: full detail only when NOT compacted — the compact one-liner
     // above already carries this lane's token.
     if (!compact && conceptLaneOpen) {
@@ -2090,20 +2034,13 @@ try {
       spendPressureMarker(pressure.level);
     }
 
-    // The delegation-watch advisory rides the same deny and spends its marker, so
-    // no standalone delegation block follows (decision 8b00e77a).
-    if (delegation && !delegationSpent()) {
-      spendDelegationMarker();
-      parts.push(delegationPart());
-    }
-
     // F4/F6/R4: this is a non-terminal, retry-next-Stop release — duties are
     // outstanding (that is why it is nagging), so settlement does not run,
     // but the claim must still be released (see releaseTouchesClaim above)
     // or it would dangle forever with no next-Stop adoption ever triggered.
     releaseTouchesClaim();
 
-    // SPEND AFTER DELIVERY (point D, decision ee8ab1f5): this deliberately
+    // SPEND AFTER DELIVERY (point D, decision foreign_ee8ab1f5): this deliberately
     // does NOT call deny() — deny() writes stderr and exits unconditionally,
     // which is exactly the ordering hazard being closed (capture-nagged used
     // to be written at :1841, before the text was ever shown). Every marker
@@ -2111,7 +2048,7 @@ try {
     // spends nothing, and the next Stop repeats the nag, louder, never
     // silent (point E). deny() itself is untouched — every OTHER call site
     // in this file still uses it unchanged. Shares writeThenSpend with the
-    // pressure/delegation/gauge deny above (Fix 1) — this site alone also
+    // pressure/gauge deny above (Fix 1) — this site alone also
     // spends capture-nagged and duty-nagged, since only here is a duty
     // actually rendered.
     const dutyText = compact ? parts.join('\n\n') : `${H10_HEADER}\n${parts.join('\n\n')}`;
@@ -2266,7 +2203,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article — create/update the feature_article with concept_family '${family}' (decision 7208729b)`,
+        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article — create/update the feature_article with concept_family '${family}'`,
         source: 'system',
         system_reason: 'concept_article_missing',
       });
@@ -2302,7 +2239,9 @@ try {
   // items above; this is the last chance to settle before clearRegisters()
   // discards the claim, since no next Stop exists once the session ends here.
   runSettlement();
-  clearRegisters();
+  // Queueing a non-capture duty does not spend a pending declaration's forward
+  // scope; queueing capture work does, and `hasCaptureDuty` distinguishes them.
+  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

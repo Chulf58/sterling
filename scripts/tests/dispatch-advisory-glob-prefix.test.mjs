@@ -1,39 +1,30 @@
 // GLOB LITERAL-PREFIX EXTRACTION + WIRING — board a63b226d ("GLOB BLIND
-// SPOT"), research_finding 289cd172's "a SEPARATE blind spot, in both
+// SPOT"), research_finding foreign_289cd172's "a SEPARATE blind spot, in both
 // directions". AUTHORED BY coder, for a test-writer to land verbatim.
 // Suggested target: scripts/tests/dispatch-advisory-glob-prefix.test.mjs
 //
-// THREE FILES TOUCHED BY THIS CHANGE, THREE TEST GROUPS:
-//   A. scripts/hooks/lib/dispatch-advisory.mjs — extractGlobPrefixCandidates(),
-//      the extractor + its MINIMUM-TWO-SEGMENT bound (conductor-directed,
-//      flood-risk mitigation).
-//   B. scripts/hooks/h22-dispatch-register.mjs — globPrefixesFromBlocks(),
-//      writing the negation-checked prefix claims into `claimed_glob_prefixes`
-//      (its OWN field, `claimed_files` stays byte-identical).
-//   C. scripts/hooks/h26-dispatch-overlap.mjs — prefix-aware (startsWith)
-//      overlap comparison, applied ONLY to `claimed_glob_prefixes`; exact
-//      equality on `claimed_files`/`files` is completely unchanged.
+// GROUP B (h22-dispatch-register.mjs `claimed_glob_prefixes`, the register
+// write side) and GROUP C (h26-dispatch-overlap.mjs prefix-aware overlap
+// comparison) are DELETED WHOLE: `claimed_glob_prefixes` had no non-test
+// reader (research_finding h22-dispatch-register-consumer-map-which-parts-
+// have-a-reader-september-2026) and h26-dispatch-overlap.mjs is already
+// deleted under the scale-down decision (sterling-claude-code-scale-down-
+// boundary, 2ad87dd1). Only GROUP A survives — the pure-function extractor
+// (extractGlobPrefixCandidates) and its detector integration remain exported
+// from scripts/hooks/lib/dispatch-advisory.mjs (hasUnsuppressedMatch is still
+// live via scripts/hooks/lib/dispatch-residue.mjs), even though H22 no longer
+// calls extractGlobPrefixCandidates itself.
 //
-// Each group's CONTROL is placed first and passes for a DIFFERENT, simpler
-// reason than the positive cases that follow it — per group, not just once.
+// The surviving GROUP A's CONTROL is placed first and passes for a
+// DIFFERENT, simpler reason than the positive cases that follow it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   extractGlobPrefixCandidates,
   hasUnsuppressedMatch,
   escapeRe,
 } from '../hooks/lib/dispatch-advisory.mjs';
-
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const HOOKS = join(root, 'scripts', 'hooks');
-const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
-const H26_PATH = join(HOOKS, 'h26-dispatch-overlap.mjs');
 
 // ===========================================================================
 // GROUP A — pure-function tests, scripts/hooks/lib/dispatch-advisory.mjs
@@ -125,266 +116,4 @@ test('(A6) a TRAILING prohibition after a glob mention now suppresses it (board 
   const [prefix] = extractGlobPrefixCandidates(prompt);
   const suppressed = !hasUnsuppressedMatch(prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false });
   assert.equal(suppressed, true);
-});
-
-// ===========================================================================
-// Shared hook-harness plumbing (mirrors scripts/tests/h22-claimed-territory.test.mjs)
-// ===========================================================================
-
-function runHook(hookPath, input, cwd) {
-  const r = spawnSync(process.execPath, [hookPath], {
-    input: JSON.stringify(input),
-    encoding: 'utf8',
-    cwd,
-    timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
-  });
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-}
-
-function makeProject() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-globprefix-'));
-  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [] }));
-  writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-// ===========================================================================
-// STATE-MACHINE RE-CUT (board 5445066b, decision
-// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
-// knowledge_get 7c515e52 — opened, not paraphrased): SubagentStart no longer
-// reads the parent transcript; it resolves ONE prompt from the per-dispatch
-// state record written at PreToolUse. The FIXTURE KEEPS ITS NAME AND
-// SIGNATURE — one entry per [subagent_type, prompt] — so every call site and
-// every glob-prefix assertion in this file is byte-identical; each entry now
-// fires a REAL PreToolUse Task event through h22 instead of planting a
-// tool_use block. SubagentStart's transcript_path points at a file that does
-// NOT exist: correct under the new contract, and a pin in its own right (a
-// surviving transcript reader would extract no prefixes and (B1)/(C1) would go
-// red rather than pass by accident).
-// ===========================================================================
-let toolUseSeq = 0;
-function writeTranscript(dir, blocks) {
-  for (const [subagent_type, prompt] of blocks) {
-    const r = runHook(
-      H22_PATH,
-      {
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Task',
-        tool_use_id: `toolu_gp_${(toolUseSeq += 1)}`,
-        tool_input: { subagent_type, prompt, description: 'a lane' },
-        session_id: 's1',
-        cwd: dir,
-        transcript_path: join(dir, 't', 'parent.jsonl'),
-        prompt_id: 'pr-1',
-      },
-      dir
-    );
-    assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
-  }
-}
-
-function subagentStart(dir, { agent_id = 'a1', agent_type = 'coder', session_id = 's1' } = {}) {
-  return runHook(
-    H22_PATH,
-    {
-      hook_event_name: 'SubagentStart',
-      session_id,
-      transcript_path: join(dir, 't', 'no-such-parent-transcript.jsonl'),
-      cwd: dir,
-      agent_id,
-      agent_type,
-    },
-    dir
-  );
-}
-
-function readRegister(dir) {
-  return JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), 'utf8'));
-}
-
-function writeRegister(dir, entries) {
-  writeFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), JSON.stringify(entries));
-}
-
-function h26Task(dir, { subagent_type = 'coder', prompt, session_id = 's1' }) {
-  return runHook(H26_PATH, { hook_event_name: 'PreToolUse', tool_name: 'Task', session_id, cwd: dir, tool_input: { subagent_type, prompt } }, dir);
-}
-
-function advisoryText(r) {
-  if (!r.stdout || !r.stdout.trim()) return '';
-  let parsed;
-  try {
-    parsed = JSON.parse(r.stdout);
-  } catch {
-    assert.fail(`stdout was not valid JSON: ${JSON.stringify(r.stdout)}`);
-  }
-  return parsed?.hookSpecificOutput?.additionalContext ?? '';
-}
-
-// ===========================================================================
-// GROUP B — h22-dispatch-register.mjs: `claimed_glob_prefixes`
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// (B0) CONTROL, PLACED FIRST: a single-segment glob claim registers an EMPTY
-// claimed_glob_prefixes — the bound holding at the register-write boundary,
-// not "the wiring is broken". Reuses (A2)'s sabotage for consistency.
-// SABOTAGE: revert the bound (`{2,}` -> `+`) in dispatch-advisory.mjs —
-// flips to a non-empty claimed_glob_prefixes.
-// ---------------------------------------------------------------------------
-test('(B0) CONTROL: SubagentStart with "YOUR FILES: scripts/**" (single segment) registers claimed_glob_prefixes: []', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: scripts/** — own this for the lane.']]);
-    const r = subagentStart(dir);
-    assert.equal(r.code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_glob_prefixes, []);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (B1) two-segment glob claim registers the literal prefix.
-// SABOTAGE: remove the `claimed_glob_prefixes` key from newEntry in h22 —
-// the field disappears from the register entirely (undefined, not []).
-// ---------------------------------------------------------------------------
-test('(B1) SubagentStart with "YOUR FILES: scripts/hooks/**" registers claimed_glob_prefixes: ["scripts/hooks"]', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: scripts/hooks/** — own this directory.']]);
-    const r = subagentStart(dir);
-    assert.equal(r.code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_glob_prefixes, ['scripts/hooks']);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (B2) a PROHIBITED glob never registers as claimed (shared suppression,
-// board a63b226d point 3 — one detector, not a second heuristic).
-// SABOTAGE: drop the `hasUnsuppressedMatch` filter from
-// globPrefixesFromBlocks in h22 — the prohibited prefix leaks into
-// claimed_glob_prefixes despite "DO NOT TOUCH".
-// ---------------------------------------------------------------------------
-test('(B2) "DO NOT TOUCH: scripts/hooks/** (another lane owns it)" registers claimed_glob_prefixes: []', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'DO NOT TOUCH: scripts/hooks/** (another lane owns it). Fix the parser instead.']]);
-    const r = subagentStart(dir);
-    assert.equal(r.code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_glob_prefixes, []);
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// GROUP C — h26-dispatch-overlap.mjs: prefix-aware comparison, end-to-end
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// (C0) CONTROL, PLACED FIRST, END-TO-END: a live dispatch claims a
-// single-segment "scripts/**" through the REAL extraction pipeline; a later
-// dispatch naming a file under scripts/ (but in a DIFFERENT subsystem,
-// scripts/domain-doctor.mjs, not scripts/hooks/) never warns — the bound
-// holding through the full write-then-read path is the actual protection
-// against the flood scenario.
-// SABOTAGE: revert the bound in dispatch-advisory.mjs (`{2,}` -> `+`) —
-// flips to a warning.
-// ---------------------------------------------------------------------------
-test('(C0) CONTROL END-TO-END: a live single-segment "scripts/**" claim never overlaps a later dispatch under scripts/ (bound holds)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: scripts/** — own this lane.']]);
-    subagentStart(dir, { agent_id: 'a1' });
-    const r = h26Task(dir, { prompt: 'fix a bug in scripts/domain-doctor.mjs' });
-    assert.equal(advisoryText(r), '');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (C1) THE CONCRETE REPRODUCTION requested: a live dispatch claims
-// "packages/mcp-server/**"; a later dispatch naming a specific file under it
-// warns, prefix-aware.
-// SABOTAGE: in h26, force `matchedPrefix = []` (remove prefix-aware
-// comparison) — flips silent.
-// ---------------------------------------------------------------------------
-test('(C1) a live "packages/mcp-server/**" claim overlaps a later dispatch naming a file under it', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: packages/mcp-server/** — own this package for the refactor.']]);
-    subagentStart(dir, { agent_id: 'a1' });
-    const r = h26Task(dir, { prompt: 'implement the fix in packages/mcp-server/src/server.ts' });
-    const ctx = advisoryText(r);
-    assert.match(ctx, /packages\/mcp-server\/src\/server\.ts/);
-    assert.ok(ctx.includes('coder:a1'));
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (C2) BOUNDARY DISCIPLINE: "packages/mcp-server-utils/x.ts" merely SHARES A
-// STRING PREFIX with a claimed "packages/mcp-server/**" but is a sibling
-// directory, not a descendant — must NOT warn.
-// SABOTAGE: change `f.startsWith(`${p}/`)` to `f.startsWith(p)` in h26
-// (drop the '/' boundary) — flips to a false warning.
-// ---------------------------------------------------------------------------
-test('(C2) BOUNDARY: "packages/mcp-server-utils/x.ts" does not overlap a claimed "packages/mcp-server/**" (sibling, not descendant)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: packages/mcp-server/** — own this package.']]);
-    subagentStart(dir, { agent_id: 'a1' });
-    const r = h26Task(dir, { prompt: 'edit packages/mcp-server-utils/x.ts for an unrelated helper package' });
-    assert.equal(advisoryText(r), '');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (C3) LEGACY register entry with NO claimed_glob_prefixes field at all
-// never crashes and never prefix-warns (falls back to exact-only, exactly
-// today's pre-migration behavior).
-// SABOTAGE: drop the `Array.isArray(e.claimed_glob_prefixes)` guard in h26
-// (assume the field is always an array) — throws on this fixture.
-// ---------------------------------------------------------------------------
-test('(C3) LEGACY: a register entry with no claimed_glob_prefixes field never crashes and never prefix-warns', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegister(dir, [{ agent_id: 'sub-1', agent_type: 'coder', session_id: 's1', files: ['src/shared/util.mjs'], claimed_files: ['src/shared/util.mjs'], at: new Date().toISOString(), attribution: 'block' }]);
-    const r = h26Task(dir, { prompt: 'edit packages/mcp-server/src/server.ts today' });
-    assert.notEqual(r.code, 2);
-    assert.equal(advisoryText(r), '');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (C4) END-TO-END SUPPRESSION: a PROHIBITED glob claim never overlaps a
-// later dispatch naming a file under it — the read-path proof that (B2)'s
-// write-path suppression actually closes the loop.
-// SABOTAGE: same as (B2) — drop the suppression filter in
-// globPrefixesFromBlocks — flips to a false warning.
-// ---------------------------------------------------------------------------
-test('(C4) a PROHIBITED "packages/mcp-server/**" claim never overlaps a later dispatch naming a file under it', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'DO NOT TOUCH: packages/mcp-server/** (another lane owns it). Fix the CLI instead.']]);
-    subagentStart(dir, { agent_id: 'a1' });
-    const r = h26Task(dir, { prompt: 'implement the fix in packages/mcp-server/src/server.ts' });
-    assert.equal(advisoryText(r), '');
-  } finally {
-    cleanup();
-  }
 });

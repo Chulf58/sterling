@@ -1,4 +1,4 @@
-// ------------- Tasks-tab OBJECTIVE GROUPING (decision a8d2ce6c, slice 2) -------------
+// ------------- Tasks-tab OBJECTIVE GROUPING (decision foreign_a8d2ce6c, slice 2) -------------
 //
 // SPEC-ONLY oracle, written BEFORE the grouping exists. Slice 1 shipped the field:
 // a todo may carry an optional non-empty `objective` string (a grouping KEY, not a
@@ -47,7 +47,7 @@
 //     wins, exactly as a collapsed Knowledge source hides an expanded card).
 //   • the pure projection keeps its existing name and gains a TRAILING OPTIONAL
 //     param: todoCards(store, expanded?) — the additive-optional-param idiom
-//     (decision 34d61f60) the P4 `knowledge?` and System-tab `roster?` params used.
+//     (decision foreign_34d61f60) the P4 `knowledge?` and System-tab `roster?` params used.
 //     Group headers are returned INLINE, in display order, ahead of their children.
 //   • ORDER between groups and standalone cards is deliberately NOT pinned (nothing
 //     in the decision fixes it); what IS pinned is nesting, membership, counts and
@@ -534,7 +534,15 @@ test('AC1/AC2 at the pure projection: todoCards(store, expanded?) returns the gr
       sorted([heads[0].id, s1.id]),
       'collapsed: the group entry plus the standalone card — no children, no maintenance item'
     );
-    assert.equal(entries.find((e) => e.id === s1.id)!.title, 'bump the changelog', "a standalone entry's title is still its todo text");
+    // CHANGED 2026-09-21 (board 081508d0, review round 2, HIGH finding): the
+    // title used to be the bare text because composition was gated on slug
+    // presence and this fixture never sets one; the gate is now "does a
+    // label exist" (it does, from the real text), so it composes `label (id8)`.
+    assert.equal(
+      entries.find((e) => e.id === s1.id)!.title,
+      `bump the changelog (${s1.id.slice(0, 8)})`,
+      "a standalone entry's title is its todo text, composed with its id — no slug required"
+    );
 
     // expanded: the children follow the header, in order, each keyed by record id
     const opened = VM.todoCards!(store, [heads[0].id]);

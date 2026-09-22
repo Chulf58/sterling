@@ -1,5 +1,5 @@
 // SPARRING-PARTNER slice 1 — scripts/lib/codex-mcp.mjs
-// (decision cd019e0b, sparring-partner-partnership-shape)
+// (decision foreign_cd019e0b, sparring-partner-partnership-shape)
 //
 // Under test, per the declared interface slice only (no implementation read):
 //   probeCodex({spawnFn, timeoutMs, env}) -> probe result
@@ -19,7 +19,7 @@
 // on withCodexEntry's OWN observable output. This tests the real end-to-end
 // contract (probe -> merged servers) without inventing an internal shape.
 //
-// SCOPED EXCEPTION as of decision ffe7c416 (host-native init, user-decided
+// SCOPED EXCEPTION as of decision foreign_ffe7c416 (host-native init, user-decided
 // 2026-08-27): probeCodexWin's `command` field IS now part of the declared
 // interface — defect (2) of that ruling is precisely that the resolved
 // absolute path was being discarded, so "the path survives the probe" is an
@@ -45,24 +45,57 @@ function nonZeroExitFn() {
   return { error: undefined, status: 1 };
 }
 function successExitFn() {
-  return { error: undefined, status: 0 };
+  return { error: undefined, status: 0, stdout: 'Usage: codex mcp-server\n' };
 }
 
 test('CODEX_MCP_ENTRY is exactly {command: "codex", args: ["mcp-server"]}', () => {
   assert.deepEqual(CODEX_MCP_ENTRY, { command: 'codex', args: ['mcp-server'] });
 });
 
-test('probeCodex: calls the injected spawnFn — never a real spawn, never depends on machine state', () => {
-  let calls = 0;
+test('probeCodex: calls the injected spawnFn for version, capability, and login — never a real spawn or machine-state dependency', () => {
+  const calls = [];
   probeCodex({
     spawnFn: (...args) => {
-      calls += 1;
+      calls.push(args.slice(0, 2));
       return successExitFn();
     },
     timeoutMs: 2000,
     env: {},
   });
-  assert.equal(calls, 1, 'probeCodex invokes the injected spawnFn exactly once instead of a real child_process spawn');
+  assert.deepEqual(calls, [
+    ['codex', ['--version']],
+    ['codex', ['mcp-server', '--help']],
+    ['codex', ['login', 'status']],
+  ], 'probe invokes only non-interactive version/capability checks before login status');
+});
+
+test('probeCodex -> withCodexEntry: logged-in binary whose mcp-server help fails is omitted, with a versioned pinned-server skip route', () => {
+  const calls = [];
+  const probeResult = probeCodex({
+    spawnFn: (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === '--version') return { error: undefined, status: 0, stdout: 'codex-cli 0.155.1\n' };
+      if (args[0] === 'mcp-server') return { error: undefined, status: 0, stdout: 'Usage: codex [OPTIONS] [PROMPT]\n' };
+      throw new Error('login status must not run after a missing mcp-server capability');
+    },
+    timeoutMs: 2000,
+    env: {},
+  });
+  assert.ok(!('codex' in withCodexEntry({ sterling: { command: 'node' } }, probeResult)), 'missing mcp-server never writes a dead codex entry');
+  assert.deepEqual(calls, [['--version'], ['mcp-server', '--help']], 'capability failure avoids an unnecessary login check');
+  assert.match(codexSkipLine(probeResult.reason, probeResult.version), /0\.155\.1.*user-scope pinned Codex MCP server/i);
+});
+
+test('probeCodex -> withCodexEntry: mcp-server help succeeds keeps the codex entry', () => {
+  const probeResult = probeCodex({
+    spawnFn: (_cmd, args) => {
+      if (args[0] === '--version') return { error: undefined, status: 0, stdout: 'codex-cli 0.153.4\n' };
+      return { error: undefined, status: 0, stdout: 'Usage: codex mcp-server\n' };
+    },
+    timeoutMs: 2000,
+    env: {},
+  });
+  assert.deepEqual(withCodexEntry({}, probeResult), { codex: CODEX_MCP_ENTRY });
 });
 
 test('probeCodex -> withCodexEntry: spawn error (binary absent) leaves mcpServers unchanged, existing entries preserved', () => {
@@ -75,7 +108,13 @@ test('probeCodex -> withCodexEntry: spawn error (binary absent) leaves mcpServer
 
 test('probeCodex -> withCodexEntry: non-zero exit (not logged in) leaves mcpServers unchanged', () => {
   const original = Object.freeze({ sterling: Object.freeze({ command: 'node', args: ['main.js'] }) });
-  const probeResult = probeCodex({ spawnFn: nonZeroExitFn, timeoutMs: 2000, env: {} });
+  const probeResult = probeCodex({ spawnFn: (_cmd, args) => {
+    if (args[0] === '--version') return { error: undefined, status: 0, stdout: 'codex 0.155.1' };
+    if (args[0] === 'mcp-server') return { error: undefined, status: 0, stdout: 'codex mcp-server' };
+    return { error: undefined, status: 1 };
+  }, timeoutMs: 2000, env: {} });
+  assert.equal(probeResult.reason, 'not-logged-in');
+  assert.match(codexSkipLine(probeResult.reason), /not logged in/i);
   const result = withCodexEntry(original, probeResult);
   assert.ok(!('codex' in result), 'no codex key added when the probe reports a non-zero exit (not logged in)');
   assert.deepEqual(result.sterling, { command: 'node', args: ['main.js'] }, 'existing sterling entry preserved');
@@ -190,14 +229,14 @@ test('codexSkipLine("timeout") starts with the fixed prefix and is distinguishab
 //     {ok:false, reason} with reason ∈ {binary-absent, not-logged-in, timeout}
 //     and NO command, on every failure.
 //
-//     AMENDED by decision ffe7c416 (host-native init, user-decided 2026-08-27).
+//     AMENDED by decision foreign_ffe7c416 (host-native init, user-decided 2026-08-27).
 //     Two pins in this section previously asserted `deepEqual(result, {ok:true})`
 //     — an EXACT-SHAPE check that forbids the resolved path surviving, which is
 //     exactly the defect the ruling orders closed: ffe7c416 defect (2) records
 //     that CODEX_MCP_ENTRY hardcoded a bare `codex` and threw away the path
 //     where.exe had just resolved, so a successful probe did NOT prove the
 //     written entry would spawn (npm installs codex as codex.cmd, hostile to
-//     shell-less spawning, and research_finding 0c712d94 measured PATH to be an
+//     shell-less spawning, and research_finding foreign_0c712d94 measured PATH to be an
 //     unreliable presence oracle on the very host this must work on). Those two
 //     deepEquals are now `assert.equal(result.ok, true)` PLUS a POSITIVE
 //     assertion on result.command. The exact-shape discipline is not simply
@@ -223,9 +262,11 @@ test('codexSkipLine("timeout") starts with the fixed prefix and is distinguishab
 const WIN_CODEX_PATH = 'C:\\Users\\test\\AppData\\Roaming\\npm\\codex.cmd';
 
 function winWhereOkThenFn(loginResult) {
-  return (cmd) => {
+  return (cmd, args) => {
     if (cmd === 'where.exe') return { error: undefined, status: 0, stdout: WIN_CODEX_PATH + '\r\n' };
-    if (cmd === WIN_CODEX_PATH) return loginResult;
+    if (cmd === WIN_CODEX_PATH && args[0] === 'login') return loginResult;
+    if (cmd === WIN_CODEX_PATH && args[0] === 'mcp-server') return { error: undefined, status: 0, stdout: 'Usage: codex mcp-server\n' };
+    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0, stdout: 'codex-cli 0.153.4\n' };
     throw new Error(`unexpected spawnFn call for cmd ${cmd} — only 'where.exe' then the resolved path are expected`);
   };
 }
@@ -328,18 +369,20 @@ test('probeCodexWin: resolves via spawnFn("where.exe", ["codex"], ...) — the W
   const spawnFn = (cmd, args) => {
     calls.push({ cmd, args });
     if (cmd === 'where.exe') return { error: undefined, status: 0, stdout: WIN_CODEX_PATH + '\r\n' };
-    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0 };
+    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0, stdout: args[0] === 'mcp-server' ? 'Usage: codex mcp-server\n' : '' };
     throw new Error(`unexpected spawnFn call for cmd ${cmd}`);
   };
   const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
-  assert.equal(calls.length, 2, 'exactly two spawnFn calls — resolve, then login status');
+  assert.equal(calls.length, 4, 'exactly four spawnFn calls — resolve, version, capability, then login status');
   assert.deepEqual(calls[0], { cmd: 'where.exe', args: ['codex'] }, 'first call resolves via where.exe, NOT spawnSync("codex") directly (which would resolve under WSL\'s own PATH)');
-  assert.deepEqual(calls[1], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'second call runs "<resolved> login status" on the path where.exe returned');
+  assert.deepEqual(calls[1], { cmd: WIN_CODEX_PATH, args: ['--version'] }, 'second call identifies the resolved executable version for a useful capability-failure warning');
+  assert.deepEqual(calls[2], { cmd: WIN_CODEX_PATH, args: ['mcp-server', '--help'] }, 'third call proves mcp-server exists without launching a session');
+  assert.deepEqual(calls[3], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'fourth call runs login status on the path where.exe returned');
   assert.equal(result.ok, true, 'both steps succeeding yields ok:true');
   assert.equal(
     result.command,
     WIN_CODEX_PATH,
-    'the probe CARRIES the path where.exe resolved (decision ffe7c416 defect 2): a probe that proves an absolute executable spawns, then hands back nothing but ok:true, forces the caller onto a bare "codex" that is NOT known to spawn — the exact gap that left codex-on-Windows broken after a SUCCESSFUL probe'
+    'the probe CARRIES the path where.exe resolved (decision ffe7c416 defect 2): a probe that proves an absolute executable spawns, then hands back nothing but ok:true, forces the caller onto a bare "codex" that is NOT known to spawn — the exact gap that left codex-on-Windows broken after a SUCCESSFUL probe' // not-a-citation: fixture id
   );
 });
 // SABOTAGE: call spawnFn('codex', ...) directly instead of resolving through
@@ -462,14 +505,14 @@ test('probeCodexWin: where.exe returning SEVERAL matches resolves the FIRST line
   const spawnFn = (cmd, args) => {
     calls.push({ cmd, args });
     if (cmd === 'where.exe') return { error: undefined, status: 0, stdout: `${WIN_CODEX_PATH}\r\n${WIN_CODEX_SHIM}\r\n` };
-    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0 };
+    if (cmd === WIN_CODEX_PATH) return { error: undefined, status: 0, stdout: args[0] === 'mcp-server' ? 'Usage: codex mcp-server\n' : '' };
     throw new Error(`unexpected spawnFn call for cmd ${JSON.stringify(cmd)} — only the first where.exe match is a spawnable candidate`);
   };
   const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: {} });
   assert.equal(result.ok, true, 'a multi-match resolution is still a successful resolution');
   assert.equal(result.command, WIN_CODEX_PATH, 'exactly the first match is carried — not the last, and not both joined');
   assert.ok(!/[\r\n]/.test(result.command), 'no line terminator survives into the command: a command containing a newline cannot be spawned, and would be written verbatim into the generated MCP config');
-  assert.deepEqual(calls[1], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'and login status was verified against THAT candidate — the probe proves the command it carries, rather than proving one path and reporting another');
+  assert.deepEqual(calls[3], { cmd: WIN_CODEX_PATH, args: ['login', 'status'] }, 'and login status was verified against THAT candidate — the probe proves the command it carries, rather than proving one path and reporting another');
 });
 // SABOTAGE: resolve with `stdout.trim()` over the whole buffer instead of its
 // first line — result.command becomes the two paths joined by CRLF, so the
@@ -483,12 +526,12 @@ test('probeCodexWin: where.exe returning SEVERAL matches resolves the FIRST line
 test('probeCodexWin: STERLING_CODEX_WIN_PATH set (non-empty) bypasses where.exe detection entirely — login status runs directly against the given path', () => {
   const FORCED_PATH = 'C:\\forced\\codex.exe';
   let whereCalled = false;
-  const spawnFn = (cmd) => {
+  const spawnFn = (cmd, args) => {
     if (cmd === 'where.exe') {
       whereCalled = true;
       return { error: undefined, status: 0, stdout: WIN_CODEX_PATH };
     }
-    if (cmd === FORCED_PATH) return { error: undefined, status: 0 };
+    if (cmd === FORCED_PATH) return { error: undefined, status: 0, stdout: args[0] === 'mcp-server' ? 'Usage: codex mcp-server\n' : '' };
     throw new Error(`unexpected spawnFn call for cmd ${cmd}`);
   };
   const result = probeCodexWin({ spawnFn, timeoutMs: 2000, env: { STERLING_CODEX_WIN_PATH: FORCED_PATH } });
@@ -497,7 +540,7 @@ test('probeCodexWin: STERLING_CODEX_WIN_PATH set (non-empty) bypasses where.exe 
   assert.equal(
     result.command,
     FORCED_PATH,
-    'the FORCED path is what the probe carries forward — not the where.exe fixture path, not a bare "codex" (decision ffe7c416 defect 2). This is also what makes STERLING_CODEX_WIN_PATH a usable command seam for init-ensure.test.mjs, which drives the end-to-end wiring through it'
+    'the FORCED path is what the probe carries forward — not the where.exe fixture path, not a bare "codex" (decision ffe7c416 defect 2). This is also what makes STERLING_CODEX_WIN_PATH a usable command seam for init-ensure.test.mjs, which drives the end-to-end wiring through it' // not-a-citation: fixture id
   );
   assert.notEqual(result.command, WIN_CODEX_PATH, 'the seam wins over detection — the where.exe fixture path never leaks into a forced-path result');
 });
@@ -528,7 +571,7 @@ test('probeCodexWin: STERLING_CODEX_WIN_PATH set to the EMPTY STRING forces bina
 // pin goes red, which is exactly how it catches the truthiness-vs-presence bug.
 
 // =============================================================================
-// Part E (decision ffe7c416, defect 2) — withCodexEntry consumes the probe's
+// Part E (decision foreign_ffe7c416, defect 2) — withCodexEntry consumes the probe's
 // CARRIED COMMAND. Spec-only: scripts/lib/codex-mcp.mjs was NOT read to author
 // these.
 //

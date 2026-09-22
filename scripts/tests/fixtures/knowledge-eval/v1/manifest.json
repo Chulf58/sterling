@@ -1,0 +1,10 @@
+{
+  "version": "v1",
+  "note": "These three plumbing smoke cases are not gold labels.",
+  "synthetic_cases": [
+    {"id":"synthetic-pull-query","version":"v1","channel":"pull","kind":"query","recipient":"conductor","input":{"rank_terms":["retrieval"],"types":["decision"],"cap":10},"labels":{"required":[{"id":"fe62546f-8dbc-4d5c-b2f3-a7f121daf739","level":"pointer"}],"acceptable":[],"irrelevant":[]},"negative":false,"source":"structural","rationale":"Synthetic plumbing smoke case using the retrieval-first decision."},
+    {"id":"synthetic-pull-preflight","version":"v1","channel":"pull","kind":"preflight","recipient":"conductor","input":{"text":"retrieval-first enforcement knowledge delivery"},"labels":{"required":[{"id":"fe62546f-8dbc-4d5c-b2f3-a7f121daf739","level":"pointer"}],"acceptable":[],"irrelevant":[]},"negative":false,"source":"structural","rationale":"Synthetic plumbing smoke case using the retrieval-first decision."},
+    {"id":"synthetic-push-read","version":"v1","channel":"push","kind":"read","recipient":"conductor","input":{"events":[{"tool":"Read","path":"scripts/prep.mjs","agent_id":null,"note":"Synthetic hook plumbing touch."}]},"labels":{"required":[{"id":"fe62546f-8dbc-4d5c-b2f3-a7f121daf739","level":"substance"}],"acceptable":[],"irrelevant":[]},"negative":false,"source":"structural","rationale":"Synthetic plumbing touch for an owned file; not a gold delivery label."},
+    {"id":"synthetic-push-bash-then-read","version":"v1","channel":"push","kind":"sequence","recipient":"conductor","score_event":1,"input":{"events":[{"tool":"Bash","command":"rg --files scripts/prep.mjs","agent_id":null,"note":"Pointer-stage Bash touch."},{"tool":"Read","path":"scripts/prep.mjs","agent_id":null,"note":"Read-stage substance touch."}]},"labels":{"required":[{"id":"fe62546f-8dbc-4d5c-b2f3-a7f121daf739","level":"substance"}],"acceptable":[],"irrelevant":[]},"negative":false,"source":"structural","rationale":"Synthetic sequence proves state persists from a pointer-stage Bash event to a substantive Read event."}
+  ]
+}

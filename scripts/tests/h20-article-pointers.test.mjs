@@ -114,7 +114,7 @@ function makeProject() {
 }
 
 function dispatch(dir, prompt, subagent_type = 'coder') {
-  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, session_id: 's1', cwd: dir };
 }
 
 // --- shared domain vocabulary --------------------------------------------

@@ -1,7 +1,6 @@
 // H16 — session-event register (spec §6, run r-0501). PostToolUse
 // WebSearch|WebFetch|Task|Agent. Records research and agent-dispatch events
-// to .sterling/transient/session-events.json in direct mode only.
-// Pipeline-mode (active run): allow with NO write — the pipeline owns capture.
+// to .sterling/transient/session-events.json in direct mode.
 // Missing store: allow, no recording (fail-open, mirrors H7).
 // Never deduplicates: the register is a pure append log.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -13,9 +12,6 @@ const store = openStore(input.cwd);
 if (!store) allow();
 
 try {
-  const run = store.getRun();
-  if (run) allow(); // pipeline: silent, no write — pipeline owns capture (AC6)
-
   // direct mode: derive kind + detail from the tool call, then append
   const tool = input.tool_name;
   let kind, detail;

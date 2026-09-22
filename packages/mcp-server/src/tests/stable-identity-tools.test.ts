@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // S3 FROZEN RED PINS — stable-identity wave, TOOL SURFACE on schema v2
-// (decision stable-identity-design-v2 / 2176748e-72f6-4cfc-a790-7fd67c7ee6aa).
+// (decision stable-identity-design-v2 / foreign_2176748e).
 // SPEC-ONLY: authored FROM THE DESIGN DECISION + the S3 dispatch contract
 // list ALONE, before any of this is wired on SterlingTools. The store layer
 // (packages/store) already ships updateRecord/editRecordField/
@@ -295,7 +295,7 @@ test('S3-1d [stable-identity-design-v2]: knowledge_edit and knowledge_append lik
 
     // test-repair 2026-08-22: the pin read appended.id at the TOP level while
     // reading edited.record.id two lines earlier — an internal inconsistency
-    // that forced a redundant receipt spread (shape decision 9c8e4601 had
+    // that forced a redundant receipt spread (shape decision foreign_9c8e4601 had
     // already rejected). The echo's record carries id+version; read it there,
     // consistently. [stable-identity-design-v2]
     const appended = tools.knowledgeAppend(edited.record.id as string, 'alternatives_rejected', [{ option: 'x', reason: 'y' }]) as unknown as { record: Loose };

@@ -2,7 +2,7 @@
 // 7e7279c4, objective dome-farmer-issues-2026-09-05).
 // SPEC-ONLY, blind to the coder's parallel implementation.
 //
-// Governing knowledge: decision 752caf98 (tdd-and-mutation-toggles-in-
+// Governing knowledge: decision foreign_752caf98 (tdd-and-mutation-toggles-in-
 // system-tab) — OFF silences the automatic default only, explicit asks
 // still work, both toggles independently default TRUE when absent from
 // config. Board 7e7279c4: the toggles were prose-only in CLAUDE.md, unread
@@ -36,7 +36,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 
 let SterlingStore;
-// H1_SEAM (decision 95c2c109 F2, harness idiom copied from
+// H1_SEAM (decision foreign_95c2c109 F2, harness idiom copied from
 // scripts/tests/hooks-full.test.mjs's "H1 machine role" tests): H1's
 // pluginRoot() resolution is walkUpPluginRoot() || STERLING_PLUGIN_ROOT, and
 // scripts/hooks/h1-session-start.mjs's own walk-up always finds THIS repo
@@ -181,14 +181,14 @@ test('MIXED: tdd ON, mutation_verification OFF -> posture line reads ON / OFF (c
 // still match their own symmetric value), but this test goes red because it
 // would print "tests-first OFF · mutation verification ON" instead.
 
-test('DEFAULT: config carries neither tdd nor mutation_verification keys -> both default to ON (decision 752caf98)', () => {
+test('DEFAULT: config carries neither tdd nor mutation_verification keys -> both default to ON (decision foreign_752caf98)', () => {
   const { dir, cleanup } = makeProject(); // no tdd / mutation_verification block at all
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r) ?? '';
-    assert.ok(ctx.includes(postureLine(true, true)), `expected both defaults to read ON per decision 752caf98; got: ${ctx}`);
+    assert.ok(ctx.includes(postureLine(true, true)), `expected both defaults to read ON per decision 752caf98; got: ${ctx}`); // not-a-citation: fixture id
   } finally {
     cleanup();
   }

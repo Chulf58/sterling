@@ -22,7 +22,7 @@
 // than this task asked for). The hardcoded provenance-table DDL
 // (record_versions/record_aliases/record_relations) is intentionally NOT
 // introspected, for the same composite-PK-trap reason the sibling file gives
-// (anti_pattern table-info-pk-composite-not-rowid-alias, 0059fa66).
+// (anti_pattern table-info-pk-composite-not-rowid-alias, foreign_0059fa66).
 //
 // DISCLOSED AMBIGUITIES / CHOICES MADE (flagging rather than silently
 // resolving, per instructions — these are NOT given literally by the brief):
@@ -110,7 +110,7 @@ function doctor(args, cwd) {
 }
 
 /** Flatten a possibly-multi-line child-process stream before interpolating it
- *  into an assertion's own MESSAGE (anti_pattern ee89c3fd) — never applied to
+ *  into an assertion's own MESSAGE (anti_pattern foreign_ee89c3fd) — never applied to
  *  an assertion's TARGET. */
 function oneLine(s) {
   return String(s).replace(/\s+/g, ' ').trim();

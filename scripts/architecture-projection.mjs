@@ -16,13 +16,6 @@ import { openProject } from './lib/project.mjs';
 // this table, and the test is the check that catches a miss.
 const SETS = [
   {
-    key: 'signals',
-    title: 'Signals (the closed exit enum)',
-    article: 'brain-signal-protocol',
-    registry: 'packages/schemas/src/transient.ts — SIGNALS + SIGNAL_PAYLOADS (consumed by the brain REACTIONS table)',
-    checks: 'scripts/check-totality.mjs (npm run check) + the brain totality test (packages/mcp-server brain.test)',
-  },
-  {
     key: 'record-types',
     title: 'Record types (durable knowledge shapes)',
     article: 'record-schemas-registry',
@@ -34,13 +27,13 @@ const SETS = [
     title: 'Agents (the roster)',
     article: 'agent-roster-and-skills',
     registry: 'agent-templates/registry.json (1:1 with templates)',
-    checks: 'scripts/check-agent-registry.mjs, check-agent-prompts.mjs (§7.3 sections), check-spawn-contracts.mjs (§7.4), check-agents-visible.mjs (runtime)',
+    checks: 'scripts/check-agent-registry.mjs, check-agent-prompts.mjs (§7.3 sections), check-spawn-contracts.mjs (§7.4), check-tool-grants.mjs (real tool names, both MCP prefixes, ToolSearch), check-skills.mjs (skill and command references), check-agents-visible.mjs (runtime)',
   },
   {
     key: 'hooks',
-    title: 'Hooks (conduct enforcement at platform seams)',
+    title: 'Hooks (the knowledge loop at platform seams)',
     article: 'hooks-suite',
-    registry: 'hooks/hooks.json (project-level registrations) + agent-template frontmatter (per-agent hooks)',
+    registry: 'hooks/hooks.json (project-level registrations)',
     checks: 'hooks.json emission check (forward-slash commands) + scripts/tests/hooks-full.test.mjs / enforcement.test.mjs',
   },
   {

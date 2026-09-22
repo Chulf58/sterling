@@ -1,7 +1,7 @@
 // DIRECT-MERGE VERSION-ONLY POLICY EXCEPTION (spec-only pins).
 //
 // GOVERNING RULING (read via knowledge_get, NOT via any in-flight
-// implementation diff): decision 5f330fbe-3a66-486d-adc4-baea65da0a17,
+// implementation diff): decision foreign_5f330fbe,
 // slug h7-co-owner-trap-verification-discharge-and-version-only-exception,
 // arm A2 (version-only manifest exception) + the corrected remedy text
 // (both discharges named, "auto-drains" retracted).
@@ -27,7 +27,7 @@
 //       verification-history append (`knowledge_append(... resolves:
 //       [...])`, event text containing "VERIFIED UNAFFECTED") — and warns
 //       per-item when the item's file_keys extend beyond this branch's
-//       diff (whole-item discharge scope, decision 5f330fbe arm A1). The
+//       diff (whole-item discharge scope, decision foreign_5f330fbe arm A1). The
 //       old "the update auto-drains its item" sentence is retracted and
 //       must not appear.
 //
@@ -57,7 +57,7 @@
 // together to isolate the reconcile-refusal / version-only-exception
 // behavior from this unrelated, already-covered gate.
 //
-// CAUTION (anti-pattern ee89c3fd): raw child-process stderr is never
+// CAUTION (anti-pattern foreign_ee89c3fd): raw child-process stderr is never
 // interpolated directly into an assertion message expected to fail —
 // always flattened via oneLine() first.
 //
@@ -96,7 +96,7 @@ function sha256hex(content) {
 }
 
 /** Flatten any child-process stream before it goes into an assertion message
- * that might fail — anti-pattern ee89c3fd. */
+ * that might fail — anti-pattern foreign_ee89c3fd. */
 function oneLine(s) {
   return String(s ?? '').replace(/\s+/g, ' ').trim();
 }

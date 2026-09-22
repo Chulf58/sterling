@@ -18,7 +18,7 @@ const modelEffort = z.object({
   effort: z.enum(['low', 'medium', 'high', 'xhigh']),
 }).strict();
 
-// Toolchain success predicates (decision 98549344, slug
+// Toolchain success predicates (decision foreign_98549344, slug
 // toolchain-success-predicates-run-gate, board babf3a9e). Lives ALONGSIDE
 // run_commands, keyed by the same run_command key — never nested inside a
 // run_commands string value (that would break H14's Object.values flatMap
@@ -101,7 +101,7 @@ export const configSchema = z.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -131,33 +131,17 @@ export const configSchema = z.object({
   project_name: z.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: z.number().positive().max(1).default(0.35),
-  prep_cap: z.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: z.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: z
-    .object({
-      inner_loop_n: z.number().int().positive().default(3),
-      outer_loop_m: z.number().int().positive().default(2),
-      research_resume_per_phase: z.number().int().positive().default(2),
-      dispatch_per_agent_type: z.number().int().positive().default(25),
-      phase_death_cap: z.number().int().positive().default(1),
-    })
-    .default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: z
     .object({
-      warn_pct: z.number().positive().default(60),
-      block_pct: z.number().positive().default(95),
-      mode: z.enum(['observe', 'enforce']).default('observe'),
       windows: z.record(z.string(), z.number().int().positive()).default({ default: 200_000 }),
       // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
       // "finish before opening new areas"; hard = once-per-session soft-block naming the
-      // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-      // different consequences (run escalation / dispatch deny in enforce mode).
+      // delegation remedy.
       conductor: z
         .object({
           soft_pct: z.number().positive().default(35),
@@ -166,24 +150,10 @@ export const configSchema = z.object({
         .default({}),
     })
     .default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: z
-    .object({
-      min_hand_work: z.number().int().positive().default(15),
-      max_dispatches: z.number().int().nonnegative().default(0),
-      // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-      // paths + searches since the last Task/Agent dispatch crossing this
-      // threshold injects ONE moment-3 advisory per streak episode.
-      streak_threshold: z.number().int().positive().default(10),
-    })
-    .default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: z
@@ -191,7 +161,7 @@ export const configSchema = z.object({
       stale_minutes: z.number().int().positive().default(60),
     })
     .default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -204,48 +174,25 @@ export const configSchema = z.object({
     })
     .default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: z
     .object({
-      test_writer: modelEffort.default({ model: 'claude-opus-5', effort: 'high' }),
-      reviewers: modelEffort.default({ model: 'claude-opus-5', effort: 'low' }),
-      implementation_architect: modelEffort.default({ model: 'claude-opus-5', effort: 'high' }),
-      coder: modelEffort.default({ model: 'claude-sonnet-5', effort: 'high' }),
-      coder_hard: modelEffort.default({ model: 'claude-opus-5', effort: 'xhigh' }),
+      implementor: modelEffort.default({ model: 'claude-sonnet-5', effort: 'high' }),
       researcher: modelEffort.default({ model: 'claude-sonnet-5', effort: 'medium' }),
-      explorer: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
+      scout: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
       classifiers: modelEffort.default({ model: 'claude-haiku-4-5', effort: 'low' }),
       // Conductor-direct agents (no agent_exit/handoff_write; final text is the
       // deliverable). librarian is mechanical clerking — cheap model, low effort
-      // (P8); debugger is root-cause judgment — high effort.
+      // (P8); debugger is root-cause judgment — high effort. No debugger.md
+      // template is registered yet (agent-templates/registry.json) — this key
+      // stays config-only until one is.
       librarian: modelEffort.default({ model: 'claude-sonnet-5', effort: 'low' }),
       debugger: modelEffort.default({ model: 'claude-sonnet-5', effort: 'high' }),
-    })
-    .default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: z
-    .object({
-      security_path_patterns: z.array(z.string()).default(['(^|/)auth/', 'token', 'secret', 'credential']),
-      security_content_patterns: z
-        .array(z.string())
-        .default(["SELECT .*\\+", 'exec\\(', 'spawn\\(', 'process\\.env', '(^|\\W)eval\\(', 'router\\.(get|post|put|delete)']),
-      perf_path_patterns: z.array(z.string()).default([]),
-      perf_content_patterns: z.array(z.string()).default(['for\\s*\\(.*\\bawait\\b', '\\.map\\(.*await', 'SELECT \\*']),
-      dependency_manifests: z.array(z.string()).default(['package.json', 'requirements.txt', 'pom.xml', '*.csproj']),
-      skeptic_diff_size_threshold: z.number().int().positive().default(400),
-      skeptic_new_export_threshold: z.number().int().positive().default(5),
-    })
-    .default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: z
-    .object({
-      split_interface_threshold: z.number().int().positive().default(3),
-      thin_knowledge_retrieval_threshold: z.number().int().nonnegative().default(2),
     })
     .default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
@@ -278,7 +225,7 @@ export const configSchema = z.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: z.number().int().positive().default(60000),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -335,7 +282,7 @@ export const configSchema = z.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: z.enum(['primary', 'secondary']).default('primary'),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -345,43 +292,6 @@ export const configSchema = z.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: z.enum(['authoring', 'consumer']).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: z
-    .object({
-      allow_scripts: z
-        .array(z.string())
-        .default(['scripts/dispose-run.mjs', 'scripts/init.mjs', 'scripts/consume-exit.mjs', 'scripts/architecture-projection.mjs', 'scripts/domain-doctor.mjs', 'scripts/commit-reviewed.mjs', 'scripts/migration-preflight.mjs', 'scripts/migrate-stores.mjs', 'packages/tui/bundle/sterling-tui.mjs', 'scripts/review-ledger.mjs', 'scripts/rotation-note.mjs', 'scripts/no-capture.mjs', 'scripts/test-repair.mjs', 'scripts/delivery-oracle.mjs', 'scripts/plan-lock.mjs']),
-    })
-    .default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -412,7 +322,7 @@ export const configSchema = z.object({
       staleness_days: z.number().int().positive().default(45),
     })
     .default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -434,34 +344,26 @@ export const configSchema = z.object({
   // that merely READS the file.
   delivery: z
     .object({
-      injection_rung: z.enum(['prompt', 'read', 'edit']).default('prompt'),
+      // `prompt` and `edit` are accepted only to migrate existing project
+      // configs. Parsed configuration exposes only the surviving read rung.
+      injection_rung: z.enum(['prompt', 'edit', 'read']).default('read').transform(() => 'read' as const),
       payload_char_cap: z.number().int().positive().default(2400),
-      // SubagentStart "porch" budget (H19 front-porch, decision
-      // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-      // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-      // additionalContext (plan line + payload) are budgeted so the harness's
-      // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-      // shipped default, 1800, is the MEASURED inline preview on Claude Code
-      // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-      // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-      // non-integer, negative, or non-numeric) falls back to this same default
-      // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-      // mirrors the config-derived-posture-line three-state guard (anti_pattern
-      // e0d280ee) even though this is an internal rendering budget, never a
-      // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-      // is a DIFFERENT case and never reaches this fallback at all: it
-      // suppresses the whole staging payload before this key is ever read, per
-      // the pre-existing shared-fate ruling pinned in
-      // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-      preview_budget_bytes: z.number().int().nonnegative().default(1800),
+      // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+      // "H19 gets a per-delivery total cap and cross-entry dedup across the
+      // turn"): scripts/hooks/lib/delivery.mjs reads this at
+      // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+      // absent/invalid value falls back to the same default there, same
+      // three-state guard used for other config-derived delivery values.
+      total_cap_bytes: z.number().int().nonnegative().default(3000),
     })
     .default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: z
@@ -475,7 +377,7 @@ export const configSchema = z.object({
       model: z.string().optional(),
     })
     .default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -489,7 +391,7 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately
@@ -499,27 +401,6 @@ export const configSchema = z.object({
       enabled: z.boolean().default(true),
     })
     .default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: z
-    .object({
-      stale_days: z.number().int().positive().max(3650).optional(),
-    })
-    .passthrough()
-    .optional(),
 });
 
 export type SterlingConfig = z.infer<typeof configSchema>;

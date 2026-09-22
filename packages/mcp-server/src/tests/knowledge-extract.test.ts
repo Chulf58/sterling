@@ -96,7 +96,7 @@ function harness() {
 // boundary is not the point. Conductor hand-edit: H5 freezes test paths
 // against pipeline agents and test-repair.mjs has no evidence contract that
 // would be a true statement about a behaviour-neutral re-point
-// (anti_pattern 985e1266); counts verified independently afterwards.
+// (anti_pattern foreign_985e1266); counts verified independently afterwards.
 function domainHarness(domainName = 'genesys') {
   const h = harnessMountedShared([domainName], {
     now: NOW,

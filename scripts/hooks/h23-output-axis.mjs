@@ -26,16 +26,9 @@
 // beside that constant below. A FOLD into H19/H20 stays the ruling's own
 // fallback if noise persists.
 //
-// POINTER, NOT SUBSTANCE, ENQUEUE-ONLY — same reasoning as H19's Bash-pointer
-// channel: a content match is weaker evidence of relevance than an explicit
-// file_keys join, and this hook fires on every Read/Bash whose output happens
-// to share vocabulary with something in the store, so a false positive must
-// cost one line, never an article. It never writes hookSpecificOutput
-// directly; it only enqueues into the SAME pending queue h19-bash-delivery
-// drains at the next UserPromptSubmit — enqueueing needs no probed injection
-// cell at all, unlike direct injection (disclosed limitation in b266d6b7: the
-// Read seam could inject at this machine's probed 'read' rung instead, kept
-// as a one-change follow-up, not built speculatively here).
+// POINTER, NOT SUBSTANCE — an output match is weaker evidence of relevance
+// than an explicit file_keys join, so this direct PostToolUse advisory stays a
+// bounded discovery pointer rather than an article.
 //
 // READ SEAM IS OWNERSHIP-GATED, BASH SEAM IS NOT. A Read of governed
 // territory already gets full article substance from H19 at the same
@@ -49,36 +42,30 @@
 // (the pointer-never-suppresses rule the Bash-pointer decision already
 // established for guard.pointer_files vs guard.records).
 //
-// CONDUCTOR-ONLY, SILENT ON A SUBAGENT MARKER: the pending queue serves the
-// conductor's next UserPromptSubmit, which a spawned agent never sees —
-// enqueueing its touches would mis-route the pointer into the wrong context
-// (the same correctness finding behind h19-knowledge-delivery/h19-bash-
-// delivery's own agent_id carve-out).
+// Every context receives its own direct pointer; no prompt-time relay exists.
 //
 // NEVER BLOCKS, NEVER THROWS OUT: every path below ends in allow()/exit 0,
 // including malformed stdin (readStdin's JSON.parse is inside the same
 // try/catch as everything else here, unlike h19/h20 where it sits outside
 // theirs — this hook's own contract requires exit 0 even there), a missing
 // tool_response, an unrecognised tool name, and any internal failure.
-import { readStdin, allow, openStore, repoRel } from './lib/common.mjs';
+import { readStdin, allow, openStore, repoRel, exitAfterWrite, warnNonBlocking } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
   guardPath,
-  pendingPath,
   readGuard,
   writeGuard,
-  enqueuePending,
   extractAxisTerms,
   axisHits,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  AXIS_MIN_DISCRIMINATING_HITS,
   hasRecordCentralityHit,
-  pointerVerifyRecipe,
   joinPointerBlock,
 } from './lib/delivery.mjs';
 
-// Clip and cap, named per the brief (b266d6b7): matching runs over the first
+// Clip and cap, named per the brief (foreign_b266d6b7): matching runs over the first
 // 16,000 chars of the stringified tool_response only, and at most
 // OUTPUT_AXIS_POINTER_CAP pointer lines render per block regardless of how many
 // records matched.
@@ -133,9 +120,6 @@ try {
   const toolName = input.tool_name;
   if (toolName !== 'Read' && toolName !== 'Bash' && toolName !== 'PowerShell') allow();
 
-  // The queue serves the conductor's next prompt; a subagent never sees one.
-  if (input.agent_id) allow();
-
   const rawResponse = input.tool_response;
   if (rawResponse === undefined || rawResponse === null) allow(); // nothing to match against
 
@@ -188,12 +172,12 @@ try {
   // must be central to the RECORD's own narrow fields, not a passing mention.
   const scored = candidates
     .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, clipped))
+    .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped))
     .sort((a, b) => b.hits.length - a.hits.length);
   if (!scored.length) allow();
 
   // OWN DEDUP NAMESPACE — guard.output_axis, never guard.records/pointer_files.
-  const gPath = guardPath(input.cwd, input.agent_id);
+  const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
   const guard = readGuard(gPath);
   const seen = new Set(guard.output_axis ?? []);
   const fresh = scored.filter((x) => !seen.has(x.record.id));
@@ -219,36 +203,23 @@ try {
     const r = x.record;
     const kind = r.type === 'anti_pattern' ? 'HAZARD anti_pattern' : 'DECISION';
     const authorityMarker = r.authority ? `[${r.authority}] ` : '';
-    return { id: r.id, line: `  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
+    return { id: r.id, hazard: r.type === 'anti_pattern', line: `  → ${authorityMarker}${kind} '${clipTitle(r.title)}' · knowledge_get ${r.id}` };
   });
   const tail = remainder > 0 ? `  (+${remainder} more matched)` : '';
 
-  // SIDE EFFECT FIRST, GUARD SECOND (the H19/H20 rule): writing the guard
-  // before the enqueue lands turns any failure into permanent silent loss,
-  // since the next touch would see the record already marked seen.
+  // Direct on this PostToolUse for both conductor and child contexts.
   recordAdvisoryFire(input.cwd, 'h23', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-  // POINTER-VERIFY recipe (decision db3392db part 2): pointer lines only, no
-  // record body — the drain re-reads the SHOWN ids and REPLACES the line of any
-  // that went superseded or missing between this match and the next prompt.
-  // Only the shown ones: a record capped out of the payload was never pointed
-  // at, so re-resolving it would disclose a record the reader never saw.
-  enqueuePending(pendingPath(input.cwd), {
-    kind: 'output_axis_pointers',
-    rel: input.tool_input?.file_path ?? input.tool_input?.command ?? '',
-    payload: joinPointerBlock({ header, lines: pointerLines, tail }),
-    recipe: pointerVerifyRecipe({ header, entries: pointerLines, tail }),
-    agent_id: 'conductor',
+  const payload = joinPointerBlock({ header, lines: pointerLines, tail });
+  exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }), 0, {
+    onWritten: () => {
+      guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
+      writeGuard(gPath, guard);
+    },
   });
-  // Only the SHOWN (capped) records are marked seen — a record capped out of
-  // the payload was never actually pointed at, so it stays eligible for a
-  // later, smaller-batch match instead of being silently lost for the session.
-  guard.output_axis = [...seen, ...shown.map((x) => x.record.id)];
-  writeGuard(gPath, guard);
-  allow();
-} catch {
+} catch (e) {
   // Delivery is an aid, never a gate, and this channel's own contract (unlike
   // H19/H20's warnNonBlocking-on-catch) is exit 0 on every path, including a
   // malformed-stdin JSON.parse failure inside readStdin() above.
-  allow();
+  warnNonBlocking(`H23: output-axis delivery failed: ${(e && e.message) || e}`);
 }
 // no close: every path above exits the process, which releases the handle (board f81b1987)

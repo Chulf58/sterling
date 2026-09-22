@@ -1,10 +1,10 @@
 // H20 consult MODEL INJECTION — config.sparring_partner.model is filled in
 // MECHANICALLY on every codex consult that omits a model (board 7423f7a2 slice 5;
-// decision 8b329d57 'codex-resumed-pinned-gpt-5-6-sol-server-side' as CORRECTED
+// decision foreign_8b329d57 'codex-resumed-pinned-gpt-5-6-sol-server-side' as CORRECTED
 // FORWARD — the server-side `-c model=` pin was REJECTED and reverted, the
 // per-call `model` parameter filled by H20's PreToolUse arm is the mechanism that
-// ships; decision ea68735d 'sparring-partner-partnership-shape' points 3/7/8;
-// decision 2d19ac0c 'consult-carriage-h20-codex-seam'; research_finding be284452
+// ships; decision foreign_ea68735d 'sparring-partner-partnership-shape' points 3/7/8;
+// decision foreign_2d19ac0c 'consult-carriage-h20-codex-seam'; research_finding foreign_be284452
 // 'sparring-partner-model-and-enabled-are-prose-only...').
 //
 // SPEC-ONLY ORACLE. Written blind, from the board item + the decisions above.
@@ -62,7 +62,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
 
-/** The value pinned on this machine by decision 8b329d57. */
+/** The value pinned on this machine by decision foreign_8b329d57. */
 const PINNED = 'gpt-5.6-sol';
 
 let SterlingStore;
@@ -103,7 +103,7 @@ function cfg({ enabled = true, model } = {}) {
 }
 
 function consult(dir, tool_input, tool_name = 'mcp__codex__codex') {
-  return { hook_event_name: 'PreToolUse', tool_name, tool_input, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name, tool_input, session_id: 's1', cwd: dir };
 }
 
 /**
@@ -120,7 +120,7 @@ function envelopeOf(r, what) {
   } catch {
     assert.fail(`${what}: stdout must be a single valid JSON envelope, got: ${r.stdout.slice(0, 400)}`);
   }
-  assert.notEqual(obj.decision, 'block', `${what}: a consult is never blocked (ea68735d point 3 — advisory, never gating)`);
+  assert.notEqual(obj.decision, 'block', `${what}: a consult is never blocked (ea68735d point 3 — advisory, never gating)`); // not-a-citation: fixture id
   assert.notEqual(
     obj?.hookSpecificOutput?.permissionDecision,
     'deny',
@@ -138,7 +138,7 @@ function injectedModel(obj) {
 
 /**
  * The user-visible disclosure text. The harness convention (sibling carriage
- * test, and decision 2d19ac0c) is hookSpecificOutput.additionalContext; the
+ * test, and decision foreign_2d19ac0c) is hookSpecificOutput.additionalContext; the
  * top-level systemMessage is folded in so a disclosure routed to the other
  * user-visible channel is not a false red. The CHANNEL itself is pinned once,
  * in the CONTROL arm below.
@@ -290,7 +290,7 @@ test('M-4: sparring_partner.enabled:false stays ADVISORY — exit 0, never a den
   const { dir, cleanup } = makeProject(cfg({ enabled: false, model: PINNED }));
   try {
     const r = runHook(consult(dir, { prompt: 'x' }), dir);
-    assert.equal(r.code, 0, 'ea68735d point 3: ADVISORY, NEVER GATING — an OFF toggle must not become exit 2 (decision 8b329d57 rejected the hard-deny option by name)');
+    assert.equal(r.code, 0, 'ea68735d point 3: ADVISORY, NEVER GATING — an OFF toggle must not become exit 2 (decision 8b329d57 rejected the hard-deny option by name)'); // not-a-citation: fixture id
     const obj = envelopeOf(r, 'M-4');
     assert.ok(obj, 'M-4: an OFF project still gets the disclosure envelope — the toggle becomes VISIBLE, which is the point');
 
@@ -609,7 +609,7 @@ test('M-10: a post-envelope bookkeeping failure (guard-file write EISDIR) never 
     seedMotivatingRecord(store);
     // Force the bookkeeping step's renameSync to throw EISDIR: plant a
     // DIRECTORY at the exact path the guard-file write targets.
-    mkdirSync(join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json'), { recursive: true });
+    mkdirSync(join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json'), { recursive: true });
 
     const r = runHook(consult(dir, { prompt: M10_PROMPT }), dir);
 

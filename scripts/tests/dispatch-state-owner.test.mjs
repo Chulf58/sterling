@@ -4,7 +4,7 @@
 // `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`
 // (knowledge_get 7c515e52-19a8-41cf-8c2d-6da61f1c8425) §1-§7, and its §8
 // FROZEN PINS list; board 5445066b; platform stdin shapes from
-// research_finding 2bad782a (PostToolUse Task carries tool_response.agentId
+// research_finding foreign_2bad782a (PostToolUse Task carries tool_response.agentId
 // synchronously; Post and the child's SubagentStart fire within 0.1-9.3 ms in
 // EITHER order).
 //
@@ -58,7 +58,7 @@ function project() {
 function requireOwner(...names) {
   for (const name of names) {
     if (typeof DS[name] !== 'function') {
-      assert.fail(`scripts/lib/dispatch-register.mjs must export ${name}() — decision 7c515e52 §1/§2/§5 makes this module the ONE owner of dispatch state`);
+      assert.fail(`scripts/lib/dispatch-register.mjs must export ${name}() — decision 7c515e52 §1/§2/§5 makes this module the ONE owner of dispatch state`); // not-a-citation: fixture id
     }
   }
 }
@@ -106,7 +106,7 @@ async function recordFor(dir, toolUseId) {
   return hit?.record ?? null;
 }
 
-// --- stdin shapes, verbatim from research_finding 2bad782a -----------------
+// --- stdin shapes, verbatim from research_finding foreign_2bad782a -----------------
 
 const PRE = (over = {}) => ({
   hook_event_name: 'PreToolUse',
@@ -349,7 +349,7 @@ test('DS-P04: a CONFLICTING Pre on the same key never overwrites — the origina
     assert.equal(rec.subagent_type, 'coder');
     // CODE SPELLING (corrected by the coordinator, 2026-09-08): the closed-set
     // code in scripts/lib/review-errors.mjs is `dispatch_state_collision` —
-    // underscores, like every other member of that set. Decision 7c515e52's
+    // underscores, like every other member of that set. Decision foreign_7c515e52's
     // prose spelled it with hyphens ('dispatch-state-collision') and is being
     // fixed forward; the CODE is the authority, not the prose.
     assert.match(disclosureText(r), /dispatch_state_collision/, 'the refusal to overwrite is disclosed by its closed-set code, never silent');
@@ -645,7 +645,7 @@ test('DS-F03: a LATE Post after a Stop tombstone is a disclosed no-op — the ro
   }
 });
 // SABOTAGE: let Post write post_binding regardless of terminal — the
-// post_binding assertion goes red; measured decision edbaa38d says a
+// post_binding assertion goes red; measured decision foreign_edbaa38d says a
 // FOREGROUND Task's Post lands after the child's Stop, so this is the common
 // path, not a corner.
 
@@ -1210,7 +1210,7 @@ test('DS-RS02: resolveAndRegisterStart hands the RESOLUTION to entryBuilder and 
 // only that the composite passes the resolution through and writes what it is
 // given.)
 
-test('DS-RS03: a RESUME still appends a fresh UNENDED round (each Start is its own round, decision 24dc4c63) and consumes no slot', async () => {
+test('DS-RS03: a RESUME still appends a fresh UNENDED round (each Start is its own round, decision foreign_24dc4c63) and consumes no slot', async () => {
   requireOwner('recordDispatchPre', 'registerStart', 'registerEnd', 'resolveAndRegisterStart', 'registerPath', 'dispatchState');
   const { dir, cleanup } = project();
   try {

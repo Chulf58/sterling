@@ -12,14 +12,11 @@ import {
   featureArticleSchema,
   todoSchema,
   briefSchema,
-  handoffSchema,
-  runRecordSchema,
   RECORD_TYPES,
   validateRecord,
   knownFieldsFor,
   digestRecord,
   DIGEST_CLIP,
-  SPINE_SIGNALS,
   SYSTEM_REASONS,
   DRAIN_VERBS,
 } from '../index.js';
@@ -219,36 +216,6 @@ test('brief: attribution sections and verifiable_at syntax (§4)', () => {
   );
 });
 
-test('handoff/run-record transient shapes', () => {
-  const h = handoffSchema.parse({
-    phase_id: 'p1',
-    agent_role: 'coder',
-    what_changed: [{ path: 'src\\a.ts', change_role: 'implemented serializer' }],
-    wired: [],
-    deferred: [],
-    decisions_made: [],
-    tests_produced: ['tests/a.test.ts'],
-    exit_signal: 'complete',
-    unresolved: [],
-  });
-  assert.equal(h.what_changed[0].path, 'src/a.ts');
-  assert.throws(
-    () => handoffSchema.parse({ ...h, exit_signal: 'victory' }),
-    /invalid/i,
-    'non-enum exit signal must be rejected'
-  );
-  runRecordSchema.parse({
-    id: 'r-0001',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-0001',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: { coder: 1 },
-    escalations: [],
-    started_at: NOW,
-  });
-});
-
 test('full §3.2 record set: anti_pattern, research_finding, reference_material, disconfirmed_hypothesis', () => {
   const ap = validateRecord({
     ...envelope('anti_pattern'),
@@ -298,7 +265,7 @@ test('full §3.2 record set: anti_pattern, research_finding, reference_material,
   });
 });
 
-test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision 8dbbc85d)', () => {
+test('research_finding: file_keys is OPTIONAL and normalizes at the boundary like every other path field (§3.2, decision foreign_8dbbc85d)', () => {
   const base = {
     ...envelope('research_finding'),
     question: 'does the platform rate-limit per org or per token?',
@@ -326,14 +293,14 @@ test("registry: research_finding.fileKeys reads its own file_keys field — the 
   assert.deepEqual(fk({}), [], 'no file_keys present yields an empty join set, never a throw');
 });
 
-test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision b47889b7 unchanged, board b1de6fab)', () => {
+test('knownFieldsFor: research_finding gains file_keys; reference_material still does not (decision foreign_b47889b7 unchanged, board b1de6fab)', () => {
   const rf = knownFieldsFor('research_finding');
   assert.ok(rf, 'research_finding must resolve its known field set');
   assert.ok(rf!.has('file_keys'), 'file_keys is now a real field of research_finding');
 
   const ref = knownFieldsFor('reference_material');
   assert.ok(ref, 'reference_material must resolve its known field set');
-  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)');
+  assert.ok(!ref!.has('file_keys'), 'reference_material carries its path via `location`, not file_keys — unaffected by this addition (decision b47889b7)'); // not-a-citation: fixture id
 });
 
 test('evidence_basis + measured_by: optional on the three ruling types, enum closed, distinct from anti_pattern.basis (board 1d02b6b4)', () => {
@@ -477,7 +444,7 @@ test('registry: full record set registered 1:1, unregistered type rejected loudl
 
 test("registry: every projection:'digest' headline field is a REAL field of its own schema (invariant 3 check)", () => {
   // WHY THIS EXISTS. knownFieldsFor derives a type's valid fields from its
-  // schema so no second list can drift (decision 44e45931). The digest map is
+  // schema so no second list can drift (decision foreign_44e45931). The digest map is
   // the one thing that CANNOT be derived — which field is a record's headline
   // is an editorial call — so it is the one place a hand-maintained list of
   // field names survives, and this is its consistency check.
@@ -537,13 +504,6 @@ test("digestRecord: headline only, absent fields omitted, long text clipped — 
   assert.deepEqual(unknown, { id: 'x', type: 'escalation_log', status: 'active', updated_at: NOW });
 });
 
-test('the signal enum is closed at the full nine §5.1 members', () => {
-  assert.deepEqual(
-    [...SPINE_SIGNALS],
-    ['complete', 'research-needed', 'review-unresolved', 'blocked', 'tests-invalid', 'contract-violated', 'bug-found', 'phase-overflow', 'agent-died']
-  );
-});
-
 test('§3.2.5: reference_material fileKeys — repo-located docs only', () => {
   const fk = RECORD_TYPES.reference_material.fileKeys;
   assert.deepEqual(fk({ kind: 'doc', location: 'docs\\spec.md' }), ['docs/spec.md'], 'doc location normalizes and doubles as a file_key');
@@ -578,7 +538,7 @@ test('sessionEventSchema: the six register kinds parse; unknown kind + missing f
 
   assert.equal(s.parse({ kind: 'agent_dispatch', detail: 'researcher', at: NOW }).kind, 'agent_dispatch');
   assert.equal(s.parse({ kind: 'debug_scope', detail: 'src/a.mjs', at: NOW }).kind, 'debug_scope');
-  // concept_designed (decision 7208729b): detail carries the concept FAMILY slug
+  // concept_designed (decision foreign_7208729b): detail carries the concept FAMILY slug
   assert.equal(s.parse({ kind: 'concept_designed', detail: 'weapons', at: NOW }).kind, 'concept_designed');
   // no_capture (board 7bbec3bd): detail carries the REASON for the declaration
   assert.equal(s.parse({ kind: 'no_capture', detail: 'read-only investigation, nothing durable', at: NOW }).kind, 'no_capture');
@@ -682,7 +642,7 @@ test('research_owed is a registered SYSTEM_REASONS member draining under "captur
   assert.deepEqual(Object.keys(DRAIN_VERBS).sort(), [...reasons].sort(), 'DRAIN_VERBS and SYSTEM_REASONS stay 1:1');
 });
 
-// ---- concept-article layer (decision 7208729b, brief concept-article-layer-wiring) ----
+// ---- concept-article layer (decision foreign_7208729b, brief concept-article-layer-wiring) ----
 
 test('feature_article.concept_family: optional marker round-trips; legacy articles omit it; it joins the FTS text; concept_article_missing drains under "created"', async () => {
   const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
@@ -720,52 +680,6 @@ test('feature_article.concept_family: optional marker round-trips; legacy articl
 
 // ------------------- mid-run scope amendment (run r-1417) -------------------
 
-test('runRecordSchema: scope_amendments — optional {path,reason,at}[] ; legacy round-trips; paths normalized (interface slice 1)', () => {
-  const base = {
-    id: 'r-1417',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-1417',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  };
-
-  // legacy run record (no scope_amendments) round-trips WITHOUT the field being invented
-  const legacy = runRecordSchema.parse(base) as { scope_amendments?: unknown[] };
-  assert.ok(
-    legacy.scope_amendments === undefined || (Array.isArray(legacy.scope_amendments) && legacy.scope_amendments.length === 0),
-    'a legacy run record without scope_amendments round-trips unchanged'
-  );
-
-  // a run record carrying scope_amendments must PARSE (assertion-red now if the field is
-  // stripped or rejected — never a thrown crash) and each path normalizes at the boundary (repoPath)
-  let parsed: { scope_amendments?: { path: string; reason: string; at: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    parsed = runRecordSchema.parse({
-      ...base,
-      scope_amendments: [
-        { path: 'src\\amended.ts', reason: 'adjudicated mid-run', at: NOW },
-        { path: 'src/two.ts', reason: 'second amendment', at: NOW },
-      ],
-    }) as typeof parsed;
-  }, 'a run record carrying scope_amendments must parse');
-  assert.ok(Array.isArray(parsed!.scope_amendments), 'scope_amendments survives parsing as an array');
-  assert.equal(parsed!.scope_amendments!.length, 2);
-  assert.equal(parsed!.scope_amendments![0].path, 'src/amended.ts', 'repoPath normalizes the amendment path (backslash -> POSIX)');
-  assert.equal(parsed!.scope_amendments![0].reason, 'adjudicated mid-run');
-  assert.equal(parsed!.scope_amendments![0].at, NOW);
-
-  // reason is z.string().min(1); at is z.string().min(1); path is required
-  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ path: 'src/a.ts', reason: '', at: NOW }] }), /invalid|min|reason|empty/i,
-    'empty reason is rejected');
-  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ path: 'src/a.ts', reason: 'r', at: '' }] }), /invalid|min|at|empty/i,
-    'empty at is rejected');
-  assert.throws(() => runRecordSchema.parse({ ...base, scope_amendments: [{ reason: 'r', at: NOW }] }), /invalid|path|required/i,
-    'path is required on each amendment');
-});
-
 // ------------------- TUI System tab: AGENT_MODEL_KEY + models catalog (run r-ea9e, AC7) -------------------
 
 // packages/schemas/src/tests -> src -> schemas -> packages -> repo root
@@ -797,35 +711,25 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
     'AGENT_MODEL_KEY keys are exactly the registered agents — none missing, none orphaned'
   );
 
-  // the exact expected mapping (interface slice 2). reviewers is many-to-one and CORRECT.
+  // the exact expected mapping — Slice 5/8 (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1, change 3): the roster
+  // is now implementor/researcher/scout/librarian (explorer -> scout, a
+  // coder-class agent -> implementor). config.models was renamed to match
+  // directly (coder -> implementor, explorer -> scout), so the map is now a
+  // straight identity.
   assert.deepEqual(map, {
-    'test-writer': 'test_writer',
-    coder: 'coder',
-    'reviewer-correctness': 'reviewers',
-    'reviewer-security': 'reviewers',
-    'reviewer-skeptic': 'reviewers',
-    'reviewer-performance': 'reviewers',
-    'implementation-architect': 'implementation_architect',
+    implementor: 'implementor',
     researcher: 'researcher',
-    explorer: 'explorer',
-    // conductor-direct agents (adopted from Comsoft): one key each, no folding
+    scout: 'scout',
     librarian: 'librarian',
-    debugger: 'debugger',
   });
 
-  // many-to-one asserted head-on: all four reviewer agents resolve to the single 'reviewers' key.
-  // (map re-cast to Record<string,string> at the string-indexed lookup: the preceding deepEqual
-  // unifies `map` to its inferred literal-key shape, which otherwise trips TS7053 on map![r].)
   const lookup = map as Record<string, string>;
-  const reviewerAgents = registeredNames.filter((n) => n.startsWith('reviewer-'));
-  assert.equal(reviewerAgents.length, 4, 'the registry carries four reviewer agents');
-  for (const r of reviewerAgents) {
-    assert.equal(lookup[r], 'reviewers', `reviewer agent '${r}' is governed by the single 'reviewers' config key`);
-  }
 
   // config-only keys have NO installed/registered agent, so they are NOT keys of AGENT_MODEL_KEY.
   assert.ok(!('coder_hard' in lookup), 'coder_hard is a config-only key — never a registered-agent key');
   assert.ok(!('classifiers' in lookup), 'classifiers is a config-only key — never a registered-agent key');
+  assert.ok(!('debugger' in lookup), 'debugger is a config-only key — no debugger template is registered yet');
 
   // every VALUE the map yields must be a real config.models key (cross-check against parseConfig defaults).
   const cfg = parseConfig({}) as unknown as { models: Record<string, unknown> };
@@ -835,47 +739,11 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
   }
 });
 
-// AGENT_CLASS totality (council wf_0d90ab18-436): the class marking is
-// LOAD-BEARING — H8 derives its slice-guarded/cap-counted set from it — so it
-// must not be allowed to drift from the registry that declares it. Both
-// directions, exactly as AGENT_MODEL_KEY above.
-test('AGENT_CLASS: totality over agent-templates/registry.json, and PIPELINE_AGENT_TYPES is exactly the pipeline class', async () => {
-  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
-  const cls = mod.AGENT_CLASS as Record<string, string> | undefined;
-  const pipeline = mod.PIPELINE_AGENT_TYPES as Set<string> | undefined;
-  assert.ok(cls, 'AGENT_CLASS must be exported from the schemas index (defined once, invariant 1)');
-  assert.ok(pipeline, 'PIPELINE_AGENT_TYPES must be exported from the schemas index');
-
-  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string; class?: string }[];
-  };
-
-  // every registered agent declares a class, and the mirror agrees with it
-  for (const a of registry.agents) {
-    assert.ok(a.class, `registry entry '${a.name}' must declare a class`);
-    assert.equal(cls![a.name], a.class, `AGENT_CLASS['${a.name}'] must match the registry's class`);
-  }
-  // no orphan keys: the mirror's keys are EXACTLY the registered agents
-  assert.deepEqual(
-    Object.keys(cls!).sort(),
-    registry.agents.map((a) => a.name).sort(),
-    'AGENT_CLASS keys are exactly the registered agents — none missing, none orphaned'
-  );
-  // only the two known classes exist (a typo'd class must fail, not silently un-guard an agent)
-  for (const [name, value] of Object.entries(cls!)) {
-    assert.ok(['pipeline', 'conductor_direct'].includes(value), `AGENT_CLASS['${name}'] = '${value}' is not a known class`);
-  }
-  // the derived guard set is exactly the pipeline class...
-  assert.deepEqual(
-    [...pipeline!].sort(),
-    registry.agents.filter((a) => a.class === 'pipeline').map((a) => a.name).sort(),
-    'PIPELINE_AGENT_TYPES is exactly the registry pipeline class'
-  );
-  // ...and the conductor-direct agents are NOT in it (the H8 regression this guards)
-  for (const a of registry.agents.filter((x) => x.class === 'conductor_direct')) {
-    assert.ok(!pipeline!.has(a.name), `conductor-direct '${a.name}' must NOT be H8 slice-guarded/cap-counted`);
-  }
-});
+// AGENT_CLASS / PIPELINE_AGENT_TYPES totality test deleted along with the
+// exports themselves (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — H8, their sole
+// consumer, is gone, and agent-templates/registry.json no longer declares a
+// `class` field.
 
 test('modelsCatalogSchema: {entries:[{id,label,tier,status}]} round-trips; malformed entries fail loud (AC7, interface slice 3)', async () => {
   const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
@@ -963,167 +831,4 @@ test('referenceMaterialSchema: optional typed catalog field — legacy round-tri
     /invalid|required/i,
     'a catalog entry missing label/tier/status is rejected'
   );
-});
-
-// ------------------- reviewer knowledge loop v2 (run r-d630, phase 1 — AC1) -------------------
-
-test('handoffSchema.dispositions: optional array; not_applicable_because requires a NON-empty reason; addressed reason optional; legacy round-trips (AC1)', () => {
-  const base = {
-    phase_id: 'p1',
-    agent_role: 'reviewer-correctness',
-    what_changed: [{ path: 'src\\a.ts', change_role: 'reviewed' }],
-    wired: [],
-    deferred: [],
-    decisions_made: [],
-    tests_produced: [],
-    exit_signal: 'complete',
-    unresolved: [],
-  };
-
-  // LEGACY handoff (no dispositions field) round-trips WITHOUT the field being invented
-  const legacy = handoffSchema.parse(base) as { dispositions?: unknown[] };
-  assert.ok(
-    legacy.dispositions === undefined || (Array.isArray(legacy.dispositions) && legacy.dispositions.length === 0),
-    'a legacy handoff without dispositions round-trips unchanged (field never invented)'
-  );
-
-  // an EMPTY dispositions array is a well-formed shape (boundary)
-  const empty = handoffSchema.parse({ ...base, dispositions: [] }) as { dispositions?: unknown[] };
-  assert.ok(Array.isArray(empty.dispositions), 'dispositions survives parsing as an array when supplied');
-  assert.equal(empty.dispositions!.length, 0, 'an empty dispositions array parses to an empty array');
-
-  // 'addressed' WITHOUT a reason is allowed (reason optional for addressed) and preserves fields.
-  // Front-load the array assertion so a STRIPPED field yields an AssertionError, not a TypeError.
-  let parsed: { dispositions?: { record_id: string; disposition: string; reason?: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    parsed = handoffSchema.parse({
-      ...base,
-      dispositions: [{ record_id: 'rec-1', disposition: 'addressed' }],
-    }) as typeof parsed;
-  }, "'addressed' without a reason must parse");
-  assert.ok(Array.isArray(parsed!.dispositions), 'dispositions survives parsing as an array (never stripped)');
-  assert.equal(parsed!.dispositions!.length, 1);
-  assert.equal(parsed!.dispositions![0].record_id, 'rec-1');
-  assert.equal(parsed!.dispositions![0].disposition, 'addressed');
-
-  // 'addressed' WITH a reason is also allowed (reason is optional, not forbidden, for addressed)
-  assert.doesNotThrow(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-1', disposition: 'addressed', reason: 'folded into the fix' }] }),
-    "'addressed' with a reason is allowed"
-  );
-
-  // 'not_applicable_because' WITH a non-empty reason parses and preserves the reason.
-  let na: { dispositions?: { record_id: string; disposition: string; reason?: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    na = handoffSchema.parse({
-      ...base,
-      dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because', reason: 'out of this phase scope' }],
-    }) as typeof na;
-  }, 'not_applicable_because with a non-empty reason must parse');
-  assert.ok(Array.isArray(na!.dispositions), 'dispositions survives parsing as an array');
-  assert.equal(na!.dispositions![0].disposition, 'not_applicable_because');
-  assert.equal(na!.dispositions![0].reason, 'out of this phase scope');
-
-  // REFINE: 'not_applicable_because' WITHOUT a reason is rejected loud
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because' }] }),
-    /invalid|reason/i,
-    'not_applicable_because requires a reason'
-  );
-  // REFINE: an EMPTY reason does not satisfy not_applicable_because (must be NON-empty)
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-2', disposition: 'not_applicable_because', reason: '' }] }),
-    /invalid|reason|empty|min/i,
-    'not_applicable_because requires a NON-empty reason'
-  );
-
-  // disposition is a closed enum of exactly the two verbs
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ record_id: 'rec-3', disposition: 'ignored' }] }),
-    /invalid/i,
-    'a disposition outside {addressed, not_applicable_because} is rejected'
-  );
-  // record_id is required on each disposition
-  assert.throws(
-    () => handoffSchema.parse({ ...base, dispositions: [{ disposition: 'addressed' }] }),
-    /invalid|record_id|required/i,
-    'record_id is required on each disposition'
-  );
-});
-
-test('runRecordSchema.review_mandatory: optional {phase_id, record_id, reason}[]; legacy round-trips; each field required (AC1)', () => {
-  const base = {
-    id: 'r-d630',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-d630',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  };
-
-  // LEGACY run record (no review_mandatory) round-trips WITHOUT the field being invented
-  const legacy = runRecordSchema.parse(base) as { review_mandatory?: unknown[] };
-  assert.ok(
-    legacy.review_mandatory === undefined || (Array.isArray(legacy.review_mandatory) && legacy.review_mandatory.length === 0),
-    'a legacy run record without review_mandatory round-trips unchanged'
-  );
-
-  // a run record CARRYING review_mandatory must parse (assertion-red if stripped, never a crash)
-  // and survive as an array of the shared mandatory tuple {phase_id, record_id, reason}.
-  let parsed: { review_mandatory?: { phase_id: string; record_id: string; reason: string }[] } | undefined;
-  assert.doesNotThrow(() => {
-    parsed = runRecordSchema.parse({
-      ...base,
-      review_mandatory: [
-        { phase_id: 'p1', record_id: 'rec-1', reason: 'governing design decision' },
-        { phase_id: 'p2', record_id: 'rec-2', reason: 'anti-pattern to avoid' },
-      ],
-    }) as typeof parsed;
-  }, 'a run record carrying review_mandatory must parse');
-  assert.ok(Array.isArray(parsed!.review_mandatory), 'review_mandatory survives parsing as an array');
-  assert.equal(parsed!.review_mandatory!.length, 2);
-  assert.deepEqual(parsed!.review_mandatory![0], { phase_id: 'p1', record_id: 'rec-1', reason: 'governing design decision' });
-
-  // each field of the mandatory tuple is required (fail loud on omission — P5)
-  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ record_id: 'rec-1', reason: 'r' }] }), /invalid|phase_id|required/i, 'phase_id is required on each mandatory item');
-  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', reason: 'r' }] }), /invalid|record_id|required/i, 'record_id is required on each mandatory item');
-  assert.throws(() => runRecordSchema.parse({ ...base, review_mandatory: [{ phase_id: 'p1', record_id: 'rec-1' }] }), /invalid|reason|required/i, 'reason is required on each mandatory item');
-});
-
-test('REVIEWER_ROLES: registry-derived set resolving exactly the four reviewer-* names; totality vs AGENT_MODEL_KEY and the roster (AC1)', async () => {
-  // dynamic import + cast: REVIEWER_ROLES does not exist until this phase ships, so a missing
-  // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
-  const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
-  const rolesRaw = mod.REVIEWER_ROLES as Set<string> | string[] | undefined;
-  assert.ok(rolesRaw, 'REVIEWER_ROLES must be exported from the schemas index (defined once, invariant 1)');
-
-  // coerce the set (Set or array) to a sorted member list — the oracle tests membership, not the container type
-  const members = (Array.isArray(rolesRaw) ? [...rolesRaw] : [...(rolesRaw as Set<string>)]).slice().sort();
-  const expected = ['reviewer-correctness', 'reviewer-performance', 'reviewer-security', 'reviewer-skeptic'];
-  assert.deepEqual(members, expected, 'REVIEWER_ROLES resolves EXACTLY the four reviewer-* names');
-
-  // the is-a-reviewer predicate: reviewers are members, non-reviewers are not
-  const has = (n: string) =>
-    typeof (rolesRaw as Set<string>).has === 'function' ? (rolesRaw as Set<string>).has(n) : members.includes(n);
-  for (const r of expected) assert.ok(has(r), `${r} is a reviewer role`);
-  assert.ok(!has('coder'), 'coder is not a reviewer role');
-  assert.ok(!has('test-writer'), 'test-writer is not a reviewer role');
-  assert.ok(!has('implementation-architect'), 'implementation-architect is not a reviewer role');
-
-  // DERIVATION (single source of truth): REVIEWER_ROLES is EXACTLY the AGENT_MODEL_KEY keys that
-  // map to 'reviewers' — a hardcoded list was explicitly REJECTED as a second source (decision 628c4b7f).
-  const map = mod.AGENT_MODEL_KEY as Record<string, string> | undefined;
-  assert.ok(map, 'AGENT_MODEL_KEY must be exported — REVIEWER_ROLES derives from it');
-  const derivedFromMap = Object.keys(map!).filter((k) => map![k] === 'reviewers').sort();
-  assert.deepEqual(members, derivedFromMap, "REVIEWER_ROLES is exactly AGENT_MODEL_KEY's 'reviewers' keys — no drift from the map");
-
-  // TOTALITY vs the roster (invariant 3): read agent-templates/registry.json at runtime; its
-  // reviewer-* agents are EXACTLY REVIEWER_ROLES — none missing, none orphaned.
-  const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string }[];
-  };
-  const rosterReviewers = registry.agents.map((a) => a.name).filter((n) => n.startsWith('reviewer-')).sort();
-  assert.deepEqual(members, rosterReviewers, 'REVIEWER_ROLES matches the reviewer-* agents in the roster (totality vs registry.json)');
 });

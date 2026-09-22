@@ -1,5 +1,5 @@
 // run-gate.mjs tests (board babf3a9e) — SPEC ONLY, red-first.
-// Governing decision: knowledge_get 98549344-e355-42da-93dd-ce7c2dc4dfcb
+// Governing decision: knowledge_get foreign_98549344
 // (slug toolchain-success-predicates-run-gate).
 //
 // Measured defect this exists for (consuming-project retro 2026-08-17):

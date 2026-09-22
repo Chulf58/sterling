@@ -1,6 +1,6 @@
 // stamp-contract [S] — propagate contract-wording bullets from
 // templates/target-claude-md.md to every registered sibling project's CLAUDE.md
-// (decision 7208729b wiring; second propagation after c76f63fa proved the need
+// (decision foreign_7208729b wiring; second propagation after foreign_c76f63fa proved the need
 // recurs). Deterministic (P3) and guarded:
 //   - a sibling bullet is replaced ONLY when its current text matches some
 //     HISTORICAL version of that bullet in the template's git history (a clean
@@ -38,8 +38,7 @@ const TARGET_LEADS = [
   // siblings. It rides INSIDE this existing bullet rather than arriving as a new
   // top-level one, so the REPLACE path carries it.
   //
-  // CORRECTED 2026-07-26 (council wf_db9a59aa-0af, black/green/yellow all landed
-  // on it): an earlier version of this comment claimed a new bullet "would need an
+  // CORRECTED 2026-07-26: an earlier version of this comment claimed a new bullet "would need an
   // insert capability this script does not have". That was FALSE — the insert path
   // exists at :127-137. What is true is narrower: that path is INDEX-PINNED, firing
   // only for TARGET_LEADS[1] and anchoring on TARGET_LEADS[0]. A lead appended at

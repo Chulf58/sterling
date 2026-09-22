@@ -49,7 +49,7 @@
 //     record_aliases historical ids resolving to the record and the
 //     record_versions snapshot COUNT. Id resolution: an exact id always wins;
 //     otherwise an unambiguous prefix resolves and an ambiguous one is refused
-//     naming every candidate (decision 6d5a6719 — a read is recoverable, so
+//     naming every candidate (decision foreign_6d5a6719 — a read is recoverable, so
 //     the id ladder applies) — the ladder's candidate pool is the UNION of
 //     `records.id` and `record_aliases.historical_id` (buildResolver,
 //     scripts/lib/citations.mjs — the resolver check-record-citations and
@@ -235,7 +235,7 @@ function openRO(dbPath) {
 
 /**
  * A read that TOUCHES NOTHING — the only honest read for a forensics tool
- * (anti_pattern 8616e72d). Two facts make this delicate:
+ * (anti_pattern foreign_8616e72d). Two facts make this delicate:
  *   1. A read-only open of a WAL-mode store can materialize an empty -wal and
  *      a -shm, and a read-only connection cannot unlink them on close.
  *   2. A WRITABLE handle appears to fix that — it leaves no litter — but only
@@ -408,7 +408,7 @@ const SUPPORTED_SCHEMA_VERSION = 2;
 /**
  * user_version WITHOUT opening a connection: bytes 60..63 of the SQLite header,
  * big-endian — the same probe scripts/migrate-stores.mjs uses (its
- * probeSchemaVersion, research_finding 5555895c). A REFUSAL must leave no
+ * probeSchemaVersion, research_finding foreign_5555895c). A REFUSAL must leave no
  * litter, and a read-only DatabaseSync open of a WAL store can materialize a
  * -shm sidecar; reading the header cannot touch anything. It is duplicated
  * rather than imported because migrate-stores.mjs is a CLI with no exports —
@@ -476,7 +476,7 @@ function requireV2(dbPath, side) {
  * ONE read-only pass over a store, gathering everything the containment proofs
  * need: which tables it HAS, its record ids, and the satellite keys that carry
  * identity independently of `records` — record_aliases.historical_id and
- * (record_id, version) from record_versions (anti_pattern 44d4f74f).
+ * (record_id, version) from record_versions (anti_pattern foreign_44d4f74f).
  *
  * It also answers the STRUCTURAL question the file header cannot: user_version
  * is an integer anyone can stamp, so a store can claim v2 while the v2 identity
@@ -1018,7 +1018,7 @@ function migrate() {
     );
   }
   // THE DESTINATION'S RESOLVABLE-ID NAMESPACE IS A UNION, not one table
-  // (anti_pattern 44d4f74f): record_aliases is an id namespace in its own
+  // (anti_pattern foreign_44d4f74f): record_aliases is an id namespace in its own
   // right, so a live source record whose id equals a destination HISTORICAL id
   // passes every records-level check and still lands one id with two
   // incompatible meanings — the alias resolves it to its canonical record,
@@ -1462,7 +1462,7 @@ function migrate() {
 
 /** Every id that RESOLVES in a store: `records.id` UNION, when the table
  *  exists, `record_aliases.historical_id` — a resolvable id namespace of its
- *  own since [stable-identity-design-v2] (anti_pattern 44d4f74f). Without the
+ *  own since [stable-identity-design-v2] (anti_pattern foreign_44d4f74f). Without the
  *  alias half, sweep can report a successor reachable ONLY through an alias
  *  as dangling (a false finding), and restore's already-resolves refusal can
  *  miss a target id an alias already resolves elsewhere — letting --apply
@@ -1473,7 +1473,7 @@ function migrate() {
  *
  *  Goes through readOnlyProbe (not a bare openRO) because a read-only open of
  *  a WAL-mode store can materialize an empty -wal/-shm it cannot unlink on
- *  close — the same trap anti_pattern 8616e72d documents; sweep, restore and
+ *  close — the same trap anti_pattern foreign_8616e72d documents; sweep, restore and
  *  scan all call this (or the same pattern) across every store they touch, so
  *  a bare open here left litter beside every one of them (board a215b119,
  *  third defect). */
@@ -1646,7 +1646,7 @@ function supersessionPointers(dbPath) {
  *  AND the satellite tables, because record_aliases (keyed by historical_id)
  *  and record_versions (keyed by record_id+version) carry identity and history
  *  under keys of their OWN — a clean records-level subset proves nothing about
- *  them (anti_pattern 44d4f74f). Ids, never counts. */
+ *  them (anti_pattern foreign_44d4f74f). Ids, never counts. */
 function adopt() {
   const from = arg('from') ?? fail('--from <store.db> is required');
   const to = arg('to') ?? fail('--to <store.db> is required');
@@ -1735,7 +1735,7 @@ function adopt() {
   if (destExists) refuseStructure(to, 'destination', dst, toProbe.version);
 
   // THE PROOF, over every table that carries identity — not `records` alone
-  // (anti_pattern 44d4f74f). Both stores can hold record X under one id (zero
+  // (anti_pattern foreign_44d4f74f). Both stores can hold record X under one id (zero
   // destination-only record ids) while the destination ALONE holds
   // record_aliases(old-id -> X) and extra archived versions of it: a whole-file
   // replace would silently delete a historical id that still resolves today,
@@ -1801,7 +1801,7 @@ process.on('exit', () => {
  * its output file already exists, which is why the output name is unique.
  *
  * THE SOURCE'S SIDECARS ARE CLEANED UP CONDITIONALLY — the same shape
- * readOnlyProbe and idsIn use (anti_pattern 8616e72d), and for the same reason:
+ * readOnlyProbe and idsIn use (anti_pattern foreign_8616e72d), and for the same reason:
  * a read-only open of a WAL store MATERIALIZES an empty -wal and -shm that a
  * read-only connection cannot unlink, so an open that removes nothing leaves
  * litter beside the USER'S store on every invocation — including the ones that
@@ -1903,7 +1903,7 @@ function vacuumIntoSnapshot(from, snapshot) {
  *     and openable by another process while the copy is still incomplete.
  *     Exclusive creation is not atomic publication.
  *   - WAL exclusivity as a quiescence proof: it needs a WRITABLE open on the
- *     store it is proving about (anti_pattern 8616e72d) and holding it across
+ *     store it is proving about (anti_pattern foreign_8616e72d) and holding it across
  *     the publication works on Unix and FAILS on native Windows — a parity
  *     break on the majority platform.
  *
@@ -2269,7 +2269,7 @@ function scan() {
   for (const f of files) {
     // readOnlyProbe, not a bare openRO+db.close(): a read-only open of a
     // WAL-mode store can materialize -wal/-shm litter it cannot unlink on
-    // close (anti_pattern 8616e72d, severity block) — scan touches every
+    // close (anti_pattern foreign_8616e72d, severity block) — scan touches every
     // store file under the roots, so a bare open here left litter beside
     // every one of them.
     readOnlyProbe(f.dbPath, (db) => {
@@ -2408,7 +2408,7 @@ function restore() {
 
   // Refuse when the target already resolves ANYWHERE the sweep can see — as
   // either a live records.id OR a record_aliases.historical_id
-  // (anti_pattern 44d4f74f). The two mean OPPOSITE things to the operator, so
+  // (anti_pattern foreign_44d4f74f). The two mean OPPOSITE things to the operator, so
   // the refusal must say WHICH one fired rather than collapsing them into one
   // Set the way sweep's resolution universe does (idsIn stays the union for
   // sweep's purposes; idsAndAliasesIn keeps them apart for this check):

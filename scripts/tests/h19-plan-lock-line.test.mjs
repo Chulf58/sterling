@@ -1,7 +1,7 @@
 // H19 dispatch staging — ACTIVE PLAN line pins (spec-only, red-first).
 // Spec: decision `plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry`
 // (knowledge_get 96125184-9797-471b-bb18-31194851c3b3): "(c) H19 dispatch
-// staging: one bounded line in coder/debugger/test-writer staging —
+// staging: one bounded line in implementor staging —
 // `ACTIVE PLAN: <title> (<path>) — this lane belongs to one of its slices` —
 // omitted with no lock." scripts/hooks/h19-dispatch-staging.mjs already
 // exists — pins below fail (today) with an ordinary substring mismatch,
@@ -119,12 +119,12 @@ function noDispatchTranscript(dir) {
 // SABOTAGE: never read .sterling/plan-lock.json from
 // h19-dispatch-staging.mjs -> the substring assertion below goes red.
 // =============================================================================
-test('PIN 21-1: a lock present stages "ACTIVE PLAN: <title> (<path>)" into a coder dispatch\'s context', () => {
+test('PIN 21-1: a lock present stages "ACTIVE PLAN: <title> (<path>)" into an implementor dispatch\'s context', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeLockFile(dir, { title: 'Pin21 Plan', plan_path: '/abs/path/to/pin21-plan.md' });
     const transcript = noDispatchTranscript(dir);
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.ok(ctx.includes('ACTIVE PLAN: Pin21 Plan (/abs/path/to/pin21-plan.md)'), `expected the literal ACTIVE PLAN line; ctx=${ctx.slice(0, 400)}`);
@@ -138,11 +138,11 @@ test('PIN 21-1: a lock present stages "ACTIVE PLAN: <title> (<path>)" into a cod
 // SABOTAGE: print a placeholder ACTIVE PLAN line even with no lock present
 // -> the doesNotMatch assertion below goes red.
 // =============================================================================
-test('PIN 21-2: with no lock present, no ACTIVE PLAN line is staged into a coder dispatch\'s context', () => {
+test('PIN 21-2: with no lock present, no ACTIVE PLAN line is staged into an implementor dispatch\'s context', () => {
   const { dir, cleanup } = makeProject();
   try {
     const transcript = noDispatchTranscript(dir);
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.doesNotMatch(ctx, /ACTIVE PLAN:/);
@@ -164,7 +164,7 @@ test('PIN 21-3: an oversize (5000-char) title is bounded in the staged ACTIVE PL
     const hugeTitle = 'X'.repeat(5000);
     writeLockFile(dir, { title: hugeTitle, plan_path: '/abs/huge-plan.md' });
     const transcript = noDispatchTranscript(dir);
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.ok(!ctx.includes(hugeTitle), 'the full 5000-char title must never appear verbatim in the staged context');
@@ -184,16 +184,16 @@ test('PIN 21-3: an oversize (5000-char) title is bounded in the staged ACTIVE PL
 // agent_type instead of scoping it to coder/debugger/test-writer -> the
 // doesNotMatch assertion below goes red.
 // =============================================================================
-test('PIN 21-4 (scoping control): a lock present stages NO ACTIVE PLAN line for a reviewer dispatch — scoped to coder/debugger/test-writer only', () => {
+test('PIN 21-4 (scoping control): a lock present stages NO ACTIVE PLAN line for a researcher dispatch — scoped to implementor only', () => {
   const { dir, cleanup } = makeProject();
   try {
     writeLockFile(dir, { title: 'Pin21 Plan', plan_path: '/abs/path/to/pin21-plan.md' });
     const transcript = noDispatchTranscript(dir);
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'reviewer-correctness' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'researcher' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'sanity: the hook ran and produced its ordinary contract output');
-    assert.doesNotMatch(ctx, /ACTIVE PLAN:/, 'the line is scoped away from a reviewer dispatch, even with a lock present');
+    assert.doesNotMatch(ctx, /ACTIVE PLAN:/, 'the line is scoped away from a researcher dispatch, even with a lock present');
   } finally {
     cleanup();
   }

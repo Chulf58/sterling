@@ -18,35 +18,28 @@
 // back-referring pronoun, naming NO path of its own) and the two clauses are
 // not separated by a paragraph break.
 //
-// FOUR TEST GROUPS, EACH WITH ITS CONTROL PLACED FIRST (a suppression pin is
-// especially prone to passing for the wrong reason — an assertion that
-// "nothing was claimed" is satisfied just as well by an extractor that found
-// nothing at all, so every group opens with an arm that must pass for the
-// OPPOSITE reason):
+// TWO TEST GROUPS SURVIVE, EACH WITH ITS CONTROL PLACED FIRST (a suppression
+// pin is especially prone to passing for the wrong reason — an assertion
+// that "nothing was claimed" is satisfied just as well by an extractor that
+// found nothing at all, so every group opens with an arm that must pass for
+// the OPPOSITE reason):
 //   A. the shared detector — the positive reach.
 //   B. the shared detector — the BOUNDS on that reach (over-suppression).
-//   C. h26-dispatch-overlap.mjs end-to-end, VERDICT CARRIER = the READ side
-//      (the live register entry is a hand-written fixture, so only h26's own
-//      extraction can change the verdict).
-//   D. h22-dispatch-register.mjs, VERDICT CARRIER = the WRITE side
-//      (`claimed_files`), with `files` pinned UNCHANGED beside it — the
-//      receipt/residue/H10 breadth must survive.
+//
+// GROUP C (h26-dispatch-overlap.mjs end-to-end) and GROUP D
+// (h22-dispatch-register.mjs `claimed_files` WRITE side) are DELETED WHOLE:
+// h26-dispatch-overlap.mjs is already deleted under the scale-down decision
+// (sterling-claude-code-scale-down-boundary, 2ad87dd1), and `claimed_files`
+// had no non-test reader (research_finding h22-dispatch-register-consumer-
+// map-which-parts-have-a-reader-september-2026) — h22's SubagentStart no
+// longer computes or writes it. hasUnsuppressedMatch/escapeRe (GROUPS A/B
+// below) remain live via scripts/hooks/lib/dispatch-residue.mjs.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { hasUnsuppressedMatch, escapeRe } from '../hooks/lib/dispatch-advisory.mjs';
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const HOOKS = join(root, 'scripts', 'hooks');
-const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
-const H26_PATH = join(HOOKS, 'h26-dispatch-overlap.mjs');
-
-/** The one call every path-side consumer makes (h22 claimedFromBlocks, h26). */
+/** The one call every path-side consumer makes (dispatch-residue's claimedResources). */
 const claimed = (prompt, path) =>
   hasUnsuppressedMatch(prompt, new RegExp(escapeRe(path)), { checkSubjectVerb: false });
 
@@ -191,216 +184,4 @@ test('(B3) BOUND: a PARAGRAPH BREAK between the claim and the prohibition stops 
 // ---------------------------------------------------------------------------
 test('(B4) BOUND: the reach is ONE clause — an intervening clause ends it', () => {
   assert.equal(claimed('YOUR FILES: src/auth.mjs — this is the whole lane — do not touch those.', 'src/auth.mjs'), true);
-});
-
-// ===========================================================================
-// Shared hook-harness plumbing
-// (mirrors scripts/tests/dispatch-advisory-glob-prefix.test.mjs)
-// ===========================================================================
-
-function runHook(hookPath, input, cwd) {
-  const r = spawnSync(process.execPath, [hookPath], {
-    input: JSON.stringify(input),
-    encoding: 'utf8',
-    cwd,
-    timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
-  });
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-}
-
-function makeProject() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-trailingproh-'));
-  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [] }));
-  writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-// ===========================================================================
-// STATE-MACHINE RE-CUT (board 5445066b, decision
-// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
-// knowledge_get 7c515e52 — opened, not paraphrased): SubagentStart no longer
-// reads the parent transcript; it resolves ONE prompt from the per-dispatch
-// state record written at PreToolUse. The FIXTURE KEEPS ITS NAME AND
-// SIGNATURE — one entry per [subagent_type, prompt] — so GROUP D's call sites
-// and assertions are byte-identical; each entry now fires a REAL PreToolUse
-// Task event through h22. SubagentStart's transcript_path points at a file
-// that does NOT exist: correct under the new contract, and a pin in its own
-// right (a surviving transcript reader would extract nothing and (D0)/(D1)
-// would go red rather than pass by accident). GROUPS A-C are untouched — the
-// detector is called directly, and h26 reads a hand-seeded register.
-// ===========================================================================
-let toolUseSeq = 0;
-function writeTranscript(dir, blocks) {
-  for (const [subagent_type, prompt] of blocks) {
-    const r = runHook(
-      H22_PATH,
-      {
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Task',
-        tool_use_id: `toolu_tp_${(toolUseSeq += 1)}`,
-        tool_input: { subagent_type, prompt, description: 'a lane' },
-        session_id: 's1',
-        cwd: dir,
-        transcript_path: join(dir, 't', 'parent.jsonl'),
-        prompt_id: 'pr-1',
-      },
-      dir
-    );
-    assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
-  }
-}
-
-function subagentStart(dir, { agent_id = 'a1', agent_type = 'coder', session_id = 's1' } = {}) {
-  return runHook(
-    H22_PATH,
-    {
-      hook_event_name: 'SubagentStart',
-      session_id,
-      transcript_path: join(dir, 't', 'no-such-parent-transcript.jsonl'),
-      cwd: dir,
-      agent_id,
-      agent_type,
-    },
-    dir
-  );
-}
-
-function readRegister(dir) {
-  return JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), 'utf8'));
-}
-
-function writeRegister(dir, entries) {
-  writeFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), JSON.stringify(entries));
-}
-
-function h26Task(dir, { subagent_type = 'coder', prompt, session_id = 's1' }) {
-  return runHook(H26_PATH, { hook_event_name: 'PreToolUse', tool_name: 'Task', session_id, cwd: dir, tool_input: { subagent_type, prompt } }, dir);
-}
-
-function advisoryText(r) {
-  if (!r.stdout || !r.stdout.trim()) return '';
-  let parsed;
-  try {
-    parsed = JSON.parse(r.stdout);
-  } catch {
-    assert.fail(`stdout was not valid JSON: ${JSON.stringify(r.stdout)}`);
-  }
-  return parsed?.hookSpecificOutput?.additionalContext ?? '';
-}
-
-// The live neighbour lane, written DIRECTLY as a fixture: nothing about this
-// entry is produced by the code under test, so the ONLY thing that can change
-// the verdict in Group C is h26's own extraction of the OUTGOING prompt —
-// that is what NAMES THE READ SIDE as the verdict carrier for these two.
-const LIVE_NEIGHBOUR = [
-  {
-    agent_id: 'sub-1',
-    agent_type: 'coder',
-    session_id: 's1',
-    files: ['scripts/hooks/lib/dispatch-advisory.mjs'],
-    claimed_files: ['scripts/hooks/lib/dispatch-advisory.mjs'],
-    claimed_glob_prefixes: [],
-    attribution: 'block',
-    at: new Date().toISOString(),
-  },
-];
-
-// ===========================================================================
-// GROUP C — h26 end-to-end; VERDICT CARRIER: the READ side
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// (C0) CONTROL, PLACED FIRST: the identical fixture with a POSITIVE claim in
-// the outgoing brief DOES warn. Without this arm, (C1)'s silence could just
-// as well mean the fixture never had a live neighbour to collide with.
-// SABOTAGE: make the trailing check unconditional in hasUnsuppressedMatch —
-// this control flips silent.
-// ---------------------------------------------------------------------------
-test('(C0) CONTROL: a POSITIVE claim on the neighbour\'s file still warns (the fixture can collide)', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegister(dir, LIVE_NEIGHBOUR);
-    const r = h26Task(dir, { prompt: 'YOUR TERRITORY: scripts/hooks/lib/dispatch-advisory.mjs — add the backward reach.' });
-    const ctx = advisoryText(r);
-    assert.match(ctx, /scripts\/hooks\/lib\/dispatch-advisory\.mjs/);
-    assert.ok(ctx.includes('coder:sub-1'));
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (C1) THE REPRODUCED FALSE POSITIVE (board 59c30a7f, measured 2026-08-27):
-// the outgoing brief is FORBIDDEN to touch the neighbour's file by a TRAILING
-// clause, and was warned about it anyway. Must be silent.
-// SABOTAGE: drop the `|| trailingSuppresses` term in hasUnsuppressedMatch —
-// the warning comes back, reproducing the measured defect.
-// ---------------------------------------------------------------------------
-test('(C1) READ SIDE: a trailing-prohibition brief no longer warns on the forbidden path', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeRegister(dir, LIVE_NEIGHBOUR);
-    const r = h26Task(dir, {
-      prompt:
-        'YOUR TERRITORY: scripts/domain-doctor.mjs. Other live lanes own scripts/hooks/h3-contract-gate.mjs, scripts/hooks/lib/dispatch-advisory.mjs — do not edit those.',
-    });
-    assert.equal(advisoryText(r), '');
-    assert.notEqual(r.code, 2);
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// GROUP D — h22 register; VERDICT CARRIER: the WRITE side (`claimed_files`)
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// (D0) CONTROL, PLACED FIRST: a positive claim registers in BOTH fields —
-// so (D1)'s absence from claimed_files cannot be read as "h22 registered
-// nothing at all".
-// SABOTAGE: make the trailing check unconditional in hasUnsuppressedMatch —
-// claimed_files empties and this control flips red.
-// ---------------------------------------------------------------------------
-test('(D0) CONTROL: a positive claim lands in BOTH files and claimed_files', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR TERRITORY: scripts/hooks/lib/dispatch-advisory.mjs — own this file.']]);
-    assert.equal(subagentStart(dir).code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.files, ['scripts/hooks/lib/dispatch-advisory.mjs']);
-    assert.deepEqual(entry.claimed_files, ['scripts/hooks/lib/dispatch-advisory.mjs']);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (D1) WRITE SIDE: a trailing-prohibition brief keeps the path OUT of
-// claimed_files (write territory) while `files` still records it — the
-// receipt/residue/H10 breadth that research_finding 289cd172 protects must
-// not narrow. Two assertions, two different carriers, deliberately in one
-// test: the pin is precisely that the two fields DIVERGE here.
-// SABOTAGE: drop the `|| trailingSuppresses` term in hasUnsuppressedMatch —
-// claimed_files regains the forbidden path (first assertion red, second
-// still green, so the failure names the write side).
-// ---------------------------------------------------------------------------
-test('(D1) WRITE SIDE: a trailing prohibition drops the path from claimed_files but NOT from files', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [
-      [
-        'coder',
-        'YOUR TERRITORY: scripts/domain-doctor.mjs. Other live lanes own scripts/hooks/lib/dispatch-advisory.mjs — do not edit those.',
-      ],
-    ]);
-    assert.equal(subagentStart(dir).code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_files, ['scripts/domain-doctor.mjs']);
-    assert.ok(entry.files.includes('scripts/hooks/lib/dispatch-advisory.mjs'), 'files must keep the full MENTIONED breadth for receipts/residue/H10');
-  } finally {
-    cleanup();
-  }
 });

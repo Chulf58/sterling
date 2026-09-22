@@ -1,4 +1,4 @@
-// /sterling:projects — list the machine-global project registry (decision 8f9e6db2).
+// /sterling:projects — list the machine-global project registry (decision foreign_8f9e6db2).
 // Read-only by default; stale-at-read: a project whose repo_path no longer exists
 // is flagged MISSING (the registry stores no liveness). `--prune-missing` removes
 // ONLY entries whose path is gone (human-gated; never live projects).

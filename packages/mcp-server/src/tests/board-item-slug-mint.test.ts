@@ -546,7 +546,7 @@ test('E1 THE LOAD-BEARING PIN: board_remove REFUSES a minted slug — naming the
   }
 });
 
-test('E2 REGRESSION PIN: board_remove still refuses an unambiguous 8-char prefix — widening the READ surface for slugs must not quietly re-open the prefix rung on the destroying call (decision 6d5a6719)', () => {
+test('E2 REGRESSION PIN: board_remove still refuses an unambiguous 8-char prefix — widening the READ surface for slugs must not quietly re-open the prefix rung on the destroying call (decision foreign_6d5a6719)', () => {
   const { tools, cleanup } = harness();
   try {
     const item = boardAdd(tools, { text: 'PREFIXES STAY REFUSED ON DESTRUCTION.\n\nbody.', source: 'user' });
@@ -644,63 +644,59 @@ test('F1 LEGACY (green before AND after — the migration-free pin de1a7329 set)
   }
 });
 
-test('F2 THE BACKFILL-AGNOSTIC PROPERTY (mechanism deliberately NOT pinned): every board item yields a human-readable name — a slugless legacy row read through board_get comes back with a non-empty kebab handle derived from its own headline, satisfied EITHER by a one-shot backfill mint OR by a derive-on-read fallback', () => {
+test('F2 THE LABEL PROPERTY (REVISED 2026-09-21, board 081508d0, [display-name-derives-from-current-text-not-slug]): every board item yields a human-readable display LABEL — a slugless legacy row read through board_get comes back with a non-empty `label` derived from its own CURRENT text, while its real `slug` field stays genuinely absent, never synthesized', () => {
+  // SUPERSEDES the pre-fix arm, which required `read.slug` itself to carry a
+  // derived kebab handle (EITHER a one-shot backfill mint OR a derive-on-read
+  // fallback into `slug`). THAT WAS THE DEFECT'S OWN SHAPE: a value written
+  // into the ADDRESSABLE `slug` field, indistinguishable from a real minted
+  // handle — see the superseded SECTION G below for the shadowing failure it
+  // caused. The fix moves the derived value to its own field, `label`, and
+  // leaves `slug` untouched for every item, legacy or not.
   const { store, tools, cleanup } = harness();
   try {
     const legacyId = seedLegacySluglessItem(store, tools, LEGACY_TEXT);
     const read = tools.boardGet(legacyId);
-    const name = read.slug;
 
-    assert.ok(
-      typeof name === 'string' && name.length > 0,
-      'EXPECTED FAILURE AT HEAD: undefined. This arm pins the PROPERTY the slice must hold either way — if the implementer chooses NO backfill, board_get must derive the name on read, because S2 has to render something for legacy items and a uuid is exactly what the user said they cannot identify'
+    assert.equal(read.slug, undefined, 'the real `slug` field stays genuinely absent for a legacy row — nothing is ever written into it, so there is nothing left to mistake for a real handle');
+    assert.equal(
+      read.label,
+      'A LEGACY ITEM PREDATING THE MINT.',
+      'the label is the item\'s own CURRENT text headline, verbatim prose — not kebab-cased, because a label is a display string, not an address'
     );
-    const slug = name as string;
-    assert.match(slug, KEBAB, 'the fallback name is a real kebab handle, not raw headline prose');
-    assert.ok(slug.includes('legacy'), `the name is derived from THIS item's headline, not a placeholder — got "${slug}"`);
-    assert.ok(!slug.includes(legacyId.slice(0, 8)), 'and it is not the id wearing a costume');
   } finally {
     cleanup();
   }
 });
 
 // ---------------------------------------------------------------------------
-// SECTION G — A DISPLAY NAME MUST NEVER SHADOW A REAL HANDLE.
+// SECTION G — REVISED 2026-09-21 (board 081508d0): THE SHADOW RISK THIS
+// SECTION GUARDED AGAINST IS NOW STRUCTURALLY CLOSED, NOT SUPPRESSED.
 //
-// THE DEFECT THIS SECTION EXISTS FOR (found in review, fixed, then found to be
-// COMPLETELY UNPINNED — the fixer stripped its own guard line, rebuilt, and ran
-// eleven suites: 199/199 stayed green while the defect reproduced):
+// THE ORIGINAL DEFECT (found in review, fixed, then found to be COMPLETELY
+// UNPINNED — the fixer stripped its own guard line, rebuilt, and ran eleven
+// suites: 199/199 stayed green while the defect reproduced): board_get used
+// to WRITE a derived value INTO THE `slug` FIELD for a legacy row with no
+// stored slug — shaped exactly like a real minted handle. If another item
+// later minted that exact handle for real, a reader citing the legacy row's
+// displayed `slug` landed on resolveRecordId -> recordsBySlug -> THE WRONG
+// RECORD, silently.
 //
-//   Legacy item A (pre-mint, no stored slug) has headline `EXPORT THE BOARD AS
-//   CSV.` and F2 above says it must READ BACK with a derived name on `slug`.
-//   The same task is later re-boarded as item B, which MINTS
-//   `export-the-board-as-csv` for real. board_get(A) then returned
-//   `slug: "export-the-board-as-csv"` — shaped exactly like a real handle. A
-//   conductor citing it lands on resolveRecordId -> recordsBySlug -> ITEM B,
-//   and reads and updates THE WRONG ITEM silently. That is the readable-ids
-//   feature handing out a citation that names something else.
+// THE FIX does not check-then-suppress a shadow; it removes the field the
+// shadow lived in. `board_get` never writes to `slug` for ANY item, legacy
+// or not — `slug` is returned exactly as stored (possibly absent), full
+// stop. The derived name moves to a separate field, `label`, which
+// resolveRecordId never reads (it resolves on `id` and `slug` only). There is
+// therefore no field left for a live handle to shadow FROM THE LEGACY ROW'S
+// SIDE, whether or not some other item's real slug happens to read the same
+// words.
 //
-// THE PROPERTY PINNED HERE, stated once: A NAME A READER IS SHOWN NEVER
-// RESOLVES TO A DIFFERENT RECORD. Absent name over wrong name (df361a0f's
-// disclose-rather-than-silently-serve posture).
-//
-// WHY G0 IS FIRST AND IS THE POINT OF THE SECTION: "no shadowing" has more
-// than one possible cause. An implementation that simply NEVER derives a
-// display name passes G1 and G2 perfectly while silently deleting the backfill
-// half of the readable-ids objective — the half the objective exists for. G0
-// must pass for the OPPOSITE reason, so a green in this section always carries
-// its own evidence.
-//
-// THESE ARMS DO NOT CONTRADICT F2, and are deliberately shaped around it:
-//   * F2 says a legacy row reads back WITH a name. G0 re-affirms exactly that
-//     (in a store that also holds real minted handles, which F2's store does
-//     not) and G1/G2 only ever withhold a name in the ONE case F2 cannot be
-//     read to require: when that exact name is already a LIVE handle for
-//     someone else.
-//   * F2 deliberately leaves the MECHANISM open (one-shot backfill mint OR
-//     derive-on-read). G2 therefore branches on which mechanism shipped and
-//     asserts the same invariant down both branches, in the EITHER-WAY style
-//     E3 already uses. Nothing here forces a mechanism F2 left free.
+// G0 restates the label property under load (a store that also holds real
+// minted handles) — unaffected by the fix, since `label` was never gated on
+// collision. G1/G2 are REPLACED, not deleted (an anti-pattern names deleting
+// coverage of surviving behaviour without auditing what still needs pinning —
+// [test-deletion-without-coverage-audit]): the NEW arms re-run the exact old
+// shadow SETUP and pin the new invariant it must now satisfy — `slug` never
+// becomes a fabricated address, regardless of what any other item mints.
 // ---------------------------------------------------------------------------
 
 // The headline of the legacy row that gets shadowed, and of the modern item
@@ -710,187 +706,81 @@ const LEGACY_SHADOW_TEXT = `${SHADOW_HEADLINE}\n\nthe original ask, boarded befo
 const REBOARD_TEXT = `${SHADOW_HEADLINE}\n\nthe same task, re-boarded after the mint existed.`;
 const FREE_SIBLING_TEXT = 'A LEGACY SIBLING WHOSE NAME NOBODY TOOK.\n\nbody prose.';
 
-// "Does this address resolve, and to what?" — an address that resolves NOWHERE
-// is a legitimate outcome for a display-only name (it was never persisted, so
-// recordsBySlug cannot see it), which is why this returns undefined instead of
-// throwing. The catch is NOT what carries any verdict below: every arm that
-// uses this asserts hard on the identity when something DOES resolve, and the
-// shadowing sabotage makes something resolve — the wrong thing.
-function resolveOrUndefined(tools: ToolsView, address: string): string | undefined {
-  try {
-    return tools.boardGet(address).id as string;
-  } catch (err) {
-    void err;
-    return undefined;
-  }
-}
-
-// The name a legacy row derives when NOTHING is competing for it, measured in
-// its own fresh store. G1 needs this to prove the collision it sets up is real
-// rather than assumed. A failure of the assertion inside this helper means the
-// derive stopped happening at all — i.e. G0's failure, surfacing here too.
-function derivedDisplayNameInAFreshStore(text: string): string {
+test('G0 CONTROL (placed FIRST — must pass for the OPPOSITE reason): a NON-COLLIDING legacy row STILL displays its label even in a store that already holds real minted handles, and its `slug` stays absent throughout', () => {
   const { store, tools, cleanup } = harness();
   try {
-    const id = seedLegacySluglessItem(store, tools, text);
-    const name = tools.boardGet(id).slug;
-    assert.ok(
-      typeof name === 'string' && name.length > 0,
-      'SETUP (this is F2\'s property, measured in isolation): a legacy row alone in a store must display a derived name — without it the shadowing scenario below cannot even be constructed'
-    );
-    return name as string;
-  } finally {
-    cleanup();
-  }
-}
-
-test('G0 CONTROL (placed FIRST and it is the POINT of this section — must pass for the OPPOSITE reason): a NON-COLLIDING legacy row STILL displays its derived name even in a store that already holds real minted handles — so the withheld names in G1/G2 are COLLISION-SPECIFIC, never a blanket "stop deriving" that would silently delete the backfill half of readable-ids', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    // A real minted handle exists in this store. If suppression were keyed on
-    // "any handle exists" rather than on THIS name being taken, this arm is
-    // where that shows up — F2's store contains no other slug-bearing row and
-    // therefore cannot tell those two implementations apart.
     const modern = boardAdd(tools, { text: 'RENDER THE BOARD IN THE TUI.\n\nbody.', source: 'user' });
     const modernSlug = requireSlug(tools, modern, 'the modern item mints a real handle, so this store is not slug-empty');
 
     const legacyId = seedLegacySluglessItem(store, tools, FREE_SIBLING_TEXT);
-    const name = tools.boardGet(legacyId).slug;
+    const read = tools.boardGet(legacyId);
 
-    assert.ok(
-      typeof name === 'string' && name.length > 0,
-      'a legacy row whose derived name NOBODY holds must still display it — a "never derive" implementation passes G1 and G2 while deleting the feature this objective exists for'
+    assert.equal(read.slug, undefined, 'a legacy row\'s `slug` stays genuinely absent — nothing is ever written into it, even in a store that holds other real handles');
+    assert.equal(
+      read.label,
+      'A LEGACY SIBLING WHOSE NAME NOBODY TOOK.',
+      'and its LABEL is derived from its own text headline regardless of what else the store holds'
     );
-    assert.match(name as string, KEBAB, 'and it is still a real kebab display name, not raw headline prose');
-    assert.ok(
-      (name as string).includes('sibling'),
-      `derived from THIS row's own headline, not a placeholder and not the neighbour's — got "${name as string}"`
-    );
-    assert.notEqual(name, modernSlug, 'it is not the modern item\'s handle wearing a legacy row\'s costume');
-    assert.equal(tools.boardGet(modernSlug).id, modern.id, 'and the store\'s REAL handle still resolves to its real owner — nothing about deriving disturbed it');
+    assert.equal(tools.boardGet(modernSlug).id, modern.id, 'the store\'s real handle still resolves to its real owner — nothing about labelling disturbed it');
   } finally {
     cleanup();
   }
 });
 
-test('G1 THE SHADOW PIN (the fix that ran 199/199 green while broken): when a legacy row\'s derived name is ALREADY A LIVE MINTED HANDLE owned by another item, board_get(legacy).slug is ABSENT or resolves back to the LEGACY row — never to the item that actually owns that handle', () => {
+test("G1' THE SHADOW SCENARIO, RE-RUN AGAINST THE FIX: a legacy row whose text headline is IDENTICAL to a handle another item later mints for real still reads back with `slug` genuinely ABSENT — never a fabricated value shaped like that live handle", () => {
   const { store, tools, cleanup } = harness();
   try {
-    // (1) What name does this headline derive when uncontested? Measured, not
-    // assumed. If this and the mint below ever stop agreeing, the SETUP CHECK
-    // fires and says so in as many words — that is a changed premise, not a
-    // broken guard.
-    const derived = derivedDisplayNameInAFreshStore(LEGACY_SHADOW_TEXT);
-
-    // (2) The modern item mints the handle FIRST, so the collision is a fact of
-    // this store rather than an assumption about how clash counting treats
-    // hard-deleted rows.
     const reboarded = boardAdd(tools, { text: REBOARD_TEXT, source: 'user' });
-    const mintedSlug = requireSlug(tools, reboarded, 'the re-boarded item must mint the handle that the legacy row would otherwise shadow');
-    assert.equal(
-      mintedSlug,
-      derived,
-      `SETUP CHECK: the re-boarded item must mint exactly the name the legacy row derives — that identity IS the shadowing scenario. Got minted "${mintedSlug}" vs derived "${derived}"`
-    );
-    assert.equal(tools.boardGet(derived).id, reboarded.id, 'SETUP CHECK: and that name is a LIVE address resolving to the re-boarded item');
+    const mintedSlug = requireSlug(tools, reboarded, 'the re-boarded item mints a real handle from the same headline the legacy row below will also carry');
+    assert.equal(tools.boardGet(mintedSlug).id, reboarded.id, 'SETUP CHECK: the minted handle is live and resolves to the re-boarded item');
 
-    // (3) Two legacy rows: one whose derived name is now taken, one whose is free.
     const legacyShadow = seedLegacySluglessItem(store, tools, LEGACY_SHADOW_TEXT);
-    const legacyFree = seedLegacySluglessItem(store, tools, FREE_SIBLING_TEXT);
+    const read = tools.boardGet(legacyShadow);
 
-    // IN-ARM CONTROL, CHECKED BEFORE THE PIN: the uncontested legacy row in
-    // THIS SAME STORE still shows its name. This is what separates "suppressed
-    // because this name is taken" from "suppressed because a collision exists
-    // somewhere in the store" — two implementations G0 alone cannot tell apart.
-    const freeName = tools.boardGet(legacyFree).slug;
-    assert.ok(
-      typeof freeName === 'string' && freeName.length > 0,
-      'IN-ARM CONTROL: the sibling legacy row, whose derived name nobody holds, must STILL display it inside the very store where another row is being suppressed'
+    assert.equal(
+      read.slug,
+      undefined,
+      'THE OLD DEFECT, RE-RUN: this used to come back "export-the-board-as-csv" — a fabricated value shaped exactly like reboarded\'s REAL slug. It must now be genuinely absent, full stop, regardless of what any other item minted'
     );
-    assert.match(freeName as string, KEBAB, 'IN-ARM CONTROL: and it is a real kebab name');
-
-    // THE PIN. Both clauses independently catch the sabotage (strip the
-    // recordsBySlug consultation from withDisplaySlug): the first names the
-    // shadowing directly, the second is the general invariant that also catches
-    // a display name colliding with any OTHER live handle.
-    const shadowName = tools.boardGet(legacyShadow).slug;
-    assert.notEqual(
-      shadowName,
-      derived,
-      `THE DEFECT: the legacy row is displaying "${derived}", which is a LIVE handle owned by another item — cite it and resolveRecordId sends you to the WRONG RECORD, silently. Absent name over wrong name (df361a0f)`
+    assert.equal(
+      read.label,
+      SHADOW_HEADLINE,
+      'the legacy row still displays a LABEL (its own headline) — the fix withholds nothing; it simply never writes that value into the addressable `slug` field'
     );
-    if (typeof shadowName === 'string' && shadowName.length > 0) {
-      // A name IS shown. Permitted only if it is genuinely this row's own
-      // address (a real backfilled mint) or resolves nowhere at all (a
-      // display-only derive). Never someone else's record.
-      const resolved = resolveOrUndefined(tools, shadowName);
-      if (resolved !== undefined) {
-        assert.equal(resolved, legacyShadow, `a displayed name that RESOLVES must resolve to the row that displayed it — "${shadowName}" resolved elsewhere`);
-      }
-    }
-
-    // The incumbent is untouched throughout: suppression withholds a DISPLAY
-    // name, it never disturbs the real handle or its owner.
-    assert.equal(tools.boardGet(derived).id, reboarded.id, 'the real handle still resolves to the item that minted it');
-    assert.equal(tools.boardGet(legacyShadow).id, legacyShadow, 'and the legacy row itself still reads by its full uuid — withholding a name never hides the record');
+    assert.equal(tools.boardGet(mintedSlug).id, reboarded.id, 'and the real handle still resolves only to the item that minted it — no ambiguity was ever introduced');
+    assert.equal(tools.boardGet(legacyShadow).id, legacyShadow, 'the legacy row itself still reads by its full uuid');
   } finally {
     cleanup();
   }
 });
 
-test('G2 THE SUPPRESSION IS EVALUATED WHEN THE NAME IS SERVED, not once when it was first derived: after a legacy row has ALREADY displayed a name, another item taking that exact name must not leave the legacy row still pointing at it — asserted down BOTH mechanisms F2 leaves open', () => {
+test("G2' BOARD_GET NEVER FABRICATES A SLUG (renamed, review round 2, LOW finding — the structural guarantee this arm actually proves, not the broader address-safety claim its old title implied): after a legacy row has already displayed a label, another item minting that EXACT headline as a real slug elsewhere never causes board_get to write anything into the legacy row's own (still-absent) `slug` field", () => {
+  // RENAMED FROM: "A DISPLAYED LABEL IS NEVER TREATED AS AN ADDRESS". That
+  // title overclaimed — this arm verifies `slug` stays absent and `label`
+  // keeps displaying; it says nothing about whether resolution ever reads
+  // `label` (it doesn't: resolveRecordId's rungs are id and slug only, and no
+  // code path here feeds a label into it). What this arm DOES prove,
+  // precisely: board_get is now a pure read for `slug` — no derive-then-
+  // write, no shadow-suppression state machine, regardless of what any other
+  // item mints in the meantime.
   const { store, tools, cleanup } = harness();
   try {
     const legacyId = seedLegacySluglessItem(store, tools, LEGACY_SHADOW_TEXT);
+    const before = tools.boardGet(legacyId);
+    assert.equal(before.label, SHADOW_HEADLINE, 'PREMISE: the legacy row displays its own headline as a label');
+    assert.equal(before.slug, undefined, 'PREMISE: and its slug is genuinely absent');
 
-    const before = tools.boardGet(legacyId).slug;
-    assert.ok(
-      typeof before === 'string' && before.length > 0,
-      'PREMISE (F2, and G0 again): while nobody else holds it, the legacy row displays its derived name'
-    );
-    const name = before as string;
+    // A new item auto-mints the exact same headline as a real slug — the
+    // everyday version of the old shadow scenario, no contrived explicit slug
+    // required.
+    const claimant = boardAdd(tools, { text: REBOARD_TEXT, source: 'user' });
+    const claimantSlug = requireSlug(tools, claimant, 'the claimant mints its own real handle from the shared headline');
 
-    // Someone now boards the same task explicitly under that very name.
-    let claimant: Loose | undefined;
-    let refusal: Error | undefined;
-    try {
-      claimant = boardAdd(tools, { text: REBOARD_TEXT, source: 'user', slug: name });
-    } catch (err) {
-      refusal = err as Error;
-    }
-
-    if (refusal !== undefined) {
-      // BRANCH A — the displayed name is a PERSISTED handle (F2's backfill
-      // mechanism). Then it is an incumbent, the create is refused exactly as
-      // C3 pins, and the legacy row keeps a name it genuinely owns.
-      assert.match(refusal.message, COLLISION_REFUSAL, `if the displayed name is a real persisted handle it must refuse the taker as a collision — got: "${refusal.message}"`);
-      assert.ok(refusal.message.includes(name), `and the refusal names the handle — got: "${refusal.message}"`);
-      assert.equal(tools.boardGet(name).id, legacyId, 'the legacy row still OWNS the name it displayed — nobody took it out from under the reader');
-      assert.equal(tools.boardGet(legacyId).slug, name, 'and it still displays it');
-    } else {
-      // BRANCH B — display-only derive (the shipped mechanism): the name was
-      // never persisted, so it was never an incumbent and the create succeeds.
-      // The reader must now stop being told the legacy row is called that.
-      const taken = claimant as Loose;
-      assert.equal(tools.boardGet(name).id, taken.id, 'the name is now a LIVE handle owned by the new item — that is precisely when the display name becomes a lie');
-
-      const after = tools.boardGet(legacyId).slug;
-      assert.notEqual(
-        after,
-        name,
-        `THE DEFECT, arrived at from the other direction: the legacy row is still displaying "${name}" after another item took it as a real handle — a re-read must consult the resolution set every time it serves a name, not once at derive time`
-      );
-      if (typeof after === 'string' && after.length > 0) {
-        const resolved = resolveOrUndefined(tools, after);
-        if (resolved !== undefined) {
-          assert.equal(resolved, legacyId, `a displayed name that RESOLVES must resolve to the row that displayed it — "${after}" resolved elsewhere`);
-        }
-      }
-      assert.equal(tools.boardGet(taken.id as string).id, taken.id, 'and the new owner reads back normally by uuid');
-    }
-
-    // True down both branches: the legacy row is still there and still itself.
-    assert.equal(tools.boardGet(legacyId).id, legacyId, 'the legacy row survives either way — this section is about what it is CALLED, never about whether it exists');
+    const after = tools.boardGet(legacyId);
+    assert.equal(after.slug, undefined, 'the legacy row\'s slug is UNCHANGED by another item minting a handle elsewhere — there is no derive-then-suppress step left to get this wrong');
+    assert.equal(after.label, SHADOW_HEADLINE, 'and it still displays its own label — board_get never withholds one, because it never derives-then-writes an address in the first place');
+    assert.equal(tools.boardGet(claimantSlug).id, claimant.id, 'the claimant\'s real handle resolves only to the claimant');
+    assert.equal(tools.boardGet(legacyId).id, legacyId, 'the legacy row survives throughout, addressed by its uuid exactly as before');
   } finally {
     cleanup();
   }

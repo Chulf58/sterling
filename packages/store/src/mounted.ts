@@ -42,7 +42,10 @@ function open(dbPath: string): SterlingStore {
 }
 
 export class MountedStores {
-  /** The project store — also the home of all run/board/transient state.
+  /** The project store — also the home of the board/maintenance queue and
+   *  other project-local transient state (the run/handoff protocol this
+   *  comment used to describe was removed per decision
+   *  sterling-claude-code-scale-down-boundary, 2ad87dd1).
    *
    *  STATED LIMIT OF THE CROSS-MOUNT WRITE BACKSTOP (decision
    *  [scope-drift-closed-by-column-authoritative-reads-not-format-change]).
@@ -62,8 +65,8 @@ export class MountedStores {
    *  outside this file touches the handle at all — every `.project.<mutator>`
    *  call in the repo is in a TEST (packages/store/src/tests/
    *  stable-identity-hardening.test.ts and packages/mcp-server/src/tests/
-   *  resolves-append-join.test.ts seed forged rows through it; mounted.test.ts
-   *  also drives createRun). Those suites are frozen, and a read-only type on
+   *  resolves-append-join.test.ts seed forged rows through it). Those suites
+   *  are frozen, and a read-only type on
    *  this field would fail their compile, so the exposure is retained
    *  deliberately and disclosed here rather than closed by editing pins. The
    *  real containment today is that production has no such caller — a
@@ -265,7 +268,7 @@ export class MountedStores {
   }
 
   /** Superseded-only counterpart of recordsBySlug — knowledge_get's dead-slug
-   *  fallthrough is the sole caller (decision df361a0f) and takes result[0] as
+   *  fallthrough is the sole caller (decision foreign_df361a0f) and takes result[0] as
    *  THE newest carrier, so the fan-in order is load-bearing. A slug does NOT
    *  live in exactly one store: retireInFavorOf's promotion shape leaves the
    *  project tombstone behind while the live copy is promoted into a domain
@@ -283,7 +286,7 @@ export class MountedStores {
       .sort((a, b) => (a.updated_at < b.updated_at ? 1 : a.updated_at > b.updated_at ? -1 : 0));
   }
 
-  /** Cross-store terminus resolution (decision de1a7329): a record lives in
+  /** Cross-store terminus resolution (decision foreign_de1a7329): a record lives in
    *  exactly one store (same reasoning as get()), so this tries each mounted
    *  store project-first and returns the first hit. */
   resolveTerminus(id: string): ReturnType<SterlingStore['resolveTerminus']> {
@@ -299,7 +302,7 @@ export class MountedStores {
    *  inbound supersedes edges can sit in a DIFFERENT mounted store than the
    *  target itself — every mount is scanned and the hits merged, same
    *  reasoning as recordsBySlug's fan. DEDUPED BY ID (roster review F3,
-   *  anti_pattern 1896c79b): a record promoted into a domain store leaves a
+   *  anti_pattern foreign_1896c79b): a record promoted into a domain store leaves a
    *  project-store tombstone behind, so the SAME source id can resolve out of
    *  two different mounts — first-seen (project-first, this.all()'s own
    *  ordering) wins, never a duplicate entry for one concept. */
@@ -473,8 +476,10 @@ export class MountedStores {
     return store;
   }
 
-  /** The project store for a PROJECT-LOCAL write (runs, board, handoffs, the
-   *  drain log), held against the active transaction's mount the same way. These
+  /** The project store for a PROJECT-LOCAL write (the board/maintenance
+   *  queue, the drain log — the run/handoff protocol this comment used to
+   *  name was removed per decision sterling-claude-code-scale-down-boundary,
+   *  2ad87dd1), held against the active transaction's mount the same way. These
    *  forward straight to this.project, so inside a DOMAIN transaction they are
    *  the second cross-mount shape: a write that commits on the project
    *  connection while the open BEGIN belongs to a domain mount. */
@@ -525,53 +530,23 @@ export class MountedStores {
     );
   }
 
-  // -- run/board/transient state: PROJECT-LOCAL, never a domain ----------------
-  // Runs (§7.5 one active run), the board/maintenance queue (§3.2.7), handoffs and
-  // check_skipped are project-scoped by definition — they live in the project
-  // store, so MountedStores forwards them straight through. Knowledge fans across
-  // mounts; run state does not. Signatures mirror SterlingStore exactly.
+  // -- board/transient state: PROJECT-LOCAL, never a domain -------------------
+  // The board/maintenance queue (§3.2.7) and check_skipped are project-scoped
+  // by definition — they live in the project store, so MountedStores forwards
+  // them straight through. Knowledge fans across mounts; this state does not.
+  // The run/handoff protocol (createRun, getRun, casTransition,
+  // casTransitionMerge, recordPendingExit/getPendingExit, appendRunEscalation,
+  // appendRunReconcileNeeded, writeHandoff/readHandoffs, setRunReviewMandatory)
+  // was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
-  createRun(...args: Parameters<SterlingStore['createRun']>): ReturnType<SterlingStore['createRun']> {
-    return this.mutatingProject('createRun').createRun(...args);
-  }
-  getRun(...args: Parameters<SterlingStore['getRun']>): ReturnType<SterlingStore['getRun']> {
-    return this.project.getRun(...args);
-  }
-  casTransition(...args: Parameters<SterlingStore['casTransition']>): ReturnType<SterlingStore['casTransition']> {
-    return this.mutatingProject('casTransition').casTransition(...args);
-  }
-  casTransitionMerge(...args: Parameters<SterlingStore['casTransitionMerge']>): ReturnType<SterlingStore['casTransitionMerge']> {
-    return this.mutatingProject('casTransitionMerge').casTransitionMerge(...args);
-  }
-  recordPendingExit(...args: Parameters<SterlingStore['recordPendingExit']>): ReturnType<SterlingStore['recordPendingExit']> {
-    return this.mutatingProject('recordPendingExit').recordPendingExit(...args);
-  }
-  getPendingExit(...args: Parameters<SterlingStore['getPendingExit']>): ReturnType<SterlingStore['getPendingExit']> {
-    return this.project.getPendingExit(...args);
-  }
-  appendRunEscalation(...args: Parameters<SterlingStore['appendRunEscalation']>): ReturnType<SterlingStore['appendRunEscalation']> {
-    return this.mutatingProject('appendRunEscalation').appendRunEscalation(...args);
-  }
-  appendRunReconcileNeeded(...args: Parameters<SterlingStore['appendRunReconcileNeeded']>): ReturnType<SterlingStore['appendRunReconcileNeeded']> {
-    return this.mutatingProject('appendRunReconcileNeeded').appendRunReconcileNeeded(...args);
-  }
   recordCheckSkipped(...args: Parameters<SterlingStore['recordCheckSkipped']>): ReturnType<SterlingStore['recordCheckSkipped']> {
     return this.mutatingProject('recordCheckSkipped').recordCheckSkipped(...args);
   }
-  writeHandoff(...args: Parameters<SterlingStore['writeHandoff']>): ReturnType<SterlingStore['writeHandoff']> {
-    return this.mutatingProject('writeHandoff').writeHandoff(...args);
-  }
-  /** The drain log is project-local (§3.2.7) — forwarded like every run/board surface. */
+  /** The drain log is project-local (§3.2.7) — forwarded like every board surface. */
   drainLogEntry(...args: Parameters<SterlingStore['drainLogEntry']>): ReturnType<SterlingStore['drainLogEntry']> {
     return this.mutatingProject('drainLogEntry').drainLogEntry(...args);
   }
-  readHandoffs(...args: Parameters<SterlingStore['readHandoffs']>): ReturnType<SterlingStore['readHandoffs']> {
-    return this.project.readHandoffs(...args);
-  }
-  setRunReviewMandatory(...args: Parameters<SterlingStore['setRunReviewMandatory']>): ReturnType<SterlingStore['setRunReviewMandatory']> {
-    return this.mutatingProject('setRunReviewMandatory').setRunReviewMandatory(...args);
-  }
-
   /** knowledge_split's multi-record write (decision
    *  compaction-tooling-windowed-read-plus-split) targets the PROJECT store
    *  only — feature_article is always project-scoped (§3.3), so the split's

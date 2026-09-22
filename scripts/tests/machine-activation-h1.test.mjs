@@ -8,9 +8,9 @@
 // to do. The contract below comes from spec surfaces only —
 //   * board 4fa477f2 (the defect, measured at HEAD 80fa755, quoting file:line, the
 //     required fix shape, the degrade wording, and the silence-control demand),
-//   * decision 946125ff (c) — H1 session-start warns BOTH surfaces, fail-open,
+//   * decision foreign_946125ff (c) — H1 session-start warns BOTH surfaces, fail-open,
 //     Sterling projects only, foreign files never judged,
-//   * anti_pattern 02a1ed39 — the incident: a machine-context flip left EVERY
+//   * anti_pattern foreign_02a1ed39 — the incident: a machine-context flip left EVERY
 //     agent-guarding hook dead while sync-agents said `up_to_date` NINE TIMES,
 //   * scripts/tests/agent-currency-h1.test.mjs and scripts/tests/h1-accuracy.test.mjs
 //     (prior tests; harness, idiom and the sibling block's contract).
@@ -193,7 +193,7 @@ function assertHookRan(r) {
 }
 
 /** The machine-activation notice: one blank-line-delimited block. The marker token
- *  is the pre-existing surface of decision 946125ff (c) — this file LOCATES the
+ *  is the pre-existing surface of decision foreign_946125ff (c) — this file LOCATES the
  *  notice by it and asserts nothing about the prose around it beyond the contract's
  *  degrade wording, so a reword of the notice does not break these pins. */
 function driftSection(text) {
@@ -212,7 +212,7 @@ const lineFor = (section, name) => section.split('\n').find((l) => l.includes(na
 const DEGRADED = /(cannot|could not|can't|unable|unreadable|unknown|missing)/i;
 const CLAIMS_CURRENT = /up[-_ ]to[-_ ]date/i;
 
-/** The human surface. Deliberately BROAD: decision 946125ff (c) fixes that both
+/** The human surface. Deliberately BROAD: decision foreign_946125ff (c) fixes that both
  *  surfaces are warned, not the sentence either one uses. The positive arm's match
  *  and the control arms' doesNotMatch use the SAME regex, so the pair is symmetric
  *  and a reword moves both together instead of producing a one-sided false red. */
@@ -257,7 +257,7 @@ function makeClone(names) {
     // RESOLVABLE machine vars: this machine's real node + a real hook file, so the
     // guard under test has nothing to report unless the fixture makes it so.
     vars: { NODE: `"${process.execPath.replace(/\\/g, '/')}"`, HOOKS_DIR: hooksDir.replace(/\\/g, '/') },
-    // A machine-context flip: neither path exists here (anti_pattern 02a1ed39).
+    // A machine-context flip: neither path exists here (anti_pattern foreign_02a1ed39).
     deadVars: { NODE: '"/other-context/bin/node"', HOOKS_DIR: '/other-context/hooks' },
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   };
@@ -348,7 +348,7 @@ Body was truncated by a bad copy.
 // is satisfied by an implementation that emits the notice unconditionally — which
 // is worse than the bug, because a banner that fires every session is a banner
 // nobody reads (P1), and that is how the nine-times-silent incident of
-// anti_pattern 02a1ed39 stayed invisible.
+// anti_pattern foreign_02a1ed39 stayed invisible.
 // =============================================================================
 
 test('A1 CONTROL: a fully readable, correctly-baked agent set produces NO machine-activation output on either surface', () => {
@@ -391,7 +391,7 @@ test('B1 POSITIVE: an agent baked for ANOTHER machine context is reported on BOT
     assertHookRan(r);
 
     const section = driftSection(contextOf(r));
-    assert.notEqual(section, '', 'a dead-baked agent is reported to the conductor (decision 946125ff (c))');
+    assert.notEqual(section, '', 'a dead-baked agent is reported to the conductor (decision 946125ff (c))'); // not-a-citation: fixture id
     assert.notEqual(lineFor(section, 'coder'), '', 'the offending agent is NAMED — "some agents are dead" is not actionable');
     assert.equal(lineFor(section, 'test-writer'), '', 'the healthy agent is NOT listed — the notice reports exceptions, not the roster');
     assert.match(messageOf(r), HUMAN_NOTICE, 'the human is warned too — 946125ff (c) fixes BOTH surfaces');
@@ -660,7 +660,7 @@ test('E0 CONTROL: a genuinely FOREIGN hand-made agent is not Sterling\'s to judg
     const r = h1(dir, clone.dir);
     assertHookRan(r);
 
-    assert.equal(driftSection(contextOf(r)), '', 'a hand-written agent with no generated marker is never judged (decision 946125ff (c): foreign files never judged)');
+    assert.equal(driftSection(contextOf(r)), '', 'a hand-written agent with no generated marker is never judged (decision 946125ff (c): foreign files never judged)'); // not-a-citation: fixture id
     assert.doesNotMatch(messageOf(r), HUMAN_NOTICE, 'and nothing for the human either');
   } finally {
     cleanup();

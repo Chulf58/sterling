@@ -46,7 +46,7 @@ test('P1 sanity: agent-templates/*.md is read via readdirSync and covers at leas
   // Guard against an empty/broken directory read silently greening the
   // per-file loop below by iterating zero files.
   assert.ok(files.length > 0, 'agent-templates directory listing must not be empty');
-  for (const must of ['coder.md', 'debugger.md', 'test-writer.md']) {
+  for (const must of ['librarian.md', 'researcher.md', 'scout.md', 'implementor.md']) {
     assert.ok(
       files.includes(must),
       `expected ${must} in the dynamic agent-templates/*.md listing, got: ${JSON.stringify(files)}`
@@ -129,22 +129,8 @@ test('P1 detector residual (DISCLOSED, not claimed as covered): a cross-line eva
   );
 });
 
-// -----------------------------------------------------------------------------
-// P2: canonical statement pin. Both coder.md and debugger.md must contain the
-// corridor sentence verbatim (case-insensitive, flexible whitespace) rather
-// than three independently-satisfiable scattered keyword matches.
-// -----------------------------------------------------------------------------
-
-const CANONICAL_CORRIDOR_LINE = /probe corridor:\s*in-repo;\s*not \*\.test\.\{mjs,js,ts\};\s*not under \.sterling\//i;
-
-test('P2: coder.md and debugger.md state the canonical probe-corridor line verbatim (case-insensitive, flexible whitespace)', () => {
-  for (const file of ['coder.md', 'debugger.md']) {
-    const content = readTemplate(file);
-    assert.ok(content.length > 0, `${file} must be non-empty (a wiped file would vacuously fail)`);
-    assert.match(
-      content,
-      CANONICAL_CORRIDOR_LINE,
-      `${file} must contain the canonical line: "Probe corridor: IN-REPO; NOT *.test.{mjs,js,ts}; NOT under .sterling/."`
-    );
-  }
-});
+// P2 (canonical probe-corridor-line pin on coder.md/debugger.md) deleted with
+// those two templates — scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1. No surviving template
+// (librarian, researcher, explorer) carries the corridor sentence, so there
+// is no substitute subject to pin it against.

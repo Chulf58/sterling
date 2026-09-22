@@ -8,7 +8,7 @@
 // throw" when the current constructor happily opens a user_version=99 file)
 // — never on a bare crash of the whole file.
 //
-// Ground truth for the pragma itself (research_finding 5555895c): PRAGMA
+// Ground truth for the pragma itself (research_finding foreign_5555895c): PRAGMA
 // user_version lives at header offset 60 and is fully the application's own
 // to use; `schema_version` is SQLite-internal and this feature must never
 // touch it.

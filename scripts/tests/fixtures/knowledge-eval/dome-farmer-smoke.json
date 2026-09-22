@@ -1,0 +1,32 @@
+{
+  "version": "v2",
+  "note": "Synthetic plumbing-only cases for project/plugin separation; these are not gold labels.",
+  "synthetic_cases": [
+    {
+      "id": "dome-farmer-pull-housing-smoke",
+      "version": "v2",
+      "project": "dome-farmer",
+      "channel": "pull",
+      "kind": "query",
+      "recipient": "conductor",
+      "input": { "rank_terms": ["housing", "registry", "bed"], "types": ["feature_article"], "cap": 10 },
+      "labels": { "required": [], "acceptable": ["5f2dd65e-8607-44b1-80ac-51312403376d"], "irrelevant": [] },
+      "negative": false,
+      "source": "synthetic",
+      "rationale": "Plumbing-only query against Dome Farmer's captured project store."
+    },
+    {
+      "id": "dome-farmer-read-housing-smoke",
+      "version": "v2",
+      "project": "dome-farmer",
+      "channel": "push",
+      "kind": "read",
+      "recipient": "conductor",
+      "input": { "events": [{ "tool": "Read", "path": "game/farm/housing.gd", "agent_id": "dome-smoke-child", "note": "Synthetic plumbing-only read of a real Dome Farmer file owned by Housing." }] },
+      "labels": { "required": [], "acceptable": ["5f2dd65e-8607-44b1-80ac-51312403376d"], "irrelevant": [] },
+      "negative": false,
+      "source": "synthetic",
+      "rationale": "Plumbing-only project checkout and per-agent transient-state smoke case."
+    }
+  ]
+}

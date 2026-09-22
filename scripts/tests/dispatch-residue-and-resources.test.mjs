@@ -13,19 +13,19 @@
 //
 // SPEC (given by the launching agent, from board 03ed9d35-32fb-433e-b714-
 // f7ab9e8b68e7 + board 31565253-cc6e-44fa-bb32-06f7b69fef8d, design pass
-// approved 2026-08-24 — see also reference_material a2a17efa §13.4/§13.6 for
+// approved 2026-08-24 — see also reference_material foreign_a2a17efa §13.4/§13.6 for
 // the incidents that motivated both):
 //
 // SPEC A — DEAD-DISPATCH RESIDUE. The H22 register is the sole observable.
 // An entry outliving config.dispatch_register.stale_minutes (default 60,
-// per decision ec9eacaa) whose SubagentStop never fired is an ORPHAN. When
+// per decision foreign_ec9eacaa) whose SubagentStop never fired is an ORPHAN. When
 // an orphan's declared files are git-dirty, ONE conductor-facing residue
 // line fires — at H10's Stop surface, again at H1's SessionStart if it
 // survives to the register wipe — shaped like: "dispatch <type>:<id>
 // stopped holding uncommitted edits to <paths>; its gates did not
 // complete." Separately, a KILL is detectable immediately at H22's own
 // SubagentStop firing (no TTL wait needed) via the real stdin field
-// `last_assistant_message` (confirmed live by research_finding 20b44518):
+// `last_assistant_message` (confirmed live by research_finding foreign_20b44518):
 // empty/absent + dirty declared files -> residue; a normal non-empty final
 // message -> no residue (agents always produce one). A git-probe failure
 // must never silently drop the residue; it prints, marked
@@ -287,7 +287,7 @@ const taskBlock = (name, subagent_type, prompt) => ({ type: 'tool_use', name, in
 // reads the parent transcript; it resolves ONE prompt from the per-dispatch
 // state record written at PreToolUse. Only SPEC B's four Start-side fixtures
 // used a planted transcript, and they now fire the real Pre event instead;
-// every resource-claim assertion is byte-identical. (Decision 41a28e1d's
+// every resource-claim assertion is byte-identical. (Decision foreign_41a28e1d's
 // rejected alternative "mint resource claims under attribution:'union'" is
 // unaffected in substance: the imprecise value is now 'none', and a claim is
 // still minted only for a precisely attributed Start.)
@@ -591,118 +591,11 @@ test('SPEC B (2): a negated mention of a configured resource writes NO exclusive
 
 // --- (B3) H26 warns on a live resource-holder overlap ----------------------
 // EXPECTED RED: h26-dispatch-overlap.mjs has no resource concept at all
-// (grep count 0 per research_finding dff23647's baseline for the sibling
+// (grep count 0 per research_finding foreign_dff23647's baseline for the sibling
 // file-overlap advisory; the resource check does not exist).
 // SABOTAGE: compare only `files`, never `exclusive_resources` — flips this
 // test red while its own no-overlap control (different resource name)
 // stays green.
-test('SPEC B (3): H26 warns when an outgoing brief claims a resource a LIVE register entry already holds', () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    writeRegisterRaw(dir, [liveEntry('holder-2', 'coder', [], { extra: { exclusive_resources: ['windowed-godot'] } })]);
-    const r = runHook(
-      'h26-dispatch-overlap.mjs',
-      h26TaskInput(dir, { subagent_type: 'coder', prompt: 'Run the windowed-godot session to verify the render, then report back.' }),
-      dir
-    );
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = parseAdditionalContext(r) || out(r);
-    assert.match(ctx, /windowed-godot/i, 'advisory names the contested resource');
-    assert.ok(ctx.includes('coder:holder-2'), `advisory names the holding dispatch; got: ${ctx}`);
-  } finally {
-    cleanup();
-  }
-});
-
-// --- (B3) CONTROL: no resource overlap -> silent ---------------------------
-test('SPEC B (3) CONTROL: a live entry holding a DIFFERENT resource than the outgoing claim never warns on resources', () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    writeConfig(dir, { exclusive_resources: ['windowed-godot', 'shared-db-migration'] });
-    writeRegisterRaw(dir, [liveEntry('holder-3', 'coder', [], { extra: { exclusive_resources: ['shared-db-migration'] } })]);
-    const r = runHook(
-      'h26-dispatch-overlap.mjs',
-      h26TaskInput(dir, { subagent_type: 'coder', prompt: 'Run the windowed-godot session to verify the render.' }),
-      dir
-    );
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = parseAdditionalContext(r) || out(r);
-    assert.doesNotMatch(ctx, /shared-db-migration/i, 'the non-overlapping resource is never named');
-    assert.ok(!ctx.includes('coder:holder-3'), 'the non-overlapping holder is never named');
-  } finally {
-    cleanup();
-  }
-});
-
-// --- (B4) resource check fires for a read-only dispatch type, self-controlled
-// Self-controlling in one call: the SAME outgoing dispatch also names a file
-// that overlaps a live entry's FILE territory — per the existing read-only-
-// class exemption (H26 (i) in h25-h26-advisory-precision.test.mjs), a
-// reviewer-class dispatch's FILE overlap must stay silent, while its
-// RESOURCE overlap must still fire — proving the resource check runs BEFORE
-// the read-only early return, not after it.
-// EXPECTED RED: no resource check exists yet at all.
-// SABOTAGE: place the resource check AFTER the read-only-class early return
-// (one line moved) — flips this test's resource assertion red while leaving
-// the file-silence half green (proving the ordering, not the existence, of
-// the resource check is what's under test).
-test('SPEC B (4): the resource check fires for a read-only (reviewer-class) dispatch even though its FILE overlap is suppressed', () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    writeRegisterRaw(dir, [
-      liveEntry('sub-file', 'coder', ['src/shared/util.mjs']),
-      liveEntry('sub-res', 'coder', [], { extra: { exclusive_resources: ['windowed-godot'] } }),
-    ]);
-    const r = runHook(
-      'h26-dispatch-overlap.mjs',
-      h26TaskInput(dir, {
-        subagent_type: 'reviewer-correctness',
-        prompt: 'Review src/shared/util.mjs and also run the windowed-godot session to check the render.',
-      }),
-      dir
-    );
-    assert.equal(r.code, 0, r.stderr);
-    const ctx = parseAdditionalContext(r) || out(r);
-    assert.doesNotMatch(ctx, tokenRe('src/shared/util.mjs'), 'read-only class: file overlap stays suppressed, as today');
-    assert.match(ctx, /windowed-godot/i, 'read-only class: resource overlap still fires — the resource check precedes the early return');
-  } finally {
-    cleanup();
-  }
-});
-
-// --- (B5) unparseable configured name printed uncaveated, never dropped ---
-// EXPECTED RED: no resource check exists yet; once built, a naive
-// implementation might silently drop a name containing regex-special
-// characters rather than escape it.
-// SABOTAGE: build the resource match via an unescaped RegExp from the
-// configured name (special characters throw or fail to match) with the
-// error swallowed and the claim dropped — flips this test red while (B3)
-// (a plain alphanumeric-ish name) stays green.
-test('SPEC B (5): a claimed resource with regex-special characters in its configured name is printed plainly, never dropped', () => {
-  const { dir, cleanup } = makeGitProject();
-  try {
-    const oddName = 'godot (v2.x)';
-    writeConfig(dir, { exclusive_resources: [oddName] });
-    writeRegisterRaw(dir, [liveEntry('holder-odd', 'coder', [], { extra: { exclusive_resources: [oddName] } })]);
-    const r = runHook(
-      'h26-dispatch-overlap.mjs',
-      h26TaskInput(dir, { subagent_type: 'coder', prompt: `Run the ${oddName} session to verify the render.` }),
-      dir
-    );
-    assert.notEqual(r.code, 2, `must never deny; stderr: ${r.stderr}`);
-    const ctx = parseAdditionalContext(r) || out(r);
-    assert.ok(ctx.includes(oddName), `the oddly-named resource is named plainly, uncaveated; got: ${ctx}`);
-    assert.doesNotMatch(ctx, /possibl|maybe|uncertain|might be/i, 'the claim is stated, not hedged');
-  } finally {
-    cleanup();
-  }
-});
-
-// --- (B6) SubagentStart injection: "you do not hold <resource>" -----------
-// EXPECTED RED: no such injection exists today.
-// SABOTAGE: compute "who holds resource X" by scanning the register BEFORE
-// pruning foreign/stale entries, or simply never emit the notice — flips
-// this test red while its own control (B6-control below) stays green.
 test('SPEC B (6): SubagentStart injects "you do not hold <resource>" naming the live holder, for a spawn that does not itself claim it', () => {
   const { dir, cleanup } = makeGitProject();
   try {

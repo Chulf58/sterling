@@ -13,8 +13,8 @@
 // SPEC (from the store, NOT from reading the hook — this author holds a read
 // wall over implementation):
 //
-// AC18 of feature_article h10-direct-capture-gate (1e1544e3, v101), verbatim:
-//   "FAN-OUT-AWARE DEFERRAL (decision ec9eacaa): touched files owned by a LIVE
+// AC18 of feature_article h10-direct-capture-gate (foreign_1e1544e3, v101), verbatim:
+//   "FAN-OUT-AWARE DEFERRAL (decision foreign_ec9eacaa): touched files owned by a LIVE
 //    H22 register entry (same session_id, 0 <= age < config.dispatch_register.
 //    stale_minutes) are excluded from the capture trigger set AND THE
 //    ARTICLE-DEMAND UNOWNED SET; ... duties re-arm on the first Stop after the
@@ -23,7 +23,7 @@
 // trigger set ... and from the article-demand unowned set", and adds "research
 // and concept duties are untouched".
 //
-// Decision ec9eacaa REJECTED the alternative "Defer research/concept duties too
+// Decision foreign_ec9eacaa REJECTED the alternative "Defer research/concept duties too
 // when any dispatch is live", reason: "Those duties are file-less and keyed to
 // conductor-registered events ... a live dispatch owns files, not the
 // conductor's own research/design debts; muting them would widen the deferral
@@ -31,7 +31,7 @@
 // DEFERRED. That is a settled ruling, so C0/C1 below pin it as behaviour that
 // must SURVIVE the defect-1 fix, rather than documenting an open question.
 //
-// AC14 + decision bd594c03: capture_pending covers touches/debug events before
+// AC14 + decision foreign_bd594c03: capture_pending covers touches/debug events before
 // AND after the declaration; first pending Stop allows WITHOUT clearing the
 // registers; second pending Stop converts to exactly ONE deduped capture_owed
 // citing the target, then clears. Board cb457cbd narrows this: WHILE THE NAMED
@@ -299,7 +299,7 @@ test('A2 (DEFECT 1, RED at HEAD): the THRESHOLD counts the SUBTRACTED set — tw
 });
 
 // ===========================================================================
-// CONCEPT DEMAND — decision ec9eacaa's REJECTED alternative settles this: the
+// CONCEPT DEMAND — decision foreign_ec9eacaa's REJECTED alternative settles this: the
 // file-less duties are NOT deferred. C0 is C1's control arm: same fixture,
 // concept event removed, so C1's exit 2 can only be caused by the concept duty.
 // Both are expected GREEN at HEAD; they exist to stop the defect-1 fix from
@@ -325,7 +325,7 @@ test('C0 (CONTROL for C1 — placed first): the same wholly-deferred fixture WIT
   }
 });
 
-test('C1: a concept_designed duty is NOT deferred by a live dispatch — the file-less duty still fires while every touched file is deferred (decision ec9eacaa rejected deferring research/concept duties)', () => {
+test('C1: a concept_designed duty is NOT deferred by a live dispatch — the file-less duty still fires while every touched file is deferred (decision foreign_ec9eacaa rejected deferring research/concept duties)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     touchRegister(dir, [CFILE]);
@@ -334,7 +334,7 @@ test('C1: a concept_designed duty is NOT deferred by a live dispatch — the fil
     writeRegisterRaw(dir, [liveEntry('sub-concept', [CFILE], 'coder')]);
 
     const r = stopOnce(dir);
-    assert.equal(r.code, 2, 'OVER-DEFERRAL SHAPE if this fires as 0: a live dispatch owns FILES, never the conductor\'s own settled-design debt — muting the concept demand widens the deferral past what decision ec9eacaa allows');
+    assert.equal(r.code, 2, 'OVER-DEFERRAL SHAPE if this fires as 0: a live dispatch owns FILES, never the conductor\'s own settled-design debt — muting the concept demand widens the deferral past what decision ec9eacaa allows'); // not-a-citation: fixture id
     assert.match(r.stderr, new RegExp(FAMILY), 'the nag names the family whose concept article is missing');
     assert.doesNotMatch(r.stderr, /nothing was captured/, 'the capture duty is satisfied — the concept duty, not the capture duty, is what fired');
   } finally {
@@ -485,7 +485,7 @@ test('P3 (ZERO-QUEUE-NOISE, unchanged by the carry): a capture landing WHILE the
 // needs one to survive.
 //
 // THE PROPERTY, stated exactly (anti-drift; this is what makes the carry safe
-// at all — AC14 + decision bd594c03 + board cb457cbd, P5):
+// at all — AC14 + decision foreign_bd594c03 + board cb457cbd, P5):
 //   once the NAMED TARGET lands, a still-pending duty becomes exactly ONE
 //   deduped capture_owed citing the target, EVEN IF OTHER DISPATCHES ARE STILL
 //   LIVE.

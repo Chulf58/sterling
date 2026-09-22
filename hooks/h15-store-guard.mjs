@@ -6,8 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h15-store-guard.mjs
-import { existsSync as existsSync2, realpathSync as realpathSync3, statSync as statSync3 } from "node:fs";
-import { dirname as dirname2, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2, sep as sep3 } from "node:path";
+import { basename, isAbsolute, resolve as resolve2, sep } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -3662,23 +3661,23 @@ var ZodEffects = class extends ZodType {
     }
     if (effect.type === "transform") {
       if (ctx.common.async === false) {
-        const base2 = this._def.schema._parseSync({
+        const base3 = this._def.schema._parseSync({
           data: ctx.data,
           path: ctx.path,
           parent: ctx
         });
-        if (!isValid(base2))
+        if (!isValid(base3))
           return INVALID;
-        const result = effect.transform(base2.value, checkCtx);
+        const result = effect.transform(base3.value, checkCtx);
         if (result instanceof Promise) {
           throw new Error(`Asynchronous transform encountered during synchronous parse operation. Use .parseAsync instead.`);
         }
         return { status: status.value, value: result };
       } else {
-        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base2) => {
-          if (!isValid(base2))
+        return this._def.schema._parseAsync({ data: ctx.data, path: ctx.path, parent: ctx }).then((base3) => {
+          if (!isValid(base3))
             return INVALID;
-          return Promise.resolve(effect.transform(base2.value, checkCtx)).then((result) => ({
+          return Promise.resolve(effect.transform(base3.value, checkCtx)).then((result) => ({
             status: status.value,
             value: result
           }));
@@ -4195,6 +4194,11 @@ var baselineAttestationsSchema = external_exports.record(external_exports.string
   head_commit: external_exports.string().min(1),
   sha256: external_exports.string().min(1)
 })).optional();
+var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1)
+}).strict()).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4214,12 +4218,13 @@ var featureArticleSchema = base.extend({
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
   // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision 65222971 → its baseline successor).
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
   // above, which reference_material shares so the shape is defined once.
   baseline_attestations: baselineAttestationsSchema,
-  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  absence_attestations: absenceAttestationsSchema,
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
   article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
@@ -4229,7 +4234,7 @@ var featureArticleSchema = base.extend({
   // superRefine below, since "which kind" is a whole-record fact a single
   // field's shape cannot express alone.
   current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -4243,7 +4248,7 @@ var featureArticleSchema = base.extend({
   // ownership) resolve per record or abstain LOUD on an unmapped name.
   working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision 474b1c71).
+  // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -4273,20 +4278,20 @@ var featureArticleSchema = base.extend({
     ["live_test_refs", rec.live_test_refs, "real content (ac_id/test_paths)"],
     ["current_ac", rec.current_ac, "real content (ac_id/text)"]
   ];
-  for (const [field, value, contentHint] of gated) {
+  for (const [field2, value, contentHint] of gated) {
     const exempt = isExempt(value);
     if (exempt && !exemptKind) {
       ctx.addIssue({
         code: external_exports.ZodIssueCode.custom,
-        path: [field],
-        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field} \u2014 only kind probe/tool may; other kinds must supply real content`
+        path: [field2],
+        message: `article_kind '${rec.article_kind}' cannot use the not_applicable exemption on ${field2} \u2014 only kind probe/tool may; other kinds must supply real content`
       });
     }
     if (!exempt && Array.isArray(value) && value.length === 0 && exemptKind) {
       ctx.addIssue({
         code: external_exports.ZodIssueCode.custom,
-        path: [field],
-        message: `${field} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
+        path: [field2],
+        message: `${field2} must not be empty on article_kind '${rec.article_kind}' \u2014 write ${contentHint}, or the structured not_applicable exemption`
       });
     }
   }
@@ -4322,7 +4327,7 @@ var researchFindingSchema = base.extend({
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
@@ -4363,6 +4368,7 @@ var referenceMaterialSchema = base.extend({
   // naked baseline whose provenance lied about which write produced it. Shape
   // shared with featureArticleSchema, never re-declared.
   baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -4464,7 +4470,7 @@ var SYSTEM_REASONS = [
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -4523,7 +4529,7 @@ var todoSchema = base.extend({
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
   system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -4599,104 +4605,14 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  scout: "scout",
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4713,79 +4629,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -4855,7 +4698,7 @@ var configSchema = external_exports.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -4885,57 +4728,31 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
-  }).default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
     stale_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -4946,41 +4763,24 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5008,7 +4808,7 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -5065,7 +4865,7 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -5075,39 +4875,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5130,7 +4897,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -5151,33 +4918,25 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard used for other config-derived delivery values.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
@@ -5189,7 +4948,7 @@ var configSchema = external_exports.object({
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
   }).default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -5201,36 +4960,15 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
-function parseConfig(raw) {
-  return configSchema.parse(raw);
-}
 
 // packages/schemas/dist/registry.js
 var projectRegistrationSchema = external_exports.object({
@@ -5268,7 +5006,25 @@ import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
 var MAX_RANK_TERMS = 16;
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base3 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base3.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base3;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
@@ -5393,910 +5149,464 @@ var { exitAfterWrite, allow, deny, warnNonBlocking } = makeExitHelpers({
   stderr: process.stderr,
   exit: (code) => process.exit(code)
 });
-function environmentDefectDenial(gateName, detail, opts = {}) {
-  const audienceAware = "agentId" in opts;
-  const { agentId, selfHeal } = opts;
-  const repair = "repair it (or restart the session) before proceeding";
-  const noConductorAbove = `there is no conductor above you to exit \`blocked\` to \u2014 ${repair}.`;
-  const agentFacing = `Do not diagnose, repair, or retry ${gateName} yourself \u2014 exit \`blocked\`, citing this message VERBATIM, and let the conductor fix the environment.`;
-  let instruction;
-  if (selfHeal) {
-    const resolution = !audienceAware || agentId ? "exit `blocked` citing it." : noConductorAbove;
-    instruction = `${selfHeal.action} ${selfHeal.onRepeat}, ${resolution}`;
-  } else if (audienceAware && !agentId) {
-    instruction = `This is broken state, and ${noConductorAbove}`;
-  } else {
-    instruction = agentFacing;
-  }
-  return `\u26A0 ENVIRONMENT DEFECT (${gateName}): this denial is about BROKEN STATE, not your conduct. ${detail} ${instruction}`;
-}
-function loadConfig(cwd) {
-  const p = join(cwd, ".sterling", "config.json");
-  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : null;
-}
-
-// scripts/lib/store-remediation.mjs
-var SANCTIONED_SCRIPTS = Object.freeze([
-  "scripts/dispose-run.mjs",
-  "scripts/init.mjs",
-  "scripts/consume-exit.mjs",
-  "scripts/architecture-projection.mjs",
-  "scripts/domain-doctor.mjs",
-  "scripts/commit-reviewed.mjs",
-  "scripts/migration-preflight.mjs",
-  "scripts/migrate-stores.mjs",
-  "packages/tui/bundle/sterling-tui.mjs",
-  // INDIVIDUAL DISPOSITION, not a bulk add (decision 1434cd54 Ruling 6 forbids
-  // bulk-adding the 12 unsanctioned store-writers; this one earned its own).
-  // Decision 57984926 (3) makes `scripts/review-ledger.mjs discharge` the ONE
-  // explicit route for a receipt that can never be spent, and H1's SessionStart
-  // report PRINTS that route. Without this entry H15 denies it, which is exactly
-  // the shape Ruling 2 names as its sharpest finding — "the sanctioned recovery
-  // route ... is UNREACHABLE BY ITS OPERATOR" — and what the consuming project
-  // reported on 2026-09-03. A remedy the guard denies is not a remedy.
-  // The verb is not a general store-write grant: discharge refuses without a
-  // selector, a matching SHA-256 ledger digest, a recognized class and a reason,
-  // and it can only supersede an entry that already exists.
-  "scripts/review-ledger.mjs",
-  // INDIVIDUAL DISPOSITION (decision 1434cd54 Ruling 1 called this a TEMPORARY
-  // machine-local workaround; Ruling 6 forbids bulk-adding the unsanctioned
-  // writers). Decision 665be1f3 states it outright: "the writer is a small
-  // sanctioned CLI (scripts/rotation-note.mjs, no-capture.mjs precedent)" — it
-  // was DESIGNED as sanctioned and never wired in. Board 77fe18af, slice 1b.
-  "scripts/rotation-note.mjs",
-  // INDIVIDUAL DISPOSITION (decision 1434cd54): H10's Stop message prints the
-  // exact `node scripts/no-capture.mjs ...` command line as the sanctioned
-  // route to discharge a capture duty; a denied printed remedy is not a
-  // remedy. Board 77fe18af, slice 1b.
-  "scripts/no-capture.mjs",
-  // INDIVIDUAL DISPOSITION (decision 1434cd54): H5's frozen-test-wall denial
-  // names `scripts/test-repair.mjs` as THE sanctioned route past the wall.
-  // Board 77fe18af, slice 1b.
-  "scripts/test-repair.mjs",
-  // INDIVIDUAL DISPOSITION (board a6b118e4 point 9): the layer-1 conformance
-  // audit (scripts/delivery-oracle.mjs) must be runnable by a Bash-gated
-  // agent, not only by hand. Rides slice 1b's commit cycle as a fourth
-  // disposition.
-  "scripts/delivery-oracle.mjs",
-  // INDIVIDUAL DISPOSITION (decision plan-lock-approved-plan-bound-at-exit-plan-
-  // mode-delivered-at-every-reentry): the manual plan-lock writer is the ONLY
-  // route to release a lock, to record an observed plan edit, or to bind a plan
-  // when ExitPlanMode could not — and H1's PLAN LOCK section PRINTS those verbs
-  // as the remedy. A printed remedy the guard denies is not a remedy.
-  "scripts/plan-lock.mjs"
-]);
-function appendMissingSanctioned(allowScripts2) {
-  if (!Array.isArray(allowScripts2)) {
-    throw new Error(
-      `appendMissingSanctioned: allow_scripts must be an array, got ${allowScripts2 === null ? "null" : typeof allowScripts2}`
-    );
-  }
-  const existing = allowScripts2;
-  const added = SANCTIONED_SCRIPTS.filter((s) => !existing.includes(s));
-  return { next: added.length ? [...existing, ...added] : existing, added };
-}
-
-// scripts/hooks/lib/plugin-root.mjs
-import { realpathSync, statSync } from "node:fs";
-import { join as join2, sep } from "node:path";
-import { fileURLToPath } from "node:url";
-var realNative = realpathSync.native ?? realpathSync;
-var toPosix = (p) => String(p).split(sep).join("/");
-var ABSENT_CODES = /* @__PURE__ */ new Set(["ENOENT", "ENOTDIR"]);
-var PLUGIN_MARKERS = [
-  [".claude-plugin/plugin.json", (dir) => statSync(join2(dir, ".claude-plugin", "plugin.json")).isFile()],
-  ["hooks/", (dir) => statSync(join2(dir, "hooks")).isDirectory()],
-  ["hooks/hooks.json", (dir) => statSync(join2(dir, "hooks", "hooks.json")).isFile()]
-];
-function probePluginLayout(dir) {
-  for (const [name, probe] of PLUGIN_MARKERS) {
-    let ok = false;
-    let threw = null;
-    try {
-      ok = probe(dir);
-    } catch (e) {
-      ok = false;
-      threw = ABSENT_CODES.has(e && e.code) ? null : e;
-    }
-    if (!ok) return { ok: false, missing: name, unreadable: threw !== null, error: threw };
-  }
-  return { ok: true, missing: null, unreadable: false, error: null };
-}
-function pluginLayoutFailure(dir) {
-  const r = probePluginLayout(dir);
-  return r.ok ? null : r.missing;
-}
-var WALK_UP_LIMIT = 6;
-function resolveActivePluginRoot(moduleUrl, env = process.env) {
-  let dir;
-  try {
-    dir = fileURLToPath(new URL(".", moduleUrl));
-  } catch (e) {
-    return {
-      root: null,
-      source: "walk-up",
-      reason: `the running hook's own module URL could not be resolved to a path (${e && e.message || e}); no sanctioned-script exemption is available and the test seam is not consulted.`
-    };
-  }
-  let walkUpFailure;
-  {
-    let lastFailure = null;
-    for (let i = 0; i < WALK_UP_LIMIT; i++) {
-      const probe = probePluginLayout(dir);
-      if (probe.unreadable) {
-        return {
-          root: null,
-          source: "walk-up",
-          reason: `the plugin-layout marker ${probe.missing} at ${toPosix(dir)} could not be READ (${probe.error && probe.error.code || probe.error && probe.error.message || probe.error}); an unreadable marker on the running hook's own walk-up is a fault, not an absence, so no sanctioned-script exemption is available and the test seam is not consulted.`
-        };
-      }
-      const missing = probe.missing;
-      if (!missing) {
-        let canonical;
-        try {
-          canonical = realNative(dir);
-        } catch (e) {
-          return {
-            root: null,
-            source: "walk-up",
-            reason: `the active plugin root ${toPosix(dir)} could not be canonicalized (${e && e.code || e && e.message || e}); no sanctioned-script exemption is available.`
-          };
-        }
-        return { root: canonical, source: "walk-up", reason: `active plugin root ${toPosix(canonical)} (derived from the running hook's own location)` };
-      }
-      lastFailure = { dir, missing };
-      const parent = join2(dir, "..");
-      if (parent === dir) break;
-      dir = parent;
-    }
-    walkUpFailure = `no ancestor within ${WALK_UP_LIMIT} levels of the running hook's own location carries the plugin layout (nearest candidate ${toPosix(lastFailure?.dir ?? "")} is missing ${lastFailure?.missing ?? ".claude-plugin/plugin.json"})`;
-  }
-  const seam = typeof env?.STERLING_PLUGIN_ROOT === "string" ? env.STERLING_PLUGIN_ROOT.trim() : "";
-  if (seam !== "") {
-    const missing = pluginLayoutFailure(seam);
-    if (missing) {
-      return {
-        root: null,
-        source: "seam",
-        reason: `the active plugin root named by STERLING_PLUGIN_ROOT (${toPosix(seam)}) FAILED PLUGIN LAYOUT VALIDATION \u2014 the marker ${missing} is absent. A root whose layout cannot be validated is not trusted (the seam was consulted because ${walkUpFailure}), so no sanctioned-script exemption is available.`
-      };
-    }
-    let canonical;
-    try {
-      canonical = realNative(seam);
-    } catch (e) {
-      return {
-        root: null,
-        source: "seam",
-        reason: `the active plugin root named by STERLING_PLUGIN_ROOT (${toPosix(seam)}) could not be canonicalized (${e && e.code || e && e.message || e}); no sanctioned-script exemption is available.`
-      };
-    }
-    return {
-      root: canonical,
-      source: "seam",
-      reason: `active plugin root ${toPosix(canonical)} (STERLING_PLUGIN_ROOT test seam, layout-validated; consulted because ${walkUpFailure})`
-    };
-  }
-  return {
-    root: null,
-    source: "walk-up",
-    reason: `no ACTIVE PLUGIN ROOT could be derived from the running hook's own location \u2014 ${walkUpFailure}. An unresolvable plugin root WITHHOLDS every sanctioned-script exemption rather than granting one.`
-  };
-}
-
-// scripts/hooks/lib/sanctioned-provenance.mjs
-import { realpathSync as realpathSync2, statSync as statSync2 } from "node:fs";
-import { isAbsolute, relative, sep as sep2 } from "node:path";
-var realNative2 = realpathSync2.native ?? realpathSync2;
-var toPosix2 = (p) => String(p).split(sep2).join("/");
-var WORD_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
-var WIN32_DRIVE_WORD_SYNTAX = /^[A-Za-z]:\/[A-Za-z0-9_./+-]+$/;
-function wordSyntaxAdmits(word, platform = process.platform) {
-  if (typeof word !== "string") return false;
-  if (WORD_SYNTAX.test(word)) return true;
-  if (platform === "win32" && WIN32_DRIVE_WORD_SYNTAX.test(word)) return true;
-  return false;
-}
-function sanctionedProvenance(word, entries, opts) {
-  const pluginRoot = opts?.pluginRoot ?? { root: null, reason: "no plugin root was supplied to the provenance check" };
-  const cwd = opts?.cwd;
-  const entrySet = Array.isArray(entries) ? entries : [];
-  const named = `compared against the sanctioned entry set [${entrySet.join(", ")}]`;
-  if (typeof word !== "string" || word === "") {
-    return { allow: false, candidate: null, reason: "no executable candidate could be read from the fragment; no exemption." };
-  }
-  if (!pluginRoot.root) {
-    return { allow: false, candidate: null, reason: pluginRoot.reason };
-  }
-  if (!wordSyntaxAdmits(word)) {
-    return {
-      allow: false,
-      candidate: null,
-      reason: `the executable candidate ${JSON.stringify(word)} is outside the sanctionable word syntax (letters, digits and _ . / + - only, plus a win32 forward-slash drive-absolute form on win32 \u2014 no backslash, ~, $, backtick or glob; a colon only in the win32 forward-slash drive form). Not sanctioned.`
-    };
-  }
-  if (typeof cwd !== "string" || cwd === "") {
-    return { allow: false, candidate: null, reason: "the project cwd is unknown, so a relative candidate cannot be resolved the way the shell would resolve it; no exemption." };
-  }
-  const rawCandidate = isAbsolute(word) ? word : `${String(cwd).replace(/[\\/]+$/, "")}${sep2}${word}`;
-  let canonicalCandidate;
-  try {
-    canonicalCandidate = realNative2(rawCandidate);
-  } catch (e) {
-    return {
-      allow: false,
-      candidate: null,
-      reason: `the executable candidate ${JSON.stringify(word)} (resolved from the project cwd as ${toPosix2(rawCandidate)}) could not be canonicalized (${e && e.code || e && e.message || e}) \u2014 it does not exist, or it is a dangling symlink. A candidate that cannot be resolved to a regular file inside the active plugin root is DENIED; there is no bare-name fallback.`
-    };
-  }
-  let stat;
-  try {
-    stat = statSync2(canonicalCandidate);
-  } catch (e) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which could not be stat'd (${e && e.code || e && e.message || e}). Not sanctioned.`
-    };
-  }
-  if (!stat.isFile()) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which is NOT A REGULAR FILE (${stat.isDirectory() ? "directory" : "special file"}). A sanctioned entry names a shipped script; not sanctioned.`
-    };
-  }
-  const rel = relative(pluginRoot.root, canonicalCandidate);
-  const escapes = rel === "" || rel === ".." || rel.startsWith(`..${sep2}`) || rel.startsWith("../") || isAbsolute(rel);
-  if (escapes) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)}, which is OUTSIDE the active plugin root ${toPosix2(pluginRoot.root)}. Provenance binds the FILE, not the spelling: a project-local file matching a sanctioned NAME is a different file from the shipped one. Not sanctioned.`
-    };
-  }
-  const relPosix = toPosix2(rel);
-  const matched = entrySet.some((entry) => {
-    const e = typeof entry === "string" ? entry.startsWith("./") ? entry.slice(2) : entry : null;
-    return e !== null && relPosix === e;
-  });
-  if (!matched) {
-    return {
-      allow: false,
-      candidate: canonicalCandidate,
-      reason: `the executable candidate resolved to ${toPosix2(canonicalCandidate)} \u2014 a real file inside the active plugin root ${toPosix2(pluginRoot.root)}, at clone-relative path ${relPosix}, which is not ${named}. Not sanctioned.`
-    };
-  }
-  return {
-    allow: true,
-    candidate: canonicalCandidate,
-    reason: `sanctioned: ${toPosix2(canonicalCandidate)} is the shipped ${relPosix} inside the active plugin root ${toPosix2(pluginRoot.root)}.`
-  };
-}
 
 // scripts/hooks/h15-store-guard.mjs
+var DB_FILE_RE = /^sterling\.db(?:-wal|-shm|-journal|\..+)?$/i;
 var input;
 try {
   input = readStdin();
 } catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `[stdin] hook input could not be read or parsed (${e && e.message || e}) \u2014 a gate that cannot read its own input has verified nothing, so it fails CLOSED (P5). An uncaught throw here would exit non-2, which the hook runner treats as NON-BLOCKING (the command would be ALLOWED unexamined). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise:`,
-      { agentId: void 0 }
-    )
-  );
+  deny(`H15: hook input could not be read (${e && e.message || e}) \u2014 a gate that cannot read its input fails closed (P5).`);
 }
-var inSterlingProject;
-try {
-  inSterlingProject = Boolean(input.cwd) && existsSync2(join3(input.cwd, ".sterling"));
-} catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `[cwd] the hook input's cwd could not be resolved to a project path (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
-      // OPTIONAL CHAIN, not decoration: a fail-closed HANDLER that can itself
-      // throw exits non-2 and voids the gate (the F5 class this file exists to
-      // avoid). MEASURED 2026-08-27: no reachable input lands here with a
-      // non-object `input` — stdin `null` throws inside readStdin's own
-      // `projectRoot(input.cwd)` and is caught above, and a primitive/array
-      // input yields `undefined` cwd, which takes the not-a-Sterling-project
-      // allow branch without ever throwing. So this is belt-and-braces on an
-      // unreachable path, kept because the cost is one character and the
-      // failure mode it forecloses is a silently voided blocking gate.
-      { agentId: input?.agent_id }
-    )
-  );
+function namesStoreComponent(absPath) {
+  const win32 = sep === "\\";
+  return absPath.split(win32 ? /[\\/]+/ : /\/+/).some((c) => (win32 ? c.replace(/[. ]+$/, "") : c).toLowerCase() === ".sterling");
 }
-function structuredWriteDestinationField(toolName) {
-  switch (toolName) {
-    case "Edit":
-    case "Write":
-    case "MultiEdit":
-      return "file_path";
-    case "NotebookEdit":
-      return "notebook_path";
-    default:
-      return null;
+function skipQuoted(s, i) {
+  if (s[i] === "'") {
+    const j2 = s.indexOf("'", i + 1);
+    return j2 === -1 ? s.length : j2 + 1;
   }
+  let j = i + 1;
+  while (j < s.length && s[j] !== '"') j += s[j] === "\\" ? 2 : 1;
+  return Math.min(j + 1, s.length);
 }
-function isCommandChannelTool(toolName) {
-  return toolName === "Bash" || toolName === "PowerShell";
-}
-function namesStoreComponent(normalizedAbs) {
-  const win32 = sep3 === "\\";
-  const components = normalizedAbs.split(win32 ? /[\\/]+/ : /\/+/);
-  return components.some(
-    (component) => (win32 ? component.replace(/[. ]+$/, "") : component).toLowerCase() === ".sterling"
-  );
-}
-function pathIsInside(parentAbs, childAbs) {
-  const rel = relative2(parentAbs, childAbs);
-  if (rel === "") return true;
-  if (isAbsolute2(rel)) return false;
-  return rel !== ".." && !rel.startsWith(".." + sep3);
-}
-function pathIsInsideEitherCase(parentAbs, childAbs) {
-  if (pathIsInside(parentAbs, childAbs)) return true;
-  return pathIsInside(parentAbs.toLowerCase(), childAbs.toLowerCase());
-}
-function ancestorExists(p) {
-  try {
-    statSync3(p);
-    return true;
-  } catch (e) {
-    const code = e && e.code || "UNKNOWN";
-    if (code === "ENOENT" || code === "ENOTDIR") return false;
-    throw new Error(
-      `[canonical-layer] the path component ${p} could not be examined (${code}); an unreadable component is not an absent one \u2014 a same-user writer may still traverse it (Windows ACLs, some SMB/drop-box shares), so walking past it could resolve the wrong ancestor and miss a symlink into the store`
-    );
-  }
-}
-function canonicalViaNearestAncestor(absPath) {
-  let anchor = absPath;
-  while (!ancestorExists(anchor)) {
-    const parent = dirname2(anchor);
-    if (parent === anchor) return null;
-    anchor = parent;
-  }
-  const suffix = relative2(anchor, absPath);
-  const real = realpathSync3(anchor);
-  return suffix === "" ? real : join3(real, suffix);
-}
-function storeDestinationDenial(toolName, field, submitted, evidence) {
-  return `H15: this ${toolName} call targets a Sterling store and is denied \u2014 a store is read and written through the \xA710 MCP tool surface ONLY, never by a direct file edit.
-Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${evidence}.
-THE DESTINATION DECIDES, NOT THE CALLER'S CWD: every \`.sterling\` directory this call can name is protected, whichever project owns it. A session launched in another project (or with any other cwd) could otherwise write a different checkout's review-ledger.json \u2014 the file the merge gate reads to refuse unreviewed commits \u2014 its enforcement-baseline.json, or its config.json. That was a CONFIRMED bypass, reproduced by execution 2026-09-06.
-PROTECTED SCOPE is the WHOLE .sterling namespace, the directory itself included: sterling.db and its backups, review-ledger.json, config.json, transient/, delivery-audit/, enforcement-baseline.json. Containment is decided by comparing the RESOLVED destination's path COMPONENTS under the HOST's name rules (case-folded, and on Windows with each component's trailing dots and spaces dropped, since Win32 opens \`.sterling.\` and \`.sterling \` as the real directory), never by a per-file allowlist and never by a string prefix.
-NO sanctioned-script exemption exists on this path: store_guard.allow_scripts authenticates an EXECUTABLE by resolved file identity, and a structured edit call has no executable provenance to authenticate.
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-REMEDY for config.json specifically: use the config_set MCP tool (an allowlisted, schema-validated key write) or the TUI System tab \u2014 never a raw edit of the file. CONDUCTOR-RUN: config_set is not granted to roster agents by design, so a subagent hitting this denial has no config_set of its own to fall back on \u2014 surface the need to the conductor instead.
-WHAT THIS DENIAL DOES NOT CLAIM, so the guard is not trusted past its reach: it gates the agent/conductor TOOL CHANNEL only \u2014 a process writing the file directly (an allowlisted script, the TUI, an external editor) is unaffected; a pre-existing HARD LINK to a store file is "outside" every test performed here; check and write are separate resolutions of the same string (TOCTOU); and a symlink into ANOTHER project's store is not covered, deliberately.
-If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface.`;
-}
-function unusableDestinationDenial(toolName, field, submitted) {
-  const seen = submitted === void 0 ? "absent" : submitted === null ? "null" : typeof submitted === "string" ? "an empty/whitespace-only string" : Array.isArray(submitted) ? "a value of type 'array'" : `a value of type '${typeof submitted}'`;
-  return `H15: this ${toolName} call carries no usable destination path, so it is denied.
-Required field: tool_input.${field} \u2014 received: ${seen}.
-The TYPE is checked before any path helper on purpose: a String() coercion would launder an array or an object into a plausible-looking path, and this gate would then decide containment on the laundered value.
-Without a destination H15 cannot establish that the Sterling store (.sterling/) is untouched, and a gate that cannot decide fails CLOSED (P5).
-Re-issue the call with an explicit path. If the tool genuinely sends its destination under another field, that is a platform change and it must be added to this gate \u2014 never worked around.`;
-}
-function undecidableDestinationDenial(toolName, field, submitted, reason) {
-  return `H15: the destination of this ${toolName} call could not be resolved, so it is denied.
-Submitted tool_input.${field}: ${JSON.stringify(submitted)} \u2014 ${reason}.
-A containment question this gate cannot answer is answered CLOSED (P5): H15 cannot establish that the Sterling store (.sterling/) is untouched, and answering "outside" on an unresolvable path is how a guard is walked past.`;
-}
-function unrecognizedToolDenial(toolName) {
-  return `H15: this call names a tool H15 does not recognize (${JSON.stringify(toolName)}), so it is denied.
-H15 judges exactly two channels: the shell channel (Bash, PowerShell), whose destination lives in the command text, and the structured-write channel (Edit, Write, MultiEdit, NotebookEdit), whose destination is an explicit tool_input field. A tool outside both has no known destination field, so this gate cannot establish that the Sterling store (.sterling/) is untouched \u2014 and a gate that cannot decide fails CLOSED (P5).
-No such call is agent-reachable today \u2014 hooks/hooks.json routes only those six names here \u2014 so this branch is DEFENCE IN DEPTH against a platform RENAME silently retiring the whole arm, not a demonstrated exploit.
-If a platform change renamed or added a writing tool, ADD IT TO THIS GATE (structuredWriteDestinationField, or isCommandChannelTool for a new shell) \u2014 never route the write around the gate, and never widen hooks/hooks.json without widening this file.`;
-}
-try {
-  const destinationField = structuredWriteDestinationField(input.tool_name);
-  if (destinationField === null) {
-    if (!isCommandChannelTool(input.tool_name)) deny(unrecognizedToolDenial(input.tool_name));
-  } else {
-    const submitted = input.tool_input?.[destinationField];
-    if (typeof submitted !== "string" || submitted.trim() === "") {
-      deny(unusableDestinationDenial(input.tool_name, destinationField, submitted));
-    }
-    const base2 = typeof input.cwd === "string" ? input.cwd : "";
-    if (!isAbsolute2(submitted) && base2 === "") {
-      deny(
-        undecidableDestinationDenial(
-          input.tool_name,
-          destinationField,
-          submitted,
-          "it is a relative path and this call carries no usable cwd to resolve it against"
-        )
-      );
-    }
-    const destination = isAbsolute2(submitted) ? resolve2(submitted) : resolve2(base2, submitted);
-    if (namesStoreComponent(destination)) {
-      deny(
-        storeDestinationDenial(
-          input.tool_name,
-          destinationField,
-          submitted,
-          `it resolves to ${destination}, which carries a '.sterling' directory component (compared under the host's name rules: case-folded, and on win32 with each component's trailing dots and spaces dropped)`
-        )
-      );
-    }
-    if (inSterlingProject && pathIsInsideEitherCase(base2, destination)) {
-      const canonical = canonicalViaNearestAncestor(destination);
-      if (canonical === null) {
-        deny(
-          undecidableDestinationDenial(
-            input.tool_name,
-            destinationField,
-            submitted,
-            `no existing ancestor of ${destination} could be resolved, so a symlink leading into the store cannot be ruled out`
-          )
-        );
-      }
-      if (namesStoreComponent(canonical)) {
-        deny(
-          storeDestinationDenial(
-            input.tool_name,
-            destinationField,
-            submitted,
-            `it canonicalizes, via its nearest existing ancestor, to ${canonical}, which carries a '.sterling' directory component \u2014 the submitted spelling reaches the store through a symlink`
-          )
-        );
-      }
-    }
-    allow();
-  }
-} catch (e) {
-  deny(
-    `\u26A0 ENVIRONMENT DEFECT (H15): this denial is about BROKEN STATE, not your conduct. [structured-write] the store-destination check for this tool call could not be completed (${e && e.message || e}); the gate fails CLOSED rather than risk a silent void (P5). IF YOU ARE A SPAWNED AGENT: do not diagnose, repair, or retry H15 yourself \u2014 exit \`blocked\`, citing this message VERBATIM. Otherwise this is broken state, and there is no conductor above you to exit \`blocked\` to \u2014 repair it (or restart the session) before proceeding.`
-  );
-}
-if (!inSterlingProject) allow();
-var command = String(input.tool_input?.command ?? "");
-var STORE_MENTION_RE = /\.sterling(?![\w.-])|sterling\.db/i;
-var DB_MENTION_RE = /sterling\.db/i;
-var mentionsStore;
-try {
-  mentionsStore = STORE_MENTION_RE.test(command) || STORE_MENTION_RE.test(unquotedText(command));
-} catch (e) {
-  deny(
-    environmentDefectDenial(
-      "H15",
-      `Internal error while preprocessing the command text for the store-mention check (${e && e.message || e}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input?.agent_id }
-      // same handler-cannot-throw rule as the [cwd] catch above
-    )
-  );
-}
-if (!mentionsStore) allow();
-var allowScripts;
-try {
-  const raw = loadConfig(input.cwd) ?? {};
-  const declared = raw?.store_guard?.allow_scripts;
-  const configured = parseConfig(raw).store_guard.allow_scripts;
-  allowScripts = Array.isArray(declared) && declared.length === 0 ? [] : appendMissingSanctioned(configured).next;
-} catch (e) {
-  deny(
-    environmentDefectDenial("H15", `Store access denied \u2014 .sterling/config.json is unreadable (${e.message}); fix the config, the gate fails closed.`, {
-      agentId: input?.agent_id
-      // same handler-cannot-throw rule as the [cwd] catch above
-    })
-  );
-}
-function splitFragments(cmd) {
-  const parts = [];
-  let current = "";
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < cmd.length; i++) {
+var escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function stripHeredocBodies(cmd) {
+  let out = "", i = 0;
+  const n = cmd.length;
+  while (i < n) {
     const c = cmd[i];
-    if (inSingle) {
-      current += c;
-      if (c === "'") inSingle = false;
+    if (c === "'" || c === '"') {
+      const end = skipQuoted(cmd, i);
+      out += cmd.slice(i, end);
+      i = end;
       continue;
     }
-    if (inDouble) {
-      current += c;
-      if (c === '"' && cmd[i - 1] !== "\\") inDouble = false;
-      continue;
-    }
-    if (c === "'") {
-      inSingle = true;
-      current += c;
-      continue;
-    }
-    if (c === '"') {
-      inDouble = true;
-      current += c;
+    if (c === "\\" && !PS) {
+      out += cmd.slice(i, Math.min(i + 2, n));
+      i += 2;
       continue;
     }
     if (c === "<" && cmd[i + 1] === "<") {
-      const m = cmd.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
-      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
-      if (delim) {
-        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const rest = cmd.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
-        const span = end ? end.index + end[0].length : rest.length;
-        current += rest.slice(0, span);
-        i += span - 1;
-        continue;
-      }
-    }
-    if (c === "\n" || c === "\r") {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    if (c === "&" && cmd[i + 1] === "&") {
-      parts.push(current);
-      current = "";
-      i++;
-      continue;
-    }
-    if (c === "&") {
-      const prevChar = current.length ? current[current.length - 1] : "";
-      if (cmd[i + 1] === ">" || prevChar === ">") {
-        current += c;
-        continue;
-      }
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    if (c === "|" && cmd[i + 1] === "|") {
-      parts.push(current);
-      current = "";
-      i++;
-      continue;
-    }
-    if (c === ";" || c === "|") {
-      parts.push(current);
-      current = "";
-      continue;
-    }
-    current += c;
-  }
-  parts.push(current);
-  return parts.map((p) => p.trim()).filter(Boolean);
-}
-var READONLY_VERBS = /* @__PURE__ */ new Set([
-  "grep",
-  "egrep",
-  "fgrep",
-  "zgrep",
-  "rgrep",
-  "ls",
-  "cat",
-  "head",
-  "tail",
-  "wc",
-  "diff",
-  "file",
-  "stat",
-  "less",
-  "more",
-  "tree",
-  "du",
-  "od",
-  "xxd",
-  "hexdump"
-]);
-var GIT_READONLY_SUBVERBS = /* @__PURE__ */ new Set([
-  "log",
-  "show",
-  "diff",
-  "grep",
-  "ls-files",
-  "branch",
-  "cat-file",
-  "status",
-  "rev-parse"
-]);
-var GIT_WRITE_SUBVERBS = /* @__PURE__ */ new Set(["checkout", "restore", "clean", "rm", "stash", "mv"]);
-var GIT_GLOBAL_VALUE_FLAGS = /* @__PURE__ */ new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace"]);
-var GIT_GLOBAL_BARE_FLAGS = /* @__PURE__ */ new Set(["--no-pager", "-p", "-P", "--paginate", "--no-optional-locks"]);
-function skipGitGlobalFlags(argsText) {
-  let s = argsText;
-  let flaggedStoreValue = null;
-  for (; ; ) {
-    const m = s.match(/^\s*(\S+)/);
-    if (!m) break;
-    const token = m[1];
-    const eq = token.indexOf("=");
-    const flagName = eq >= 0 ? token.slice(0, eq) : token;
-    if (GIT_GLOBAL_VALUE_FLAGS.has(flagName)) {
-      s = s.slice(m[0].length);
-      let value;
-      if (eq >= 0) {
-        value = token.slice(eq + 1);
+      let j = i + 2;
+      if (cmd[j] === "-") j++;
+      while (cmd[j] === " " || cmd[j] === "	") j++;
+      let tag = "", k = j;
+      if (cmd[j] === "'" || cmd[j] === '"') {
+        const q = cmd[j];
+        k = j + 1;
+        while (k < n && cmd[k] !== q) k++;
+        tag = cmd.slice(j + 1, k);
+        k++;
       } else {
-        const v = s.match(/^\s*(\S+)/);
-        value = v ? v[1] : "";
-        if (v) s = s.slice(v[0].length);
+        while (k < n && /[A-Za-z0-9_]/.test(cmd[k])) k++;
+        tag = cmd.slice(j, k);
       }
-      if (!flaggedStoreValue && STORE_MENTION_RE.test(value)) flaggedStoreValue = value;
-      continue;
-    }
-    if (GIT_GLOBAL_BARE_FLAGS.has(flagName)) {
-      s = s.slice(m[0].length);
-      continue;
-    }
-    break;
-  }
-  return { rest: s, flaggedStoreValue };
-}
-function classifyGit(trimmed) {
-  const m = trimmed.match(/^git\s+(.*)$/i);
-  const { rest, flaggedStoreValue } = m ? skipGitGlobalFlags(m[1]) : { rest: "", flaggedStoreValue: null };
-  if (flaggedStoreValue) return true;
-  const sm = rest.match(/^\s*(\S+)/);
-  const subverb = sm ? sm[1].toLowerCase() : "";
-  if (GIT_READONLY_SUBVERBS.has(subverb)) return false;
-  if (GIT_WRITE_SUBVERBS.has(subverb)) return true;
-  return STORE_MENTION_RE.test(unquotedText(trimmed));
-}
-var FIND_MUTATING_FLAGS_RE = /(^|\s)-(delete|fdelete|execdir|exec|ok)\b/;
-function classifyFind(trimmed) {
-  return FIND_MUTATING_FLAGS_RE.test(trimmed);
-}
-function firstWord(fragment) {
-  const m = fragment.match(/^\s*(\S+)/);
-  return m ? m[1].toLowerCase() : "";
-}
-function unquotedText(str) {
-  let out = "";
-  let inSingle = false;
-  let inDouble = false;
-  for (let i = 0; i < str.length; i++) {
-    const c = str[i];
-    if (inSingle) {
-      if (c === "'") inSingle = false;
-      continue;
-    }
-    if (inDouble) {
-      if (c === '"' && str[i - 1] !== "\\") inDouble = false;
-      continue;
-    }
-    if (c === "'") {
-      inSingle = true;
-      continue;
-    }
-    if (c === '"') {
-      inDouble = true;
-      continue;
-    }
-    if (c === "<" && str[i + 1] === "<") {
-      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
-      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
-      if (delim) {
-        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const rest = str.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
-        const span = end ? end.index + end[0].length : rest.length;
-        i += span - 1;
+      j = k;
+      if (tag) {
+        const lineEnd = cmd.indexOf("\n", j);
+        if (lineEnd === -1) {
+          out += cmd.slice(i, j);
+          i = n;
+          continue;
+        }
+        out += cmd.slice(i, j) + "\n";
+        const m = new RegExp("^\\t*" + escapeRe(tag) + "$", "m").exec(cmd.slice(lineEnd + 1));
+        i = m ? lineEnd + 1 + m.index + m[0].length : n;
         continue;
       }
     }
     out += c;
+    i++;
   }
   return out;
 }
-function executableWords(str) {
-  const words = [];
-  let current = "";
-  let started = false;
-  let inSingle = false;
-  let inDouble = false;
-  const push = () => {
-    if (started) {
-      words.push(current);
-      current = "";
-      started = false;
-    }
-  };
-  for (let i = 0; i < str.length; i++) {
+function extractBalanced(str, start, openCh, closeCh) {
+  let depth = 1, i = start;
+  const n = str.length;
+  while (i < n && depth > 0) {
     const c = str[i];
-    if (inSingle) {
-      if (c === "'") inSingle = false;
-      else current += c;
+    if (c === "'" || c === '"') {
+      i = skipQuoted(str, i);
       continue;
     }
-    if (inDouble) {
-      if (c === '"' && str[i - 1] !== "\\") inDouble = false;
-      else current += c;
+    if (c === "\\") {
+      i += 2;
       continue;
     }
+    if (c === openCh) depth++;
+    else if (c === closeCh) depth--;
+    i++;
+  }
+  return { inner: str.slice(start, i - 1), end: i };
+}
+function scanDoubleQuoted(str, i) {
+  let j = i + 1;
+  const n = str.length;
+  const subs = [];
+  while (j < n && str[j] !== '"') {
+    if (str[j] === "\\" && j + 1 < n && !PS) {
+      j += 2;
+      continue;
+    }
+    if (str[j] === "$" && str[j + 1] === "(") {
+      const { inner, end } = extractBalanced(str, j + 2, "(", ")");
+      subs.push(...splitTopLevel(inner));
+      j = end;
+      continue;
+    }
+    if (str[j] === "`") {
+      let k = j + 1;
+      while (k < n && str[k] !== "`") k += str[k] === "\\" ? 2 : 1;
+      subs.push(...splitTopLevel(str.slice(j + 1, k)));
+      j = k + 1;
+      continue;
+    }
+    j++;
+  }
+  return { end: Math.min(j + 1, n), subs };
+}
+function splitTopLevel(str) {
+  const fragments = [];
+  let buf = "", i = 0;
+  const n = str.length;
+  const flush = () => {
+    const t = buf.trim();
+    if (t) fragments.push(t);
+    buf = "";
+  };
+  while (i < n) {
+    const c = str[i];
     if (c === "'") {
-      inSingle = true;
-      started = true;
+      const end = skipQuoted(str, i);
+      buf += str.slice(i, end);
+      i = end;
       continue;
     }
     if (c === '"') {
-      inDouble = true;
-      started = true;
+      const { end, subs } = scanDoubleQuoted(str, i);
+      buf += str.slice(i, end);
+      fragments.push(...subs);
+      i = end;
       continue;
     }
-    if (c === "<" && str[i + 1] === "<") {
-      const m = str.slice(i + 2).match(/^[-~]?\s*(?:"([^"]+)"|'([^']+)'|(\w+))/);
-      const delim = m ? m[1] ?? m[2] ?? m[3] : null;
-      if (delim) {
-        const escapedDelim = delim.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        const rest = str.slice(i);
-        const end = rest.match(new RegExp(`\\n\\s*${escapedDelim}(?=\\n|$)`));
-        const span = end ? end.index + end[0].length : rest.length;
-        i += span - 1;
-        push();
+    if (c === "\\" && !PS) {
+      buf += str.slice(i, Math.min(i + 2, n));
+      i += 2;
+      continue;
+    }
+    if (c === "$" && str[i + 1] === "(") {
+      const { inner, end } = extractBalanced(str, i + 2, "(", ")");
+      fragments.push(...splitTopLevel(inner));
+      buf += " ";
+      i = end;
+      continue;
+    }
+    if (c === "`") {
+      let j = i + 1;
+      while (j < n && str[j] !== "`") j += str[j] === "\\" ? 2 : 1;
+      fragments.push(...splitTopLevel(str.slice(i + 1, j)));
+      buf += " ";
+      i = j + 1;
+      continue;
+    }
+    if (c === "(") {
+      const { inner, end } = extractBalanced(str, i + 1, "(", ")");
+      fragments.push(...splitTopLevel(inner));
+      buf += " ";
+      i = end;
+      continue;
+    }
+    if (c === "\n" || c === ";") {
+      flush();
+      i++;
+      continue;
+    }
+    if (c === "&" && str[i + 1] === "&") {
+      flush();
+      i += 2;
+      continue;
+    }
+    if (c === "|" && str[i + 1] === "|") {
+      flush();
+      i += 2;
+      continue;
+    }
+    if (c === "|") {
+      if (str[i - 1] === ">") {
+        buf += c;
+        i++;
         continue;
       }
-    }
-    if (/\s/.test(c)) {
-      push();
+      flush();
+      i++;
       continue;
     }
-    if (c === "#" && !started) break;
-    started = true;
-    current += c;
-  }
-  push();
-  return words;
-}
-var INTERPRETER_WORDS = /* @__PURE__ */ new Set(["node", "nodejs", "bash", "sh", "zsh", "python", "python3"]);
-function fragmentExecutableCandidate(fragment) {
-  const words = executableWords(fragment);
-  if (!words.length) return { word: null, viaInterpreter: false, interpreterOption: null };
-  if (!INTERPRETER_WORDS.has(words[0])) return { word: words[0], viaInterpreter: false, interpreterOption: null };
-  if (words.length < 2) return { word: null, viaInterpreter: true, interpreterOption: null };
-  if (words[1].startsWith("-") || words[1].startsWith("+")) {
-    const later = words.slice(2).find((w) => !w.startsWith("-") && !w.startsWith("+")) ?? null;
-    return { word: later, viaInterpreter: true, interpreterOption: words[1] };
-  }
-  return { word: words[1], viaInterpreter: true, interpreterOption: null };
-}
-function fragmentIsSafePredecessor(fragment) {
-  const SAFE_PREDECESSOR_WORDS = /* @__PURE__ */ new Set(["echo", "true", ":", "pwd"]);
-  const words = executableWords(fragment);
-  if (!words.length) return true;
-  if (!SAFE_PREDECESSOR_WORDS.has(words[0])) return false;
-  return !/[$`<>]/.test(String(fragment));
-}
-function fragmentSanctionedProvenance(fragment, entries, ctx) {
-  const { word, viaInterpreter, interpreterOption } = fragmentExecutableCandidate(fragment);
-  if (ctx?.unsafePredecessor) {
-    return {
-      allow: false,
-      word,
-      viaInterpreter,
-      detail: {
-        allow: false,
-        candidate: null,
-        reason: `an EARLIER fragment of this command (${JSON.stringify(ctx.unsafePredecessor)}) is not on the known-safe predecessor list (a literal echo, true, :, pwd \u2014 no expansion \u2014 or a sanctioned invocation), so the interpreter's environment and cwd can no longer be assumed to be the ones the platform launched \u2014 an exported NODE_OPTIONS/BASH_ENV/PYTHONPATH makes the interpreter load code before the script it was handed, a \`cd\` moves what a relative path names, and a function definition can shadow the interpreter word itself (decision 95c2c109 F1, Codex rounds 2-3). Run the sanctioned script on its own command line.`
+    if (c === "&") {
+      if (str[i + 1] === ">") {
+        buf += c;
+        i++;
+        continue;
       }
-    };
+      flush();
+      i++;
+      continue;
+    }
+    buf += c;
+    i++;
   }
-  if (interpreterOption !== null) {
-    return {
-      allow: false,
-      word: word ?? interpreterOption,
-      viaInterpreter,
-      detail: {
-        allow: false,
-        candidate: null,
-        reason: `the fragment carries the interpreter option ${interpreterOption} between the interpreter and the script, so it is not a plain \`<interpreter> <script> <args>\` run and NO sanctioned-script exemption is available \u2014 an interpreter option can load or evaluate code (node -r/--import/-e, bash -c/-s, python -c/-m/-, \u2026), so the first non-option word (${word ?? "none"}) is not necessarily the file that executes (decision 95c2c109 F1). Run the sanctioned script plainly, options AFTER the script path belong to the script and are fine.`
-      }
-    };
-  }
-  if (word === null) {
-    return { allow: false, word: null, viaInterpreter, detail: null };
-  }
-  const detail = sanctionedProvenance(word, entries, ctx);
-  return { allow: detail.allow, word, viaInterpreter, detail };
+  flush();
+  return fragments;
 }
-var PLAIN_WORD_RE = /^[A-Za-z0-9_./~+-]+$/;
-function redirectsIntoStore(str) {
-  const text = unquotedText(str);
-  const RE = /(?:[0-9]+|&)?(>>|>)(\s*)(\S+)?/g;
-  let m;
-  while (m = RE.exec(text)) {
-    const target = m[3];
-    if (target === void 0) return true;
-    if (/^&[0-9]+$/.test(target)) continue;
-    if (!PLAIN_WORD_RE.test(target)) return true;
-    if (STORE_MENTION_RE.test(target)) return true;
+function tokenizeFragment(fragment) {
+  const tokens = [];
+  let word = "", i = 0;
+  const n = fragment.length;
+  const flushWord = () => {
+    if (word !== "") {
+      tokens.push({ type: "word", value: word });
+      word = "";
+    }
+  };
+  const takeFd = () => {
+    if (/^\d+$/.test(word)) {
+      const fd = word;
+      word = "";
+      return fd;
+    }
+    flushWord();
+    return "";
+  };
+  while (i < n) {
+    const c = fragment[i];
+    if (c === " " || c === "	") {
+      flushWord();
+      i++;
+      continue;
+    }
+    if (c === "'") {
+      const j = fragment.indexOf("'", i + 1);
+      const end = j === -1 ? n : j;
+      word += fragment.slice(i + 1, end);
+      i = j === -1 ? n : j + 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n && fragment[j] !== '"') {
+        if (fragment[j] === "\\" && j + 1 < n && !PS) {
+          word += fragment[j + 1];
+          j += 2;
+        } else {
+          word += fragment[j];
+          j++;
+        }
+      }
+      i = j + 1;
+      continue;
+    }
+    if (c === "\\" && i + 1 < n && !PS) {
+      word += fragment[i + 1];
+      i += 2;
+      continue;
+    }
+    if (c === ">" || c === "<") {
+      const fd = takeFd();
+      let op = fd + c;
+      i++;
+      if (fragment[i] === c) {
+        op += c;
+        i++;
+      } else if (c === ">" && fragment[i] === "|") {
+        op += "|";
+        i++;
+      }
+      tokens.push({ type: "op", value: op });
+      continue;
+    }
+    if (c === "&" && fragment[i + 1] === ">") {
+      const fd = takeFd();
+      tokens.push({ type: "op", value: fd + "&>" });
+      i += 2;
+      continue;
+    }
+    if (c === "&" || c === "|") {
+      flushWord();
+      tokens.push({ type: "op", value: c });
+      i++;
+      continue;
+    }
+    word += c;
+    i++;
+  }
+  flushWord();
+  return tokens;
+}
+function isDbPath(token) {
+  const value = token.includes("=") ? token.slice(token.lastIndexOf("=") + 1) : token;
+  const parts = value.split(/[\\/]+/).filter(Boolean);
+  if (parts.length < 2) return false;
+  const base3 = parts[parts.length - 1];
+  return parts.slice(0, -1).some((p) => p.toLowerCase() === ".sterling") && DB_FILE_RE.test(base3);
+}
+function isDotSterlingDir(token) {
+  const parts = token.replace(/[\\/]+$/, "").split(/[\\/]+/).filter(Boolean);
+  return parts.length > 0 && parts[parts.length - 1].toLowerCase() === ".sterling";
+}
+var WRAPPERS_PLAIN = /* @__PURE__ */ new Set(["command", "time", "exec", "xargs", "builtin"]);
+var SUDO_ARG_OPTS = /* @__PURE__ */ new Set(["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T"]);
+var NICE_ARG_OPTS = /* @__PURE__ */ new Set(["-n"]);
+var ENV_ARG_OPTS = /* @__PURE__ */ new Set(["-u", "-C", "-S"]);
+function skipOptsWithArgs(tokens, i, argOpts) {
+  while (i < tokens.length && tokens[i].type === "word" && tokens[i].value.startsWith("-") && tokens[i].value !== "--") {
+    const opt = tokens[i].value;
+    i++;
+    if (opt.length === 2 && argOpts.has(opt) && i < tokens.length && tokens[i].type === "word") i++;
+  }
+  if (i < tokens.length && tokens[i].type === "word" && tokens[i].value === "--") i++;
+  return i;
+}
+function skipEnvOptions(tokens, i) {
+  while (i < tokens.length && tokens[i].type === "word") {
+    const v = tokens[i].value;
+    if (v === "--") {
+      i++;
+      break;
+    }
+    if (/^[A-Za-z_]\w*=/.test(v)) {
+      i++;
+      continue;
+    }
+    if (v.startsWith("-")) {
+      i++;
+      if (v.length === 2 && ENV_ARG_OPTS.has(v) && i < tokens.length && tokens[i].type === "word") i++;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+function skipWrappers(tokens) {
+  let i = 0;
+  if (tokens[i] && tokens[i].type === "op" && tokens[i].value === "&") i++;
+  while (i < tokens.length && tokens[i].type === "word") {
+    const lv = tokens[i].value.toLowerCase();
+    if (lv === "sudo") {
+      i = skipOptsWithArgs(tokens, i + 1, SUDO_ARG_OPTS);
+      continue;
+    }
+    if (lv === "nice") {
+      i = skipOptsWithArgs(tokens, i + 1, NICE_ARG_OPTS);
+      continue;
+    }
+    if (lv === "env") {
+      i = skipEnvOptions(tokens, i + 1);
+      continue;
+    }
+    if (WRAPPERS_PLAIN.has(lv)) {
+      i++;
+      continue;
+    }
+    break;
+  }
+  return i;
+}
+var DESTRUCTIVE_VERBS = /* @__PURE__ */ new Set([
+  "rm",
+  "rmdir",
+  "unlink",
+  "mv",
+  "cp",
+  "dd",
+  "truncate",
+  "shred",
+  "sqlite3",
+  "tee",
+  "del",
+  "erase",
+  "move",
+  "copy",
+  "remove-item",
+  "ri",
+  "rd",
+  "move-item",
+  "copy-item",
+  "rename-item",
+  "set-content",
+  "add-content",
+  "out-file",
+  "clear-content",
+  "new-item"
+]);
+function isDestructiveFragment(tokens) {
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.type === "op" && /^\d*(>>|>\||&>|>)$/.test(t.value)) {
+      const next = tokens[i + 1];
+      if (next && next.type === "word" && isDbPath(next.value)) return true;
+    }
+  }
+  const idx0 = skipWrappers(tokens);
+  const verb = tokens[idx0];
+  if (!verb || verb.type !== "word") return false;
+  const lv = verb.value.toLowerCase();
+  const rest = tokens.slice(idx0 + 1);
+  const restWords = rest.filter((t) => t.type === "word").map((t) => t.value);
+  if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
+  if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
+  if (lv === "rm") {
+    const recursive = restWords.some((w) => w === "--recursive" || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(w));
+    if (recursive && restWords.some(isDotSterlingDir)) return true;
+  }
+  if (lv === "rmdir" && restWords.some(isDotSterlingDir)) return true;
+  if (lv === "find") {
+    const namesStore = restWords.some((w) => isDotSterlingDir(w) || /(^|[\\/])\.sterling([\\/]|$)/i.test(w));
+    const deletes = restWords.includes("-delete") || restWords.includes("-exec") && restWords.some((w) => /^rm$/i.test(w));
+    if (namesStore && deletes) return true;
+  }
+  if (lv === "git" && restWords[0] && restWords[0].toLowerCase() === "clean") {
+    const flagChars = rest.filter((t) => t.type === "word" && /^-[^-]/.test(t.value)).map((t) => t.value.slice(1)).join("") + (restWords.includes("--force") ? "f" : "");
+    if (/[xX]/.test(flagChars) && /[df]/.test(flagChars)) return true;
+  }
+  if (lv === "remove-item" || lv === "ri" || lv === "rd") {
+    const recursive = restWords.some((w) => /^-r(ecurse)?$/i.test(w) || w.toLowerCase() === "/s");
+    if (recursive && restWords.some(isDotSterlingDir)) return true;
   }
   return false;
 }
-function sanctionedFragmentHasShellRider(fragment) {
-  return redirectsIntoStore(fragment) || /(?:\$\(|`|[<>]\()/.test(fragment);
+var tool = input.tool_name;
+var PS = tool === "PowerShell";
+if (tool === "Bash" || tool === "PowerShell") {
+  const rawCommand = input.tool_input?.command;
+  let command;
+  if (rawCommand === void 0 || rawCommand === null) command = "";
+  else if (typeof rawCommand === "string") command = rawCommand;
+  else deny(`H15: this ${tool} call carries a non-string command (${typeof rawCommand}), which cannot be safely inspected for a destructive shape \u2014 re-issue with a string command.`);
+  const fragments = splitTopLevel(stripHeredocBodies(command));
+  for (const fragment of fragments) {
+    if (isDestructiveFragment(tokenizeFragment(fragment))) {
+      deny(
+        "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
+      );
+    }
+  }
+  allow();
 }
-function classifyFragment(fragment) {
-  const trimmed = fragment.trim();
-  if (!trimmed || !STORE_MENTION_RE.test(trimmed) && !STORE_MENTION_RE.test(unquotedText(trimmed))) {
-    return { write: false, fragment: trimmed };
-  }
-  if (DB_MENTION_RE.test(trimmed)) return { write: true, fragment: trimmed, dbSeal: true };
-  if (redirectsIntoStore(trimmed)) return { write: true, fragment: trimmed };
-  const verb = firstWord(trimmed);
-  if (verb === "sed") {
-    if (/(^|\s)-\w*i\w*(\s|=|$)/.test(trimmed) || /(^|\s)--in-place(=\S*)?(\s|$)/.test(trimmed)) {
-      return { write: true, fragment: trimmed };
-    }
-    return { write: false, fragment: trimmed };
-  }
-  if (verb === "git") return { write: classifyGit(trimmed), fragment: trimmed };
-  if (verb === "find") return { write: classifyFind(trimmed), fragment: trimmed };
-  if (READONLY_VERBS.has(verb)) return { write: false, fragment: trimmed };
-  return { write: true, fragment: trimmed, unknownVerb: true };
+var field = tool === "NotebookEdit" ? "notebook_path" : tool === "Edit" || tool === "Write" || tool === "MultiEdit" ? "file_path" : null;
+if (field === null) allow();
+var submitted = input.tool_input?.[field];
+if (typeof submitted !== "string" || submitted.trim() === "") {
+  deny(`H15: this ${tool} call carries no usable tool_input.${field}, so the store database cannot be shown untouched \u2014 re-issue with an explicit path.`);
 }
-var offending = null;
-var offendingIsDbSeal = false;
-var offendingUnknownVerb;
-var offendingProvenance;
-try {
-  offendingProvenance = "";
-  offendingUnknownVerb = false;
-  const pluginRoot = resolveActivePluginRoot(import.meta.url, process.env);
-  const provenanceCtx = { pluginRoot, cwd: input.cwd, unsafePredecessor: null };
-  for (const frag of splitFragments(command)) {
-    const sanctioned = fragmentSanctionedProvenance(frag, allowScripts, provenanceCtx);
-    const exempt = sanctioned.allow && !sanctionedFragmentHasShellRider(frag);
-    if (provenanceCtx.unsafePredecessor === null && !exempt && !fragmentIsSafePredecessor(frag)) {
-      provenanceCtx.unsafePredecessor = frag.trim().slice(0, 80);
-    }
-    if (exempt) continue;
-    const result = classifyFragment(frag);
-    if (result.write) {
-      offending = result.fragment;
-      offendingIsDbSeal = Boolean(result.dbSeal);
-      offendingUnknownVerb = Boolean(result.unknownVerb);
-      const d = sanctioned.detail;
-      const looksLikeAScriptInvocation = Boolean(sanctioned.word) && (sanctioned.viaInterpreter || sanctioned.word.includes("/"));
-      offendingProvenance = d && !d.allow && looksLikeAScriptInvocation ? `Sanctioned-script provenance: ${d.reason}
-` : "";
-      break;
-    }
-  }
-} catch (e) {
+var base2 = typeof input.cwd === "string" ? input.cwd : "";
+if (!isAbsolute(submitted) && base2 === "") {
+  deny(`H15: '${submitted}' is a relative path and this call carries no cwd to resolve it against, so the store database cannot be shown untouched.`);
+}
+var destination = isAbsolute(submitted) ? resolve2(submitted) : resolve2(base2, submitted);
+if (namesStoreComponent(destination) && DB_FILE_RE.test(basename(destination))) {
   deny(
-    environmentDefectDenial(
-      "H15",
-      `Internal error while evaluating shell command safety (${e.message}); the gate fails closed rather than risk a silent void.`,
-      { agentId: input?.agent_id }
-      // same handler-cannot-throw rule as the [cwd] catch above
-    )
+    `H15: this ${tool} call targets the Sterling store database (${destination}), which only the Sterling MCP server writes \u2014 use the knowledge_* / board_* tools. Every other file under .sterling/ (config.json, transient/*) may be edited directly.`
   );
 }
-if (!offending) allow();
-if (offendingIsDbSeal) {
-  const match = DB_MENTION_RE.exec(command);
-  const matchedText = match ? match[0] : "sterling.db";
-  const offset = match ? match.index : command.search(DB_MENTION_RE);
-  deny(
-    `H15: shell access to the Sterling store's database file is denied \u2014 DB access is the MCP tool surface's job, never raw shell.
-Denied fragment: ${offending}
-Matched substring: "${matchedText}" at offset ${offset} in the command text.
-This is a raw command-text DB seal: it matches the literal text of the command, not a resolved path or write target, so syntactic role and verb are intentionally ignored \u2014 it fires the same whether the literal sits in a path, inside a quoted search pattern, or in a redirect target, and regardless of whether the verb is a write or a normally read-only one like grep.
-Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root; the same name in a comment, a quoted flag value, an unrelated path, or a project-local file of the same name exempts nothing.
-` + offendingProvenance + "If the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
-  );
-}
-deny(
-  `H15: shell write access to the Sterling store is denied \u2014 the store is read and written through the \xA710 MCP tool surface ONLY.
-Denied fragment: ${offending}
-This is the closed-world store-write classifier: verbs not explicitly recognized as read-only are deliberately denied as potentially mutating (decision 0b4d3c8c) \u2014 the denial does not assert the command was proven to write.
-` + // THE DISCRIMINATOR THAT ACTUALLY FIRED, when it was the fallback (board
-  // 31b2c872): every other deny path here has a positive finding behind it (a
-  // redirect into the store, sed -i, a writing git subverb). This one has
-  // none — it is a store-path MENTION under a verb the allowlist does not
-  // recognise — and saying so is the difference between "add your verb to
-  // READONLY_VERBS or use the tool surface" and hunting for a write that was
-  // never detected.
-  (offendingUnknownVerb ? `Discriminator: this fragment NAMES a store path and its verb ('${firstWord(offending)}') is not in the read-only verb allowlist \u2014 that combination alone is the denial. No write was detected in it.
-` : "") + `Reads: knowledge_query / knowledge_get / board_query / maintenance_query / run_state. Writes: knowledge_create / knowledge_update / knowledge_link / board_add / board_remove / run_signal / agent_exit.
-Sanctioned scripts/launchers: ${allowScripts.join(", ")} (config store_guard.allow_scripts) \u2014 an entry exempts a fragment ONLY when that fragment's EXECUTABLE argument RESOLVES, by realpath, to that exact file inside the active plugin root.
-` + offendingProvenance + ".sterling/sterling.db is sealed to shell access for EVERY verb, reads included \u2014 DB access is the MCP tool surface's job, never raw shell.\nNon-DB store files (config.json, transient/*) ARE shell-readable (decision 0b4d3c8c); the closed-world classifier above is what decides, and a verb it does not recognize as read-only is denied.\nIf the running MCP server predates the current code, RESTART THE SESSION \u2014 never write around the surface."
-);
+allow();

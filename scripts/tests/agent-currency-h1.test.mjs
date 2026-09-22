@@ -2,9 +2,9 @@
 //
 // SPEC ONLY. Nothing in scripts/hooks/h1-session-start.mjs, scripts/lib/*.mjs or
 // scripts/sync-agents.mjs was read to author this file (H4 read wall). The
-// contract below comes from board 6ce18724, research_finding 0038af7c (the
-// measurement), decision 946125ff + anti_pattern 02a1ed39 (the three-seam
-// precedent this copies), decision 558895a9 (the CLONE-currency signal that is
+// contract below comes from board 6ce18724, research_finding foreign_0038af7c (the
+// measurement), decision foreign_946125ff + anti_pattern foreign_02a1ed39 (the three-seam
+// precedent this copies), decision foreign_558895a9 (the CLONE-currency signal that is
 // explicitly NOT this) and the launching agent's user-ruled shape. The harness
 // (runHook / hookInput / envelope / makeProject / h1) is copied from
 // scripts/tests/h1-accuracy.test.mjs; the agent fixtures and the installAgents /
@@ -42,7 +42,7 @@
 //     via `systemMessage`, the conductor via `hookSpecificOutput.additionalContext`.
 //  5. SILENT WHEN CURRENT: every installed sterling-generated agent matching the
 //     clone's current template => no marker anywhere.
-//  6. DEGRADE LOUD (P5, and the whole lesson of anti_pattern 02a1ed39, whose
+//  6. DEGRADE LOUD (P5, and the whole lesson of anti_pattern foreign_02a1ed39, whose
 //     staleness check reported `up_to_date` NINE times while the agents were
 //     dead): if the clone-side template cannot be read/hashed, the notice fires
 //     saying so and never claims up-to-date.
@@ -77,7 +77,7 @@ const T_INSTALL = '2026-01-01T00:00:00.000Z'; // safely BEFORE any real session 
 
 let SterlingStore;
 // H1's pluginRoot() resolution is now walkUpPluginRoot() || process.env.STERLING_PLUGIN_ROOT
-// (decision 95c2c109 F2): the running hook's own walk-up wins over the env
+// (decision foreign_95c2c109 F2): the running hook's own walk-up wins over the env
 // seam, and is consulted ONLY when that walk-up fails. Every test in this file
 // points STERLING_PLUGIN_ROOT at a synthetic clone (see h1() below) so BOTH
 // sides of the currency comparison are controlled fixtures — but
@@ -261,7 +261,7 @@ test('CONTROL: every installed agent matches the clone template_hash — H1 says
 // under it.
 
 // =============================================================================
-// THE MEASURED CASE (research_finding 0038af7c)
+// THE MEASURED CASE (research_finding foreign_0038af7c)
 // =============================================================================
 
 test('MEASURED CASE: an unmodified install whose header template_hash is OLD is reported STALE, naming the agent', () => {
@@ -280,7 +280,7 @@ test('MEASURED CASE: an unmodified install whose header template_hash is OLD is 
     const line = lineFor(section, 'coder');
     assert.notEqual(line, '', 'the notice NAMES the stale agent — "some agents are stale" is not actionable');
     assert.match(line, /stale/i, 'the named agent is described as stale');
-    assert.doesNotMatch(section, /up[-_ ]to[-_ ]date/i, 'the notice never claims up-to-date while reporting staleness (anti_pattern 02a1ed39)');
+    assert.doesNotMatch(section, /up[-_ ]to[-_ ]date/i, 'the notice never claims up-to-date while reporting staleness (anti_pattern 02a1ed39)'); // not-a-citation: fixture id
   } finally {
     cleanup();
     clone.cleanup();
@@ -353,9 +353,9 @@ test('a LOCALLY MODIFIED agent is never reported as merely stale — the stale /
     assert.notEqual(section, '', 'the notice still fires for the genuinely stale agent');
     assert.match(lineFor(section, 'coder'), /stale/i, 'the unmodified-but-behind agent is stale');
 
-    const modifiedLine = lineFor(section, 'test-writer');
-    assert.doesNotMatch(modifiedLine, /stale/i, 'a locally MODIFIED install is not describable as stale — sync refuses it, it is not a missed refresh');
-    if (modifiedLine !== '') assert.match(modifiedLine, /modif/i, 'if the modified install is mentioned at all, it is classified as locally modified');
+    // 2026-09-19 deliberate change (4): one counted line per state names its
+    // agents, so inspect the refused state rather than a per-agent detail line.
+    assert.match(section, /refused_local_modification \(behind template\): test-writer\.md/i, 'a locally MODIFIED install is classified as refused, never stale');
     assert.match(section, /\b1\b/, 'the stale COUNT is 1 — the modified agent is not counted as stale');
   } finally {
     cleanup();
@@ -439,7 +439,7 @@ test('NON-BLOCKING: a project full of stale agents still starts — exit 0, no b
 // the rest of the banner.
 
 // =============================================================================
-// DEGRADE LOUD, NEVER SILENT (P5; the entire lesson of anti_pattern 02a1ed39,
+// DEGRADE LOUD, NEVER SILENT (P5; the entire lesson of anti_pattern foreign_02a1ed39,
 // whose staleness check reported up_to_date NINE times while the agents were dead)
 // =============================================================================
 
@@ -518,7 +518,7 @@ test('DEGRADE LOUD: the clone has no agent-templates directory at all — H1 sti
 //
 // STILL SPEC-ONLY: scripts/hooks/h1-session-start.mjs was NOT read (H4 read
 // wall). These expectations come from the fix list in the dispatch brief, the
-// contract at the top of this file, anti_pattern 02a1ed39 and research_finding
+// contract at the top of this file, anti_pattern foreign_02a1ed39 and research_finding
 // 0038af7c — never from the implementation.
 //
 // Run with:  node --test scripts/tests/agent-currency-h1.test.mjs
@@ -881,22 +881,9 @@ test('F11: a hand-edited agent that is LEVEL with its template is worded differe
     assert.ok(r.out, `H1 must emit parseable JSON: ${r.stdout}${r.stderr}`);
 
     const section = currencySection(contextOf(r));
-    const levelLine = lineFor(section, 'coder');
-    const behindLine = lineFor(section, 'test-writer');
-
-    assert.notEqual(levelLine, '', 'the hand-edited but level agent is reported (F7)');
-    assert.notEqual(behindLine, '', 'so is the hand-edited agent that is behind');
-
-    // The wording-independent half: strip the names and the two must still differ.
-    const shape = (l) => l.replace(/coder|test-writer/g, '<agent>').replace(/\s+/g, ' ').trim();
-    assert.notEqual(
-      shape(levelLine),
-      shape(behindLine),
-      'the two cases must NOT collapse to one sentence — sync leaves the level one alone and REFUSES the behind one, which are different problems with different remedies'
-    );
-
-    assert.match(behindLine, /(refus|will not|won\'t|blocked|declin)/i, 'the behind-and-edited agent is the one sync refuses');
-    assert.doesNotMatch(levelLine, /(refus|will not|won\'t|blocked|declin)/i, 'the level-and-edited agent is NOT described as refused — nothing is being withheld from it; it is simply hand-owned now');
+    assert.match(section, /locally modified \(current template\): coder\.md/i, 'the hand-edited but level agent is reported as locally modified/current');
+    assert.match(section, /refused_local_modification \(behind template\): test-writer\.md/i, 'the behind-and-edited agent is the one sync refuses');
+    assert.doesNotMatch(section.match(/locally modified \(current template\):[^;.]*/i)?.[0] ?? '', /refus/i, 'the level-and-edited agent is not described as refused');
   } finally {
     cleanup();
     clone.cleanup();

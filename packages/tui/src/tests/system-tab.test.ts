@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
@@ -53,7 +53,7 @@ import * as viewmodel from '../viewmodel.js';
 //     in its text (the visible AC4 marker); an aligned row does neither.
 //   • reduce/buildDashboardState gain a TRAILING optional roster? param (after
 //     the existing knowledge? param) — the additive-optional-param idiom of
-//     decision 34d61f60. buildSystemTab reads the same snapshot from ui.
+//     decision foreign_34d61f60. buildSystemTab reads the same snapshot from ui.
 //   • inline selector protocol: on a key row ENTER opens the MODEL picker
 //     (options = catalog entries, highlight at index 0); UP/DOWN move the
 //     highlight; ENTER confirms the model and opens the EFFORT picker (options
@@ -200,9 +200,12 @@ interface SystemArityStateMod {
 const SR = stateMod as unknown as SystemArityStateMod;
 
 // ---- fixtures --------------------------------------------------------------
-const REVIEWER_AGENTS = ['reviewer-correctness', 'reviewer-security', 'reviewer-skeptic', 'reviewer-performance'];
+const ROSTER_AGENTS: string[] = JSON.parse(
+  readFileSync(join(process.cwd(), 'agent-templates', 'registry.json'), 'utf8'),
+).agents.map((agent: { name: string }) => agent.name);
+const GOVERNED_KEY = ROSTER_AGENTS[0];
 
-/** Catalog entries. Entry[0] is claude-opus-4-8 (the reviewers/coder_hard
+/** Catalog entries. Entry[0] is claude-opus-4-8 (the researcher
  *  current model), so a single DOWN lands on entry[1] regardless of whether the
  *  picker highlights index 0 or the current model. 'Opus 4.1' is used by NO
  *  config key — its appearance is the "picker is open" tell. */
@@ -220,14 +223,16 @@ function baseSnapshot(over: Partial<AgentRosterSnapshot> = {}): AgentRosterSnaps
   return {
     agents: [
       { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...REVIEWER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
+      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     ],
     // insertion order fixes the row order + the cursor index per key:
-    // coder=0, reviewers=1, coder_hard=2, classifiers=3
+    // coder=0 (orphan), implementor=1, researcher=2, scout=3, librarian=4, classifiers=5
     configModels: {
       coder: { model: 'claude-sonnet-4-6', effort: 'high' },
-      reviewers: { model: 'claude-opus-4-8', effort: 'low' },
-      coder_hard: { model: 'claude-opus-4-8', effort: 'xhigh' },
+      implementor: { model: 'claude-opus-4-8', effort: 'low' },
+      researcher: { model: 'claude-opus-4-8', effort: 'low' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
+      librarian: { model: 'claude-opus-4-8', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
     catalog: freshCatalog(),
@@ -333,39 +338,38 @@ test('AC1: buildSystemTab renders exactly one row per config.models KEY, in key 
   );
 });
 
-test('AC1: a governed key (reviewers) lists ALL four governed agents and shows the installed model + effort', () => {
+test('AC1: each current registry agent is listed under its governed key with installed model + effort', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
   const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
-  const reviewers = rowOf(view, 'reviewers');
-  assert.ok(reviewers, 'the reviewers row is present');
-  const text = rowText(reviewers!);
-  for (const name of REVIEWER_AGENTS) {
-    assert.match(text, new RegExp(name), `the reviewers row lists the governed agent ${name}`);
+  for (const name of ROSTER_AGENTS) {
+    const row = rowOf(view, name);
+    assert.ok(row, `the ${name} row is present`);
+    const text = rowText(row!);
+    assert.match(text, new RegExp(name), `the ${name} row lists its governed agent`);
+    assert.match(text, /claude-opus-4-8/, `the ${name} row shows the installed model`);
+    assert.match(text, /\blow\b/, `the ${name} row shows the installed effort`);
   }
-  assert.match(text, /claude-opus-4-8/, 'the reviewers row shows the installed model');
-  assert.match(text, /\blow\b/, 'the reviewers row shows the installed effort');
 });
 
-test('AC1: config-only keys (coder_hard, classifiers) appear as rows with no governed agent, showing their config model+effort', () => {
+test('AC1: config-only key (classifiers) appears with no governed agent, showing its config model+effort', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
   const view = buildSystemTab!(baseSnapshot(), st({ tab: SYS_TAB }), 80);
-  const hard = rowOf(view, 'coder_hard');
-  assert.ok(hard, 'the coder_hard config-only row is present');
+  const hard = rowOf(view, 'classifiers');
+  assert.ok(hard, 'the classifiers config-only row is present');
   const hardText = rowText(hard!);
   // no installed/registered agent maps to coder_hard, so no agent name is listed on it
-  for (const name of ['coder', ...REVIEWER_AGENTS]) {
-    assert.doesNotMatch(hardText, new RegExp(name), `coder_hard is config-only — it does not list the agent ${name}`);
+  for (const name of ['coder', ...ROSTER_AGENTS]) {
+    assert.doesNotMatch(hardText, new RegExp(name), `classifiers is config-only — it does not list the agent ${name}`);
   }
-  assert.match(hardText, /claude-opus-4-8/, 'coder_hard shows its config model');
-  assert.match(hardText, /xhigh/, 'coder_hard shows its config effort (xhigh)');
-  assert.ok(rowOf(view, 'classifiers'), 'the classifiers config-only row is present');
+  assert.match(hardText, /claude-haiku-4-5/, 'classifiers shows its config model');
+  assert.match(hardText, /low/, 'classifiers shows its config effort');
 });
 
 test('AC1: every registered agent in the snapshot appears in exactly one row (the tab lists every agent)', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
   const snap = baseSnapshot();
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  for (const agent of snap.agents) {
+  for (const agent of snap.agents.filter((agent) => ROSTER_AGENTS.includes(agent.name))) {
     const hits = view.rows.filter((r) => new RegExp(agent.name).test(rowText(r)));
     assert.equal(hits.length, 1, `agent ${agent.name} is listed in exactly one row`);
   }
@@ -373,20 +377,28 @@ test('AC1: every registered agent in the snapshot appears in exactly one row (th
 
 test('AC1: the row shows the INSTALLED frontmatter value (the governing copy), NOT the config value, when they differ', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  // coder: installed frontmatter says opus-4-8, but config.models says sonnet-4-6.
+  // researcher: installed frontmatter says opus-4-8, but config.models says sonnet-4-6.
   // The tab must surface the INSTALLED opus value — the copy that governs dispatch.
   const snap = baseSnapshot({
     agents: [
-      { name: 'coder', installedModel: 'claude-opus-4-8', installedEffort: 'xhigh' },
-      ...REVIEWER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
+      { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
+      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'low' })),
     ],
+    configModels: {
+      coder: { model: 'claude-sonnet-4-6', effort: 'high' },
+      implementor: { model: 'claude-opus-4-8', effort: 'low' },
+      researcher: { model: 'claude-sonnet-4-6', effort: 'high' },
+      scout: { model: 'claude-opus-4-8', effort: 'low' },
+      librarian: { model: 'claude-opus-4-8', effort: 'low' },
+      classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
+    },
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  const coder = rowOf(view, 'coder');
-  assert.ok(coder, 'the coder row is present');
-  const text = rowText(coder!);
+  const researcher = rowOf(view, GOVERNED_KEY);
+  assert.ok(researcher, 'the governed agent row is present');
+  const text = rowText(researcher!);
   assert.match(text, /claude-opus-4-8/, 'the installed model (opus-4-8) is shown — the governing frontmatter copy');
-  assert.match(text, /xhigh/, 'the installed effort (xhigh) is shown, not the config effort');
+  assert.match(text, /low/, 'the installed effort (low) is shown, not the config effort');
 });
 
 // ===========================================================================
@@ -408,17 +420,17 @@ test('AC4: driftOf is a pure scalar comparison — equal values do not drift, di
 
 test('AC4: a row whose installed model disagrees with config shows a visible drift marker; an aligned row does not', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  // reviewers installed on sonnet, config on opus → model drift on the reviewers row.
+  // researcher installed on sonnet, config on opus → model drift on that row.
   const snap = baseSnapshot({
     agents: [
       { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...REVIEWER_AGENTS.map((name) => ({ name, installedModel: 'claude-sonnet-4-6', installedEffort: 'low' })),
+      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-sonnet-4-6', installedEffort: 'low' })),
     ],
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  const reviewers = rowOf(view, 'reviewers')!;
-  assert.equal(reviewers.drift, true, 'the reviewers row is flagged drift (installed sonnet ≠ config opus)');
-  assert.match(rowText(reviewers), /drift/i, 'the drift is visible in the reviewers row text (AC4 marker)');
+  const governed = rowOf(view, GOVERNED_KEY)!;
+  assert.equal(governed.drift, true, 'the governed row is flagged drift (installed sonnet ≠ config opus)');
+  assert.match(rowText(governed), /drift/i, 'the drift is visible in the governed row text (AC4 marker)');
 
   const coder = rowOf(view, 'coder')!;
   assert.notEqual(coder.drift, true, 'the aligned coder row is not flagged drift');
@@ -427,44 +439,42 @@ test('AC4: a row whose installed model disagrees with config shows a visible dri
 
 test('AC4: EFFORT-only disagreement (model equal) still drifts the row', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  // models all match config; only the reviewers effort differs (installed high vs config low)
+  // models all match config; only the governed agents' effort differs (installed high vs config low)
   const snap = baseSnapshot({
     agents: [
       { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      ...REVIEWER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'high' })),
+      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: 'claude-opus-4-8', installedEffort: 'high' })),
     ],
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  const reviewers = rowOf(view, 'reviewers')!;
-  assert.equal(reviewers.drift, true, 'an effort-only disagreement drifts the row');
-  assert.match(rowText(reviewers), /drift/i, 'effort drift is visible on the row');
+  const governed = rowOf(view, GOVERNED_KEY)!;
+  assert.equal(governed.drift, true, 'an effort-only disagreement drifts the row');
+  assert.match(rowText(governed), /drift/i, 'effort drift is visible on the row');
 });
 
 test('AC4/AC5 (P5 backstop): a partially applied projection — config updated but one governed agent still on the old model — surfaces as drift', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  // A swap wrote config.models.reviewers → sonnet and re-stamped three of four
-  // reviewer files, but reviewer-security's frontmatter still holds opus (the
-  // file write partially failed). The one disagreeing agent must show drift —
+  // A swap wrote config.models.researcher → sonnet but its installed frontmatter
+  // still holds opus (the file write partially failed). The disagreeing agent must show drift —
   // the AC4 marker is the P5 backstop for a partial projection (decision 98064d77c).
   const snap = baseSnapshot({
     agents: [
       { name: 'coder', installedModel: 'claude-sonnet-4-6', installedEffort: 'high' },
-      { name: 'reviewer-correctness', installedModel: 'claude-sonnet-4-6', installedEffort: 'low' },
-      { name: 'reviewer-security', installedModel: 'claude-opus-4-8', installedEffort: 'low' }, // stale — not re-stamped
-      { name: 'reviewer-skeptic', installedModel: 'claude-sonnet-4-6', installedEffort: 'low' },
-      { name: 'reviewer-performance', installedModel: 'claude-sonnet-4-6', installedEffort: 'low' },
+      ...ROSTER_AGENTS.map((name) => ({ name, installedModel: name === GOVERNED_KEY ? 'claude-opus-4-8' : 'claude-sonnet-4-6', installedEffort: 'low' })),
     ],
     configModels: {
       coder: { model: 'claude-sonnet-4-6', effort: 'high' },
-      reviewers: { model: 'claude-sonnet-4-6', effort: 'low' }, // config already swapped to sonnet
-      coder_hard: { model: 'claude-opus-4-8', effort: 'xhigh' },
+      implementor: { model: 'claude-sonnet-4-6', effort: 'low' },
+      researcher: { model: 'claude-sonnet-4-6', effort: 'low' }, // config already swapped to sonnet
+      scout: { model: 'claude-sonnet-4-6', effort: 'low' },
+      librarian: { model: 'claude-sonnet-4-6', effort: 'low' },
       classifiers: { model: 'claude-haiku-4-5', effort: 'low' },
     },
   });
   const view = buildSystemTab!(snap, st({ tab: SYS_TAB }), 80);
-  const reviewers = rowOf(view, 'reviewers')!;
-  assert.equal(reviewers.drift, true, 'the partially projected reviewers row is flagged drift (one agent still on opus)');
-  assert.match(rowText(reviewers), /drift/i, 'the partial projection is visible as drift (P5 backstop)');
+  const governed = rowOf(view, GOVERNED_KEY)!;
+  assert.equal(governed.drift, true, 'the partially projected governed row is flagged drift (installed model stayed old)');
+  assert.match(rowText(governed), /drift/i, 'the partial projection is visible as drift (P5 backstop)');
 });
 
 // ===========================================================================
@@ -549,7 +559,7 @@ test('audit finding 24/43: committing a non-claude model is REFUSED with a visib
   }
 });
 
-test('selector effort rule: a subagent key (reviewers) offers efforts EXCLUDING xhigh and max', () => {
+test('selector effort rule: a registered agent key offers efforts EXCLUDING xhigh and max', () => {
   assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
   const { store, cleanup } = storeFixture();
   try {
@@ -566,25 +576,11 @@ test('selector effort rule: a subagent key (reviewers) offers efforts EXCLUDING 
   }
 });
 
-test('selector effort rule: coder_hard DOES offer xhigh (the one key permitted xhigh)', () => {
-  assert.strictEqual(typeof buildSystemTab, 'function', 'buildSystemTab must be exported');
-  const { store, cleanup } = storeFixture();
-  try {
-    const snap = baseSnapshot();
-    // coder_hard is key index 2; open model picker then confirm → effort picker.
-    const atEffort = drive(store, st({ tab: SYS_TAB, cursor: 2 }), [key('ENTER'), key('ENTER')], snap);
-    const view = buildSystemTab!(snap, atEffort.ui, 80);
-    assert.match(allText(view), /xhigh/i, 'coder_hard offers xhigh');
-  } finally {
-    cleanup();
-  }
-});
-
 test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_swap effect with config write, governed agents, and the titled decision', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    // reviewers row (cursor 1): open model picker (highlights opus-4-8 at index 0),
+    // researcher row (cursor 1): open model picker (highlights opus-4-8 at index 0),
     // DOWN → sonnet-4-6 (index 1), ENTER confirm model, ENTER commit (effort[0]).
     const res = drive(
       store,
@@ -595,14 +591,14 @@ test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_sw
     const swap = findSwap(res.effects);
     assert.ok(swap, 'the commit emits exactly one model_swap effect');
     assert.equal(res.effects.filter((e) => (e as ModelSwapEffect).type === 'model_swap').length, 1, 'exactly one swap effect, never a burst');
-    assert.equal(swap!.key, 'reviewers', 'the effect names the config.models key being swapped');
+    assert.equal(swap!.key, GOVERNED_KEY, 'the effect names the config.models key being swapped');
     assert.equal(swap!.from?.model, 'claude-opus-4-8', 'from = the CURRENT config model (the authoritative copy being replaced)');
     assert.equal(swap!.to?.model, 'claude-sonnet-4-6', 'to = the newly selected model');
     // the governed agents (for the surgical setInstalledModelEffort projection)
-    assert.deepEqual([...(swap!.agents ?? [])].sort(), [...REVIEWER_AGENTS].sort(), 'the effect carries the four governed reviewer agents for the frontmatter projection');
+    assert.deepEqual([...(swap!.agents ?? [])].sort(), [GOVERNED_KEY], 'the effect carries the governed registry agent for the frontmatter projection');
     // the durable decision title convention (AC5 + decision 98064d77e), verbatim
     const title = swap!.decisionTitle ?? '';
-    assert.ok(title.startsWith('Model swap: reviewers '), `decision title names the key: "${title}"`);
+    assert.ok(title.startsWith(`Model swap: ${GOVERNED_KEY} `), `decision title names the key: "${title}"`);
     assert.ok(title.includes('claude-opus-4-8→claude-sonnet-4-6'), `decision title records old→new: "${title}"`);
     assert.ok(title.endsWith('(System tab)'), `decision title carries the (System tab) provenance: "${title}"`);
     // the effort committed for a subagent key honors the rule
@@ -614,24 +610,25 @@ test('AC5 commit (governed key): ENTER→DOWN→ENTER→ENTER emits ONE model_sw
   }
 });
 
-test('AC5 commit (config-only key): a coder_hard swap emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
+test('AC5 commit (config-only key): a classifiers swap emits the effect with NO governed agents (config write + decision only, no frontmatter projection)', () => {
   const { store, cleanup } = storeFixture();
   try {
     const snap = baseSnapshot();
-    // coder_hard row (cursor 2): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
+    // classifiers row (cursor 5: coder=0, implementor=1, researcher=2, scout=3,
+    // librarian=4, classifiers=5): open → DOWN to sonnet-4-6 (index 1) → confirm → commit.
     const res = drive(
       store,
-      st({ tab: SYS_TAB, cursor: 2 }),
+      st({ tab: SYS_TAB, cursor: 5 }),
       [key('ENTER'), key('DOWN'), key('ENTER'), key('ENTER')],
       snap,
     );
     const swap = findSwap(res.effects);
     assert.ok(swap, 'a config-only key still emits a swap effect (AC5: every swap is recorded)');
-    assert.equal(swap!.key, 'coder_hard', 'the effect names the coder_hard key');
-    assert.equal(swap!.from?.model, 'claude-opus-4-8', 'from = the current coder_hard config model');
+    assert.equal(swap!.key, 'classifiers', 'the effect names the classifiers key');
+    assert.equal(swap!.from?.model, 'claude-haiku-4-5', 'from = the current classifiers config model');
     assert.equal(swap!.to?.model, 'claude-sonnet-4-6', 'to = the selected model');
     assert.deepEqual(swap!.agents ?? [], [], 'a config-only key governs no installed agent — no frontmatter file to project');
-    assert.ok((swap!.decisionTitle ?? '').startsWith('Model swap: coder_hard '), 'the decision is still titled for the config-only key');
+    assert.ok((swap!.decisionTitle ?? '').startsWith('Model swap: classifiers '), 'the decision is still titled for the config-only key');
   } finally {
     cleanup();
   }

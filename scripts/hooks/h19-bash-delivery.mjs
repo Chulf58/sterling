@@ -17,67 +17,54 @@
 //     file, so full-article delivery here could cost more context than the
 //     reads it protects. One line per owned path is the design, not a
 //     degradation.
-//  2. IT ALWAYS ENQUEUES, WHATEVER THE RUNG. injection_rung is probe-set per
-//     CELL, and upstream #55889 (research_finding d21d70c6) reports
-//     additionalContext DROPPED for the Bash matcher specifically while other
-//     matchers worked — auto-closed by a stale-bot, not by a fix. This machine's
-//     rung 'read' was probed on the Read/Edit matchers, which is a DIFFERENT
-//     cell; honouring it here would bet delivery on an unprobed surface that
-//     fails silently. Enqueueing needs no output channel at all (a file write
-//     and a clean exit), and h19-delivery-drain's UserPromptSubmit injection is
-//     the one surface proven on this platform. Cost: a one-turn lag. Raising
-//     this to direct injection is licensed by a probe of the Bash cell, nothing
-//     less.
+//  2. IT DELIVERS DIRECTLY in its PostToolUse envelope.
 //  3. IT IS SILENT ON UNOWNED TERRITORY. The frontier signal is right for an
 //     edit — you are about to work there. On Bash it would fire on every grep
 //     across every unowned file, which is most of a survey (P1: a signal that
 //     always fires teaches you to ignore it).
 //
-// SCOPE LIMIT, disclosed not hidden: this serves the CONDUCTOR only. The pending
-// queue drains at UserPromptSubmit, which a subagent never sees, so enqueueing a
-// subagent's touches would mis-route its knowledge into the conductor's context
-// (the correctness finding that shaped the same rule in h19-knowledge-delivery).
-// Pipeline agents get prep's knowledge_pack instead; a direct-mode subagent's
-// Bash surveying is genuinely uncovered until the Bash cell is probed.
-import { readStdin, allow, warnNonBlocking, openStore, repoRel } from './lib/common.mjs';
-import { existsSync, statSync } from 'node:fs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig, repoRel } from './lib/common.mjs';
+import { statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   guardPath,
-  pendingPath,
   readGuard,
   writeGuard,
-  enqueuePending,
   extractCommandPathCandidates,
   bashPointerBlock,
-  joinPointerBlock,
-  pointerVerifyRecipe,
   BASH_POINTER_PATH_CAP,
   budgetKnownGaps,
   isGapDelivered,
   markGapDelivered,
+  resolveTotalCap,
+  isSubstanceDelivered,
+  isDiscoveryDelivered,
+  markSubstanceDelivered,
+  markDiscoveryDelivered,
+  recordRevision,
+  hazardParts,
+  assembleDelivery,
+  claimLegacyInjectionRungNotice,
 } from './lib/delivery.mjs';
 
 const input = readStdin();
-const command = input.tool_input?.command;
-if (!command) allow(); // nothing to parse (not a shell call, or a malformed one)
+function main(input) {
+  const command = input.tool_input?.command;
+  if (!command) return allow(); // nothing to parse (not a shell call, or a malformed one)
 
-// The queue serves the conductor's next prompt; a subagent never sees one.
-if (input.agent_id) allow();
+  const store = openStore(input.cwd);
+  if (!store) return allow(); // not a Sterling project — no ceremony (P1)
 
-const store = openStore(input.cwd);
-if (!store) allow(); // not a Sterling project — no ceremony (P1)
+  try {
+  // Step 2: Bash pointers are always direct on their PostToolUse.
+  const rawRung = loadConfig(input.cwd)?.delivery?.injection_rung;
+  const migrationNotice = claimLegacyInjectionRungNotice(input.cwd, rawRung);
 
-try {
-  // NO run gating here, deliberately: a pipeline AGENT is already excluded above
-  // (the pending queue is the conductor's), and the conductor's own inline
-  // surveying during a run deserves delivery exactly as much as it does outside
-  // one — which is what h19-knowledge-delivery's AC6 carve-out says too.
-  const gPath = guardPath(input.cwd, input.agent_id);
+  // No run gating: every context gets its own direct advisory.
+  const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
   const guard = readGuard(gPath);
 
   const entries = [];
-  const delivered = [];
   for (const candidate of extractCommandPathCandidates(command)) {
     if (entries.length >= BASH_POINTER_PATH_CAP) break;
     const rel = repoRel(candidate, input.cwd);
@@ -91,13 +78,15 @@ try {
     // not a file on disk dies right here. Directories are excluded because
     // ownership is declared per FILE — a governed directory would fan one `ls`
     // out across every article beneath it.
-    let abs;
+    let isFile;
     try {
-      abs = join(input.cwd, rel);
-      if (!existsSync(abs) || !statSync(abs).isFile()) continue;
-    } catch {
-      continue;
+      isFile = statSync(join(input.cwd, rel)).isFile();
+    } catch (e) {
+      // The candidate can vanish or have an ancestor replaced during the scan.
+      if (e?.code === 'ENOENT' || e?.code === 'ENOTDIR') continue;
+      throw e;
     }
+    if (!isFile) continue;
 
     const owners = store
       .query({ types: ['feature_article', 'reference_material'], file_keys: [rel], cap: 100 })
@@ -108,13 +97,15 @@ try {
     if (!owners.length && !hazards.length) continue;
 
     entries.push({ rel, owners, hazards });
-    delivered.push(rel);
   }
 
-  if (!entries.length) allow();
+  if (!entries.length) {
+    if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
+    return allow();
+  }
 
   // KNOWN_GAPS RE-EMISSION AT THE BASH/PROBE-OUTPUT SEAM (board f1489964,
-  // decision known-gaps-inline-ships-with-probe-seam-boarded 53fd6f62's ship
+  // decision known-gaps-inline-ships-with-probe-seam-boarded foreign_53fd6f62's ship
   // condition — closed here). The inline known_gaps slice (h19-knowledge-
   // delivery.mjs) never reaches the exact moment a probe's OUTPUT is trusted,
   // because this hook is pointer-only. Trigger is NARROW and reuses the
@@ -147,26 +138,64 @@ try {
   // is what makes delivery once-per-session, so writing it before the delivery
   // happens turns any failure into permanent silent loss — nothing retries,
   // because the next touch sees the paths already marked.
-  // POINTER-VERIFY recipe (decision db3392db part 2, v2 per fixer F1): the block
-  // is enqueued DECOMPOSED — the fixed two-sentence header plus one {id, line}
-  // per record — so the drain can REBUILD it: a still-live record's line replays
-  // verbatim, while a superseded or missing one is REPLACED by its stub. The
-  // earlier shape sent bare ids and let the drain append disclosures beneath the
-  // whole cached blob, which left the dead record's own line standing above the
-  // footnote, still naming it as governing this path. Gap substance rides the
-  // SAME per-owner {id, line} entry (see bashPointerBlock), so it inherits the
-  // identical live/superseded/missing verdict as the pointer it sits beside.
-  const block = bashPointerBlock(entries, { gapsByOwner });
-  enqueuePending(pendingPath(input.cwd), {
-    kind: 'bash_pointers',
-    rel: delivered.join(' '),
-    payload: joinPointerBlock(block),
-    recipe: pointerVerifyRecipe({ header: block.header, entries: block.lines }),
-    agent_id: 'conductor',
+  //
+  // ONE ASSEMBLER (decision 92088a62 item 2/4): a hazard now renders WHOLE —
+  // via the SAME `hazardParts`/`renderHazards` the Read rung uses, pinned and
+  // unbudgeted (decision 301d8a0a) — and earns a SUBSTANCE mark; an owner
+  // still renders as a one-line POINTER (this hook's whole reason to exist,
+  // see the header) and earns a DISCOVERY mark. Both are built as assembler
+  // parts and composed through ONE `assembleDelivery` call so the total cap is
+  // charged on the FINAL composed context, never two separately-capped
+  // strings glued together after the fact. `aggregateLabel` keeps this rung's
+  // established "+N more pointer line(s) held back…" overflow wording, which
+  // predates the assembler and several tests already pin verbatim.
+  const alreadyDelivered = (r) =>
+    r.type === 'anti_pattern' ? isSubstanceDelivered(guard, r) : isSubstanceDelivered(guard, r) || isDiscoveryDelivered(guard, r);
+
+  const ownerById = new Map();
+  const hazardById = new Map();
+  for (const e of entries) {
+    for (const o of e.owners) if (!ownerById.has(o.id)) ownerById.set(o.id, o);
+    for (const h of e.hazards) if (!hazardById.has(h.id)) hazardById.set(h.id, h);
+  }
+
+  const rawOwnerLines = bashPointerBlock(entries, { gapsByOwner, includeHazardLines: false }).lines;
+  const seenOwnerIds = new Set();
+  const ownerParts = [];
+  for (const l of rawOwnerLines) {
+    if (!l?.id || seenOwnerIds.has(l.id)) continue;
+    seenOwnerIds.add(l.id);
+    const rec = ownerById.get(l.id);
+    if (!rec || alreadyDelivered(rec)) continue; // already delivered elsewhere this session
+    const full = [l.line, ...(l.gapLines ?? [])].join('\n');
+    ownerParts.push({
+      kind: 'ordinary', contentClass: 'discovery', identity: rec.id, revision: recordRevision(rec),
+      text: full, pointer: l.line,
+    });
+  }
+
+  const eligibleHazards = [...hazardById.values()].filter((h) => !alreadyDelivered(h));
+  const hzParts = hazardParts(eligibleHazards, { fileKeys: entries.map((e) => e.rel) });
+
+  if (!ownerParts.length && !hzParts.length) {
+    if (migrationNotice) return exitAfterWrite(JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: migrationNotice } }), 0);
+    return allow();
+  }
+
+  const totalCap = resolveTotalCap(input.cwd);
+  const headerPart = { kind: 'ordinary', pinned: true, contentClass: 'chrome', text: bashPointerBlock([]).header };
+  // MIGRATION NOTICE CHARGED ON THE CAP TOO (fix-round HIGH 4): folded in as
+  // a leading pinned-but-charged part — see h19-knowledge-delivery.mjs's
+  // identical comment — instead of being string-prepended AFTER assembly,
+  // which let its bytes escape the total cap entirely.
+  const migrationNoticePart = migrationNotice ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: migrationNotice }] : [];
+  const assembled = assembleDelivery([...migrationNoticePart, headerPart, ...hzParts, ...ownerParts], totalCap, {
+    aggregateLabel: (n) => `  (+${n} more pointer line(s) held back by the ${totalCap}-byte delivery cap — knowledge_query the command's governed paths)`,
   });
-  guard.pointer_files.push(...delivered);
-  // MARK ONLY WHAT ACTUALLY RENDERED (fixer round LOW finding, mirrors the
-  // cappedHazards precedent: a hazard/decision capped OUT of a payload is
+
+  // MARK ONLY WHAT ACTUALLY RENDERED — the assembler's own returned sets,
+  // never a re-scan of the composed text (fixer round LOW finding, mirrors
+  // the cappedHazards precedent: a hazard/owner capped OUT of a payload is
   // never marked delivered, so it can surface on a later touch instead of
   // vanishing). An owner whose ENTIRE gap allocation lost the shared budget
   // this touch (info.shown.length === 0, e.g. a later owner in a delivery
@@ -174,13 +203,33 @@ try {
   // one shot at this seam's dedup — a subsequent probe of its territory
   // should still get a real chance to show its gaps, not a permanently
   // suppressed "0 of N" repeat.
-  const deliveredGapOwners = gapOwners.filter((o) => (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
-  if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
-  writeGuard(gPath, guard);
-  allow();
-} catch (e) {
+  const shownIds = new Set([...assembled.emittedSubstance, ...assembled.emittedDiscovery].map((e) => e.identity));
+  const deliveredGapOwners = gapOwners.filter((o) => shownIds.has(o.id) && (gapsByOwner.get(o.id)?.shown?.length ?? 0) > 0);
+  const emittedPaths = new Set();
+  for (const entry of entries) {
+    const eligible = [...entry.owners, ...entry.hazards].filter((r) => !alreadyDelivered(r));
+    if (eligible.length && eligible.every((r) => shownIds.has(r.id))) emittedPaths.add(entry.rel);
+  }
+  const recordDelivered = () => {
+    guard.pointer_files.push(...emittedPaths);
+    if (deliveredGapOwners.length) markGapDelivered(guard, deliveredGapOwners);
+    markSubstanceDelivered(guard, assembled.emittedSubstance);
+    markDiscoveryDelivered(guard, assembled.emittedDiscovery);
+    writeGuard(gPath, guard);
+  };
+  // migrationNotice is already folded into `assembled.text` above (as a
+  // leading, charged chrome part — fix-round HIGH 4), so it is not
+  // re-prepended here.
+  const payload = assembled.text;
+  return exitAfterWrite(
+    JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: payload } }),
+    0,
+    { onWritten: recordDelivered }
+  );
+  } catch (e) {
   // Delivery is an aid, never a gate: internal failure is loud but NON-blocking
   // (P5 visibility without an AC7 violation).
-  warnNonBlocking(`H19: bash pointer delivery failed: ${(e && e.message) || e}`);
+    return warnNonBlocking(`H19: bash pointer delivery failed: ${(e && e.message) || e}`);
+  }
 }
-// no close: every path above exits the process, which releases the handle (board f81b1987)
+main(input);

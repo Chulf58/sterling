@@ -11,3 +11,18 @@ sterling-launch.sh
 sterling-windows.bat
 .claude-plugin/sterling-mcp-win.json
 sterling-update.bat
+sterling-check.mjs
+# Codex CLI derives these from .claude/agents/ at run time (machine state, like .claude/agents/)
+.codex/agents/
+# Codex CLI derives AGENTS.md from CLAUDE.md (rewrites "Claude Code"→"Codex", corrupting slugs); never commit it
+AGENTS.md
+# Agent isolation worktrees (machine state, hundreds of MB; .claude/agents/ already ignored above)
+.claude/worktrees/
+# Transient dispatch log — lifecycle-bound session state, never durable (P4)
+.pipeline/
+# Dated store exports, regenerable
+knowledge-export/
+# Machine-local launcher: hardcodes an absolute Windows path, like sterling.bat/tui.bat above
+claude-wsl.bat
+# Windows `> NUL` redirect artifact: under WSL, NUL is a real file, not a device
+NUL

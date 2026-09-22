@@ -6,11 +6,10 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h1-session-start.mjs
-import { randomUUID as randomUUID3, createHash as createHash5 } from "node:crypto";
-import { readFileSync as readFileSync5, existsSync as existsSync7, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync4, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync2, realpathSync as realpathSync2 } from "node:fs";
-import { spawnSync as spawnSync3 } from "node:child_process";
-import { tmpdir } from "node:os";
-import { basename as basename3, dirname as dirname6, join as join8 } from "node:path";
+import { randomUUID as randomUUID5 } from "node:crypto";
+import { readFileSync as readFileSync5, existsSync as existsSync6, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync5, statSync as statSync5, writeFileSync as writeFileSync5, rmSync as rmSync3 } from "node:fs";
+import { spawnSync as spawnSync4 } from "node:child_process";
+import { basename as basename2, dirname as dirname7, join as join8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -4226,6 +4225,11 @@ var baselineAttestationsSchema = external_exports.record(external_exports.string
   head_commit: external_exports.string().min(1),
   sha256: external_exports.string().min(1)
 })).optional();
+var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1)
+}).strict()).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4245,12 +4249,13 @@ var featureArticleSchema = base.extend({
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
   // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision 65222971 → its baseline successor).
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
   // above, which reference_material shares so the shape is defined once.
   baseline_attestations: baselineAttestationsSchema,
-  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  absence_attestations: absenceAttestationsSchema,
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
   article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
@@ -4260,7 +4265,7 @@ var featureArticleSchema = base.extend({
   // superRefine below, since "which kind" is a whole-record fact a single
   // field's shape cannot express alone.
   current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -4274,7 +4279,7 @@ var featureArticleSchema = base.extend({
   // ownership) resolve per record or abstain LOUD on an unmapped name.
   working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision 474b1c71).
+  // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -4353,7 +4358,7 @@ var researchFindingSchema = base.extend({
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
@@ -4394,6 +4399,7 @@ var referenceMaterialSchema = base.extend({
   // naked baseline whose provenance lied about which write produced it. Shape
   // shared with featureArticleSchema, never re-declared.
   baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -4495,7 +4501,7 @@ var SYSTEM_REASONS = [
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -4554,7 +4560,7 @@ var todoSchema = base.extend({
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
   system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -4630,33 +4636,12 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  scout: "scout",
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -4750,7 +4735,7 @@ var RECORD_TYPES = {
     // article (class enumeration stays a consumer-side filter on the field).
     fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
     fileKeys: (r) => (r.files ?? []).map((f) => f.path),
-    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
     // and the id in the envelope beside it is not. version + state say whether
     // this is a moving target and whether it is wired yet.
     digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
@@ -4797,75 +4782,6 @@ function validateRecord(input2) {
 }
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4882,79 +4798,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -5024,7 +4867,7 @@ var configSchema = external_exports.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -5054,57 +4897,31 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
-  }).default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
     stale_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -5115,41 +4932,24 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5177,7 +4977,7 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -5234,7 +5034,7 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -5244,39 +5044,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5299,7 +5066,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -5320,33 +5087,25 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard used for other config-derived delivery values.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
@@ -5358,7 +5117,7 @@ var configSchema = external_exports.object({
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
   }).default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -5370,32 +5129,14 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 
 // packages/schemas/dist/registry.js
@@ -5661,7 +5402,6 @@ var SchemaMigrationRequiredError = class extends Error {
     this.db_path = dbPath;
   }
 };
-var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
   const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
@@ -5678,7 +5418,25 @@ function deepReplaceString(value, from, to) {
   return value;
 }
 var MAX_RANK_TERMS = 16;
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base2 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base2;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
 var COMPARE_WORK_BUDGET = 1e7;
@@ -5833,6 +5591,10 @@ var JournalDemotionRefusedError = class extends Error {
     this.name = "JournalDemotionRefusedError";
   }
 };
+function buildReconcileText(owner, fileKeys) {
+  const files = [...fileKeys].sort();
+  return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
+}
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -6347,7 +6109,7 @@ var SterlingStore = class _SterlingStore {
    * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
    * neither is ever caller-supplied.
    */
-  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations"];
+  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations", "absence_attestations"];
   /**
    * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
    * write of server-owned drift metadata that DELIBERATELY PRESERVES the
@@ -6434,6 +6196,17 @@ var SterlingStore = class _SterlingStore {
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
    *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
    * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
    * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
    * caller that deliberately preserves the stored `updated_at` — see
@@ -6460,6 +6233,16 @@ var SterlingStore = class _SterlingStore {
       }
       if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
         throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
+      }
+      const removedRelation = opts.remove_relation === void 0 ? void 0 : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === "supersedes") {
+        throw new Error(`${op}: rel 'supersedes' cannot be removed as a raw edge \u2014 it is the authoritative carrier of a lifecycle transition. Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`);
+      }
+      if (removedRelation) {
+        const exists = this.db.prepare("SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists \u2014 nothing was written; re-read the record and retry.`);
+        }
       }
       const candidate = buildPatch(current);
       candidate.id = id;
@@ -6496,16 +6279,32 @@ var SterlingStore = class _SterlingStore {
       for (const tag of new Set(validated.stack_tags)) {
         this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
       }
+      const beforeFileKeys = new Set(entry.fileKeys(current));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      for (const path of new Set(entry.fileKeys(stored))) {
+      for (const path of afterFileKeys) {
         this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
       }
       for (const link of validated.links)
         this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        const deleted = this.db.prepare("DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
+        }
+      }
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
-        this.drainResolves(op, opts.resolves, now);
+        this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = /* @__PURE__ */ new Set();
+        for (const path of beforeFileKeys)
+          if (!afterFileKeys.has(path))
+            droppedPaths.add(path);
+        if (droppedPaths.size > 0)
+          this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
     });
     return served;
@@ -6516,8 +6315,18 @@ var SterlingStore = class _SterlingStore {
    * already-closed claim throws, which rolls the ENTIRE write back — an
    * unclaimed write must never appear to succeed against a dead reference, and
    * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
    */
-  drainResolves(op, ids, at) {
+  drainResolves(op, ids, at, receipt) {
     for (const claimed of new Set(ids)) {
       const item = this.get(claimed);
       if (!item) {
@@ -6526,7 +6335,75 @@ var SterlingStore = class _SterlingStore {
       if (item.type !== "todo") {
         throw new Error(`${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) \u2014 the whole write rolled back`);
       }
+      if (receipt)
+        receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
       this.remove(claimed, at);
+    }
+  }
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
+    const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    for (const r of rows) {
+      const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+        continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0)
+        continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      const owner = this.get(ownerId);
+      const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -6551,10 +6428,22 @@ var SterlingStore = class _SterlingStore {
    *      file absorbed the second file's drift into a fresh baseline: the finding
    *      neither queued nor survived.
    *
-   * The key is therefore (system_reason, feature_link, file_keys SET), and the
-   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
-   * concurrent caller blocks on the write lock and then SEES the committed row
-   * instead of racing it.
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
    *
    * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
    * severity — edited today, deleted tomorrow, both reconcile_needed, the first
@@ -6592,10 +6481,67 @@ var SterlingStore = class _SterlingStore {
       const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
       return strip(a) === strip(b);
     };
+    const isReconcileFold = candidate.system_reason === "reconcile_needed" && !!candidate.feature_link;
     let existing;
     let textUpdated = false;
+    let insertedText;
     this.tx(() => {
       const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      if (isReconcileFold) {
+        const matches = [];
+        for (const r of rows) {
+          const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
+          if (t.source !== "system")
+            continue;
+          if (t.system_reason !== "reconcile_needed" || t.feature_link !== candidate.feature_link)
+            continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link);
+            const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
+            this.insertRecord({ ...candidate, text: canonicalText });
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate);
+          }
+          return;
+        }
+        matches.sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set(survivor.file_keys ?? []);
+        for (const f of folded)
+          for (const k of f.file_keys ?? [])
+            unionSet.add(k);
+        for (const k of candidate.file_keys ?? [])
+          unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles2 = [...survivor.file_keys ?? []].sort();
+        const filesChanged2 = JSON.stringify(priorFiles2) !== JSON.stringify(unionFiles);
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? "";
+        if (widening) {
+          const owner = this.get(candidate.feature_link);
+          nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
+        }
+        const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
+        if (textChanged2 || filesChanged2) {
+          existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
+            ...cur,
+            updated_at: candidate.updated_at,
+            ...textChanged2 ? { text: nextText } : {},
+            ...filesChanged2 ? { file_keys: unionFiles } : {}
+          }), {});
+          textUpdated = textChanged2;
+        } else {
+          existing = survivor;
+        }
+        for (const f of folded)
+          this.remove(f.id, candidate.updated_at);
+        return;
+      }
       for (const r of rows) {
         const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
         if (t.source !== "system")
@@ -6624,7 +6570,15 @@ var SterlingStore = class _SterlingStore {
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
-      record: this.hydrateAll([_SterlingStore.storableBody(candidate)])[0],
+      // The echo must agree with the ROW this call actually inserted, not
+      // with the caller's pre-canonicalization `candidate` — see
+      // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+      record: this.hydrateAll([
+        _SterlingStore.storableBody({
+          ...candidate,
+          ...insertedText !== void 0 ? { text: insertedText } : {}
+        })
+      ])[0],
       deduped: false,
       text_updated: false
     };
@@ -6824,7 +6778,7 @@ var SterlingStore = class _SterlingStore {
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
    * uses this ONLY after live-slug and id-prefix resolution both fail, so it
    * can never shadow a live record: a slug still carried by a non-superseded
@@ -6839,7 +6793,7 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
-   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)
    * record resolves to itself at hops:0. Unknown id -> null. Never throws
@@ -6871,7 +6825,7 @@ var SterlingStore = class _SterlingStore {
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
    * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
    * it only ever has something to say about a record that was itself retired
    * via supersede(). A record can also be named the target of a rel:'supersedes'
    * link WITHOUT ever being retired — a clause-level or partial override
@@ -7212,223 +7166,17 @@ var SterlingStore = class _SterlingStore {
     this.db.close();
   }
   // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
   // -------------------------------------------------------------------------
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input2) {
-    const run = runRecordSchema.parse(input2);
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-      }
-      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-  /** By id, or the single active run when no id is given. */
-  getRun(id) {
-    const row = id ? this.db.prepare("SELECT body FROM runs WHERE id = ?").get(id) : this.db.prepare(`SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).get(...ACTIVE_STATES);
-    return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
-  }
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  static parsePendingQueue(raw) {
-    if (!raw)
-      return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-  static serializePendingQueue(queue) {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed, next) {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-    });
-    return run;
-  }
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed, runId, mutate, attempts = 5) {
-    this.assertWritable("casTransitionMerge");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`casTransitionMerge: no run '${runId}'`);
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      if (row.machine_state !== observed) {
-        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body));
-      const next = runRecordSchema.parse(mutate(current));
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId, exit) {
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = _SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(`recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? "unknown"} on phase '${dup.phase_id ?? "?"}' ('${dup.signal}') \u2014 one exit per dispatched agent; call run_signal (or consume-exit) first`);
-      }
-      this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(_SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId) {
-    const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-    if (!row)
-      throw new Error(`getPendingExit: no run '${runId}'`);
-    return _SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId, input2, at) {
-    this.assertWritable("writeHandoff");
-    const handoff = handoffSchema.parse(input2);
-    if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    this.tx(() => {
-      this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-  readHandoffs(runId, filter = {}) {
-    const rows = filter.phase_id ? this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at").all(runId, filter.phase_id) : this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at").all(runId);
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId, mutate, attempts = 5) {
-    this.assertWritable("updateRunOptimistic");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const current = JSON.parse(row.body);
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
-      }
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId, entry) {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId, articleId) {
-    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
-  }
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId, amendment) {
-    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
-  }
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId, phaseId, items) {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId, agentType) {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
-    }));
-    return next.dispatch_counts[agentType];
-  }
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
    * transactionally — read + delete in one transaction, never a signal file (P4).
@@ -7467,15 +7215,28 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable("renameFileKey");
     const from = normalizeRepoPath(oldPath);
     const to = normalizeRepoPath(newPath);
-    const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+    let count = 0;
     this.tx(() => {
+      const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+      count = rows.length;
       for (const { record_id } of rows) {
         if (!this.get(record_id))
           continue;
-        this.applyInPlace("renameFileKey", record_id, (current) => deepReplaceString(current, from, to), {}, { allowRetired: true });
+        this.applyInPlace("renameFileKey", record_id, (current) => {
+          const patched = deepReplaceString(current, from, to);
+          const c = current;
+          if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
+            const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
+            const featureLink = patched.feature_link;
+            const owner = featureLink ? this.get(featureLink) : void 0;
+            const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: featureLink }, fileKeys);
+            return { ...patched, file_keys: fileKeys, text };
+          }
+          return patched;
+        }, {}, { allowRetired: true, suppressReconcilePrune: true });
       }
     });
-    return rows.length;
+    return count;
   }
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
    *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
@@ -7505,54 +7266,12 @@ var SterlingStore = class _SterlingStore {
     });
     return this.hydrateAll([stored])[0];
   }
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId, summaries) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "completing") {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
-    this.tx(() => {
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
-      if (res.changes === 0)
-        throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-    return next;
-  }
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.assertWritable("recordCheckSkipped");
@@ -7613,7 +7332,7 @@ var SterlingStore = class _SterlingStore {
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
    */
   enqueueRefreshReferenceOnce(nowISO) {
     const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
@@ -8074,7 +7793,7 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join as join6, basename as basename2, dirname as dirname5 } from "node:path";
+import { join as join6, dirname as dirname5 } from "node:path";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -8083,7 +7802,7 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_corrupt",
   "ledger_absent",
   "ledger_digest_mismatch",
-  "ledger_lock_held",
+  "compatibility_lock_held",
   "entry_not_found",
   "entry_selector_ambiguous",
   "entry_not_active",
@@ -8108,7 +7827,7 @@ var CODES = /* @__PURE__ */ new Set([
   "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
-  // §1.4 commit-reviewed
+  // commit operation
   "nothing_staged",
   "message_missing",
   "no_spendable_receipt",
@@ -8247,12 +7966,8 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_CODE_BY_BASENAME = {
-  "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "ledger_lock_held"
-};
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+function lockCodeFor() {
+  return "register_lock_held";
 }
 function isPidAlive(pid) {
   try {
@@ -8321,7 +8036,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 `
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
@@ -8332,7 +8047,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -8531,305 +8246,6 @@ function sessionBoundarySweep(root, opts = {}) {
     }
   }
   return { terminated, pruned, ...refused ? { refused } : {} };
-}
-
-// scripts/hooks/lib/review-ledger-entry.mjs
-import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync5, renameSync as renameSync3 } from "node:fs";
-import { join as join7, extname } from "node:path";
-import { createHash as createHash3, randomBytes as randomBytes2 } from "node:crypto";
-function isEvidenceObject(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function normalizeReceiptPath(p) {
-  const s2 = String(p).replace(/\\/g, "/").replace(/^\.\//, "");
-  if (/^[A-Za-z]:/.test(s2)) return null;
-  if (s2.startsWith("/")) return null;
-  if (s2.split("/").includes("..")) return null;
-  return s2;
-}
-function isUsableBlobSha(v) {
-  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
-}
-function parseDisposition(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.class !== "string" || raw.class === "") return { ok: false };
-  if (typeof raw.reason !== "string" || raw.reason === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (typeof raw.head_sha !== "string" || raw.head_sha === "") return { ok: false };
-  if (typeof raw.classifier_version !== "number") return { ok: false };
-  const facts = isEvidenceObject(raw.facts) ? raw.facts : {};
-  return {
-    ok: true,
-    value: { class: raw.class, reason: raw.reason, at: raw.at, head_sha: raw.head_sha, classifier_version: raw.classifier_version, facts }
-  };
-}
-function parseReservation(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
-  if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
-  const value = { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation };
-  if (raw.waived !== void 0) {
-    if (typeof raw.waived !== "boolean") return { ok: false };
-    value.waived = raw.waived;
-  }
-  return { ok: true, value };
-}
-function parseConsumption(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
-  if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  const value = { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce };
-  if (raw.paths !== void 0) {
-    if (!Array.isArray(raw.paths) || !raw.paths.every((p) => typeof p === "string")) return { ok: false };
-    value.paths = raw.paths.slice();
-  }
-  return { ok: true, value };
-}
-function parseContentEvidence(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (raw.status !== "complete" && raw.status !== "partial" && raw.status !== "unavailable") return { ok: false };
-  const basis = typeof raw.basis === "string" && raw.basis ? raw.basis : "stop-time-worktree-snapshot";
-  let blobs;
-  if (raw.blobs === void 0) {
-    blobs = {};
-  } else if (isEvidenceObject(raw.blobs)) {
-    blobs = { ...raw.blobs };
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.blobs" } };
-  }
-  let absentPaths;
-  if (raw.absent_paths === void 0) {
-    absentPaths = [];
-  } else if (Array.isArray(raw.absent_paths)) {
-    absentPaths = raw.absent_paths.filter((p) => typeof p === "string");
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.absent_paths" } };
-  }
-  const value = { basis, status: raw.status, blobs, absent_paths: absentPaths };
-  if (raw.index_blobs !== void 0) {
-    if (!isEvidenceObject(raw.index_blobs)) {
-      return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.index_blobs" } };
-    }
-    value.index_blobs = { ...raw.index_blobs };
-  }
-  if (raw.truncated === true) value.truncated = true;
-  if (Number.isInteger(raw.truncated_of)) value.truncated_of = raw.truncated_of;
-  if (typeof raw.failure_reason === "string" && raw.failure_reason) value.failure_reason = raw.failure_reason;
-  return { ok: true, value };
-}
-function parseObservedEvidence(raw) {
-  const value = {};
-  if (Array.isArray(raw?.observed_files)) value.observed_files = raw.observed_files.filter((p) => typeof p === "string");
-  if (Array.isArray(raw?.observed_reads)) value.observed_reads = raw.observed_reads.filter((p) => typeof p === "string");
-  if (typeof raw?.observed_source === "string" && raw.observed_source) value.observed_source = raw.observed_source;
-  if (raw?.observed_truncated === true) value.observed_truncated = true;
-  return { ok: true, value };
-}
-var RECEIPT_STATUSES = /* @__PURE__ */ new Set(["active", "reserved", "consumed", "discharged"]);
-var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var AGENT_TYPE_PATTERN = /^[A-Za-z0-9_-]+$/;
-var TERRITORY_SOURCES = /* @__PURE__ */ new Set(["review-territory", "free-prose-fallback", "unattributable"]);
-function parseReceipt(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.schema_version !== 2) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.kind !== void 0 && raw.kind !== "roster_receipt") return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.entry_id !== "string" || !UUID_PATTERN.test(raw.entry_id)) return { ok: false, code: "ledger_entry_malformed" };
-  if (!RECEIPT_STATUSES.has(raw.status)) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.started_at !== "string" || !raw.started_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.finished_at !== "string" || !raw.finished_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (!isEvidenceObject(raw.reviewer)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer" } };
-  if (typeof raw.reviewer.agent_type !== "string" || !AGENT_TYPE_PATTERN.test(raw.reviewer.agent_type)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer.agent_type" } };
-  }
-  if (!isEvidenceObject(raw.identity)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity" } };
-  if (typeof raw.identity.agent_id !== "string" || !raw.identity.agent_id) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity.agent_id" } };
-  }
-  if (!isEvidenceObject(raw.territory) || !Array.isArray(raw.territory.files)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory" } };
-  }
-  if (!TERRITORY_SOURCES.has(raw.territory.source)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
-  }
-  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "none" && raw.territory.attribution !== "union") {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
-  }
-  const contentParsed = parseContentEvidence(raw.content_evidence);
-  if (!contentParsed.ok) {
-    return { ok: false, code: "ledger_entry_malformed", facts: contentParsed.facts ?? { field: "content_evidence" } };
-  }
-  let reservation;
-  let consumption;
-  let disposition = null;
-  if (raw.status === "reserved") {
-    const r = parseReservation(raw.reservation);
-    if (!r.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-    reservation = r.value;
-  } else if (raw.reservation !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-  }
-  if (raw.status === "consumed") {
-    const c = parseConsumption(raw.consumption);
-    if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-    if (Array.isArray(c.value.paths) && c.value.paths.length > 0) {
-      const partialReceipt = {
-        territory: { files: raw.territory.files.filter((f) => typeof f === "string") },
-        content_evidence: contentParsed.value
-      };
-      const covered = new Set(receiptCoveredPaths(partialReceipt));
-      const seen = /* @__PURE__ */ new Set();
-      for (const p of c.value.paths) {
-        const n = normalizeReceiptPath(p);
-        if (n === null || !covered.has(n) || seen.has(n)) {
-          return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption.paths", entry_id: raw.entry_id } };
-        }
-        seen.add(n);
-      }
-    }
-    consumption = c.value;
-  } else if (raw.consumption !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-  }
-  if (raw.status === "discharged") {
-    const d = parseDisposition(raw.disposition);
-    if (!d.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-    disposition = d.value;
-  } else if (raw.disposition !== void 0 && raw.disposition !== null) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-  }
-  const identity = {
-    session_id: typeof raw.identity.session_id === "string" ? raw.identity.session_id : null,
-    branch: typeof raw.identity.branch === "string" ? raw.identity.branch : null,
-    base_sha: typeof raw.identity.base_sha === "string" ? raw.identity.base_sha : null,
-    agent_id: raw.identity.agent_id
-  };
-  const observed = parseObservedEvidence(raw).value;
-  const receipt = {
-    schema_version: 2,
-    entry_id: raw.entry_id,
-    kind: "roster_receipt",
-    status: raw.status,
-    started_at: raw.started_at,
-    finished_at: raw.finished_at,
-    reviewer: {
-      agent_type: raw.reviewer.agent_type,
-      model: raw.reviewer.model ?? null,
-      model_family: raw.reviewer.model_family ?? null,
-      model_source: raw.reviewer.model_source ?? null
-    },
-    identity,
-    territory: {
-      files: raw.territory.files.filter((f) => typeof f === "string"),
-      source: raw.territory.source,
-      attribution: raw.territory.attribution,
-      ...typeof raw.territory.attribution_case === "string" ? { attribution_case: raw.territory.attribution_case } : {}
-    },
-    content_evidence: contentParsed.value,
-    disposition,
-    ...observed
-  };
-  if (reservation) receipt.reservation = reservation;
-  if (consumption) receipt.consumption = consumption;
-  return { ok: true, receipt };
-}
-function legacyFingerprint(raw) {
-  const files = Array.isArray(raw?.files) ? raw.files.filter((f) => typeof f === "string").map(normalizeReceiptPath).sort() : [];
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? raw.reviewed_state.blobs : {};
-  const blobs = Object.entries(blobsObj).map(([p, s2]) => [normalizeReceiptPath(p), s2]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  let canonical;
-  try {
-    canonical = JSON.stringify([raw?.agent_type ?? null, raw?.at ?? null, files, blobs]);
-    if (typeof canonical !== "string") canonical = "<unserializable>";
-  } catch {
-    canonical = "<unserializable>";
-  }
-  return createHash3("sha256").update(canonical).digest("hex").slice(0, 32);
-}
-function legacyReceiptHandle(raw) {
-  return `receipt-${legacyFingerprint(raw)}`;
-}
-function adaptLegacyEntry(raw) {
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? { ...raw.reviewed_state.blobs } : {};
-  return {
-    kind: "legacy",
-    handle: legacyReceiptHandle(raw),
-    agent_type: typeof raw?.agent_type === "string" ? raw.agent_type : null,
-    files: Array.isArray(raw?.files) ? raw.files.slice() : [],
-    at: typeof raw?.at === "string" ? raw.at : null,
-    session_id: typeof raw?.session_id === "string" ? raw.session_id : null,
-    branch: typeof raw?.branch === "string" ? raw.branch : null,
-    base_sha: typeof raw?.base_sha === "string" ? raw.base_sha : null,
-    blobs: blobsObj,
-    status: raw?.status === "discharged" ? "discharged" : "active"
-  };
-}
-function looksLikeLegacyV1(raw) {
-  return typeof raw?.agent_type === "string" && raw.agent_type !== "" && Array.isArray(raw?.files) && typeof raw?.at === "string" && raw.at !== "";
-}
-function classifyLedgerEntry(raw) {
-  if (!isEvidenceObject(raw)) {
-    return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (raw.schema_version === 2) {
-    if (raw.kind === "external_review") {
-      if (typeof raw.entry_id !== "string" || !raw.entry_id || typeof raw.thread_id !== "string" || !Array.isArray(raw.files)) {
-        return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "external_review" } };
-      }
-      return { kind: "external_review", entry: raw };
-    }
-    const parsed = parseReceipt(raw);
-    if (!parsed.ok) return { kind: "malformed", code: "ledger_entry_malformed", facts: parsed.facts ?? { reason: "receipt" } };
-    return { kind: "receipt", receipt: parsed.receipt };
-  }
-  if (looksLikeLegacyV1(raw)) {
-    return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
-  }
-  return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
-}
-function receiptCoveredPaths(receipt) {
-  const files = Array.isArray(receipt?.territory?.files) ? receipt.territory.files : [];
-  const blobs = isEvidenceObject(receipt?.content_evidence?.blobs) ? receipt.content_evidence.blobs : {};
-  const absentPaths = new Set(
-    (Array.isArray(receipt?.content_evidence?.absent_paths) ? receipt.content_evidence.absent_paths : []).filter((p) => typeof p === "string").map(normalizeReceiptPath).filter((n) => n !== null)
-  );
-  const covered = [];
-  for (const f of files) {
-    if (typeof f !== "string") continue;
-    const n = normalizeReceiptPath(f);
-    if (n === null) continue;
-    const sha = blobs[f] ?? blobs[n];
-    if (isUsableBlobSha(sha) || absentPaths.has(n)) covered.push(n);
-  }
-  return covered;
-}
-function ledgerPath(root) {
-  return join7(root, ".sterling", "review-ledger.json");
-}
-function readLedger(root) {
-  const p = ledgerPath(root);
-  if (!existsSync5(p)) return { availability: "absent", entries: [], rawEntries: [], raw: "" };
-  let raw;
-  try {
-    raw = readFileSync3(p, "utf8");
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  return {
-    availability: "ok",
-    entries: parsed.map((e, index) => ({ ...classifyLedgerEntry(e), index })),
-    rawEntries: parsed,
-    raw
-  };
 }
 
 // scripts/hooks/lib/undeclared-source.mjs
@@ -9075,11 +8491,11 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 }
 
 // scripts/lib/agent-distribution.mjs
-import { createHash as createHash4 } from "node:crypto";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, readdirSync as readdirSync2, existsSync as existsSync6, mkdirSync as mkdirSync6, statSync as statSync3 } from "node:fs";
+import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync3, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
-  return createHash4("sha256").update(normalize(text), "utf8").digest("hex");
+  return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
 }
 var HEADER_RE = /^<!-- sterling-generated v=(\S+) template=(\S+) template_hash=([0-9a-f]{64}) content_hash=([0-9a-f]{64}) installed_at=(\S+) -->$/m;
 function parseInstalledHeader(content) {
@@ -9105,9 +8521,27 @@ function extractBakedCommandPaths(content) {
   return [...paths];
 }
 function loadRegistry(registryPath2) {
-  const registry = JSON.parse(readFileSync4(registryPath2, "utf8"));
+  const registry = JSON.parse(readFileSync3(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
     throw new Error(`agent registry ${registryPath2}: unsupported shape (expected {version: 1, agents: []})`);
+  }
+  const names = /* @__PURE__ */ new Set();
+  const files = /* @__PURE__ */ new Set();
+  for (const [index, entry] of registry.agents.entries()) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}] must be an object`);
+    }
+    if (typeof entry.name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(entry.name)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].name must be a safe agent name`);
+    }
+    if (typeof entry.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
+      throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
+    }
+    if (names.has(entry.name) || files.has(entry.file)) {
+      throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
+    }
+    names.add(entry.name);
+    files.add(entry.file);
   }
   return registry;
 }
@@ -9116,10 +8550,95 @@ var RESTART_INSTRUCTION = [
   "RESTART REQUIRED \u2014 project subagents load at session start.",
   "Agents installed into .claude/agents/ are NOT visible to a",
   "session that was already running. Restart Claude Code in this",
-  "project before the first pipeline run; the run is blocked until",
-  "the runtime visibility check confirms the installed agent set.",
+  "project before dispatching any of the agents above.",
   "================================================================"
 ].join("\n");
+
+// scripts/hooks/lib/settlement.mjs
+import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync2, statSync as statSync4, renameSync as renameSync4 } from "node:fs";
+import { spawnSync as spawnSync3 } from "node:child_process";
+import { join as join7, dirname as dirname6 } from "node:path";
+function hashFile(root, rel) {
+  try {
+    return createHash4("sha256").update(readFileSync4(join7(root, rel))).digest("hex");
+  } catch {
+    return void 0;
+  }
+}
+var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+function gitZ(root, args) {
+  const r = spawnSync3("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
+  return r.stdout.split("\0").filter(Boolean);
+}
+function changedSince(root, base2) {
+  const diff = ["diff", "--name-only", "-z", "--no-renames", "--relative"];
+  return /* @__PURE__ */ new Set([
+    ...gitZ(root, [...diff, base2]),
+    ...gitZ(root, [...diff, "--cached", base2]),
+    ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+  ]);
+}
+var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
+function readGitSettled(root) {
+  try {
+    const s2 = JSON.parse(readFileSync4(join7(root, GIT_SETTLED_REL), "utf8"));
+    return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
+  } catch {
+    return null;
+  }
+}
+function gitTouches(root, now) {
+  let head;
+  try {
+    const r = spawnSync3("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    if (r.status === 0) head = r.stdout.trim();
+    else if (spawnSync3("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else return { ok: false, reason: "no_git" };
+    const settled = readGitSettled(root);
+    let base2 = settled?.sha;
+    if (base2 && base2 !== EMPTY_TREE && (spawnSync3("git", ["cat-file", "-e", `${base2}^{tree}`], { cwd: root, timeout: 3e4 }).status !== 0 || spawnSync3("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0)) base2 = null;
+    const hashOf = (p) => hashFile(root, p) ?? null;
+    const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next };
+    const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
+    const pool = /* @__PURE__ */ new Set([...base2 ? changedSince(root, base2) : dirtyNow, ...Object.keys(settled.dirty)]);
+    const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
+    const candidates = [...changed].map((path) => {
+      let at = settled.at;
+      try {
+        at = statSync4(join7(root, path)).mtime.toISOString();
+      } catch {
+      }
+      return { path, at: typeof at === "string" ? at : now };
+    });
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2) };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e) };
+  }
+}
+function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
+  const p = join7(root, GIT_SETTLED_REL);
+  mkdirSync6(dirname6(p), { recursive: true });
+  if (ifAbsent) {
+    try {
+      writeFileSync4(p, JSON.stringify(snapshot), { flag: "wx" });
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  }
+  writeFileSync4(`${p}.tmp`, JSON.stringify(snapshot));
+  renameSync4(`${p}.tmp`, p);
+  return true;
+}
+function writeInitialGitSettled(root, snapshot) {
+  return writeGitSettled(root, snapshot, { ifAbsent: true });
+}
 
 // scripts/hooks/h1-session-start.mjs
 async function deleteRegisterUnderLock(cwd) {
@@ -9134,10 +8653,10 @@ async function deleteRegisterUnderLock(cwd) {
           process.stderr.write(`${sweep.refused}
 `);
         }
-        rmSync2(registerPath(cwd), { force: true });
-        const registerBasename = basename3(registerPath(cwd));
+        rmSync3(registerPath(cwd), { force: true });
+        const registerBasename = basename2(registerPath(cwd));
         for (const f of readdirSync3(transientDir)) {
-          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync2(join8(transientDir, f), { force: true });
+          if (f.startsWith(`${registerBasename}.tmp-`)) rmSync3(join8(transientDir, f), { force: true });
         }
       },
       { retryMs: 1e3, timeoutMs: 1e4 }
@@ -9151,61 +8670,21 @@ async function deleteRegisterUnderLock(cwd) {
     }
   }
 }
-function conventions(maxConcurrent2) {
-  return [
-    "Sterling conventions (injected by H1):",
-    `- Anti-speculation: never invent an API, field, flag, or behavior; cite tool-call evidence from this turn or say "I don't know, checking" and check.`,
-    "- No false action claims: never imply something was saved, run, or recorded unless it was actually performed this turn.",
-    "- Canonical naming: one name per concept, from the registries; phase execution, intake, steps \u2014 kill synonyms on sight.",
-    // Injected here, not in CLAUDE.md: H1 ships from the shared plugin clone, so these
-    // reach every project at its next session start with no per-project copy and no
-    // stamp-contract propagation — the same reason the todo/queue routing lines live on
-    // the commands. Stated because the user was otherwise re-declaring them per project.
-    // Delegation: the anti-quota half leads DELIBERATELY. An earlier revision of this
-    // rule read "3-5 active at all times" in a consuming project and the user withdrew it
-    // within a day — "i am afraid that a session will feel force to spend up subagents even
-    // if they see necessary" — and the same concern was raised again here on 2026-07-29:
-    // "i am afraid that the conductor feel force to dispatch subagents without any value,
-    // for the sake of just doing it to keep the claude.md happy". Leading with "up to N"
-    // reads as a target; leading with the ceiling reads as a limit. Both halves of the
-    // watchdog conditional bind, and over-dispatch is named a DEFECT rather than waste,
-    // because a rule that only pushes one way is the rule that produced the fear.
-    `- Delegation: ${maxConcurrent2} concurrent subagents is a CEILING, not a target \u2014 there is no floor, no quota and no expectation. This convention is NEVER satisfied by dispatching: an idle slot is not a finding, and a session that delegated nothing and did the work itself has violated nothing. Dispatch where it buys something real \u2014 speed on genuinely independent work, an independent pair of eyes on quality, or protecting the conductor context window. THE CONTEXT WINDOW IS THE PRIMARY VALUE (user-stated 2026-08-10, decision 9042abeb): the conductor typically runs on a premium model, so hand-work costs twice \u2014 it fills the session's scarcest context AND spends the most expensive tokens, while a subagent (opus for judgment, sonnet for mechanical) returns only the conclusion at a fraction of the price. Weigh dispatch-vs-hand-work in conductor tokens spent on intermediate reading, not just wall-clock. Dispatching without value is a DEFECT, not a neutral choice: it loses twice, burning tokens AND returning a report the conductor must read and verify, spending the very context the delegation was meant to protect.`,
-    '- The count is a trigger to CHECK, never a level to maintain: "fewer than 3 agents running AND work available? dispatch". Both halves bind \u2014 being below three prompts one question, is there parallel work, and "no" is a complete and correct answer that ends the matter. Dispatch several independent things in ONE message so they actually overlap; when there is one thing to do, do the one thing. The real failure is never "too few agents" \u2014 it is the conductor reading files by hand that an agent should have read for it.',
-    // Named moments (decision 677f1639, 2026-08-10): measured miss — the conductor sat at
-    // 1/5 seats with three delegable analyses boarded and the watchdog verbatim in context.
-    // Diagnosis: the rule bound to no event (an always-rule fires never) and the wording's
-    // fear was one-sided. Trigger moments added; the anti-quota lead above is unchanged.
-    `- THE WATCHDOG CHECK HAS THREE NAMED MOMENTS \u2014 an always-rule fires never, so ask it exactly here: (1) an agent RETURNS: a freed seat is a dispatch decision, not background noise \u2014 adjudicate the report, then re-ask "is there parallel work?"; (2) a work unit lands (slice committed, design adjudicated, drain finished): before choosing the next unit, ask what can run beside it; (3) BEFORE starting any multi-file read, sweep, probe, repro, or bulk analysis by hand: if you only need the CONCLUSION, it is a dispatch \u2014 hand-work needs a positive reason (live diagnosis with the user, design needing exact semantics held in your own context, verifying a subagent's claim). Under-delegation and over-dispatch are the SAME defect with the same cost: the conductor's attention spent where it should not be (decision 677f1639).`,
-    // Slice ordering (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22): the
-    // stable-identity campaign ran its critical path single-file for hours with free seats while
-    // later slices' independent pieces were already dispatchable — the user had to interrupt
-    // to demand the frontier be widened. This states WHAT TO PICK; 677f1639 above states WHEN
-    // to check. Sharpened by an external-model (Codex) consult, adjudicated: pure unlock-count
-    // starved risky-but-low-unlock proof slices and mandatory low-unlock slices, and re-picking
-    // on every freed seat could interrupt coherent in-flight work for no reason.
-    "- SLICE ORDERING IS UNBLOCK-FIRST (decision slice-ordering-is-unblock-first, user-ruled 2026-08-22; sharpened by external-model consult): order every slice list by UNBLOCKING POWER weighed WITH risk-retirement \u2014 a risky integration proof may deserve first position even when it unlocks little, and low-unlock but mandatory slices get a latest-start bound so they cannot starve. Re-pick what most widens the frontier on MATERIAL EVENTS (slice completion, dependency change, newly discovered work) \u2014 never disturb coherent in-flight work just because a seat freed. The frontier \u2014 ready work across the board, the maintenance queue, and future slices' independent pieces (read-only hunts, pins authorable from a settled design, scoped artifacts that cannot contaminate the current slice's commit boundary) \u2014 must GROW while an objective's slice list is still expanding; convergence to single-file near the end is healthy when EXPLAINED, a defect when unexamined. Librarian dispatches are store maintenance, not parallel WORK. TURN-END RULE: a turn may not end in a wait-state with free seats unless the report names the READY, POSITIVE-VALUE, SAFELY-DISPATCHABLE work on the frontier and why none qualifies \u2014 a free seat alone never implies dispatch (the quota pathology stays forbidden).",
-    // Article application (decision dac3d2c6, 2026-08-10): measured miss — the conductor
-    // drafted correctly but hand-ran ~10 article writes and absorbed the ~50KB full-record
-    // echo each store write then returned. Board 7ddf13a7 has since slimmed the echo (write
-    // results default to a digest receipt), but the dispatch shape stands: drafting a
-    // slice's reconciles still spends conductor attention per write, and the librarian
-    // batches them off the critical path. Drafting stays with the conductor.
-    "- ARTICLE APPLICATION IS DISPATCH-SHAPED: the conductor DRAFTS all reconcile text \u2014 the librarian never authors knowledge \u2014 then BATCHES the slice's drafted updates into ONE librarian dispatch (drafts + target ids + apply order) that returns only new record ids + versions and closes the reconcile_needed items its writes clear. (Write echoes default to a slim digest receipt since board 7ddf13a7 \u2014 the old ~50KB full-record echo is opt-in via projection:'full' \u2014 so the dispatch now buys parallelism and attention, not just tokens.) The dispatch is FIRE-AND-CONTINUE: a librarian ALWAYS runs in parallel with the conductor's next work \u2014 never await it, never hold it for something to run beside (user-decided 2026-08-10); the only follow-ups are re-checking projection freshness after it reports, and never aiming two concurrent writers at the SAME record. Hand-run store writes only for small authored creates, a write needing live adjudication, or a single small-record touch (decision dac3d2c6).",
-    `- The Workflow tool stays OPT-IN and needs the user's explicit per-prompt ask ("use a workflow" / "ultracode") or the session setting \u2014 its fan-out is an order of magnitude larger, so that cost stays theirs to authorize. Dispatches the brain returns during an active run, and the conductor_direct agents (librarian/debugger) on a task already stated, are authorized work either way.`,
-    // Slice-flow + mode intent (user-decided 2026-08-10, decision aac19532): per-slice
-    // stops were rejected verbatim ("demands attention all the time"); the three subagent
-    // purposes are the user's own words. Ships here so every project gets it next session.
-    `- CONDUCTOR MODE FLOWS THROUGH SLICE BOUNDARIES: commit each slice at its boundary, reconcile, and CONTINUE to the next unattended \u2014 never end the turn to ask "shall I continue?". The user is engaged at exactly two points: the merge-to-main gate, and a genuine blocker (an adjudication only they can make, an ambiguity the store cannot resolve, hard context pressure \u2192 rotation). Subagents are intrinsic to the mode, for three things: PARALLEL speed on independent work; subagents DO the work while the conductor REVIEWS; and protecting the conductor's context window (decision aac19532).`,
-    // Explorer is SONNET (user, 2026-07-29). The convention states the PIN, not the reasoning:
-    // the rationale lives in the store (decision + the paired-exploration research_finding), and
-    // conventions injected on every session stay short to stay read.
-    "- Every spawned agent carries an EXPLICIT pinned model: opus for judgment, sonnet for authoring, exploration and mechanical work. NEVER haiku for a spawned agent, and NEVER Fable without the user's prior agreement for that specific spawn \u2014 and never a silent inherit of the session model.",
-    '- A SUBAGENT RESULT IS EVIDENCE, NOT A VERDICT. Treat every exhaustiveness claim in an agent report ("all N files", "every hook", "ruled out none") as unverified until you have the count yourself \u2014 measured 2026-07-29, explorers at two different tiers BOTH asserted "all N" from a partial sweep. One grep -c is cheaper than a conclusion built on one.',
-    "- CODEX (sparring partner) IS THE DEFAULT for repo-grounded read-only work AND code review: the DEFAULT independent reviewer on every significant code-touching diff, beside the mandatory roster reviewer (an outside model family catches shared-blind-spot defects a same-family reviewer cannot); and the DEFAULT ENGINE for repo-grounded read-only investigation (diagnosis, subsystem reading, bypass hunting) since it reads the repo itself in its own sandbox at zero marginal cost. THE DIVIDING LINE: repo-grounded READ-ONLY work goes to Codex; implementation and writes NEVER do (Codex runs outside the entire hook enforcement surface); store/KB-context work stays on Claude agents (Codex has no knowledge tools). On a plan-cap hit, fall back to a Claude dispatch and say so. ADVISORY, NEVER GATING \u2014 it never writes and disagreement never blocks work (decision codex-preferred-for-read-shaped-analysis).",
-    "- QUESTION DISCIPLINE: every decision put to the user goes through the AskUserQuestion tool form \u2014 a question asked in prose (even a numbered section) reads as rhetorical and gets missed (user-stated 2026-08-11). Ask ONE highest-leverage question through that form; consolidate the CONSIDERATIONS into that single question, never several questions into one form. When a prompt may time out unanswered, prefer the safe default and proceed unattended, disclosing the assumption \u2014 but ONLY for a REVERSIBLE choice needing no user authorization, and NEVER for a gate/grill decision, which is re-asked or waited out instead (user, 2026-07-02).",
-    "- SOLVE, DON'T BOARD: for findings INSIDE the current task's scope or an already-selected board item, evaluate and fix in-session; board only what genuinely cannot be done now, saying why \u2014 many smells dissolve on two minutes of checking (user-stated 2026-07-27). UNRELATED findings are surfaced for the user's disposition, never fixed inline (surface smells, don't fix them). Small board items get NO per-item slice ceremony: fix directly, one commit per task, one review pass (user-decided 2026-08-21)."
-  ].join("\n");
+function conductorContractBlock() {
+  const root = pluginRoot();
+  if (!root) {
+    return "CONDUCTOR CONTRACT UNAVAILABLE (H1): the Sterling plugin root could not be resolved, so docs/conductor-contract.md could not be read. The conductor has no posture contract this session.";
+  }
+  const contractPath = join8(root, "docs", "conductor-contract.md");
+  try {
+    const text = readFileSync5(contractPath, "utf8");
+    if (!text.trim()) {
+      return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} exists but is empty. The conductor has no posture contract this session.`;
+    }
+    return text;
+  } catch (e) {
+    return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} could not be read (${e?.code ?? e?.message ?? e}). The conductor has no posture contract this session.`;
+  }
 }
 var BANNER_ROWS = [
   "\u2584\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588   \u2580\u2588\u2580 \u2588\u2584 \u2588 \u2584\u2580\u2580\u2584",
@@ -9238,10 +8717,10 @@ function pluginRoot() {
   return process.env.STERLING_PLUGIN_ROOT || null;
 }
 function walkUpPluginRoot() {
-  let dir = dirname6(fileURLToPath(import.meta.url));
+  let dir = dirname7(fileURLToPath(import.meta.url));
   for (let i = 0; i < 4; i++) {
-    if (existsSync7(join8(dir, ".claude-plugin", "plugin.json"))) return dir;
-    dir = dirname6(dir);
+    if (existsSync6(join8(dir, ".claude-plugin", "plugin.json"))) return dir;
+    dir = dirname7(dir);
   }
   return null;
 }
@@ -9274,93 +8753,29 @@ function computeH1DeadDispatchResidue(cwd, source) {
   }
   return lines;
 }
-var RECEIPT_FIELD_CLAMP = 120;
-function safeReceiptField(v) {
-  if (typeof v !== "string") return "";
-  const cleaned = [...v].map((ch) => {
-    const c = ch.codePointAt(0);
-    return c < 32 || c === 127 || c >= 128 && c <= 159 ? " " : ch;
-  }).join("").trim();
-  return cleaned.length > RECEIPT_FIELD_CLAMP ? `${cleaned.slice(0, RECEIPT_FIELD_CLAMP)}\u2026(truncated)` : cleaned;
-}
-function renderSurvivorLine(survivor) {
-  const isLegacy = survivor.kind === "legacy";
-  const legacy = isLegacy ? survivor.legacy : null;
-  const receipt = isLegacy ? null : survivor.receipt;
-  const startStr = isLegacy ? legacy.at : receipt.started_at;
-  const finishedStr = isLegacy ? null : receipt.finished_at;
-  const startMs = typeof startStr === "string" ? Date.parse(startStr) : NaN;
-  const rawCompletedMs = typeof finishedStr === "string" ? Date.parse(finishedStr) : NaN;
-  const nowMs = Date.now();
-  const lowerMs = Number.isNaN(startMs) ? -Infinity : startMs;
-  const completedMs = !Number.isNaN(rawCompletedMs) && rawCompletedMs >= lowerMs && rawCompletedMs <= nowMs ? rawCompletedMs : NaN;
-  const useCompleted = !Number.isNaN(completedMs);
-  const recordedAt = useCompleted ? completedMs : startMs;
-  const age = Number.isNaN(recordedAt) ? "age unknown (no usable timestamp)" : `${((nowMs - recordedAt) / 36e5).toFixed(1)}h old`;
-  const e = isLegacy ? { agent_type: legacy.agent_type, session_id: legacy.session_id, branch: legacy.branch, files: legacy.files } : { agent_type: receipt.reviewer?.agent_type, session_id: receipt.identity?.session_id, branch: receipt.identity?.branch, files: receipt.territory?.files };
-  const type = safeReceiptField(e.agent_type) || "unknown reviewer";
-  const session = safeReceiptField(e.session_id);
-  const branch = safeReceiptField(e.branch);
-  const origin = [session ? `session ${session}` : null, branch ? `branch ${branch}` : null].filter(Boolean).join(", ");
-  const files = Array.isArray(e.files) ? e.files.map((f) => safeReceiptField(f)).filter(Boolean) : [];
-  const label = isLegacy ? "LEGACY " : "";
-  const handleSuffix = isLegacy ? `; discharge handle: ${legacy.handle}` : "";
-  const reservedSuffix = !isLegacy && receipt.status === "reserved" ? " [RESERVED \u2014 mid-spend, see reconcile below]" : "";
-  return `- ${label}${type} \u2014 ${age}${origin ? ` (earned in ${origin})` : " (no recorded session/branch \u2014 a pre-expiry receipt)"}${files.length ? `; files: ${files.slice(0, 5).join(", ")}` : ""}${handleSuffix}${reservedSuffix}`;
-}
-function renderMalformedLine(row, rawEntries) {
-  const raw = rawEntries[row.index];
-  const rawId = typeof raw?.entry_id === "string" ? safeReceiptField(raw.entry_id) : "";
-  const id = rawId || `index ${row.index}`;
-  const field = safeReceiptField(row.facts?.field ?? row.facts?.reason ?? "") || "unknown";
-  return render(
-    disclosure(
-      "ledger_entry_malformed",
-      row.facts ?? {},
-      `H1: ledger entry ${id} is unreadable \u2014 the shape owner refuses it (offending field: ${field}); no automated command can address it. Open .sterling/review-ledger.json and inspect this entry yourself.`
-    )
-  );
-}
-function reviewReceiptLines(cwd) {
-  const { availability, entries, rawEntries } = readLedger(cwd);
-  if (availability !== "ok") return { survivors: [], hasReserved: false, malformed: [] };
-  const survivors = [];
-  const malformed = [];
-  let hasReserved = false;
-  for (const row of entries) {
-    if (row.kind === "external_review") continue;
-    if (row.kind === "malformed") {
-      malformed.push(renderMalformedLine(row, rawEntries));
-      continue;
-    }
-    if (row.kind === "legacy") {
-      if (row.legacy.status === "discharged") continue;
-      survivors.push({ kind: "legacy", legacy: row.legacy });
-      continue;
-    }
-    const receipt = row.receipt;
-    if (receipt.status === "discharged" || receipt.status === "consumed") continue;
-    if (receipt.status === "reserved") hasReserved = true;
-    survivors.push({ kind: "receipt", receipt });
-  }
-  return { survivors: survivors.map(renderSurvivorLine), hasReserved, malformed };
-}
 var input = readStdin();
+if (input.source === "startup" || input.source === "clear") {
+  try {
+    const git = gitTouches(input.cwd, (/* @__PURE__ */ new Date()).toISOString());
+    if (git.ok) writeInitialGitSettled(input.cwd, git.next);
+  } catch {
+  }
+}
 var sessionMarkerPath = join8(input.cwd, ".sterling", "transient", "session.json");
 var sessionMarkerTmp = join8(input.cwd, ".sterling", "transient", `session.json.tmp-${process.pid}`);
 try {
-  if (existsSync7(join8(input.cwd, ".sterling", "config.json"))) {
+  if (existsSync6(join8(input.cwd, ".sterling", "config.json"))) {
     mkdirSync7(join8(input.cwd, ".sterling", "transient"), { recursive: true });
     writeFileSync5(
       sessionMarkerTmp,
       JSON.stringify({ session_id: input.session_id ?? null, source: input.source ?? null, at: (/* @__PURE__ */ new Date()).toISOString() })
     );
-    renameSync4(sessionMarkerTmp, sessionMarkerPath);
+    renameSync5(sessionMarkerTmp, sessionMarkerPath);
   }
 } catch {
   try {
-    rmSync2(sessionMarkerPath, { recursive: true, force: true });
-    rmSync2(sessionMarkerTmp, { recursive: true, force: true });
+    rmSync3(sessionMarkerPath, { recursive: true, force: true });
+    rmSync3(sessionMarkerTmp, { recursive: true, force: true });
   } catch {
   }
 }
@@ -9371,44 +8786,6 @@ var dispatchResidueLines = (() => {
     return [];
   }
 })();
-var receiptLines = (() => {
-  try {
-    return reviewReceiptLines(input.cwd);
-  } catch {
-    return { survivors: [], hasReserved: false, malformed: [] };
-  }
-})();
-var REMEDY_ROOT_SYNTAX = /^[A-Za-z0-9_./+-]+$/;
-var remedyClone = (() => {
-  try {
-    const r = walkUpPluginRoot();
-    if (!r) return null;
-    const posix = String(r).split("\\").join("/").replace(/\/+$/, "");
-    return REMEDY_ROOT_SYNTAX.test(posix) ? posix : null;
-  } catch {
-    return null;
-  }
-})();
-var receiptContext = receiptLines.survivors.length ? `
-
-SURVIVING REVIEW RECEIPTS (H1): ${receiptLines.survivors.length} un-consumed review receipt(s) sit in .sterling/review-ledger.json \u2014 earned by a reviewer dispatch that ended, but never stamped into a commit.
-` + receiptLines.survivors.join("\n") + `
-A receipt from an earlier session or another branch is NO LONGER SPENDABLE: scripts/commit-reviewed.mjs discloses it and refuses to stamp it (decision review-ledger-receipt-expiry) \u2014 its life is bound to the session and branch that earned it, so stamping it here would claim a review that never saw this work. Nothing was deleted. Usual cause: a code-touching commit made with bare 'git commit' instead of commit-reviewed, so the review it earned was never consumed.
-Judge each one and DISCHARGE it explicitly (decision 57984926: discharge preserves the evidence and records a disposition; it is never automatic):
-  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs discharge --entry-id <entry_id> --digest <sha256 of the exact .sterling/review-ledger.json bytes> --class <foreign-session|foreign-branch|no-live-territory> --reason "<why>"
-A LEGACY v1 receipt (no schema_version) has no entry_id \u2014 select it with --legacy-handle receipt-<32 hex> instead. The --digest is the concurrency token: re-read the ledger bytes and hash them immediately before running, or the verb refuses and writes nothing. Otherwise, re-dispatch a reviewer for the work it covered.` + // R1-C82: a RESERVED entry (a crashed/interrupted commit-reviewed spend)
-// is NEVER offered the discharge remedy — discharge refuses a reserved
-// entry outright ([entry_not_active]), so printing it here would send the
-// operator at a guaranteed refusal. `reconcile` either finalizes it
-// against the commit that actually landed or releases it back to active.
-(receiptLines.hasReserved ? `
-One or more of the receipts above are RESERVED (mid-spend, marked above): discharge refuses a reserved entry outright \u2014 the remedy is
-  node ${remedyClone ?? "<clone: the Sterling plugin root could not be resolved from this hook, substitute your clone path>"}/scripts/review-ledger.mjs reconcile
-` : "") : "";
-var malformedContext = receiptLines.malformed.length ? `
-
-MALFORMED REVIEW LEDGER ENTRIES (H1): ${receiptLines.malformed.length} entry(ies) in .sterling/review-ledger.json do not parse as any recognized shape (receipt, external review, or legacy). Neither the discharge nor the reconcile command above can address one of these \u2014 both need parsed facts a malformed entry does not have \u2014 so open the file and inspect each one named below directly:
-` + receiptLines.malformed.join("\n") : "";
 var planLockContext = "";
 var planLock = null;
 var planLockMalformed = false;
@@ -9421,12 +8798,12 @@ try {
 }
 var store = openStore(input.cwd);
 if (!store) {
-  if (planLockContext || dispatchResidueLines.length || receiptContext || malformedContext) {
+  if (planLockContext || dispatchResidueLines.length) {
     process.stdout.write(
       JSON.stringify({
         hookSpecificOutput: {
           hookEventName: "SessionStart",
-          additionalContext: planLockContext + dispatchResidueLines.join("\n\n") + receiptContext + malformedContext
+          additionalContext: planLockContext + dispatchResidueLines.join("\n\n")
         }
       })
     );
@@ -9480,7 +8857,7 @@ var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
   const gitDir = root ? join8(root, ".git") : null;
-  if (gitDir && existsSync7(gitDir) && statSync4(gitDir).isDirectory()) {
+  if (gitDir && existsSync6(gitDir) && statSync5(gitDir).isDirectory()) {
     let role = null;
     try {
       role = JSON.parse(readFileSync5(join8(root, ".sterling", "config.json"), "utf8")).machine_role;
@@ -9488,7 +8865,7 @@ try {
     }
     if (role !== "authoring") {
       const git = (args, timeout = 5e3) => {
-        const r = spawnSync3("git", args, { cwd: root, encoding: "utf8", timeout });
+        const r = spawnSync4("git", args, { cwd: root, encoding: "utf8", timeout });
         return r.status === 0 ? (r.stdout ?? "").trim() : null;
       };
       const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]);
@@ -9503,7 +8880,7 @@ try {
         } catch {
         }
         if (!fresh) {
-          spawnSync3("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
+          spawnSync4("git", ["fetch", "origin", "--quiet"], { cwd: root, encoding: "utf8", timeout: 1e4, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" } });
           try {
             writeFileSync5(cachePath, JSON.stringify({ checked_at: (/* @__PURE__ */ new Date()).toISOString() }) + "\n");
           } catch {
@@ -9514,7 +8891,7 @@ try {
           currencyWarning = `\u26A0 Sterling is ${behind} update(s) behind \u2014 double-click sterling-update.bat (or run /sterling:update), then restart the session. A /clear is NOT enough \u2014 MCP servers survive it, so EXIT AND RELAUNCH the Claude Code CLI. `;
           currencyContext = `
 
-STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse, decision e6240afe), and remind them a session RESTART follows a successful update \u2014 that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
+STERLING CLONE IS BEHIND (H1): the Sterling clone at ${root} is ${behind} commit(s) behind origin's default branch. Tell the user; on their word run /sterling:update (never hand-reconcile or git-pull around it \u2014 fast-forward-or-refuse), and remind them a session RESTART follows a successful update \u2014 that means EXIT AND RELAUNCH the Claude Code CLI, since a /clear alone does not reload the server/hook code.`;
         }
       }
     }
@@ -9587,7 +8964,7 @@ function planLockSection(ctx) {
     }
     let branchNow = "unknown";
     try {
-      const r = spawnSync3("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
+      const r = spawnSync4("git", ["rev-parse", "--abbrev-ref", "HEAD"], { cwd: ctx.cwd, encoding: "utf8", timeout: 5e3 });
       const current = r.status === 0 ? (r.stdout ?? "").trim() : "";
       const approved = clean(lock.approved_branch, 120);
       if (current && approved) branchNow = current === approved ? "same" : `DIFFERENT (now ${current}, approved on ${approved})`;
@@ -9641,12 +9018,12 @@ var rotationContext = "";
 try {
   if (input.source === "clear") {
     const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
-    if (existsSync7(notePath)) {
+    if (existsSync6(notePath)) {
       const note = JSON.parse(readFileSync5(notePath, "utf8"));
-      rmSync2(notePath, { force: true });
+      rmSync3(notePath, { force: true });
       const head = (() => {
         try {
-          const r = spawnSync3("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+          const r = spawnSync4("git", ["rev-parse", "HEAD"], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
           return r.status === 0 ? (r.stdout ?? "").trim() : null;
         } catch {
           return null;
@@ -9663,7 +9040,7 @@ try {
           commitsAheadUnverified = true;
         } else {
           try {
-            const countR = spawnSync3("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
+            const countR = spawnSync4("git", ["rev-list", "--count", `${note.base_branch}..HEAD`], { cwd: input.cwd, encoding: "utf8", timeout: 5e3 });
             const actual = countR.status === 0 ? Number((countR.stdout ?? "").trim()) : null;
             if (Number.isFinite(actual)) {
               if (actual !== note.commits_ahead) {
@@ -9757,7 +9134,7 @@ Resume from next_slice. The board and knowledge store remain the authorities for
 try {
   if (input.source === "compact" || input.source === "startup" || input.source === "clear") {
     const conductorLedger = join8(input.cwd, ".sterling", "transient", "conductor-reads.json");
-    rmSync2(conductorLedger, { force: true });
+    rmSync3(conductorLedger, { force: true });
   }
 } catch {
 }
@@ -9766,44 +9143,18 @@ var dispatchResidueContext = dispatchResidueLines.length ? `
 DEAD-DISPATCH RESIDUE (H1, source=${input.source}): the in-flight dispatch register survived to this session boundary \u2014 its SubagentStop(s) never fired, so the register is about to be wiped (P4).` + (input.source === "clear" ? ` NOT PROOF THAT THESE DISPATCHES ENDED: a dispatch may still be RUNNING across a /clear \u2014 cross-check the LIVE DISPATCHES line in the rotation restore above, and ListAgents, before acting on these files or re-dispatching at them.` : "") + `
 ` + dispatchResidueLines.join("\n") : "";
 await deleteRegisterUnderLock(input.cwd);
-var PERCALL_TMP_TTL_MS = 60 * 60 * 1e3;
-var PERCALL_TMP_SWEEP_CAP = 500;
-try {
-  let tagRoot = input.cwd;
-  try {
-    tagRoot = realpathSync2(input.cwd);
-  } catch {
-  }
-  const projectTag = createHash5("sha256").update(tagRoot).digest("hex").slice(0, 16);
-  const percallRe = new RegExp(`^sterling-enforce-${projectTag}-[\\s\\S]+-call-[0-9a-f]{32}(?:\\.dirty|\\.baseline)?\\.json$`);
-  const tmp = tmpdir();
-  const cutoff = Date.now() - PERCALL_TMP_TTL_MS;
-  let removed = 0;
-  for (const name of readdirSync3(tmp)) {
-    if (removed >= PERCALL_TMP_SWEEP_CAP) break;
-    if (!percallRe.test(name)) continue;
-    const p = join8(tmp, name);
-    try {
-      if (statSync4(p).mtimeMs >= cutoff) continue;
-      rmSync2(p, { force: true });
-      removed++;
-    } catch {
-    }
-  }
-} catch {
-}
 var residueContext = "";
 try {
   if (input.source === "startup" || input.source === "clear") {
     const transient = join8(input.cwd, ".sterling", "transient");
     const regPaths = [join8(transient, "touches.json"), join8(transient, "session-events.json"), join8(transient, "capture-nagged.json")];
     const [touchesPath, eventsPath] = regPaths;
-    if (regPaths.some((p) => existsSync7(p))) {
+    if (regPaths.some((p) => existsSync6(p))) {
       let touches = [];
       let events = [];
       let malformed = false;
       try {
-        if (existsSync7(touchesPath)) {
+        if (existsSync6(touchesPath)) {
           const raw = JSON.parse(readFileSync5(touchesPath, "utf8"));
           if (Array.isArray(raw)) touches = raw;
           else malformed = true;
@@ -9812,7 +9163,7 @@ try {
         malformed = true;
       }
       try {
-        if (existsSync7(eventsPath)) {
+        if (existsSync6(eventsPath)) {
           const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
           if (Array.isArray(raw)) events = raw;
           else malformed = true;
@@ -9839,7 +9190,7 @@ try {
           if (!open) {
             const now = (/* @__PURE__ */ new Date()).toISOString();
             store.enqueueSystemTodo({
-              id: randomUUID3(),
+              id: randomUUID5(),
               type: "todo",
               created_at: now,
               updated_at: now,
@@ -9860,7 +9211,7 @@ SESSION-BOUNDARY RESIDUE (H1): a previous session left unsettled transient regis
           }
         }
       }
-      for (const p of regPaths) rmSync2(p, { force: true });
+      for (const p of regPaths) rmSync3(p, { force: true });
     }
   }
 } catch {
@@ -9913,12 +9264,12 @@ Drain it with /sterling:drain before taking new work, and expect much of it to b
   queueContext += " This is a persistent visibility count by design \u2014 items close only at their lane-specific events, e.g. file_parked only at merge, so a stable count is not a failed drain.";
 }
 var registryContext = "";
-if (existsSync7(registryPath())) {
+if (existsSync6(registryPath())) {
   const cwdPosix = input.cwd.replace(/\\/g, "/");
   const registry = new ProjectRegistry(registryPath());
   try {
     registry.touchLastSeen(cwdPosix, (/* @__PURE__ */ new Date()).toISOString());
-    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync7(p.repo_path));
+    const siblings = registry.list().filter((p) => p.repo_path !== cwdPosix && existsSync6(p.repo_path));
     if (siblings.length) {
       registryContext = "\n\nSibling Sterling projects on this machine (shared project registry) \u2014 other initialized projects; knowledge in any domain you both declare (stack_tags) is shared through the per-user domain stores:\n" + siblings.map((p) => `- ${p.name}: ${p.stack_tags.join(", ") || "(no domains)"}`).join("\n");
     }
@@ -9947,10 +9298,10 @@ var staleWarning = "";
 try {
   const root = pluginRoot();
   const serverDist = process.env.STERLING_SERVER_DIST ?? (root ? join8(root, "packages", "mcp-server", "dist") : null);
-  const currentBuildId = serverDist && existsSync7(buildIdPath(serverDist)) ? readFileSync5(buildIdPath(serverDist), "utf8").trim() || null : null;
+  const currentBuildId = serverDist && existsSync6(buildIdPath(serverDist)) ? readFileSync5(buildIdPath(serverDist), "utf8").trim() || null : null;
   let marker = null;
   const markerPath = runtimeMarkerPath(join8(input.cwd, ".sterling", "sterling.db"));
-  if (existsSync7(markerPath)) {
+  if (existsSync6(markerPath)) {
     const parsed = runtimeMarkerSchema.safeParse(JSON.parse(readFileSync5(markerPath, "utf8")));
     if (parsed.success) marker = parsed.data;
   }
@@ -9992,16 +9343,14 @@ try {
       }
       continue;
     }
-    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync7(p));
+    const unresolved = extractBakedCommandPaths(content).find((p) => !existsSync6(p));
     if (unresolved) dead.push({ agent: f, node: unresolved });
   }
   if (dead.length || unknown.length) {
     machineWarning = (dead.length ? `\u26A0 ${dead.length} installed agent(s) carry hook commands baked for ANOTHER machine context (e.g. ${dead[0].agent} \u2192 ${dead[0].node}) \u2014 their hooks fail silently. ` : "") + (unknown.length ? `\u26A0 ${unknown.length} installed agent file(s) could not be checked at all \u2014 whether their hooks run on this machine is UNKNOWN. ` : "") + `Run /sterling:sync-agents from this context, then restart. `;
     machineContext = `
 
-MACHINE-CONTEXT DRIFT (H1, anti_pattern 60e8463d): ` + (dead.length ? `${dead.length} installed agent(s) in .claude/agents/ carry hook node paths that do not resolve on this machine (${dead.map((d) => d.agent).join(", ")}). Every hook of those agents fails non-blocking \u2014 the enforcement floor (H3/H4/H5/H6/H14/H17) is ABSENT for them. ` : "") + (unknown.length ? `${unknown.length} installed agent file(s) could not be checked, so their activation is UNKNOWN \u2014 an unreadable file is not a healthy one, and one bad file no longer silences this guard:
-` + unknown.join("\n") + `
-` : "") + `Before dispatching any subagent: run scripts/sync-agents.mjs --target <project> from this context (re-bakes as machine_rebaked), tell the user a RESTART is required, and do not start pipeline work until scripts/check-agents-visible.mjs passes.`;
+MACHINE-CONTEXT DRIFT (H1): ` + (dead.length ? `${dead.length} inactive (${dead.map((d) => d.agent).join(", ")}); ` : "") + (unknown.length ? `${unknown.length} UNKNOWN (${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? "agent").join(", ")}). ` : "") + `Hooks for inactive agents fail non-blocking. Run /sterling:sync-agents, restart, then pass scripts/check-agents-visible.mjs before dispatching.`;
   }
 } catch {
 }
@@ -10053,6 +9402,7 @@ try {
     }
     const stale = [];
     const modified = [];
+    const refusedModified = [];
     for (const { file, content, header } of installed) {
       if (!templateFor) {
         unknown.push(`- ${file} \u2014 currency UNKNOWN: ${cloneProblem}`);
@@ -10065,7 +9415,7 @@ try {
         );
         continue;
       }
-      if (templateFile !== basename3(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
+      if (templateFile !== basename2(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
         unknown.push(
           `- ${file} \u2014 currency UNKNOWN: its template '${templateFile}' does not name a plain .md file inside agent-templates/, so nothing outside that directory is allowed to certify it`
         );
@@ -10082,27 +9432,30 @@ try {
       const locallyModified = isLocallyModified(content, header);
       if (templateCurrent && !locallyModified) continue;
       if (locallyModified) {
-        modified.push(
-          templateCurrent ? `- ${file} \u2014 locally MODIFIED: its body no longer matches its own header content_hash, so a hand edit is what governs dispatch here; sync records it as locally_modified_up_to_date and never refreshes it (re-apply the edit on a fresh install, or delete the file and re-install)` : `- ${file} \u2014 locally MODIFIED and behind the clone template: sync re-renders it only if its body byte-matches the fresh template (header_repaired) and REFUSES otherwise (refused_local_modification), so it may never refresh on its own (re-apply your edits on the fresh template, or delete the file and re-install)`
-        );
+        (templateCurrent ? modified : refusedModified).push(file);
       } else {
         stale.push(`- ${file} \u2014 STALE: installed ${String(header.installedAt).slice(0, 10)}, the clone template has changed since (an unmodified install refreshes on sight)`);
       }
     }
-    if (stale.length || modified.length || unknown.length) {
+    if (stale.length || modified.length || refusedModified.length || unknown.length) {
       const inspected = installed.length + unreadableBeforeClassification;
       const parts = [
         stale.length ? `${stale.length} stale` : null,
-        modified.length ? `${modified.length} locally modified` : null,
+        modified.length ? `${modified.length} locally modified (current template)` : null,
+        refusedModified.length ? `${refusedModified.length} refused_local_modification (behind template)` : null,
         unknown.length ? `${unknown.length} of UNKNOWN currency` : null
       ].filter(Boolean);
-      const named = [...stale, ...modified, ...unknown];
+      const named = [...stale, ...unknown];
+      const stateLines = [
+        stale.length ? `stale: ${stale.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? "agent").join(", ")}` : null,
+        modified.length ? `locally modified (current template): ${modified.join(", ")}` : null,
+        refusedModified.length ? `refused_local_modification (behind template): ${refusedModified.join(", ")}` : null,
+        unknown.length ? `unknown: ${unknown.map((x) => x.match(/- ([^ —]+)/)?.[1] ?? "agent").join(", ")}` : null
+      ].filter(Boolean);
       agentCurrencyWarning = `\u26A0 AGENT CURRENCY: ${parts.join(", ")} of ${inspected} installed Sterling agent file(s) \u2014 run /sterling:sync-agents in this project, then restart. `;
       agentCurrencyContext = `
 
-AGENT CURRENCY (H1, research_finding 0038af7c): of ${inspected} Sterling-generated agent file(s) in .claude/agents/, ${parts.join(", ")} against the clone's templates (${templatesDir ?? "(plugin root unresolved)"}).
-` + named.join("\n") + `
-The agent sync only visits projects in the SHARED PROJECT REGISTRY, so a project the registry does not know is never refreshed however current the clone is. Run scripts/sync-agents.mjs --target ${input.cwd} from this context, tell the user a RESTART is required (project subagents load at session start), and check /sterling:projects \u2014 an absence there is the root cause, not a symptom.`;
+AGENT CURRENCY (H1): ${parts.join(", ")} of ${inspected} generated agent file(s): ` + stateLines.join("; ") + `. Run /sterling:sync-agents, restart (agents load at session start), and check /sterling:projects; an unregistered project is not refreshed.`;
     }
   }
 } catch {
@@ -10128,17 +9481,11 @@ if (process.env.STERLING_NO_BANNER !== "1") {
   process.stderr.write(`${paint(BANNER_ROWS)}
 ${versionLine}`);
 }
-var maxConcurrent = 5;
-try {
-  maxConcurrent = config?.delegation?.max_concurrent ?? 5;
-} catch {
-  maxConcurrent = 5;
-}
-var conventionsBlock = input.source === "clear" ? "" : conventions(maxConcurrent);
+var conventionsBlock = conductorContractBlock();
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before the conventions, not after them.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + receiptContext + malformedContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

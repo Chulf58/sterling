@@ -28,7 +28,7 @@
 // unsupported tool, an agent-scoped call, no tool_response, an excluded path,
 // owned-path suppression, no term match, dedup, the pointer cap) and a
 // verdict that cannot tell them apart is exactly the multiply-caused silence
-// anti_pattern 1b141d1f warns about; `expected_reason` ('unsupported_tool' |
+// anti_pattern foreign_1b141d1f warns about; `expected_reason` ('unsupported_tool' |
 // 'agent_id_present' | 'no_tool_response' | 'path_excluded' |
 // 'owned_suppressed' | 'below_axis_floor') names which of the six
 // STORE-DERIVABLE silence causes applies (dedup and the pointer cap stay
@@ -45,7 +45,7 @@
 //   (1) THE VERDICT IS NOT CAP-AWARE. deriveOutputAxisExpected names every
 //       matching record while the live hook renders at most
 //       OUTPUT_AXIS_POINTER_CAP = 1 pointer plus a "(+N more matched)" tail
-//       (decision h23-kept-raised-threshold-one-pointer-payload, 284fc4b0), and
+//       (decision h23-kept-raised-threshold-one-pointer-payload, foreign_284fc4b0), and
 //       run()'s `covers` is a bare `expected_ids.every(...)`. A probe matching
 //       2+ records would therefore score a permanent FALSE MISS against a hook
 //       behaving exactly as ruled. Latent only because main() supplies no
@@ -77,7 +77,7 @@
 // The expected set MIRRORS each hook's own predicate (same types, same
 // file_keys, same cap, same !working_tree filter) rather than asking an
 // independent question — so the oracle measures the hooks, not its own opinion.
-// Excluded paths are accounted for BY NAME (anti_pattern 1b141d1f: a deduping
+// Excluded paths are accounted for BY NAME (anti_pattern foreign_1b141d1f: a deduping
 // notifier's silence is multiply-caused), never silently dropped.
 //
 //   node scripts/delivery-oracle.mjs [--project <dir>] [--probes <dir>] [--json]
@@ -92,7 +92,7 @@ import { join, dirname, basename, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, hasRecordCentralityHit, MAX_RANK_TERMS,
+  extractAxisTerms, axisHits, AXIS_MIN_HITS, hasDiscriminatingHit, AXIS_MIN_DISCRIMINATING_HITS, hasRecordCentralityHit, MAX_RANK_TERMS,
   decodeLiveRecordRow, classifyClaimPath,
 } from '@sterling/store';
 import { arg, hasFlag } from './lib/project.mjs';
@@ -116,7 +116,7 @@ const DRAIN = 'h19-delivery-drain.mjs';
 const H23 = 'h23-output-axis.mjs';
 const H20 = 'h20-mechanism-axis.mjs';
 
-// H10's demand-block header PREFIX. Since bad0817 (decision ee8ab1f5, Stop
+// H10's demand-block header PREFIX. Since bad0817 (decision foreign_ee8ab1f5, Stop
 // output shorter-and-fewer) the block opens with one of two lines — the
 // first-nag header 'H10 ▸ act, then Stop again:' (h10-direct-capture.mjs:1945)
 // or the compaction line 'H10 ▸ N duty(ies) unchanged since HH:MM: …' (:2033)
@@ -207,7 +207,7 @@ function normalizeClaimedPath(p) {
 
 /** ONE H23-output-axis Case, mirroring h23-output-axis.mjs's OWN predicate
  *  exactly (board 5d462868) — never an independent opinion about relevance.
- *  Output-axis content matching confers no OWNERSHIP (decision b266d6b7): the
+ *  Output-axis content matching confers no OWNERSHIP (decision foreign_b266d6b7): the
  *  case's `expected.owners` is always empty, and the cap
  *  (h23-output-axis.mjs's OUTPUT_AXIS_POINTER_CAP) is a DELIVERY-time concern,
  *  never applied here — `expected_ids` names every matching candidate.
@@ -236,7 +236,7 @@ function deriveOutputAxisExpected(store, probe, index) {
     tool,
     tool_response: probe?.tool_response,
   };
-  // Every SILENT verdict names WHICH cause produced it (anti_pattern 1b141d1f:
+  // Every SILENT verdict names WHICH cause produced it (anti_pattern foreign_1b141d1f:
   // H23's silence is multiply-caused, and a verdict that cannot tell its causes
   // apart audits nothing). One shape for the five EARLY-EXIT causes below; the
   // sixth ('below_axis_floor') is only knowable after the content match runs,
@@ -315,7 +315,7 @@ function deriveOutputAxisExpected(store, probe, index) {
     ];
     const scored = candidates
       .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, clipped));
+      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, clipped));
     hazards = scored.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record.id);
     rationale = scored.filter((x) => x.record.type === 'decision').map((x) => x.record.id);
   }
@@ -363,7 +363,7 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
     for (const record of records) {
       for (const p of claimedPaths(record)) {
         if (typeof p !== 'string' || !p) continue;
-        // Accounted for BY NAME, never dropped (anti_pattern 1b141d1f).
+        // Accounted for BY NAME, never dropped (anti_pattern foreign_1b141d1f).
         if (!isRepoPath(p)) { rejectedPaths.push({ rel: p, record_id: record.id }); continue; }
         // NORMALIZE BEFORE USE AS A KEY (Codex review, MUST-FIX 1): the
         // directory/ancestor screen below, and everything after it, compares
@@ -387,7 +387,7 @@ export function deriveExpected(store, { repoRoot: root, outputAxisProbes = [] } 
   //     directory-shaped claim materializes a FILE exactly where a nested
   //     claim underneath it needs a DIRECTORY, and mkdirSync throws EEXIST —
   //     the crash this fix closes. Screened here, before any case or
-  //     materialization work, and reported BY NAME (anti_pattern 1b141d1f)
+  //     materialization work, and reported BY NAME (anti_pattern foreign_1b141d1f)
   //     rather than silently dropped or left to crash the run. The upstream
   //     fork this board item ALSO owes (reject vs. teach every hook a
   //     directory scope) is a separate, later decision — this fix only keeps
@@ -633,7 +633,7 @@ export function synthesizePayload(caseOrProbe, { cwd, agent_id, session_id } = {
       stdin.tool_input = { ...ti };
       break;
     case 'ask':
-      // AskUserQuestion has NO prompt field (decision f5638a84). The shape is
+      // AskUserQuestion has NO prompt field (decision foreign_f5638a84). The shape is
       // whitelisted rather than copied so a synthesized prompt cannot leak in.
       stdin.hook_event_name = c.event ?? 'PreToolUse';
       stdin.tool_name = c.tool ?? 'AskUserQuestion';
@@ -714,12 +714,12 @@ export function parseDelivery(hookResult, sandboxDir) {
   for (const entry of queuedEntries) {
     const kind = entry?.kind ?? 'delivery';
     // Ids are read from the WHOLE entry, not the payload alone: the drain
-    // re-resolves from the entry's `recipe` (decision db3392db), and a rendered
+    // re-resolves from the entry's `recipe` (decision foreign_db3392db), and a rendered
     // full article names its record in the recipe while the prose body need not
     // print the uuid at all. A frontier entry names territory and no record —
     // assuming every queue entry is article-shaped drops the signal it carries.
     const text = JSON.stringify(entry ?? null);
-    // H23's own disclosure tail (board 5d462868, decision 284fc4b0), parsed with
+    // H23's own disclosure tail (board 5d462868, decision foreign_284fc4b0), parsed with
     // the SAME regex h23-output-axis.mjs's own frozen suite pins — a rename of
     // the tail format then breaks both suites identically instead of silently
     // diverging. 0, never undefined, when the tail is absent: "not measured"
@@ -937,7 +937,7 @@ export function loadProbes(dir) {
     const ti = json.tool_input;
     if (!ti || typeof ti !== 'object') bad('missing tool_input');
     if (json.kind === 'ask') {
-      if (Object.hasOwn(ti, 'prompt')) bad('kind "ask" carries a prompt field — AskUserQuestion has none (decision f5638a84), and a synthesized one is a lie about the surface');
+      if (Object.hasOwn(ti, 'prompt')) bad('kind "ask" carries a prompt field — AskUserQuestion has none, and a synthesized one is a lie about the surface');
       if (!Array.isArray(ti.questions)) bad('kind "ask" needs tool_input.questions[]');
     } else if (typeof ti.prompt !== 'string' || !ti.prompt.trim()) {
       bad(`kind "${json.kind}" needs a tool_input.prompt string`);
@@ -1163,13 +1163,13 @@ function newestPriorRun(projectRoot) {
 }
 
 // ---------------------------------------------------------------------------
-// GOLDEN SCENARIOS — layer 2 (board ab288113), per decision 08872881
+// GOLDEN SCENARIOS — layer 2 (board ab288113), per decision foreign_08872881
 // (golden-fixture-expectations-stay-in-the-fixture-guarded-by-a-digest-pin,
 // USER-RULED 2026-09-06): the expectations stay IN the fixture JSON at
 // scripts/tests/fixtures/delivery-golden/*.json —
 // {event, payload, expected_ids, expected_absent_ids, source_incident} — and
 // the frozen test file carries a SHA-256 digest pin over a canonical manifest
-// of ONLY the expectations, guarding against a coder turning a red golden
+// of ONLY the expectations, guarding against an implementor turning a red golden
 // scenario green by editing the fixture instead of the code.
 //
 // REPLAY MECHANISM (not pinned by the decision, decided here): each fixture
@@ -1286,7 +1286,7 @@ export function loadGoldenFixtures(dir) {
   return fixtures;
 }
 
-/** The canonical manifest decision 08872881 pins — ONLY the expectations,
+/** The canonical manifest decision foreign_08872881 pins — ONLY the expectations,
  *  fixtures sorted by filename, each id set sorted. Stimulus fields (event,
  *  payload, source_incident) are deliberately NOT included: they would create
  *  digest churn without buying any protection the decision's own text names. */
@@ -1357,7 +1357,7 @@ function goldenRel(fixture) {
 /** Two known disclosure-tail SHAPES report suppression: H19's direct
  *  decision/hazard-pointer tail "… N more NOT shown (cap N)"
  *  (scripts/hooks/lib/delivery.mjs renderDecisionPointers/renderHazards) and
- *  H23's queue tail "(+N more matched)" (decision 284fc4b0). Only the first
+ *  H23's queue tail "(+N more matched)" (decision foreign_284fc4b0). Only the first
  *  names its own cap; the second's cap is a caller-known constant, so `cap`
  *  is null there rather than guessed. */
 function extractSuppressionTail(text) {
@@ -1401,7 +1401,7 @@ function isEligibleForRel(store, id, rel) {
 // NO `repoRoot` OPTION HERE, deliberately (round-2 review finding: an API
 // defect, not a test mistake). `deriveExpected`'s `repoRoot` names the
 // AUDITED PROJECT; a same-named option here was read the same way by a
-// test-writer blind to the implementation, but this function needs the
+// test author blind to the implementation, but this function needs the
 // CLONE root instead — where hooks/*.mjs actually live — which is always the
 // module-level `repoRoot` constant above and never varies per call. Taking
 // it as a caller option only invited exactly this confusion, so hook
@@ -1573,7 +1573,7 @@ async function main(argv) {
   // SNAPSHOT (VACUUM INTO — never a file copy; the live store is WAL) through a
   // READ-ONLY handle, and through NOTHING ELSE. SterlingStore's constructor
   // opens WRITABLE and runs PRAGMA + DDL, and a writable open on a WAL database
-  // MUTATES the main file when it closes (anti_pattern 8616e72d) — an audit
+  // MUTATES the main file when it closes (anti_pattern foreign_8616e72d) — an audit
   // that claims to be read-only must not be able to write to the store it
   // audits on ANY branch, so there is deliberately NO writable fallback: a
   // failed read-only open ABORTS the run.
@@ -1602,8 +1602,8 @@ async function main(argv) {
   } catch (e) {
     console.error(
       `delivery-oracle: READ-ONLY snapshot of ${dbPath} failed — ${e.message}\n` +
-        '  ABORTING. There is no writable fallback by design: a writable open mutates the live WAL store on close ' +
-        '(anti_pattern 8616e72d), and a read-only audit that can write to its own subject measures nothing.'
+        '  ABORTING. There is no writable fallback by design: a writable open mutates the live WAL store on close, ' +
+        'and a read-only audit that can write to its own subject measures nothing.'
     );
     rmSync(snapDir, { recursive: true, force: true });
     process.exit(1);

@@ -4195,6 +4195,11 @@ var baselineAttestationsSchema = external_exports.record(external_exports.string
   head_commit: external_exports.string().min(1),
   sha256: external_exports.string().min(1)
 })).optional();
+var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1)
+}).strict()).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4214,12 +4219,13 @@ var featureArticleSchema = base.extend({
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
   // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision 65222971 → its baseline successor).
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
   // above, which reference_material shares so the shape is defined once.
   baseline_attestations: baselineAttestationsSchema,
-  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  absence_attestations: absenceAttestationsSchema,
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
   article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
@@ -4229,7 +4235,7 @@ var featureArticleSchema = base.extend({
   // superRefine below, since "which kind" is a whole-record fact a single
   // field's shape cannot express alone.
   current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -4243,7 +4249,7 @@ var featureArticleSchema = base.extend({
   // ownership) resolve per record or abstain LOUD on an unmapped name.
   working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision 474b1c71).
+  // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -4322,7 +4328,7 @@ var researchFindingSchema = base.extend({
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
@@ -4363,6 +4369,7 @@ var referenceMaterialSchema = base.extend({
   // naked baseline whose provenance lied about which write produced it. Shape
   // shared with featureArticleSchema, never re-declared.
   baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -4464,7 +4471,7 @@ var SYSTEM_REASONS = [
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -4523,7 +4530,7 @@ var todoSchema = base.extend({
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
   system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -4599,33 +4606,12 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  scout: "scout",
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -4719,7 +4705,7 @@ var RECORD_TYPES = {
     // article (class enumeration stays a consumer-side filter on the field).
     fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
     fileKeys: (r) => (r.files ?? []).map((f) => f.path),
-    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
     // and the id in the envelope beside it is not. version + state say whether
     // this is a moving target and whether it is wired yet.
     digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
@@ -4766,75 +4752,6 @@ function validateRecord(input2) {
 }
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4851,79 +4768,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -4993,7 +4837,7 @@ var configSchema = external_exports.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -5023,57 +4867,31 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
-  }).default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
     stale_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -5084,41 +4902,24 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5146,7 +4947,7 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -5203,7 +5004,7 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -5213,39 +5014,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5268,7 +5036,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -5289,33 +5057,25 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard used for other config-derived delivery values.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
@@ -5327,7 +5087,7 @@ var configSchema = external_exports.object({
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
   }).default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -5339,32 +5099,14 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 
 // packages/schemas/dist/registry.js
@@ -5550,9 +5292,6 @@ function rankedAxisTerms(text) {
   }
   return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0].length - a[0].length || (a[0] < b[0] ? -1 : 1)).map(([term]) => term);
 }
-function extractAxisTermsUncapped(text) {
-  return rankedAxisTerms(text);
-}
 function axisNarrowText(record) {
   if (!record || typeof record !== "object")
     return "";
@@ -5650,10 +5389,13 @@ var GENERIC_DEV_TERMS = /* @__PURE__ */ new Set([
   "through",
   "actually",
   "behavior",
-  "still"
+  "still",
+  "full"
 ]);
-function hasDiscriminatingHit(hits) {
-  return hits.some((t) => !GENERIC_DEV_TERMS.has(String(t).toLowerCase()));
+var AXIS_MIN_DISCRIMINATING_HITS = 2;
+function hasDiscriminatingHit(hits, minDiscriminating = 1) {
+  const distinct = new Set(hits.map((t) => String(t).toLowerCase()).filter((t) => !GENERIC_DEV_TERMS.has(t)));
+  return distinct.size >= minDiscriminating;
 }
 var AXIS_RECORD_TOP_K = 6;
 var AXIS_MIN_RECORD_TERMS = 2;
@@ -5683,10 +5425,6 @@ function hasRecordCentralityHit(record, outgoingText, opts = {}) {
   const central = unionCentralTerms(record, topK);
   const covered = coveredCentralTerms(central, outgoingText);
   return covered.length >= Math.min(minTerms, central.length);
-}
-function hasFullNarrowCentralityCoverage(record, outgoingText, opts = {}) {
-  const central = narrowCentralTerms(record, opts.topK ?? AXIS_RECORD_TOP_K);
-  return coveredCentralTerms(central, outgoingText).length >= central.length;
 }
 
 // packages/store/dist/index.js
@@ -5837,7 +5575,6 @@ var SchemaMigrationRequiredError = class extends Error {
     this.db_path = dbPath;
   }
 };
-var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
   const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
@@ -5854,7 +5591,25 @@ function deepReplaceString(value, from, to) {
   return value;
 }
 var MAX_RANK_TERMS = 16;
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base2 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base2;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
 var COMPARE_WORK_BUDGET = 1e7;
@@ -6009,6 +5764,10 @@ var JournalDemotionRefusedError = class extends Error {
     this.name = "JournalDemotionRefusedError";
   }
 };
+function buildReconcileText(owner, fileKeys) {
+  const files = [...fileKeys].sort();
+  return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
+}
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -6523,7 +6282,7 @@ var SterlingStore = class _SterlingStore {
    * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
    * neither is ever caller-supplied.
    */
-  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations"];
+  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations", "absence_attestations"];
   /**
    * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
    * write of server-owned drift metadata that DELIBERATELY PRESERVES the
@@ -6610,6 +6369,17 @@ var SterlingStore = class _SterlingStore {
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
    *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
    * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
    * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
    * caller that deliberately preserves the stored `updated_at` — see
@@ -6636,6 +6406,16 @@ var SterlingStore = class _SterlingStore {
       }
       if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
         throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
+      }
+      const removedRelation = opts.remove_relation === void 0 ? void 0 : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === "supersedes") {
+        throw new Error(`${op}: rel 'supersedes' cannot be removed as a raw edge \u2014 it is the authoritative carrier of a lifecycle transition. Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`);
+      }
+      if (removedRelation) {
+        const exists = this.db.prepare("SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists \u2014 nothing was written; re-read the record and retry.`);
+        }
       }
       const candidate = buildPatch(current);
       candidate.id = id;
@@ -6672,16 +6452,32 @@ var SterlingStore = class _SterlingStore {
       for (const tag of new Set(validated.stack_tags)) {
         this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
       }
+      const beforeFileKeys = new Set(entry.fileKeys(current));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      for (const path of new Set(entry.fileKeys(stored))) {
+      for (const path of afterFileKeys) {
         this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
       }
       for (const link of validated.links)
         this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        const deleted = this.db.prepare("DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
+        }
+      }
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
-        this.drainResolves(op, opts.resolves, now);
+        this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = /* @__PURE__ */ new Set();
+        for (const path of beforeFileKeys)
+          if (!afterFileKeys.has(path))
+            droppedPaths.add(path);
+        if (droppedPaths.size > 0)
+          this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
     });
     return served;
@@ -6692,8 +6488,18 @@ var SterlingStore = class _SterlingStore {
    * already-closed claim throws, which rolls the ENTIRE write back — an
    * unclaimed write must never appear to succeed against a dead reference, and
    * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
    */
-  drainResolves(op, ids, at) {
+  drainResolves(op, ids, at, receipt) {
     for (const claimed of new Set(ids)) {
       const item = this.get(claimed);
       if (!item) {
@@ -6702,7 +6508,75 @@ var SterlingStore = class _SterlingStore {
       if (item.type !== "todo") {
         throw new Error(`${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) \u2014 the whole write rolled back`);
       }
+      if (receipt)
+        receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
       this.remove(claimed, at);
+    }
+  }
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
+    const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    for (const r of rows) {
+      const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+        continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0)
+        continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      const owner = this.get(ownerId);
+      const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -6727,10 +6601,22 @@ var SterlingStore = class _SterlingStore {
    *      file absorbed the second file's drift into a fresh baseline: the finding
    *      neither queued nor survived.
    *
-   * The key is therefore (system_reason, feature_link, file_keys SET), and the
-   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
-   * concurrent caller blocks on the write lock and then SEES the committed row
-   * instead of racing it.
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
    *
    * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
    * severity — edited today, deleted tomorrow, both reconcile_needed, the first
@@ -6768,10 +6654,67 @@ var SterlingStore = class _SterlingStore {
       const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
       return strip(a) === strip(b);
     };
+    const isReconcileFold = candidate.system_reason === "reconcile_needed" && !!candidate.feature_link;
     let existing;
     let textUpdated = false;
+    let insertedText;
     this.tx(() => {
       const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      if (isReconcileFold) {
+        const matches = [];
+        for (const r of rows) {
+          const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
+          if (t.source !== "system")
+            continue;
+          if (t.system_reason !== "reconcile_needed" || t.feature_link !== candidate.feature_link)
+            continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link);
+            const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
+            this.insertRecord({ ...candidate, text: canonicalText });
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate);
+          }
+          return;
+        }
+        matches.sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set(survivor.file_keys ?? []);
+        for (const f of folded)
+          for (const k of f.file_keys ?? [])
+            unionSet.add(k);
+        for (const k of candidate.file_keys ?? [])
+          unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles2 = [...survivor.file_keys ?? []].sort();
+        const filesChanged2 = JSON.stringify(priorFiles2) !== JSON.stringify(unionFiles);
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? "";
+        if (widening) {
+          const owner = this.get(candidate.feature_link);
+          nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
+        }
+        const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
+        if (textChanged2 || filesChanged2) {
+          existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
+            ...cur,
+            updated_at: candidate.updated_at,
+            ...textChanged2 ? { text: nextText } : {},
+            ...filesChanged2 ? { file_keys: unionFiles } : {}
+          }), {});
+          textUpdated = textChanged2;
+        } else {
+          existing = survivor;
+        }
+        for (const f of folded)
+          this.remove(f.id, candidate.updated_at);
+        return;
+      }
       for (const r of rows) {
         const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
         if (t.source !== "system")
@@ -6800,7 +6743,15 @@ var SterlingStore = class _SterlingStore {
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
-      record: this.hydrateAll([_SterlingStore.storableBody(candidate)])[0],
+      // The echo must agree with the ROW this call actually inserted, not
+      // with the caller's pre-canonicalization `candidate` — see
+      // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+      record: this.hydrateAll([
+        _SterlingStore.storableBody({
+          ...candidate,
+          ...insertedText !== void 0 ? { text: insertedText } : {}
+        })
+      ])[0],
       deduped: false,
       text_updated: false
     };
@@ -7000,7 +6951,7 @@ var SterlingStore = class _SterlingStore {
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
    * uses this ONLY after live-slug and id-prefix resolution both fail, so it
    * can never shadow a live record: a slug still carried by a non-superseded
@@ -7015,7 +6966,7 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
-   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)
    * record resolves to itself at hops:0. Unknown id -> null. Never throws
@@ -7047,7 +6998,7 @@ var SterlingStore = class _SterlingStore {
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
    * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
    * it only ever has something to say about a record that was itself retired
    * via supersede(). A record can also be named the target of a rel:'supersedes'
    * link WITHOUT ever being retired — a clause-level or partial override
@@ -7388,223 +7339,17 @@ var SterlingStore = class _SterlingStore {
     this.db.close();
   }
   // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
   // -------------------------------------------------------------------------
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input2) {
-    const run = runRecordSchema.parse(input2);
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-      }
-      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-  /** By id, or the single active run when no id is given. */
-  getRun(id) {
-    const row = id ? this.db.prepare("SELECT body FROM runs WHERE id = ?").get(id) : this.db.prepare(`SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).get(...ACTIVE_STATES);
-    return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
-  }
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  static parsePendingQueue(raw) {
-    if (!raw)
-      return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-  static serializePendingQueue(queue) {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed, next) {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-    });
-    return run;
-  }
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed, runId, mutate, attempts = 5) {
-    this.assertWritable("casTransitionMerge");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`casTransitionMerge: no run '${runId}'`);
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      if (row.machine_state !== observed) {
-        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body));
-      const next = runRecordSchema.parse(mutate(current));
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId, exit) {
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = _SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(`recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? "unknown"} on phase '${dup.phase_id ?? "?"}' ('${dup.signal}') \u2014 one exit per dispatched agent; call run_signal (or consume-exit) first`);
-      }
-      this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(_SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId) {
-    const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-    if (!row)
-      throw new Error(`getPendingExit: no run '${runId}'`);
-    return _SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId, input2, at) {
-    this.assertWritable("writeHandoff");
-    const handoff = handoffSchema.parse(input2);
-    if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    this.tx(() => {
-      this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-  readHandoffs(runId, filter = {}) {
-    const rows = filter.phase_id ? this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at").all(runId, filter.phase_id) : this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at").all(runId);
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId, mutate, attempts = 5) {
-    this.assertWritable("updateRunOptimistic");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const current = JSON.parse(row.body);
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
-      }
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId, entry) {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId, articleId) {
-    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
-  }
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId, amendment) {
-    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
-  }
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId, phaseId, items) {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId, agentType) {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
-    }));
-    return next.dispatch_counts[agentType];
-  }
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
    * transactionally — read + delete in one transaction, never a signal file (P4).
@@ -7643,15 +7388,28 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable("renameFileKey");
     const from = normalizeRepoPath(oldPath);
     const to = normalizeRepoPath(newPath);
-    const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+    let count = 0;
     this.tx(() => {
+      const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+      count = rows.length;
       for (const { record_id } of rows) {
         if (!this.get(record_id))
           continue;
-        this.applyInPlace("renameFileKey", record_id, (current) => deepReplaceString(current, from, to), {}, { allowRetired: true });
+        this.applyInPlace("renameFileKey", record_id, (current) => {
+          const patched = deepReplaceString(current, from, to);
+          const c = current;
+          if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
+            const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
+            const featureLink = patched.feature_link;
+            const owner = featureLink ? this.get(featureLink) : void 0;
+            const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: featureLink }, fileKeys);
+            return { ...patched, file_keys: fileKeys, text };
+          }
+          return patched;
+        }, {}, { allowRetired: true, suppressReconcilePrune: true });
       }
     });
-    return rows.length;
+    return count;
   }
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
    *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
@@ -7681,54 +7439,12 @@ var SterlingStore = class _SterlingStore {
     });
     return this.hydrateAll([stored])[0];
   }
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId, summaries) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "completing") {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
-    this.tx(() => {
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
-      if (res.changes === 0)
-        throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-    return next;
-  }
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.assertWritable("recordCheckSkipped");
@@ -7789,7 +7505,7 @@ var SterlingStore = class _SterlingStore {
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
    */
   enqueueRefreshReferenceOnce(nowISO) {
     const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
@@ -8078,7 +7794,7 @@ function recordAdvisoryFire(root, hook, sessionId) {
 }
 
 // scripts/hooks/lib/delivery.mjs
-import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, rmSync, renameSync, statSync as statSync2, readdirSync } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync, mkdirSync as mkdirSync3, existsSync as existsSync4, renameSync, openSync, closeSync } from "node:fs";
 import { join as join4, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join4(cwd, ".sterling", "transient", "delivery");
@@ -8099,174 +7815,94 @@ function outgoingProposalText(toolInput) {
   }
   return "";
 }
-function guardPath(cwd, agentId) {
-  return join4(deliveryDir(cwd), agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json");
+function sanitizeSessionId(sessionId) {
+  let encoded;
+  try {
+    encoded = encodeURIComponent(String(sessionId));
+  } catch {
+    return null;
+  }
+  if (!encoded) return "%00";
+  return encoded === "." ? "%2E" : encoded === ".." ? "%2E%2E" : encoded;
 }
-function emptyGuard() {
-  return { records: [], frontier_files: [], pointer_files: [], slugs: [], gap_articles: [] };
+function deliverySessionDir(cwd, sessionId) {
+  const normalizedSessionId = sessionId == null ? "" : String(sessionId);
+  if (!normalizedSessionId) {
+    process.stderr.write("H19: session_id missing \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  const component = sanitizeSessionId(normalizedSessionId);
+  if (component === null) {
+    process.stderr.write("H19: session_id is not encodable \u2014 delivery deduplication disabled; guard will not be read or written\n");
+    return null;
+  }
+  return join4(deliveryDir(cwd), component);
 }
-function lineageKey(record) {
-  return record?.slug ?? record?.id;
+function guardPath(cwd, agentId, sessionId) {
+  const dir = deliverySessionDir(cwd, sessionId);
+  return dir ? join4(dir, agentId ? `guard-agent-${agentId}.json` : "guard-conductor.json") : null;
 }
-function isDelivered(guard, record) {
-  return guard.records.includes(record.id) || guard.slugs.includes(lineageKey(record));
+var DELIVERY_GUARD_VERSION = 2;
+function emptyDeliveryGuard() {
+  return { version: DELIVERY_GUARD_VERSION, substance: [], discovery: [], frontier_files: [], pointer_files: [], gap_articles: [] };
 }
-function markDelivered(guard, records) {
-  for (const r of records) {
-    if (!guard.records.includes(r.id)) guard.records.push(r.id);
-    const key = lineageKey(r);
-    if (!guard.slugs.includes(key)) guard.slugs.push(key);
+function recordRevision(record) {
+  return record?.version ?? record?.updated_at ?? record?.id;
+}
+function revisionDelivered(list, record) {
+  const rev = recordRevision(record);
+  return (list ?? []).some((e) => e?.id === record?.id && e?.revision === rev);
+}
+function markRevisionDelivered(list, entries) {
+  for (const e of entries ?? []) {
+    if (!e?.identity) continue;
+    if (!list.some((x) => x.id === e.identity && x.revision === e.revision)) {
+      list.push({ id: e.identity, revision: e.revision ?? null });
+    }
   }
 }
+function isSubstanceDelivered(guard, record) {
+  return revisionDelivered(guard.substance, record);
+}
+function isDiscoveryDelivered(guard, record) {
+  return revisionDelivered(guard.discovery, record);
+}
+function isKnownDelivered(guard, record) {
+  return isSubstanceDelivered(guard, record) || isDiscoveryDelivered(guard, record);
+}
+function markSubstanceDelivered(guard, emittedSubstance) {
+  markRevisionDelivered(guard.substance, emittedSubstance);
+}
+function markDiscoveryDelivered(guard, emittedDiscovery) {
+  markRevisionDelivered(guard.discovery, emittedDiscovery);
+}
 function readGuard(path) {
+  if (!path) return emptyDeliveryGuard();
   try {
-    if (!existsSync4(path)) return emptyGuard();
-    return { ...emptyGuard(), ...JSON.parse(readFileSync3(path, "utf8")) };
+    if (!existsSync4(path)) return emptyDeliveryGuard();
+    const parsed = JSON.parse(readFileSync3(path, "utf8"));
+    if (parsed?.version !== DELIVERY_GUARD_VERSION) return emptyDeliveryGuard();
+    return { ...emptyDeliveryGuard(), ...parsed };
   } catch {
     process.stderr.write(`H19: corrupt delivery guard at ${path} \u2014 reset to empty
 `);
-    return emptyGuard();
+    return emptyDeliveryGuard();
   }
 }
 function writeGuard(path, guard) {
+  if (!path) return;
   mkdirSync3(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(tmp, JSON.stringify(guard));
   renameSync(tmp, path);
 }
 var DENY_RULING_TYPES = ["decision", "anti_pattern"];
-var STRICT_MIN_HITS = 3;
-var DELTA_MIN_NEW_TERMS = 5;
-var DELTA_TERMS_VERSION = 2;
 function subQuestionText(q) {
   return [
     q?.question,
     q?.header,
     ...Array.isArray(q?.options) ? q.options.flatMap((o) => [o?.label, o?.description]) : []
   ].filter((s2) => typeof s2 === "string" && s2.trim()).join("\n");
-}
-function denyLedgerPath(cwd, agentId) {
-  return join4(deliveryDir(cwd), agentId ? `deny-ledger-agent-${agentId}.json` : "deny-ledger-conductor.json");
-}
-function emptyDenyLedger() {
-  return { entries: {}, overrides: [] };
-}
-function isWellFormedDenyEntry(entry) {
-  if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
-  if (!Array.isArray(entry.recordIds) || !entry.recordIds.every((id) => typeof id === "string" && id)) return false;
-  if (!Array.isArray(entry.terms) || !entry.terms.every((t) => typeof t === "string")) return false;
-  if (entry.terms_version !== void 0 && !Number.isFinite(entry.terms_version)) return false;
-  return true;
-}
-function readDenyLedger(path) {
-  try {
-    if (!existsSync4(path)) return emptyDenyLedger();
-    const raw = JSON.parse(readFileSync3(path, "utf8"));
-    const ledger = emptyDenyLedger();
-    const rawEntries = raw?.entries;
-    if (rawEntries && typeof rawEntries === "object" && !Array.isArray(rawEntries)) {
-      const dropped = [];
-      for (const [key, entry] of Object.entries(rawEntries)) {
-        if (isWellFormedDenyEntry(entry)) ledger.entries[key] = entry;
-        else dropped.push(key);
-      }
-      if (dropped.length) {
-        process.stderr.write(
-          `H20: dropped ${dropped.length} malformed deny-once ledger entry(ies) at ${path} \u2014 ${dropped.join(", ")}
-`
-        );
-      }
-    } else if (rawEntries !== void 0) {
-      process.stderr.write(`H20: deny-once ledger at ${path} has a non-object 'entries' \u2014 treated as empty
-`);
-    }
-    if (Array.isArray(raw?.overrides)) ledger.overrides = raw.overrides;
-    else if (raw?.overrides !== void 0) {
-      process.stderr.write(`H20: deny-once ledger at ${path} has a non-array 'overrides' \u2014 treated as empty
-`);
-    }
-    return ledger;
-  } catch {
-    process.stderr.write(`H20: corrupt deny-once ledger at ${path} \u2014 reset to empty
-`);
-    return emptyDenyLedger();
-  }
-}
-function writeDenyLedger(path, ledger) {
-  mkdirSync3(dirname3(path), { recursive: true });
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
-  writeFileSync(tmp, JSON.stringify(ledger));
-  renameSync(tmp, path);
-}
-function denyIntentKey(recordIds) {
-  return [...new Set(recordIds ?? [])].sort().join("|");
-}
-function escapeForRegex(s2) {
-  return String(s2).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-function citationPattern(needle) {
-  return `(?<![a-z0-9])${escapeForRegex(needle)}(?![a-z0-9])`;
-}
-function idCitedIn(text, id) {
-  if (!id) return false;
-  const hay = String(text ?? "").toLowerCase();
-  const full = String(id).toLowerCase();
-  const boundaried = (needle) => new RegExp(citationPattern(needle), "i").test(hay);
-  if (boundaried(full)) return true;
-  const prefix = full.split("-")[0];
-  return prefix.length >= 8 && boundaried(prefix);
-}
-var FULL_UUID_PATTERN = "(?<![a-z0-9])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![a-z0-9])";
-var CITATION_BOILERPLATE_WORDS = [
-  "knowledge_get",
-  "anti_pattern",
-  "decisions",
-  "decision",
-  "rulings",
-  "ruling",
-  "overriding",
-  "overrides",
-  "override",
-  "ids",
-  "id"
-];
-var CITATION_SEP = "[\\s(),.:;\\[\\]]*";
-var CITATION_BOILERPLATE_RUN = `(?:\\b(?:${CITATION_BOILERPLATE_WORDS.join("|")})\\b${CITATION_SEP})*`;
-function citationStripRegex(needlePattern) {
-  return new RegExp(`${CITATION_BOILERPLATE_RUN}${needlePattern}${CITATION_SEP}${CITATION_BOILERPLATE_RUN}`, "gi");
-}
-function stripCitations(text, recordIds = []) {
-  let out = String(text ?? "");
-  out = out.replace(citationStripRegex(FULL_UUID_PATTERN), " ");
-  for (const id of recordIds ?? []) {
-    if (!id) continue;
-    const prefix = String(id).toLowerCase().split("-")[0];
-    if (prefix.length < 8) continue;
-    out = out.replace(citationStripRegex(citationPattern(prefix)), " ");
-  }
-  return out;
-}
-function substanceFor(d) {
-  if (d.type === "anti_pattern") {
-    const trigger = typeof d.trigger === "string" ? d.trigger.trim() : "";
-    const rightWay = typeof d.right_way === "string" ? d.right_way.trim() : "";
-    if (trigger && rightWay) return { text: `${trigger} \u2014 ${rightWay}`, marker: "" };
-    if (trigger) return { text: trigger, marker: `\u27E8right_way missing \u2014 knowledge_get ${d.id}\u27E9` };
-    if (rightWay) return { text: rightWay, marker: `\u27E8trigger missing \u2014 knowledge_get ${d.id}\u27E9` };
-    return { text: "", marker: `\u27E8no substance recorded \u2014 knowledge_get ${d.id}\u27E9` };
-  }
-  const statement = typeof d.statement === "string" ? d.statement.trim() : "";
-  return statement ? { text: statement, marker: "" } : { text: "", marker: `\u27E8no substance recorded \u2014 knowledge_get ${d.id}\u27E9` };
-}
-function renderOverrideLine(ids) {
-  if (!ids.length) {
-    return "Cite the ruling id + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.";
-  }
-  const EXPLICIT_CAP = 2;
-  const shown = ids.slice(0, EXPLICIT_CAP);
-  const rest = ids.length - shown.length;
-  const idsText = ids.length > 1 ? `one of ${shown.join(", ")}${rest > 0 ? ` +${rest} more` : ""}` : shown.join(", ");
-  return `Cite ${idsText} + the unresolved delta or it stays denied \u2014 a re-ask with no delta is denied again, and every override is logged.`;
 }
 function statusBracket(record) {
   const status = record?.status ?? "unknown";
@@ -8275,38 +7911,6 @@ function statusBracket(record) {
 }
 function statusAnnotation(record) {
   return record?.status === "active" ? "" : ` [${statusBracket(record)}]`;
-}
-function renderDenyOnceMessage(ruled, totalQuestions, open = []) {
-  const lines = [
-    "STERLING DENY-ONCE (H20, decision 68332e4b) \u2014 this question was NOT shown to the user; read the settled ruling(s) below, then act on them before resubmitting."
-  ];
-  if (totalQuestions > 1) {
-    const openLabel = open.length ? open.map((o) => `"${clip(normalizeWs(o.label) || `Sub-question ${o.index + 1}`, 40)}"`).join(", ") : "none \u2014 every sub-question is settled";
-    lines.push(
-      `${totalQuestions} sub-question(s) total, ${ruled.length} settled by the store below \u2014 resubmit only the open sub-question(s): ${openLabel}`
-    );
-  }
-  const citedIds = [];
-  for (const r of ruled) {
-    const label = clip(normalizeWs(r.label) || `Sub-question ${r.index + 1}`, 80);
-    for (const d of r.decisions) {
-      citedIds.push(d.id);
-      const kind = d.type === "anti_pattern" ? "anti_pattern" : "decision";
-      const { text, marker } = substanceFor(d);
-      const clippedText = clip(normalizeWs(text), 160);
-      const normalizedMarker = normalizeWs(marker);
-      const substance = normalizedMarker ? `${clippedText}${clippedText ? " " : ""}${normalizedMarker}` : clippedText;
-      lines.push(`\u2014 "${label}" \u2192 ${kind} [${d.id}] [${statusBracket(d)}]: ${substance}`);
-    }
-    if (r.delta && typeof r.delta.new_terms === "number") {
-      lines.push(
-        `  re-ask delta: your re-ask added ${r.delta.new_terms} of the \u2265${DELTA_MIN_NEW_TERMS} new terms required to override \u2014 state what is UNRESOLVED and why, in words the prior attempt did not use; repeating the same question with the id pasted in is denied again.`
-      );
-    }
-  }
-  const idList = [...new Set(citedIds)];
-  lines.push(renderOverrideLine(idList));
-  return lines.join("\n");
 }
 function clip(text, cap) {
   const s2 = String(text ?? "");
@@ -8318,9 +7922,6 @@ function clip(text, cap) {
     count++;
   }
   return out;
-}
-function normalizeWs(text) {
-  return String(text ?? "").replace(/\s+/g, " ").trim();
 }
 var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
@@ -8347,6 +7948,28 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
     blocks.push(`\u2026 ${dropped} more hazard(s) NOT shown (cap ${cap}) \u2014 ${widen} for the full set`);
   }
   return blocks;
+}
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+  const shown = cappedHazards(hazards, cap);
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  return blocks.map(
+    (text, i) => i < shown.length ? {
+      kind: "hazard",
+      contentClass: "substance",
+      identity: shown[i].id,
+      revision: recordRevision(shown[i]),
+      text,
+      // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
+      // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
+      // the hard transport ceiling degrades to this bare notice — never a
+      // partial trigger/right_way (the HAZARDS clause: "each whole") —
+      // and the assembler then correctly withholds its substance mark.
+      pointer: hazardOverflowPointer(shown[i])
+    } : { kind: "hazard", contentClass: "chrome", text }
+  );
+}
+function hazardOverflowPointer(record) {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 var ARTICLE_POINTER_CAP = 3;
 function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
@@ -8385,56 +8008,197 @@ function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { re
   }
   return lines.join("\n");
 }
-var PORCH_BYTE_COUNT_RESERVE = "000000";
-function porchByteLen(s2) {
+function byteLen(s2) {
   return Buffer.byteLength(String(s2 ?? ""), "utf8");
 }
 function clipToBytes(text, maxBytes) {
   const s2 = String(text ?? "");
   if (maxBytes <= 0) return "";
-  if (porchByteLen(s2) <= maxBytes) return s2;
+  if (byteLen(s2) <= maxBytes) return s2;
   const ELLIPSIS = "\u2026";
-  const ellipsisBytes = porchByteLen(ELLIPSIS);
+  const ellipsisBytes = byteLen(ELLIPSIS);
   const room = maxBytes > ellipsisBytes ? maxBytes - ellipsisBytes : 0;
   let out = "";
   let used = 0;
   for (const ch of s2) {
-    const chBytes = porchByteLen(ch);
+    const chBytes = byteLen(ch);
     if (used + chBytes > room) break;
     out += ch;
     used += chBytes;
   }
   return room > 0 ? `${out}${ELLIPSIS}` : out;
 }
-function subjectStagingClause({ hasSubjectChannel, subjectHazardCount, subjectDecisionPointerCount }) {
-  return hasSubjectChannel ? `${subjectHazardCount} hazard(s) / ${subjectDecisionPointerCount} decision pointer(s)` : "none";
+var DELIVERY_TOTAL_CAP_DEFAULT = 3e3;
+var DELIVERY_TRANSPORT_VISIBLE_BYTES = 1e4;
+var DELIVERY_TOTAL_CAP_MIN = 500;
+function resolveTotalCap(cwd) {
+  try {
+    const v = loadConfig(cwd)?.delivery?.total_cap_bytes;
+    if (!(typeof v === "number" && Number.isInteger(v) && v >= 0)) return DELIVERY_TOTAL_CAP_DEFAULT;
+    if (v === 0) return 0;
+    return Math.max(v, DELIVERY_TOTAL_CAP_MIN);
+  } catch {
+    return DELIVERY_TOTAL_CAP_DEFAULT;
+  }
 }
-function articleBodiesClause({ articleBodiesCount, referencePointerCount = 0 }) {
-  return referencePointerCount > 0 ? `${articleBodiesCount} article body(ies) / ${referencePointerCount} reference pointer(s)` : `${articleBodiesCount} article body(ies)`;
+function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}) {
+  const items = (parts ?? []).filter((part) => part && typeof part.text === "string" && part.text).map((part) => ({
+    ...part,
+    kind: part.kind === "hazard" ? "hazard" : "ordinary",
+    contentClass: part.contentClass ?? "chrome",
+    pinned: part.kind === "hazard" ? true : !!part.pinned
+  }));
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const dedupeEntries = (entries) => {
+    const seen = /* @__PURE__ */ new Set();
+    const out = [];
+    for (const e of entries) {
+      if (!e?.identity) continue;
+      const key = `${e.identity}\0${e.revision}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ identity: e.identity, revision: e.revision });
+    }
+    return out;
+  };
+  const creditsFor = (survivors2) => {
+    const emittedSubstance2 = [];
+    const emittedDiscovery2 = [];
+    for (const part of survivors2) {
+      if (part.contentClass !== "substance" && part.contentClass !== "discovery") continue;
+      const bucket = part.contentClass === "substance" ? emittedSubstance2 : emittedDiscovery2;
+      for (const entry of idsOf(part)) {
+        if (entry?.identity) bucket.push({ identity: entry.identity, revision: entry.revision });
+      }
+    }
+    return { emittedSubstance: emittedSubstance2, emittedDiscovery: emittedDiscovery2 };
+  };
+  const bytes = (text) => byteLen(text);
+  const isHazard = (part) => part.kind === "hazard";
+  const isChrome = (part) => part.kind !== "hazard" && part.pinned;
+  const ordinaryCeiling = capBytes > 0 ? Math.min(capBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES) : DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const selected = /* @__PURE__ */ new Map();
+  const omitted = [];
+  const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
+  const totalBytes = () => bytes(output().join(sep));
+  const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
+  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
+  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const pointerFor = (part) => part.pointer || "";
+  const tryDegradeOrdinary = (part, fitsFn) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsFn()) return;
+    selected.delete(part);
+    const suffix = part.suffix || pointerFor(part);
+    if (suffix) {
+      const lines = part.text.split("\n");
+      let clipped = "";
+      let best = "";
+      for (const line of lines) {
+        const candidate = clipped ? `${clipped}
+${line}` : line;
+        selected.set(part, { text: `${candidate}
+${suffix}`, full: false });
+        if (!fitsFn()) break;
+        clipped = candidate;
+        best = `${candidate}
+${suffix}`;
+      }
+      if (best) {
+        selected.set(part, { text: best, full: false });
+        return;
+      }
+      selected.delete(part);
+      selected.set(part, { text: pointerFor(part), full: false });
+      if (pointerFor(part) && fitsFn()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+  const tryDegradeHazard = (part) => {
+    selected.set(part, { text: part.text, full: true });
+    if (fitsTransport()) return;
+    selected.delete(part);
+    const ptr = pointerFor(part);
+    if (ptr) {
+      selected.set(part, { text: ptr, full: false });
+      if (fitsTransport()) return;
+      selected.delete(part);
+    }
+    omitted.push(part);
+  };
+  for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
+  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  if (omitted.length) {
+    const aggregatePart = { kind: "ordinary", contentClass: "chrome", text: "" };
+    items.push(aggregatePart);
+    const idsForDisclosure = (part) => {
+      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+      if (tagged.length) return tagged;
+      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+    };
+    const aggregate = () => {
+      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
+      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      if (aggregateLabel) {
+        let line2 = aggregateLabel(count, ids);
+        while (ids.length && bytes(line2) > ordinaryCeiling) {
+          ids.pop();
+          line2 = aggregateLabel(count, ids);
+        }
+        return line2;
+      }
+      const prefix = `+${count} more records: knowledge_query`;
+      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      while (ids.length && bytes(line) > ordinaryCeiling) {
+        ids.pop();
+        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      }
+      return line;
+    };
+    while (true) {
+      const text = aggregate();
+      aggregatePart.text = text;
+      selected.set(aggregatePart, { text, full: false });
+      const ordinaryOk = fitsOrdinaryCap();
+      const transportOk = fitsTransport();
+      if (ordinaryOk && transportOk) break;
+      selected.delete(aggregatePart);
+      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      if (last) {
+        selected.delete(last);
+        omitted.push(last);
+        continue;
+      }
+      const degradable = !transportOk ? [...items].reverse().find((part) => isHazard(part) && selected.has(part) && selected.get(part).full && pointerFor(part)) : null;
+      if (degradable) {
+        selected.set(degradable, { text: pointerFor(degradable), full: false });
+        continue;
+      }
+      selected.set(aggregatePart, { text, full: false });
+      break;
+    }
+  }
+  const survivors = items.filter((part) => selected.has(part) && selected.get(part).full);
+  const { emittedSubstance, emittedDiscovery } = creditsFor(survivors);
+  const omittedEntries = dedupeEntries(omitted.flatMap(idsOf));
+  const partial = items.some((part) => selected.has(part) && !selected.get(part).full);
+  return {
+    text: output().join(sep),
+    emittedSubstance,
+    emittedDiscovery,
+    omitted: omittedEntries,
+    omittedCount: omittedEntries.length,
+    degraded: omitted.length > 0 || partial
+  };
 }
-function porchEndLine(byteCountText, meta) {
-  const { pathDecisionPointerCount } = meta;
-  return `\u25B8 PORCH END (${byteCountText} bytes) \u2014 followed by ${articleBodiesClause(meta)}; path channel: ${pathDecisionPointerCount} decision pointer(s); subject staging: ${subjectStagingClause(meta)}. If this context was shown TRUNCATED with a persisted-file path, open that file before reasoning or acting; normal instruction precedence applies.`;
-}
-var PORCH_HEADER_TEMPLATE_BYTES = porchByteLen(payloadHeaderLine(""));
-var PORCH_END_TEMPLATE_BYTES = porchByteLen(
-  porchEndLine(PORCH_BYTE_COUNT_RESERVE, {
-    articleBodiesCount: 99,
-    referencePointerCount: 99,
-    pathDecisionPointerCount: 99,
-    hasSubjectChannel: true,
-    subjectHazardCount: 99,
-    subjectDecisionPointerCount: 99
-  })
-);
-var PORCH_MIN_BUDGET_BYTES = PORCH_HEADER_TEMPLATE_BYTES + 2 + PORCH_END_TEMPLATE_BYTES;
-function payloadHeaderLine(rel) {
-  return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
+function decisionBlockPointer(count, widen) {
+  return `\u25B8 DECISIONS (${count}) held back by the delivery cap \u2014 ${widen}`;
 }
 
 // scripts/hooks/h20-mechanism-axis.mjs
 var MAX_DECISIONS = 5;
-var NARROW_CLIP = 700;
 var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
 function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
@@ -8467,7 +8231,7 @@ function buildModelPin(inp) {
   const lines = [];
   if (sp && sp.enabled === false) {
     lines.push(
-      `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE (decision ea68735d point 3): this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
+      `${PIN} \u2014 the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. Turn it back on in the TUI System tab if the OFF state is stale.`
     );
   }
   const callModel = typeof inp.tool_input?.model === "string" && inp.tool_input.model !== "" ? inp.tool_input.model : null;
@@ -8568,98 +8332,13 @@ function main(input2) {
       }
     }
     if (!candidates.length) return finish();
-    if (isQuestion) {
-      const questions = input2.tool_input.questions;
-      const perQuestion = questions.map((q, index) => {
-        const subText = subQuestionText(q);
-        const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
-        const strict = candidates.filter((r) => DENY_RULING_TYPES.includes(r.type)).map((r) => ({ record: r, hits: axisHits(r, subTerms) })).filter(
-          (x) => x.hits.length >= STRICT_MIN_HITS && hasDiscriminatingHit(x.hits) && // FULL coverage of the record's PRE-UNION narrow top-K. NOT
-          // hasRecordCentralityHit: this rung exits 2 and blocks the user's
-          // question, so it must never see the title-union central set (a
-          // bigger set makes full coverage a weaker per-term demand — see
-          // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
-          hasFullNarrowCentralityCoverage(x.record, subText)
-        );
-        return { index, label: q?.header || q?.question, subText, subTerms, strict };
-      });
-      const ledgerPath = denyLedgerPath(input2.cwd, input2.agent_id);
-      const ledger = readDenyLedger(ledgerPath);
-      const unresolved = [];
-      const openIndexes = /* @__PURE__ */ new Set();
-      const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
-      for (const p of perQuestion) {
-        const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
-        let overridden = null;
-        let shortfall = null;
-        let reseeded = false;
-        const citedUnresolvedIds = /* @__PURE__ */ new Set();
-        for (const [key2, entry] of Object.entries(ledger.entries)) {
-          if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
-          if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
-          if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
-            const carried = extractAxisTermsUncapped(
-              stripCitations(Array.isArray(entry.terms) ? entry.terms.join(" ") : "", entry.recordIds)
-            );
-            entry.terms = [.../* @__PURE__ */ new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
-            entry.terms_version = DELTA_TERMS_VERSION;
-            reseeded = true;
-            for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
-            continue;
-          }
-          const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
-          if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
-            overridden = { key: key2, recordIds: entry.recordIds };
-            break;
-          }
-          if (shortfall === null || newTerms.length > shortfall.new_terms) {
-            shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
-          }
-          for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
-        }
-        if ((reseeded || shortfall !== null) && p.strict.length === 0) {
-          const byId = new Map(candidates.map((r) => [r.id, r]));
-          const records = [...citedUnresolvedIds].map((id) => {
-            const pooled = byId.get(id);
-            if (pooled) return pooled;
-            try {
-              return store.get(id) ?? { id };
-            } catch {
-              return { id };
-            }
-          });
-          unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
-          continue;
-        }
-        if (!reseeded && overridden) {
-          ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: (/* @__PURE__ */ new Date()).toISOString() });
-          openIndexes.add(p.index);
-          continue;
-        }
-        if (p.strict.length === 0) {
-          openIndexes.add(p.index);
-          continue;
-        }
-        const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
-        const key = denyIntentKey(recordIds);
-        if (!ledger.entries[key])
-          ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
-        unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
-      }
-      writeDenyLedger(ledgerPath, ledger);
-      if (unresolved.length) {
-        const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
-        recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
-        return deny(renderDenyOnceMessage(unresolved, questions.length, open));
-      }
-    }
-    const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
+    const scored = candidates.map((r) => ({ record: r, hits: axisHits(r, terms) })).filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, outgoing)).sort((a, b) => b.hits.length - a.hits.length);
     if (!scored.length) return finish();
-    const gPath = guardPath(input2.cwd, input2.agent_id);
+    const gPath = guardPath(input2.cwd, input2.agent_id, input2.session_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter((x) => !isDelivered(guard, x.record));
+    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
     if (!fresh.length) return finish();
-    const hazards = fresh.filter((x) => x.record.type === "anti_pattern").slice(0, HAZARD_CAP);
+    const hazards = fresh.filter((x) => x.record.type === "anti_pattern");
     const decisions = fresh.filter((x) => x.record.type === "decision").slice(0, MAX_DECISIONS);
     const articles = fresh.filter((x) => x.record.type === "feature_article");
     const priorAnswers = fresh.filter(
@@ -8673,16 +8352,24 @@ function main(input2) {
     const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
+    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
+    const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
     const hazardDecisionBlocks = [
-      ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
+      ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
       }),
       ...decisions.length ? [
-        renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, {
-          remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`
-        })
+        {
+          kind: "ordinary",
+          contentClass: "discovery",
+          identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+          text: renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
+          pointer: decisionBlockPointer(decisions.length, decisionRemedy),
+          suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
+        }
       ] : []
     ];
+    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
     const articleBlocks = articles.length ? [
       renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
         remedy: `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`
@@ -8714,19 +8401,41 @@ function main(input2) {
       ].join("\n")
     ] : [];
     const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+    const asPart = (text, widen, identities) => ({ kind: "ordinary", contentClass: "discovery", identities, text, pointer: `\u25B8 held back by the delivery cap \u2014 ${widen}` });
+    const articleParts = articleBlocks.map(
+      (t) => asPart(
+        t,
+        `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
+        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a) }))
+      )
+    );
+    const priorParts = priorBlocks.map(
+      (t) => asPart(
+        t,
+        `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`,
+        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record) }))
+      )
+    );
+    const pin = modelPin();
+    const pinPart = pin?.line ? [{ kind: "ordinary", pinned: true, contentClass: "chrome", text: pin.line }] : [];
     const blocks = [
-      header,
+      { kind: "ordinary", contentClass: "chrome", text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
-      ...promptIsQuestionShaped ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]
+      ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorParts, ...articleParts]
     ];
-    return emitEnvelope(blocks.join("\n\n"), {
+    const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input2.cwd));
+    const carriage = assembled.text;
+    const hookSpecificOutput = { hookEventName: input2.hook_event_name };
+    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
+    if (carriage) hookSpecificOutput.additionalContext = carriage;
+    return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
         recordAdvisoryFire(input2.cwd, "h20", input2.session_id);
         try {
-          const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-          markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
+          markSubstanceDelivered(guard, assembled.emittedSubstance);
+          markDiscoveryDelivered(guard, assembled.emittedDiscovery);
           writeGuard(gPath, guard);
         } catch (e) {
           process.stderr.write(

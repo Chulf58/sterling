@@ -19,7 +19,7 @@ process.stdout.write(
   JSON.stringify({
     hookSpecificOutput: {
       hookEventName: 'UserPromptSubmit',
-      additionalContext: `TUI selection (one-shot): the user has selected ${selection.type} '${selection.record_id}'. Resolve it via knowledge_get (records) or run_state (runs/phases) before answering.`,
+      additionalContext: `TUI selection (one-shot): the user has selected ${selection.type} '${selection.record_id}'. Resolve the selected record via knowledge_get before answering.`,
     },
   })
 );

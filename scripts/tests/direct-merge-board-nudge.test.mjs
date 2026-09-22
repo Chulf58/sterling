@@ -35,7 +35,7 @@
 // eligible to block the merge, isolating the source-filter behavior from the
 // reconcile-refusal behavior entirely.
 //
-// CAUTION (anti-pattern ee89c3fd): raw child-process stderr is NEVER
+// CAUTION (anti-pattern foreign_ee89c3fd): raw child-process stderr is NEVER
 // interpolated directly into an assertion message expected to fail — always
 // flattened via oneLine() first, so a multi-line diagnostic cannot start a
 // YAML line and misdirect the TAP crash classifier.
@@ -84,7 +84,7 @@ function sha256hex(content) {
 }
 
 /** Flatten any child-process stream before it goes into an assertion message
- * that might fail — anti-pattern ee89c3fd. */
+ * that might fail — anti-pattern foreign_ee89c3fd. */
 function oneLine(s) {
   return String(s ?? '').replace(/\s+/g, ' ').trim();
 }

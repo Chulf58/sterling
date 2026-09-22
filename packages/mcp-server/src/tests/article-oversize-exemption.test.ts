@@ -11,12 +11,12 @@ import { SterlingTools } from '../tools.js';
 const NOW = '2026-06-10T12:00:00.000Z';
 
 // ---------------------------------------------------------------------------
-// Spec under test: decision 881baf13-f9e1-4344-b088-5fd16ad206b0
-// [article-oversize-exemption-cites-live-decision], superseding d547d3b0
+// Spec under test: decision foreign_881baf13
+// [article-oversize-exemption-cites-live-decision], superseding foreign_d547d3b0
 // [mcp-tool-surface's article_oversize item is ACCEPTED STANDING DEBT].
-// Rides the per-slug dedup-at-minting-site fix, decision 19b506ce
+// Rides the per-slug dedup-at-minting-site fix, decision foreign_19b506ce
 // [article-oversize-dedups-on-the-slug-at-its-minting-site-the], and the
-// base mechanism, decision 6c79a617 (board 8390f8fa).
+// base mechanism, decision foreign_6c79a617 (board 8390f8fa).
 //
 // Authored BLIND to the concurrent implementation, from the decision
 // records' text alone — never from packages/mcp-server/src/tools.ts.
@@ -134,7 +134,7 @@ test('article_oversize exemption CONTROL: an over-threshold article with NO exem
   }
 });
 
-test('article_oversize exemption: an entry citing a LIVE decision suppresses the mint, scoped to its own slug — a sibling non-exempted article in the SAME config still mints (881baf13)', () => {
+test('article_oversize exemption: an entry citing a LIVE decision suppresses the mint, scoped to its own slug — a sibling non-exempted article in the SAME config still mints (foreign_881baf13)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-oversize-exempt-scope-'));
   const store = new SterlingStore(join(dir, 'sterling.db'));
   const seed = new SterlingTools({ store, now: () => NOW, config: parseConfig({ article_oversize_chars: 200 }) });

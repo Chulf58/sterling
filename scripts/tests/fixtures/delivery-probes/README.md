@@ -33,7 +33,7 @@ expectations are written by hand, here.
                            ask     -> { questions: [{ question, header,
                                         options: [{ label, description }] }] }
                                       NO `prompt` field — AskUserQuestion has none
-                                      (decision f5638a84); a synthesized one is a
+                                      (decision foreign_f5638a84); a synthesized one is a
                                       lie about the surface and is REFUSED by
                                       loadProbes()
                            consult -> { prompt }

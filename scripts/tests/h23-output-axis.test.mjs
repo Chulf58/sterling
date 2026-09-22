@@ -42,6 +42,10 @@ function runHook(input, cwd) {
   return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
 }
 
+// 2026-09-19 step 2: transport changed from a delayed queue to this call's
+// additionalContext.  All assertions below keep their matching/shape strength.
+const directPayload = (result) => JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
+
 /** For the malformed-stdin case: stdin that is not JSON at all. */
 function runRaw(raw, cwd) {
   const r = spawnSync(process.execPath, [join(HOOKS, 'h23-output-axis.mjs')], {
@@ -127,13 +131,8 @@ function makeProject() {
   return { dir, store, cleanup };
 }
 
-const pendingOf = (dir) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', 'pending.json');
-  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
-};
-
 const guardOf = (dir) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', 'guard-conductor.json');
+  const p = join(dir, '.sterling', 'transient', 'delivery', 's1', 'guard-conductor.json');
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : { records: [], frontier_files: [] };
 };
 
@@ -142,6 +141,7 @@ const postRead = (dir, file, response, extra = {}) => ({
   tool_name: 'Read',
   tool_input: { file_path: join(dir, file) },
   tool_response: response,
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -151,6 +151,7 @@ const postBash = (dir, command, response, extra = {}) => ({
   tool_name: 'Bash',
   tool_input: { command },
   tool_response: response,
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -195,18 +196,16 @@ const UNRELATED_CONTENT =
 // AC1 — Bash content match enqueues a pointer block, never stdout
 // ---------------------------------------------------------------------------
 
-test('AC1: Bash tool_response content matching an anti_pattern under the H20 three-floor axis discipline enqueues a pointer block, never stdout, and always exits 0', () => {
+test('AC1: Bash tool_response content matching an anti_pattern under the H20 three-floor axis discipline delivers a direct pointer block and always exits 0', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const ap = store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0, 'never blocks');
-    assert.equal(r.stdout, '', 'no direct stdout injection — pointer goes to the pending queue only');
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'the pointer block was enqueued');
-    assert.match(pending[0].payload, /output-axis/i, 'header names the output-axis seam');
-    assert.match(pending[0].payload, /H23/);
-    assert.match(pending[0].payload, new RegExp(`knowledge_get ${ap.id}`), 'the matched record is pointed at by id');
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
+    assert.match(payload, /output-axis/i, 'header names the output-axis seam');
+    assert.match(payload, /H23/);
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the matched record is pointed at by id');
   } finally {
     cleanup();
   }
@@ -218,15 +217,14 @@ test('AC1: an object-shaped tool_response (e.g. a structured Bash result) is str
     const ap = store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postBash(dir, 'run-probe.sh', { stdout: CONTENT_SENTENCE, stderr: '', exitCode: 0 }), dir);
     assert.equal(r.code, 0);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'the object body was stringified and still matched');
-    assert.match(pending[0].payload, new RegExp(`knowledge_get ${ap.id}`));
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the object body was stringified and still matched');
   } finally {
     cleanup();
   }
 });
 
-// Decision `h23-kept-raised-threshold-one-pointer-payload` (284fc4b0, user-ruled
+// Decision `h23-kept-raised-threshold-one-pointer-payload` (foreign_284fc4b0, user-ruled
 // 2026-08-31): "payload drops to ONE pointer plus the suppressed-count tail (was
 // 3 + tail)" — the volume cut that keeps H23's unique output-axis coverage while
 // removing the noise its ~6% follow rate paid for. Class ordering (hazards ahead
@@ -242,10 +240,10 @@ test('AC1: hazards outrank decisions for the single pointer line, the outranked 
     const dec = store.create(markedDecision('DEC-GAMMA'));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const payload = pendingOf(dir)[0].payload;
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
 
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
-    assert.equal(lines.length, 1, 'exactly one pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0');
+    assert.equal(lines.length, 1, 'exactly one pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0'); // not-a-citation: fixture id
 
     assert.ok(payload.includes('AP-ALPHA'), 'the hazard — the highest class — occupies the one available pointer line');
     assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the rendered pointer is the anti_pattern, not the decision');
@@ -275,7 +273,7 @@ test('AC2: Read of a file with an owning feature_article stays silent on the out
     store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postRead(dir, 'src/a.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0, 'governed territory is H19\'s job — H23 exists for ungoverned consumption only');
+    assert.equal(r.stdout, '', '2026-09-19: governed territory produces no direct additionalContext');
   } finally {
     cleanup();
   }
@@ -285,15 +283,14 @@ test('AC2: Read of a file with an owning feature_article stays silent on the out
 // AC3 — Read of an UNOWNED file with matching content enqueues
 // ---------------------------------------------------------------------------
 
-test('AC3: Read of a file with no owning article, whose content matches a governing decision, enqueues the pointer block', () => {
+test('AC3: Read of a file with no owning article, whose content matches a governing decision, delivers the pointer block directly', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const dec = store.create(markedDecision('DEC-GAMMA'));
     const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1);
-    assert.match(pending[0].payload, new RegExp(`knowledge_get ${dec.id}`));
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
+    assert.match(payload, new RegExp(`knowledge_get ${dec.id}`));
   } finally {
     cleanup();
   }
@@ -303,43 +300,43 @@ test('AC3: Read of a file with no owning article, whose content matches a govern
 // AC4 — the silence floor
 // ---------------------------------------------------------------------------
 
-test('AC4: unrelated vocabulary in the tool_response enqueues nothing', () => {
+test('AC4: unrelated vocabulary in the tool_response delivers nothing', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postBash(dir, 'cat run.log', UNRELATED_CONTENT), dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0);
+    assert.equal(r.stdout, '', '2026-09-19: no direct additionalContext for an unrelated result');
   } finally {
     cleanup();
   }
 });
 
-test('AC4: malformed (non-JSON) stdin never crashes — exit 0, nothing enqueued', () => {
+test('AC4: malformed (non-JSON) stdin is a visible non-blocking internal failure', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
     const r = runRaw('{not json at all', dir);
-    assert.equal(r.code, 0, 'malformed stdin must never crash the hook');
-    assert.equal(pendingOf(dir).length, 0);
+    assert.equal(r.code, 1, 'malformed stdin is a visible non-blocking internal failure');
+    assert.match(r.stderr, /H23: output-axis delivery failed:/, 'H23 internal failure is visible, never silently swallowed');
   } finally {
     cleanup();
   }
 });
 
-test('AC4: a missing tool_response field never crashes — exit 0, nothing enqueued', () => {
+test('AC4: a missing tool_response field never crashes or delivers context', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_input: { command: 'cat run.log' }, cwd: dir }, dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0);
+    assert.equal(r.stdout, '', '2026-09-19: missing content produces no direct additionalContext');
   } finally {
     cleanup();
   }
 });
 
-test('AC4: a tool name other than Read or Bash is ignored — exit 0, nothing enqueued', () => {
+test('AC4: a tool name other than Read or Bash is ignored — exit 0, no direct context', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
@@ -348,7 +345,7 @@ test('AC4: a tool name other than Read or Bash is ignored — exit 0, nothing en
       dir
     );
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0);
+    assert.equal(r.stdout, '', '2026-09-19: ignored tools produce no direct additionalContext');
   } finally {
     cleanup();
   }
@@ -358,16 +355,16 @@ test('AC4: a tool name other than Read or Bash is ignored — exit 0, nothing en
 // AC5 — guard dedup, in H23's OWN namespace
 // ---------------------------------------------------------------------------
 
-test('AC5: the same record match on a second event does not re-enqueue', () => {
+test('AC5: the same record match on a second event does not re-deliver', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
     const first = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(first.code, 0);
-    assert.equal(pendingOf(dir).length, 1, 'first touch enqueues');
+    assert.match(directPayload(first), /knowledge_get/, '2026-09-19: first touch delivers direct additionalContext');
     const second = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(second.code, 0);
-    assert.equal(pendingOf(dir).length, 1, 'second touch of the same record on this axis is silent — no re-enqueue');
+    assert.equal(second.stdout, '', '2026-09-19: second touch is silent — no re-delivery');
   } finally {
     cleanup();
   }
@@ -377,9 +374,9 @@ test('AC5: H23\'s own dedup namespace leaves the substance-delivery guard ledger
   const { dir, store, cleanup } = makeProject();
   try {
     const ap = store.create(markedAntiPattern('AP-ALPHA'));
-    runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
+    const first = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir); // dedup should suppress this one
-    assert.equal(pendingOf(dir).length, 1, 'sanity: dedup held');
+    assert.match(directPayload(first), /knowledge_get/, '2026-09-19: the original delivery is direct additionalContext');
     const guard = guardOf(dir);
     assert.ok(!(guard.records ?? []).includes(ap.id), "H23's dedup key must be a SEPARATE namespace from H19's substance ledger (guard.records)");
   } finally {
@@ -391,13 +388,14 @@ test('AC5: H23\'s own dedup namespace leaves the substance-delivery guard ledger
 // AC6 — subagent silence
 // ---------------------------------------------------------------------------
 
-test('AC6: an event carrying a subagent session marker enqueues nothing — the queue serves only the conductor', () => {
+test('AC6: an event carrying a subagent session marker delivers directly to that child context', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE, { agent_id: 'coder-1' }), dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0, 'a spawned agent\'s session never enqueues into the conductor\'s queue');
+    // 2026-09-19 step 2: child delivery is direct, never routed to conductor.
+    assert.match(directPayload(r), /knowledge_get/, 'the child receives the pointer on its own PostToolUse');
   } finally {
     cleanup();
   }
@@ -407,7 +405,7 @@ test('AC6: an event carrying a subagent session marker enqueues nothing — the 
 // AC7 — cap
 // ---------------------------------------------------------------------------
 
-// Decision `h23-kept-raised-threshold-one-pointer-payload` (284fc4b0, user-ruled
+// Decision `h23-kept-raised-threshold-one-pointer-payload` (foreign_284fc4b0, user-ruled
 // 2026-08-31) supersedes the 3-line cap: the payload is ONE pointer plus the
 // suppressed-count tail. The remainder is therefore matched-minus-one, and the
 // tail is the only thing standing between a volume cut and silent knowledge loss
@@ -422,9 +420,9 @@ test('AC7: more than 1 matching record caps the pointer block at 1 line and disc
     store.create(markedAntiPattern('AP-DELTA'));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const payload = pendingOf(dir)[0].payload;
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
     const lines = payload.split('\n').filter((l) => l.includes('knowledge_get'));
-    assert.equal(lines.length, 1, 'at most 1 pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0');
+    assert.equal(lines.length, 1, 'at most 1 pointer line renders — OUTPUT_AXIS_POINTER_CAP is 1 per decision 284fc4b0'); // not-a-citation: fixture id
     const remainderMatch = payload.match(/\(\+(\d+) more matched\)/);
     assert.ok(remainderMatch, 'a remainder disclosure names how many more matched');
     assert.equal(remainderMatch[1], '3', '4 matched minus the 1 shown leaves exactly 3 suppressed records disclosed as the remainder');
@@ -445,9 +443,8 @@ test('AC8: a >64KB tool_response with matching vocabulary inside the first 16,00
     assert.ok(huge.length > 64 * 1024, 'fixture really is > 64KB');
     const r = runHook(postBash(dir, 'cat huge.log', huge), dir);
     assert.equal(r.code, 0, 'a large tool_response must never crash the hook');
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'the match inside the first 16,000 chars still fires');
-    assert.match(pending[0].payload, new RegExp(`knowledge_get ${ap.id}`));
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'the match inside the first 16,000 chars still fires');
   } finally {
     cleanup();
   }
@@ -460,7 +457,7 @@ test('AC8: a >64KB tool_response with matching vocabulary inside the first 16,00
 // for the withFileLock fix in lib/delivery.mjs.
 // ---------------------------------------------------------------------------
 
-test('review (a): PowerShell tool_response content matches enqueue exactly like Bash', () => {
+test('review (a): PowerShell tool_response content delivers directly exactly like Bash', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     const ap = store.create(markedAntiPattern('AP-ALPHA'));
@@ -469,42 +466,40 @@ test('review (a): PowerShell tool_response content matches enqueue exactly like 
       dir
     );
     assert.equal(r.code, 0);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'PowerShell is a first-class seam, same as Bash');
-    assert.match(pending[0].payload, new RegExp(`knowledge_get ${ap.id}`));
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
+    assert.match(payload, new RegExp(`knowledge_get ${ap.id}`), 'PowerShell is a first-class seam, same as Bash');
   } finally {
     cleanup();
   }
 });
 
-test('review (b): Read of a path under .sterling/ enqueues nothing — the store tree is the highest-false-positive, self-referential input', () => {
+test('review (b): Read of a path under .sterling/ delivers nothing — the store tree is the highest-false-positive, self-referential input', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(markedAntiPattern('AP-ALPHA'));
-    const r = runHook(postRead(dir, '.sterling/transient/delivery/pending.json', CONTENT_SENTENCE), dir);
+    const r = runHook(postRead(dir, '.sterling/config.json', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0, 'reading the delivery queue must never feed the delivery queue');
+    assert.equal(r.stdout, '', '2026-09-19: reading .sterling never produces direct additionalContext');
   } finally {
     cleanup();
   }
 });
 
-test('review (c): a file owned ONLY by a working_tree-scoped article still enqueues — working-tree owners do not gate, matching H19', () => {
+test('review (c): a file owned ONLY by a working_tree-scoped article still delivers — working-tree owners do not gate, matching H19', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('tree-scoped', ['logs/probe.txt'], { working_tree: 'detached-copy' }));
     const dec = store.create(markedDecision('DEC-GAMMA'));
     const r = runHook(postRead(dir, 'logs/probe.txt', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const pending = pendingOf(dir);
-    assert.equal(pending.length, 1, 'a working_tree-scoped owner means H19 delivers no substance here, so H23 must fire');
-    assert.match(pending[0].payload, new RegExp(`knowledge_get ${dec.id}`));
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
+    assert.match(payload, new RegExp(`knowledge_get ${dec.id}`), 'a working_tree-scoped owner means H19 delivers no substance here, so H23 must fire');
   } finally {
     cleanup();
   }
 });
 
-test('review (d): a file owned by a repo-located reference_material enqueues nothing — the ownership predicate matches H19 exactly', () => {
+test('review (d): a file owned by a repo-located reference_material delivers nothing — the ownership predicate matches H19 exactly', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create({
@@ -519,46 +514,7 @@ test('review (d): a file owned by a repo-located reference_material enqueues not
     store.create(markedAntiPattern('AP-ALPHA'));
     const r = runHook(postRead(dir, 'docs/probe-ref.md', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    assert.equal(pendingOf(dir).length, 0, 'a repo-located reference doc confers ownership, same as H19');
-  } finally {
-    cleanup();
-  }
-});
-
-// Second, disjoint vocabulary family for the concurrency pin, same freq-3
-// centrality idiom as the DOMAIN_* fixtures — so each concurrent process
-// matches exactly one record and the two enqueues are distinguishable.
-const SLUICE_TRIGGER =
-  'quench manifold quench manifold arbor sluice arbor sluice gantry pylon gantry pylon ' +
-  'recur constantly though this fault rarely touches a coolant loop stage during purge work';
-
-const SLUICE_CONTENT =
-  'The purge trace shows the quench manifold venting while the sluice arbor and the gantry pylon both drift past nominal torque.';
-
-test('review (e): two h23 processes on the SAME project concurrently — pending.json stays valid JSON and holds BOTH entries (withFileLock pin)', async () => {
-  const { spawn } = await import('node:child_process');
-  const { dir, store, cleanup } = makeProject();
-  try {
-    const a = store.create(markedAntiPattern('AP-ALPHA'));
-    const b = store.create(antiPattern('AP-SLUICE quench manifold sluice arbor gantry pylon failure', SLUICE_TRIGGER));
-    const run = (input) =>
-      new Promise((resolve) => {
-        const p = spawn(process.execPath, [join(HOOKS, 'h23-output-axis.mjs')], { cwd: dir });
-        p.on('exit', (code) => resolve(code));
-        p.stdin.write(JSON.stringify(input));
-        p.stdin.end();
-      });
-    const [c1, c2] = await Promise.all([
-      run(postBash(dir, 'cat run.log', CONTENT_SENTENCE)),
-      run(postBash(dir, 'cat purge.log', SLUICE_CONTENT)),
-    ]);
-    assert.equal(c1, 0);
-    assert.equal(c2, 0);
-    const pending = pendingOf(dir); // JSON.parse here IS the torn-file assertion
-    assert.equal(pending.length, 2, 'both concurrent enqueues survive — no lost update, no torn queue');
-    const all = pending.map((e) => e.payload).join('\n');
-    assert.match(all, new RegExp(`knowledge_get ${a.id}`));
-    assert.match(all, new RegExp(`knowledge_get ${b.id}`));
+    assert.equal(r.stdout, '', '2026-09-19: a repo-located reference doc produces no direct additionalContext');
   } finally {
     cleanup();
   }
@@ -574,7 +530,7 @@ test('AC8: vocabulary appearing only AFTER the first 16,000 chars is never match
     assert.ok(huge.length > 64 * 1024, 'fixture really is > 64KB');
     const r = runHook(postBash(dir, 'cat huge.log', huge), dir);
     assert.equal(r.code, 0, 'never crashes even when nothing matches');
-    assert.equal(pendingOf(dir).length, 0, 'the domain vocabulary lives past char 16,000 and must not be seen');
+    assert.equal(r.stdout, '', '2026-09-19: vocabulary past the clip produces no direct additionalContext');
   } finally {
     cleanup();
   }
@@ -593,7 +549,7 @@ test('S4b (c): a decision with authority renders "[authority]" on its H23 pointe
     const dec = store.create(markedDecision('DEC-GAMMA', { authority: 'one_off' }));
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const payload = pendingOf(dir)[0].payload;
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
     const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${dec.id}`));
     assert.ok(line, 'the decision pointer line renders');
     assert.match(line, /\[one_off\]/, 'authority renders as a bracketed marker on the pointer line');
@@ -608,7 +564,7 @@ test('S4b (c): a decision WITHOUT authority renders its H23 pointer line with no
     const dec = store.create(markedDecision('DEC-GAMMA')); // no authority
     const r = runHook(postBash(dir, 'cat run.log', CONTENT_SENTENCE), dir);
     assert.equal(r.code, 0);
-    const payload = pendingOf(dir)[0].payload;
+    const payload = directPayload(r); // 2026-09-19: direct PostToolUse transport.
     const line = payload.split('\n').find((l) => l.includes(`knowledge_get ${dec.id}`));
     assert.ok(line, 'the decision pointer line renders');
     assert.doesNotMatch(line, /\[(standing|session_scoped|one_off)\]/, 'no authority → no bracketed marker at all');

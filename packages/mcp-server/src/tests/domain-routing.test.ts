@@ -22,7 +22,7 @@ import { harnessMounted as harnessMountedShared } from './test-helpers/mounted-h
 // out here on purpose — it is load-bearing in this file's asserted scope
 // strings, knowledgePromote targets and resolveDomainMounts arms, and must
 // NOT be parameterized away. Conductor hand-edit under H5's frozen-test wall
-// (anti_pattern 985e1266); counts verified independently afterwards.
+// (anti_pattern foreign_985e1266); counts verified independently afterwards.
 function harness() {
   const h = harnessMountedShared(['genesys'], {
     now: '2026-06-16T12:00:00.000Z',
@@ -80,50 +80,10 @@ test('knowledge_update of a domain record supersedes IN the domain store; projec
   }
 });
 
-test('run protocol stays PROJECT-LOCAL through MountedStores: a run is created/advanced and lives only in the project store', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    store.createRun({
-      id: 'r-0001',
-      brief_ref: randomUUID(),
-      branch: 'sterling/run-r-0001',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: '2026-06-10T12:00:00.000Z',
-    });
-    // delegated run reads resolve the active run via the project store
-    assert.equal(tools.runState().id, 'r-0001');
-    assert.ok(store.project.getRun(), 'the run record lives in the project store');
-
-    // run-state forwards land in the project store, never a domain — H7 marks
-    // reconcile_needed on the run through exactly this MountedStores forward.
-    store.appendRunReconcileNeeded('r-0001', 'art-0001');
-    assert.deepEqual(
-      store.project.getRun('r-0001')!.reconcile_needed,
-      ['art-0001'],
-      'appendRunReconcileNeeded routes to the project store'
-    );
-
-    // a single-phase complete drives the brain to the completion sequence — all
-    // run/transient writes (handoff, pending-exit, CAS) route to the project store
-    tools.handoffWrite({
-      handoff: {
-        phase_id: 'p1', agent_role: 'coder',
-        what_changed: [{ path: 'src/x.ts', change_role: 'implemented' }],
-        wired: [], deferred: [], decisions_made: [], tests_produced: [],
-        exit_signal: 'complete', unresolved: [],
-      },
-    });
-    tools.agentExit({ phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } });
-    const sig = tools.runSignal({});
-    assert.equal(sig.action.action, 'complete_run');
-    assert.equal(sig.machine_state, 'completing');
-  } finally {
-    cleanup();
-  }
-});
+// The run-protocol-stays-project-local test that lived here was removed with
+// the staged-pipeline run/handoff protocol (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — createRun, getRun,
+// runState, handoffWrite, agentExit and runSignal no longer exist.
 
 test('§3.3 project-store-then-promote: a project-scoped reference surfaces ONE promotion_review; domain-scoped and non-candidate types do not', () => {
   const { tools, cleanup } = harness();

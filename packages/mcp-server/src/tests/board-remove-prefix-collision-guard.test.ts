@@ -64,7 +64,7 @@ function harness() {
   return { store, tools, cleanup };
 }
 
-// The new contract's required refusal content (decision 6d5a6719): names the
+// The new contract's required refusal content (decision foreign_6d5a6719): names the
 // full-uuid requirement, and names WHY (hard-delete / silent-retarget risk).
 // Flexible alternation, not an exact string — the precise wording is the
 // implementer's to choose; the SUBSTANCE is what the ruling pins.

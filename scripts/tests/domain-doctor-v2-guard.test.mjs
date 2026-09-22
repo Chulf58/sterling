@@ -1,5 +1,5 @@
 // domain-doctor v2-guard tests (board b96ebf47; supersedes the hollow half of
-// article 'domain-doctor' AC3, 8ff011e4) — a SIBLING to domain-doctor.test.mjs,
+// article 'domain-doctor' AC3, foreign_8ff011e4) — a SIBLING to domain-doctor.test.mjs,
 // not an extension of it. See that file's header for why a sibling exists.
 //
 // THREE ADJUDICATION ROUNDS SO FAR:
@@ -116,7 +116,7 @@
 //   record_aliases(historical_id PK, canonical_id, archived_version, created_at)
 //   record_relations(source_id, rel, target_id, created_at) PK(source_id,rel,target_id)
 // — because introspecting here would itself be the composite-PK trap
-// (anti_pattern table-info-pk-composite-not-rowid-alias, 0059fa66) two of
+// (anti_pattern table-info-pk-composite-not-rowid-alias, foreign_0059fa66) two of
 // these tests exist to pin; and oneLine() flattening any raw child-process
 // stream before it lands in an assertion's own MESSAGE (anti_pattern
 // ee89c3fd), never in an assertion's TARGET.
@@ -186,7 +186,7 @@ function doctor(args, cwd) {
 }
 
 /** Flatten a possibly-multi-line child-process stream before interpolating it
- *  into an assertion's own MESSAGE (anti_pattern ee89c3fd). Never applied to
+ *  into an assertion's own MESSAGE (anti_pattern foreign_ee89c3fd). Never applied to
  *  an assertion's TARGET (the string being matched), only to diagnostic text
  *  shown on failure. */
 function oneLine(s) {
@@ -1147,7 +1147,7 @@ test('AC20: migrate refuses when the source holds any record_relations rows, nam
 // naming the id), detected in BOTH the dry-run/plan path and under --apply —
 // the diff that decides the plan is the same diff --apply acts on, so the
 // conflict cannot be apply-gated without the plan lying about what it will
-// do. CONTROL FIRST per decisions cf863d84 / 23afbc83. AC21-control and the
+// do. CONTROL FIRST per decisions foreign_cf863d84 / foreign_23afbc83. AC21-control and the
 // identical-body skip test are GREEN TODAY already (today's id-only filter
 // produces this outcome by coincidence, not by comparing bodies — see the
 // sibling suite's "migrate copies records verbatim..." test, which exercises
@@ -1254,7 +1254,7 @@ test('AC21: same id, DIFFERING body is detected in the dry-run/plan path too, no
 // STRENGTHENING ROUND (this revision) — two independent reviews found AC20
 // and AC21's existing pins insufficiently discriminating. Three gaps, in the
 // dispatch's own numbering. Every new pin below carries its own SABOTAGE
-// comment (decision 23afbc83) and, where its verdict could have more than
+// comment (decision foreign_23afbc83) and, where its verdict could have more than
 // one cause, an explicit note on which earlier test in this file already
 // serves as its CONTROL arm (never re-litigated, only cited — the control
 // stays where it already is, physically earlier in the file, which is what
@@ -1327,7 +1327,7 @@ test('AC20: migrate refuses when the source holds EXACTLY ONE record_relations r
 //                     carries paths is PER TYPE": research_finding →
 //                     file_keys[]). Carries the nested INNER-VALUE difference.
 //   * source_urls[] — an array of plain strings, ORDER-BEARING and stored as
-//                     authored: MEASURED on live research_finding 8add62e0,
+//                     authored: MEASURED on live research_finding foreign_8add62e0,
 //                     whose three source_urls sit in non-alphabetical author
 //                     order, so the store neither sorts nor canonicalizes
 //                     them. It also passes through none of the path
@@ -1458,7 +1458,7 @@ test('AC21: same id, bodies differ ONLY in ARRAY ORDER of an order-bearing field
   // The SAME two members on both sides, in opposite order — the only
   // difference in either body. source_urls is the order-bearing array chosen
   // here (over file_keys) because it is stored exactly as authored, MEASURED
-  // on live research_finding 8add62e0 whose source_urls sit in
+  // on live research_finding foreign_8add62e0 whose source_urls sit in
   // non-alphabetical author order: the store neither sorts nor canonicalizes
   // it, and unlike file_keys it passes through no path normalization that
   // could reorder or rewrite an element and dissolve the very difference this

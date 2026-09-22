@@ -15,7 +15,7 @@ export const CODES = new Set([
   'ledger_corrupt',
   'ledger_absent',
   'ledger_digest_mismatch',
-  'ledger_lock_held',
+  'compatibility_lock_held',
   'entry_not_found',
   'entry_selector_ambiguous',
   'entry_not_active',
@@ -40,7 +40,7 @@ export const CODES = new Set([
   'reconcile_unresolved',
   'record_external_duplicate',
   'argument_invalid',
-  // §1.4 commit-reviewed
+  // commit operation
   'nothing_staged',
   'message_missing',
   'no_spendable_receipt',

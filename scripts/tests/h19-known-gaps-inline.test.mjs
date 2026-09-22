@@ -2,7 +2,7 @@
 //
 // Spec source (verified by knowledge_get, not paraphrase): decision
 // delivery-lifecycle-and-drain-reresolve-design (db3392db) Part 3, ship-ruled by
-// decision known-gaps-inline-ships-with-probe-seam-boarded (53fd6f62), board
+// decision known-gaps-inline-ships-with-probe-seam-boarded (foreign_53fd6f62), board
 // 3dbbdb35. The Part 3 paragraph, verbatim substance pinned here:
 //
 //   "when H19 file-touch delivery resolves a touched path to owning articles
@@ -40,9 +40,8 @@
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -52,13 +51,8 @@ const HOOKS = join(root, 'scripts', 'hooks');
 const NOW = '2026-07-19T12:00:00.000Z';
 
 let SterlingStore;
-let SterlingTools; // Group-C addendum only: used by the drain-path gaps test
-// below, mirroring scripts/tests/h19-drain-reresolve.test.mjs's own use of the
-// compiled SterlingTools class as fixture-construction infrastructure (not
-// implementation-under-test) to get a genuinely ACTIVE-then-EDITED record.
 before(async () => {
   ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
-  ({ SterlingTools } = await import(pathToFileURL(join(root, 'packages', 'mcp-server', 'dist', 'tools.js')).href));
 });
 
 function runHook(script, input, cwd) {
@@ -120,6 +114,7 @@ const postRead = (dir, file, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Read',
   tool_input: { file_path: join(dir, file) },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -128,6 +123,7 @@ const postBash = (dir, command, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Bash',
   tool_input: { command },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });
@@ -136,11 +132,6 @@ function ctxOf(result) {
   assert.equal(result.code, 0, `hook must not block (AC7): ${result.stderr}`);
   return JSON.parse(result.stdout).hookSpecificOutput.additionalContext;
 }
-
-const pendingOf = (dir) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', 'pending.json');
-  return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : [];
-};
 
 /** Loose, format-agnostic search for a disclosure line naming `count` beside a
  * drop/omit/more-style word within 80 chars either direction. The exact
@@ -385,7 +376,7 @@ test('dedup: a second touch of the same article does not re-inline its gaps; a d
 
 // ---------------------------------------------------------------------------
 // (7) The probe-output/Bash pointer path stays gap-free — the accepted,
-// boarded exclusion (decision 53fd6f62; follow-up board f1489964). The exclusion
+// boarded exclusion (decision foreign_53fd6f62; follow-up board f1489964). The exclusion
 // pin that stood here was INVERTED DELIBERATELY on 2026-09-01 when board
 // f1489964 shipped the seam closure — exactly the deliberate change the old
 // pin existed to force (its own header named f1489964 as the sanctioned
@@ -398,7 +389,7 @@ test('dedup: a second touch of the same article does not re-inline its gaps; a d
 // ---------------------------------------------------------------------------
 
 test('the probe-output/Bash pointer path re-emits known_gaps substance beside its pointer (board f1489964 closes the seam the old pin held as excluded)', () => {
-  const { dir, store, cleanup } = makeProject({ rung: 'prompt' });
+  const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
@@ -409,149 +400,12 @@ test('the probe-output/Bash pointer path re-emits known_gaps substance beside it
     );
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'grep -n x src/a.mjs'), dir);
     assert.equal(r.code, 0, 'AC7: delivery never blocks');
-    const q = pendingOf(dir);
-    assert.equal(q.length, 1, 'the bash touch queues exactly one pointer entry');
-    assert.match(q[0].payload, /owner gap/, 'gap site now re-emits beside the pointer (board f1489964)');
-    assert.match(q[0].payload, /WRONG-ON-PURPOSE/, 'mutation_survivor framing re-emits too');
-    assert.match(q[0].payload, new RegExp(`knowledge_get ${rec.id}`), 'the article pointer is retained beside the gap');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// APPENDED 2026-09-01 (coordinator instruction): four additional observable
-// behaviors from a Codex-driven fix round. Nothing above this line is
-// altered. Still spec-only — no implementation reads. Ground fixtures follow
-// scripts/tests/h19-drain-reresolve.test.mjs's disclosed fixture techniques
-// (that file's header comment enumerates (1) raw status envelopes, (2)
-// SterlingTools for genuine post-enqueue mutation, (3) schema-discovery raw
-// SQL for hard-delete). This section adds ONE more disclosed technique in the
-// same spirit:
-//
-//  (4) SUBSTRING-LEVEL RAW SQL EDIT. Neither `store.create()` (INSERT-only, no
-//      demonstrated update path in any sibling test) nor a guessed
-//      `SterlingTools.knowledgeUpdate(...)` signature (not exercised by any
-//      test file read for this task, and not an MCP tool granted to this
-//      role — `knowledge_update` is absent from the test-writer's tool set,
-//      so its exact parameter shape cannot be confirmed without reading
-//      implementation) is available to produce "the SAME article record,
-//      edited in place, between touch and drain". `mutateRecordJsonText`
-//      below discovers (at runtime, never assumed) every table with an `id`
-//      column, finds the row for the given id, and does a plain SUBSTRING
-//      replace on whichever string column(s) contain the given sentinel —
-//      never assuming a column name or JSON structure. This is weaker
-//      leverage than technique (3)'s DELETE (a substring swap cannot corrupt
-//      JSON structure the way a malformed value could), and is guarded by
-//      the same `mutated >= 1` fixture-sanity pattern technique (3) uses.
-// ===========================================================================
-
-function makeProjectDrain({ rung = 'prompt' } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-h19-gaps-drain-'));
-  mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ delivery: { injection_rung: rung } }));
-  const dbPath = join(dir, '.sterling', 'sterling.db');
-  const store = new SterlingStore(dbPath);
-  const cleanup = () => {
-    store.close();
-    rmSync(dir, { recursive: true, force: true });
-  };
-  return { dir, store, dbPath, cleanup };
-}
-
-function mkTools(store) {
-  return new SterlingTools({ store, now: () => NOW });
-}
-
-function drain(dir) {
-  return runHook('h19-delivery-drain.mjs', { hook_event_name: 'UserPromptSubmit', cwd: dir }, dir);
-}
-
-/** Technique (4), disclosed above: substring-level raw SQL edit, table/column
- * discovered at runtime. Returns the number of string columns actually
- * mutated, so every call site can assert `>= 1` as fixture sanity. */
-function mutateRecordJsonText(dbPath, id, oldSubstring, newSubstring) {
-  const db = new DatabaseSync(dbPath);
-  try {
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
-    let mutated = 0;
-    for (const t of tables) {
-      let cols;
-      try {
-        cols = db.prepare(`PRAGMA table_info("${t}")`).all().map((c) => c.name);
-      } catch {
-        continue;
-      }
-      if (!cols.includes('id')) continue;
-      let row;
-      try {
-        row = db.prepare(`SELECT * FROM "${t}" WHERE id = ?`).get(id);
-      } catch {
-        continue;
-      }
-      if (!row) continue;
-      for (const col of cols) {
-        const val = row[col];
-        if (typeof val === 'string' && val.includes(oldSubstring)) {
-          const next = val.split(oldSubstring).join(newSubstring);
-          db.prepare(`UPDATE "${t}" SET "${col}" = ? WHERE id = ?`).run(next, id);
-          mutated += 1;
-        }
-      }
-    }
-    return mutated;
-  } finally {
-    db.close();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// (8) DRAIN-PATH GAPS: on rung 'prompt', a delivery drained from the queued
-// recipe re-renders known_gaps computed LIVE at drain time from current store
-// state — a gap edited between touch and drain shows the drained-time text,
-// never the touch-time cache. Mirrors AC3's active-then-mutate sequencing in
-// h19-drain-reresolve.test.mjs, generalized from supersede (new id) to an
-// in-place text edit (same id) via technique (4).
-// EXPECTED GREEN against the fixed implementation (regression net).
-// SABOTAGE: revert to replaying the cached payload verbatim at drain (no live
-// known_gaps re-read) — GAP_TOUCH_TIME_SENTINEL would then still appear (the
-// stale cache), flipping the doesNotMatch assertion red, while
-// GAP_DRAIN_TIME_SENTINEL would never appear, flipping the match assertion
-// red too — this is the same failure shape AC3 already pins for decision
-// bodies, extended to the known_gaps field specifically.
-// ---------------------------------------------------------------------------
-
-test('drain-path gaps: known_gaps are computed LIVE at drain time — a gap edited between touch and drain shows the drained-time text, not the touch-time cache', () => {
-  const { dir, store, dbPath, cleanup } = makeProjectDrain({ rung: 'prompt' });
-  try {
-    const tools = mkTools(store);
-    const created = tools.knowledgeCreate('feature_article', {
-      slug: 'gapdrain',
-      title: 'gapdrain',
-      what_it_does: 'gapdrain does the gapdrain thing',
-      intended_behavior: 'gapdrain intends',
-      files: [{ path: 'src/a.mjs', role: 'owner' }],
-      current_ac: [{ ac_id: 'AC1', text: 'gapdrain works', verifiable_at: 'final' }],
-      dependencies: { relies_on: [], relied_by: [] },
-      state: 'active',
-      history: [],
-      live_test_refs: [{ ac_id: 'AC1', test_paths: ['scripts/tests/h19-known-gaps-inline.test.mjs'] }],
-      known_gaps: [{ site: 'drain-gap-site', kind: 'other', evidence: 'GAP_TOUCH_TIME_SENTINEL text at touch time.', recorded_run: 'r1' }],
-    }).record;
-
-    const enq = runHook('h19-knowledge-delivery.mjs', postRead(dir, 'src/a.mjs'), dir);
-    assert.equal(enq.code, 0, enq.stderr);
-    const cached = pendingOf(dir)[0]?.payload ?? '';
-    assert.match(cached, /GAP_TOUCH_TIME_SENTINEL/, 'fixture sanity: the touch-time gap text is really cached');
-
-    const mutated = mutateRecordJsonText(dbPath, created.id, 'GAP_TOUCH_TIME_SENTINEL', 'GAP_DRAIN_TIME_SENTINEL');
-    assert.ok(mutated >= 1, 'fixture sanity: the stored gap text was genuinely edited between touch and drain');
-
-    const d = drain(dir);
-    assert.equal(d.code, 0, d.stderr);
-    const ctx = ctxOf(d);
-    assert.match(ctx, /GAP_DRAIN_TIME_SENTINEL/, 'the drained gap text reflects CURRENT store state at drain time');
-    assert.doesNotMatch(ctx, /GAP_TOUCH_TIME_SENTINEL/, 'the stale touch-time cached gap text must never be served');
+    // 2026-09-19: decision 92088a62 deletes the queue/drain; pin the same
+    // surviving Bash payload directly in additionalContext.
+    const ctx = ctxOf(r);
+    assert.match(ctx, /owner gap/, 'gap site now re-emits beside the pointer (board f1489964)');
+    assert.match(ctx, /WRONG-ON-PURPOSE/, 'mutation_survivor framing re-emits too');
+    assert.match(ctx, new RegExp(`knowledge_get ${rec.id}`), 'the article pointer is retained beside the gap');
   } finally {
     cleanup();
   }
@@ -618,7 +472,7 @@ test('zero-budget disclosure: the owning article whose gaps are entirely consume
 // (delivery-first) with 3 'other'-kind gaps, beta with 1 mutation_survivor
 // gap. Beta's survivor must be among the 3 shown, AND the total shown across
 // both owners stays exactly 3 (pooled, not multiplied per owner — the exact
-// failure mode decision db3392db Part 3 names and rejects: "per-article
+// failure mode decision foreign_db3392db Part 3 names and rejects: "per-article
 // budgets multiply unboundedly when several articles own one path").
 // EXPECTED GREEN against the fixed implementation.
 // SABOTAGE: cap each owner's gaps at 3 independently instead of pooling
@@ -710,20 +564,13 @@ test('site clipping: a gap site longer than ~120 chars and/or multiline renders 
 });
 
 // ---------------------------------------------------------------------------
-// (12) DRAIN-PATH COVERAGE: postBash on a governed path whose owner carries a
-// mutation_survivor gap, drained (not just enqueued) — the KNOWN GAPS header
-// renders on its OWN line beneath the pointer, and a two-path command naming
-// the SAME owner still emits the gap block only ONCE.
-// SABOTAGE: revert bashPointerBlock to embedding the gap block into the
-// pointer entry's `line` via a joined newline (the pre-fix newline-smuggling
-// shape) instead of the separate `gapLines`/`gap_lines` field — the drain's
-// unconditional flattenToOneLine() on `line` then collapses the whole gap
-// block into the SAME line as the pointer, so the header-on-its-own-line
-// assertion goes red.
+// (12) DIRECT BASH COVERAGE: postBash on a governed path whose owner carries a
+// mutation_survivor gap renders the KNOWN GAPS header on its OWN line beneath
+// the pointer, and a two-path command naming the SAME owner emits it once.
 // ---------------------------------------------------------------------------
 
-test('drain-path (newline-smuggling revert -> header lands mid-line): a two-path command naming one owner drains the KNOWN GAPS header on its own line beneath the pointer, emitted once', () => {
-  const { dir, store, cleanup } = makeProject({ rung: 'prompt' });
+test('direct Bash path: a two-path command naming one owner emits the KNOWN GAPS header on its own line beneath the pointer, once', () => {
+  const { dir, store, cleanup } = makeProject();
   try {
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src', 'a.mjs'), 'x\n');
@@ -737,15 +584,13 @@ test('drain-path (newline-smuggling revert -> header lands mid-line): a two-path
     // ONE command naming BOTH paths owned by the SAME article.
     const r = runHook('h19-bash-delivery.mjs', postBash(dir, 'diff src/a.mjs src/b.mjs'), dir);
     assert.equal(r.code, 0, 'AC7: delivery never blocks');
-    assert.equal(pendingOf(dir).length, 1, 'one queue batch for the one command');
-
-    const d = drain(dir);
-    assert.equal(d.code, 0, d.stderr);
-    const ctx = ctxOf(d);
+    // 2026-09-19: decision 92088a62 deletes the queue/drain; assert the
+    // surviving direct Bash additionalContext at the same output strength.
+    const ctx = ctxOf(r);
     const lines = ctx.split('\n');
 
     const headerIdx = lines.findIndex((l) => l.trim() === 'KNOWN GAPS recorded for this territory:');
-    assert.ok(headerIdx >= 0, '(a) KNOWN GAPS header renders on its OWN line at drain, not mid-line');
+    assert.ok(headerIdx >= 0, '(a) KNOWN GAPS header renders on its OWN line, not mid-line');
 
     const pointerIdx = lines.findIndex((l) => l.includes("article 'owner [owner]'"));
     assert.ok(pointerIdx >= 0 && pointerIdx < headerIdx, "(b) the owner's pointer line precedes the KNOWN GAPS header");

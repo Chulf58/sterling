@@ -332,7 +332,7 @@ test('LANE knowledge_array_remove: a resolves claim against a DOMAIN-held target
 // validator that never consults scopeOfHolder) -> "Missing expected
 // exception" here while the update/append/edit lanes above stay green.
 
-// LANE knowledge_supersede — REMOVED 2026-09-07: decision f2c61919 (`domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired`)
+// LANE knowledge_supersede — REMOVED 2026-09-07: decision foreign_f2c61919 (`domain-held-subject-queue-items-close-two-step-named-mount-refusal-on-every-lane-label-routed-transaction-retired`)
 // was corrected — knowledge_supersede takes NO `resolves` parameter (verified: packages/mcp-server/src/tools.ts:9497,
 // signature `knowledgeSupersede(oldId, fields, orphansAcknowledged?)`) and is therefore not a resolves lane at all.
 

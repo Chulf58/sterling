@@ -1,20 +1,10 @@
 {
   "toolchains": [],
-  "prep_cap": 20,
-  "caps": {
-    "inner_loop_n": 3,
-    "outer_loop_m": 2,
-    "research_resume_per_phase": 2,
-    "dispatch_per_agent_type": 25,
-    "phase_death_cap": 1
-  },
   "context_watch": {
-    "warn_pct": 60,
-    "block_pct": 95,
-    "mode": "observe",
     "windows": {
       "default": 200000,
       "claude-fable-5": 1000000,
+      "claude-fable-5-1": 1000000,
       "claude-opus-5": 1000000,
       "claude-sonnet-5": 1000000,
       "claude-haiku-4-5": 200000
@@ -22,46 +12,18 @@
     "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
   "models": {
-    "test_writer": { "model": "claude-opus-5", "effort": "high" },
-    "reviewers": { "model": "claude-opus-5", "effort": "low" },
-    "implementation_architect": { "model": "claude-opus-5", "effort": "high" },
-    "coder": { "model": "claude-sonnet-5", "effort": "high" },
-    "coder_hard": { "model": "claude-opus-5", "effort": "xhigh" },
+    "implementor": { "model": "claude-sonnet-5", "effort": "high" },
     "researcher": { "model": "claude-sonnet-5", "effort": "medium" },
-    "explorer": { "model": "claude-sonnet-5", "effort": "low" },
+    "scout": { "model": "claude-sonnet-5", "effort": "low" },
     "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },
     "librarian": { "model": "claude-sonnet-5", "effort": "low" },
     "debugger": { "model": "claude-sonnet-5", "effort": "high" }
-  },
-  "reviewer_selection": {
-    "security_path_patterns": ["(^|/)auth/", "token", "secret", "credential"],
-    "security_content_patterns": [
-      "SELECT .*\\+",
-      "exec\\(",
-      "spawn\\(",
-      "process\\.env",
-      "(^|\\W)eval\\(",
-      "router\\.(get|post|put|delete)"
-    ],
-    "perf_path_patterns": [],
-    "perf_content_patterns": ["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"],
-    "dependency_manifests": ["package.json", "requirements.txt", "pom.xml", "*.csproj"],
-    "skeptic_diff_size_threshold": 400,
-    "skeptic_new_export_threshold": 5
-  },
-  "difficulty": {
-    "split_interface_threshold": 3,
-    "thin_knowledge_retrieval_threshold": 2
   },
   "session_events": {
     "research_agents": ["researcher", "claude-code-guide"]
   },
   "delegation": {
     "max_concurrent": 5
-  },
-  "delegation_watch": {
-    "min_hand_work": 15,
-    "max_dispatches": 0
   },
   "dispatch_register": {
     "stale_minutes": 60
@@ -79,8 +41,9 @@
     "staleness_days": 45
   },
   "delivery": {
-    "injection_rung": "prompt",
-    "payload_char_cap": 2400
+    "injection_rung": "read",
+    "payload_char_cap": 2400,
+    "total_cap_bytes": 3000
   },
   "article_history_genesis_entries": 2,
   "sparring_partner": {

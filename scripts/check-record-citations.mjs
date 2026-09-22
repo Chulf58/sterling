@@ -1,6 +1,6 @@
 // Record-id citation check (board item 10668ae3 — the PREVENTION half of the
 // 2026-07-26 citation sweep; the sweep itself was the cure). Code and docs cite
-// record ids constantly ("decision 6dfbe675", "article stale-server-guard
+// record ids constantly ("decision foreign_6dfbe675", "article stale-server-guard
 // 8f48f67c"), and nothing checked that the cited record EXISTS. A cross-machine
 // knowledge import remapped record prose but not code citations, leaving five
 // files citing origin-machine ids that resolve to nothing here — found by eye,
@@ -45,7 +45,7 @@ if (!existsSync(storePath)) {
 // Scanned: authored source and docs. NOT scanned, each for a reason:
 //   docs/historical/** — the retired spec, deliberately frozen as it was written;
 //   docs/feedback/** — consuming-project reports, kept VERBATIM as evidence
-//     (decision 42f385ea). Their ids belong to the REPORTING machine's store, not
+//     (decision foreign_42f385ea). Their ids belong to the REPORTING machine's store, not
 //     this one, so they are correct there and unresolvable here — exactly the
 //     "an id from another machine" case this check's own failure message names.
 //     They are also third-party text: the 'not-a-citation' opt-out would work
@@ -59,7 +59,7 @@ const SCANNED_EXTENSIONS = ['.mjs', '.ts', '.md'];
 const EXCLUDED_PREFIXES = ['docs/historical/', 'docs/feedback/', 'hooks/'];
 
 // CONSUMER-CLONE PRECONDITION, one step further in than the no-store skip above
-// (decision e6240afe-e94b-4c1f-8eed-bafe32fb4d89). A consumer machine's Sterling
+// (decision foreign_e6240afe). A consumer machine's Sterling
 // clone HAS a store — init creates it — but holds no knowledge, because
 // .sterling/ is gitignored and records never travel with the repo. Every
 // citation in the tree then "fails" for want of knowledge rather than for a bad

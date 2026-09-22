@@ -4,7 +4,7 @@
 //   - store.query() already excludes superseded records.
 //   - store.get(id)/knowledge_get already returns a superseded record PINNED
 //     (its own id, own fields) with its own status:'superseded' and a
-//     one-hop superseded_by — decision de1a7329 rules ids stay
+//     one-hop superseded_by — decision foreign_de1a7329 rules ids stay
 //     version-pinned; this change DISCLOSES the chain, it never redirects.
 //   - the fix adds an additive `terminus` field: { id, status, hops } (plus
 //     `truncated` when applicable), sourced from the new
@@ -86,7 +86,7 @@ test('AC5: knowledge_get on a SUPERSEDED record adds a terminus field for the ch
     });
 
     const pinned = tools.knowledgeGet(a.id) as unknown as Record<string, unknown>;
-    assert.equal(pinned.id, a.id, 'knowledge_get(a) still returns the PINNED a — never silently redirected (decision de1a7329)');
+    assert.equal(pinned.id, a.id, 'knowledge_get(a) still returns the PINNED a — never silently redirected (decision de1a7329)'); // not-a-citation: fixture id
     assert.equal(pinned.status, 'superseded');
     assert.equal(pinned.superseded_by, b.id, 'the existing one-hop superseded_by is unchanged');
     assert.equal(pinned.statement, 'v1 statement', "the pinned record's own fields are untouched by the disclosure");

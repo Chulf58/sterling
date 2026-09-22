@@ -1,5 +1,5 @@
 // Config write-back for the System-tab sparring/TDD/mutation-verification
-// toggles (decision 752caf98, tdd-and-mutation-toggles-in-system-tab) —
+// toggles (decision foreign_752caf98, tdd-and-mutation-toggles-in-system-tab) —
 // EXTRACTED from main.ts (Codex review finding) so the frozen pins in
 // tests/config-writeback.test.ts can import this module directly without
 // pulling in main.ts's argv-parsing/terminal-kit side effects on import.
@@ -68,7 +68,7 @@ export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => vo
 }
 
 /** Execute a mutation_toggle effect: config.mutation_verification.enabled
- *  write only (decision 752caf98) — mirrors applySparringToggle exactly.
+ *  write only (decision foreign_752caf98) — mirrors applySparringToggle exactly.
  *  Optional trailing `path` overrides the cwd-derived default (see
  *  applySparringToggle). */
 export function applyMutationToggle(e: MutationToggleEffect, onError?: (msg: string) => void, path?: string): boolean {

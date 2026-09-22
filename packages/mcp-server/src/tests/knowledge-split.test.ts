@@ -3,7 +3,7 @@
 // compaction-tooling-windowed-read-plus-split, knowledge_get
 // d452e085-0a12-4166-8cff-39ba3ced88af; board
 // 136091d2-0f2a-44d3-801c-bbcb33a592ad), which mechanically enforces the
-// split invariants decision 8b87efcb-1fe9-498d-92bf-2e002a338d56 established
+// split invariants decision foreign_8b87efcb established
 // by hand for the hooks-suite split: prose moved VERBATIM, ac_ids inherited
 // not renumbered, live_test_refs re-pointed, parent slug survives, file
 // coverage total.
@@ -20,7 +20,7 @@
 // (tools.ts, server.ts, packages/schemas) was read.
 //
 // live_test_refs' EXACT element shape is not given by any read fixture (every
-// existing example passes an empty array). Decision 8b87efcb's own prose
+// existing example passes an empty array). Decision foreign_8b87efcb's own prose
 // states the mapping is "ac_id -> test paths", and every other list-like
 // feature_article field (files[], current_ac[], alternatives_rejected[])
 // follows the house convention of an array of small objects, never a keyed
@@ -587,7 +587,7 @@ test('atomicity: one valid child plus one invalid child (unknown path) refuses t
 
 // ===========================================================================
 // resolves semantics — mirrors the existing knowledge_update explicit-claim
-// convention (decision 68988832): an item named in `resolves` is closed by
+// convention (decision foreign_68988832): an item named in `resolves` is closed by
 // the discharging write; an unnamed sibling item stays open. No dedicated
 // resolves-claim fixture helper was found in the three files read for this
 // spec (tools.test.ts's comments reference a separate

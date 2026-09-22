@@ -13,8 +13,8 @@ import { SterlingTools, SERVER_OWNED_FIELDS, CREATE_DEFAULTED_FIELDS } from './t
 const passthrough = z.object({}).passthrough();
 
 /**
- * knowledge_create's typed `fields` body (decision 7c7f6db1, probe
- * research_finding 15c8e6b5) — REPLACES the passthrough with a per-type
+ * knowledge_create's typed `fields` body (decision foreign_7c7f6db1, probe
+ * research_finding foreign_15c8e6b5) — REPLACES the passthrough with a per-type
  * z.discriminatedUnion('type', ...) derived MECHANICALLY from RECORD_TYPES, so
  * a malformed first write is refused at PARSE TIME with a variant-scoped zod
  * error instead of round-tripping through knowledgeCreate's own schema.parse.
@@ -33,7 +33,7 @@ const passthrough = z.object({}).passthrough();
  * property (`fields`) sidesteps this entirely: the outer object DOES have
  * `.shape`, normalizeObjectSchema succeeds on it, and zod-to-json-schema then
  * recurses into `fields` and renders the union as the bare `anyOf` research_
- * finding 15c8e6b5 actually measured. This was re-verified against the
+ * finding foreign_15c8e6b5 actually measured. This was re-verified against the
  * installed SDK build for this exact shape before settling on it.
  *
  * WHY THE DISCRIMINATOR LITERAL THEREFORE LIVES INSIDE `fields` (fields.type),
@@ -85,7 +85,7 @@ const passthrough = z.object({}).passthrough();
  * path is even entered, and names the type's actual allowed set in the zod
  * error rather than a generic "unknown field" message.
  *
- * Served as a bare `anyOf` (research_finding 15c8e6b5 measured this against
+ * Served as a bare `anyOf` (research_finding foreign_15c8e6b5 measured this against
  * the SDK's actual zod-to-json-schema conversion, re-confirmed above): each
  * variant carries its own accurate `properties` / `required[]` /
  * `type:{const:...}` literal even though the discriminator keyword itself is
@@ -153,7 +153,7 @@ const knowledgeCreateFieldsSchema = z.discriminatedUnion(
  * only the parameter names that are a closed set.
  *
  * A z.discriminatedUnion is verified the SAME way, separately (decision
- * 7c7f6db1, probe research_finding 15c8e6b5, re-confirmed empirically against
+ * 7c7f6db1, probe research_finding foreign_15c8e6b5, re-confirmed empirically against
  * this same installed SDK build): `normalizeObjectSchema` only ever runs on
  * the TOP-LEVEL tool.inputSchema, and it requires `.shape` — a union has none,
  * so a union AS the top-level inputSchema serves EMPTY (`{properties:{}}`),
@@ -192,7 +192,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_create',
     {
       description:
-        'Create a knowledge record. `fields` is TYPED PER `type` (decision 7c7f6db1): each of the 9 registered record types gets its own shape — unknown fields inside `fields` are refused loudly at parse time, naming that type\'s actual allowed set, before the write path is ever entered. Server-owned fields (id/created_at/updated_at/status/superseded_by/lifecycle/freshness/file_baselines/version) are not part of any variant\'s `fields` shape — the server assigns them. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type` argument.',
+        "Create a knowledge record. `fields` is typed per `type`: unknown fields are refused naming the type's allowed set; server-owned fields (id, created_at, updated_at, status, superseded_by, lifecycle, freshness, file_baselines, version) are refused. Set fields.type to select one schema branch; use only properties from that matching branch. fields.type must match the outer `type`. A colliding feature_article slug is refused. Use knowledge_schema first for an unfamiliar type. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({ type: z.string(), fields: knowledgeCreateFieldsSchema, projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ type, fields, projection }) => {
@@ -223,7 +223,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_query',
     {
       description:
-        'Retrieve knowledge: filter (type/stack tags) → file-key join → rank (rank_terms: plain keyword array, never prose) → cap. Unknown parameter names are REJECTED, never ignored. Returns {matched_filter, returned, cap, capped, records}: capped=true means you are holding a WINDOW, not the whole set. matched_filter counts the FILTER only — rank_terms order that set, they never narrow it. projection:"digest" returns one headline line per record (id + slug/title, anti_pattern trigger, research_finding clocks) instead of full bodies: use it to SEE THE LANDSCAPE cheaply — a wide digest then knowledge_get on the few that matter beats a capped full-body window you can neither complete nor trust. Query results omit the supersedes chain (see supersedes_count) and server-owned file_baselines — knowledge_get is the full-fidelity read. What the stripped baselines are FOR is served derived instead: a record whose owned files have moved since the bytes it was written against carries baseline_drift {changed[], unverifiable?[], note}, and the envelope\'s provenance says whether that check ran at all — \'checked\', or \'unavailable:<reason>\' (no_repo_root | no_baselines | count_projection) — because a record owning no files can never be annotated, so an ABSENT annotation is never proof of freshness. min_score (requires rank_terms) answers the ABSENCE QUESTION a capped window cannot: the result gains above_threshold, the count of records scoring >= min_score over the FULL match set (never the capped `records` window), so above_threshold:0 is a usable "nothing is ruled about this". SCALE: the score is `-bm25(records_fts)` — SQLite FTS5\'s bm25() is lower-is-better and unbounded below, so this negates it: HIGHER means more relevant, a bare keyword match sits near 0, and there is no fixed upper bound.',
+        "Retrieve knowledge: filter (types, stack_tags) → file_keys join → rank (rank_terms: single keywords, never prose) → cap. Unknown parameters are refused. Returns {matched_filter, returned, cap, capped, provenance, records}: capped=true means a WINDOW — raise cap or narrow the filter before concluding anything about absence. matched_filter counts the filter only; rank_terms order, never narrow. projection: \"full\" (default), \"digest\" (one headline line per record — scan wide, then knowledge_get the few you need), or \"count\". Results omit the supersedes chain (see supersedes_count) and file_baselines; knowledge_get is the full-fidelity read. A record whose owned files changed since it was written carries baseline_drift; provenance says whether that check ran ('checked' or 'unavailable:<reason>'), so an absent annotation is never proof of freshness. min_score (requires rank_terms) adds above_threshold: the count over the FULL match set scoring >= min_score (score = -bm25, higher is more relevant, unbounded).",
       inputSchema: strict({
         types: z.array(z.string()).optional(),
         stack_tags: z.array(z.string()).optional(),
@@ -241,7 +241,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_get',
     {
       description:
-        'Fetch a record by id — the full-fidelity read (query results are projected). No `field`: exactly the whole record, terminus handling included. With `field`: a WINDOWED projection of just that one field instead of the whole record (decision compaction-tooling-windowed-read-plus-split) — the measured defect this closes is an oversize article that overflows its own read tool. Unknown field is refused, naming it plus the valid set for the record\'s type. A string/array field returns {kind, total_chars|total_entries, offset, value|entries} — offset/length address CHARACTERS on a string, ELEMENTS on an array; offset at/past the end is not an error (empty value/entries, true total still reported, for clean paging termination). A scalar/object field returns {kind:"value", value} whole — offset/length alongside it are refused as not windowable. offset/length without field is refused.',
+        "Fetch one record by id (full uuid, exact slug, or unambiguous 8-char prefix) — the full-fidelity read. version:<n> reads an archived prior version. With `field`: a windowed read of just that field — strings page by characters, arrays by elements (offset/length); returns {kind, total_chars|total_entries, offset, value|entries}; an offset past the end returns empty with the true total. Scalar/object fields return whole and refuse offset/length. Unknown field is refused naming the valid set; offset/length without field is refused.",
       inputSchema: strict({
         id: z.string(),
         field: z.string().optional(),
@@ -262,7 +262,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_render',
     {
       description:
-        'READ-ONLY: render 1-20 knowledge records as ONE paste-ready plain-text block, for embedding store rulings faithfully into an EXTERNAL (non-MCP) reviewer prompt (e.g. a Codex consult) instead of hand-transcribing them — an index/summary is a lookup, never a source (P6 context-carriage). Each id resolves through the same ladder knowledge_get uses (full uuid / exact slug / unambiguous 8-char prefix); an id that resolves to nothing, or ambiguously, refuses the WHOLE call loudly, naming the failing id — never a partial render with silent skips. Records render in the order requested. Per record: a header line naming type, title, handle and status, followed by every content-bearing field for that record\'s type, labeled and readable; server-owned plumbing (file_baselines, version, …) never appears. A superseded/retired record still renders in full, with its status carried loudly in the header. No writes — rendering never mints a version.',
+        "Read-only: render 1-20 records (same id ladder as knowledge_get) as one paste-ready plain-text block, for embedding store rulings into an external reviewer prompt. Any id that fails to resolve or is ambiguous refuses the whole call, naming it. Records render in request order with a header (type, title, handle, status) and every content field; server-owned plumbing is omitted; superseded records render with their status. Never writes.",
       inputSchema: strict({ ids: z.array(z.string()).min(1).max(20).describe('1-20 record ids (uuid / slug / unambiguous 8-char prefix)') }),
     },
     ({ ids }) => ({ content: [{ type: 'text' as const, text: tools.knowledgeRender({ ids }) }] })
@@ -272,7 +272,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_split',
     {
       description:
-        'Split a feature_article: move a subset of its files[]/current_ac[]/live_test_refs entries into one or more NEW child articles, mechanically enforcing the invariants decision 8b87efcb established by hand for the hooks-suite split (decision compaction-tooling-windowed-read-plus-split) — prose moved VERBATIM, ac_ids INHERITED never renumbered, live_test_refs RE-POINTED to whichever side now owns the ac_id, the parent SURVIVES under its ORIGINAL slug (superseded to version+1, never replaced), and FILE COVERAGE stays TOTAL (every parent-owned path lands on exactly the parent or one child). Every child move_files path must be owned by the parent and claimed by at most one child; same for move_ac_ids; child slugs must be pairwise distinct and not collide with an existing feature_article; the parent must retain at least one file (moving all of them is refused — that shape is retire-and-replace, not a split). ALL validation runs before any write, and the whole split (every child plus the parent supersession) lands in ONE transaction, so a mid-split failure leaves the store untouched. resolves closes named open maintenance items exactly like knowledge_update\'s explicit-claim contract; an unnamed item stays open. Returns {parent:{id,slug,version}, children:[{id,slug}], warnings:[]} — warnings never gate the write, and report a still-oversize parent or an oversize-born child needing its own further split, the same article_oversize mechanism knowledge_update carries.',
+        "Split a feature_article: move a subset of its files[] / current_ac[] / live_test_refs into one or more NEW child articles. Prose moves verbatim, ac_ids are inherited (never renumbered), live_test_refs follow their ac_id, the parent keeps its slug (new version), and file coverage stays total. Refused: a moved path/ac_id not owned by the parent or claimed by two children, a child slug that duplicates another or an existing article, or moving every parent file. All validation runs first and the whole split is one transaction. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items on this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). Returns {parent:{id,slug,version}, children:[{id,slug}], warnings[]} — warnings (e.g. still-oversize) never gate.",
       inputSchema: strict({
         id: z.string(),
         children: z
@@ -305,7 +305,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_extract',
     {
       description:
-        'Lift a PASSAGE out of one string field of a live record into a NEW standalone record, while the original stays active minus the extracted claim (decision knowledge-extract-design; board ff07e314). Kin to knowledge_split, but extract lifts a passage from any NON-ATTESTATION source (domain-held sources ARE supported — the whole write commits on the mount that physically holds the source, so only a non-empty `resolves` is refused there, because maintenance todos are project-local; attestation sources are refused because knowledgeUpdate\'s supersession semantics contradict extract\'s stays-live contract) into a fresh record of a caller-chosen type — a half-portable clause in an article most wants to become a citable decision/research_finding. The excision is passage-scoped: a (field, find) substring under the SAME exactly-once contract knowledge_edit enforces (0 matches refused with the char count, >1 refused as ambiguous); the post-removal value is computed server-side by literal replacement at the single located occurrence (never String.replace, so caller-supplied replace text carrying $&/$`/$\'/$$ is never interpreted as a substitution pattern; replace defaults to \'\'), never taken from the caller. Provenance is written BOTH ways as real edges — new --informed_by--> original (the edge knowledge_promote writes) AND original --cites--> new. new_record.type is REQUIRED and caller-chosen; todo and attestation are barred targets (mirrors promote\'s UNPROMOTABLE); an explicit new_record.fields.scope must match the source\'s scope. Extract does NOT cross scope — the new record inherits the source scope (compose extract-then-promote for project→domain). resolves is the plain lane (reconcile_needed + refresh_reference; promotion_review always refused), keyed on file_keys overlap with the source. All validation runs before any write, and the create + source-trim + both edges + resolves-drain land in ONE transaction, so a mid-op failure leaves the store byte-for-byte untouched. Returns {extracted, source:{id,version}, edges:{informed_by,cites}, warnings:[]} — warnings never gate the write and report an oversize new record or a still-oversize trimmed source.',
+        "Lift a passage out of one string field of a live record into a NEW record of a caller-chosen type (new_record.type required; todo/attestation refused); the source stays active minus the passage. (field, find) must match exactly once (0 or >1 matches refused with the count); replace (default '') is inserted literally. Edges are written both ways: new informed_by source, source cites new. The new record inherits the source scope (an explicit different scope is refused); attestation sources are refused; on a domain-held source a non-empty resolves is refused. All validation runs first and everything lands in one transaction. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items on this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). Returns {extracted, source:{id,version}, edges, warnings[]}.",
       inputSchema: strict({
         id: z.string(),
         field: z.string(),
@@ -332,7 +332,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_schema',
     {
       description:
-        'Ask what a record type requires BEFORE writing it, instead of learning by rejection. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, example?, server_owned?}], required[], optional[]} — derived from the registered zod schema, so it cannot drift from what a write will accept. `example` is a worked VALUE for the field, derived from that same schema and PROVEN against it before it is reported (scalars bare, composites as JSON): alternatives_rejected answers [{"option":"<option>","reason":"<reason>"}], so you never have to discover by rejection that it is not string[]. An absent example means nothing derivable satisfied the field\'s own constraint — never a guess. A field marked server_owned:true (id, created_at, status, superseded_by, …) is set by the server and refused if you pass it — it still appears in `fields` so you know it exists, but never in `required`/`optional`, because those two lists answer "what may I supply", not "what does this record hold". required[] means required FROM THE CALLER on a create, not every field the raw schema declares. Use it when you are unsure of a field name, whether a field is mandatory, whether it takes a string or an array of objects, or what a closed enum permits (volatility_hint is fast|medium|stable — "low" is refused). An unregistered type lists the registered ones.',
+        "Describe what a record type accepts before writing it. Returns {type, fields:[{name, required, type, enum_values?, element_fields?, example?, server_owned?}], required[], optional[]}, derived from the registered schema. `example` is a schema-validated worked value (absent when none is derivable). server_owned fields are listed but refused on write and excluded from required/optional. An unregistered type lists the registered ones.",
       inputSchema: strict({ type: z.string() }),
     },
     ({ type }) => json(tools.knowledgeSchema(type))
@@ -342,7 +342,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_stats',
     {
       description:
-        'Size and composition WITHOUT the body (board a382af6b). With id (uuid/slug/8-char prefix): body_chars (the number the article_oversize threshold judges — history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. With no id: the aggregate over the MOUNTED store set (project + any domain mounts, unconfirmed included) — per-type counts and body sizes, the total, and the 10 largest feature_article bodies flagged against the threshold. Use it before deciding how to write to a big record (knowledge_edit/knowledge_append vs a full retransmit) and to find what is bloating; query digest lines carry each record\'s size_chars for the cheap scan, this is the drill-down.',
+        "Size and composition without the body. With id: body_chars (what article_oversize judges; history excluded), history_chars, history_entries, supersedes_count, and over_threshold for a feature_article. Without id: per-type counts and sizes over the mounted stores, plus the 10 largest feature_article bodies against the threshold.",
       inputSchema: strict({ id: z.string().optional() }),
     },
     ({ id }) => json(tools.knowledgeStats(id))
@@ -352,7 +352,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_retire',
     {
       description:
-        'Retire a record in favour of a surviving one: sets status=superseded and superseded_by=<in_favor_of> with NO new row, so queries stop serving it while provenance and inbound links survive and it stays fetchable by id. THIS IS NOT FOR A MERELY WRONG RECORD — fix those FORWARD with knowledge_update, which supersedes the error. Use it for the one shape update cannot repair: a genuine DUPLICATE, where two records claim to describe one thing and the reader must be sent to the survivor. in_favor_of is required and must be a live record — retiring into a void or into a tombstone leaves the reader nowhere. todos are refused (they leave via board_remove / maintenance_remove, P4).',
+        "Retire a genuine DUPLICATE in favour of a surviving record: status=superseded, superseded_by=in_favor_of, no new row; it stays fetchable by id and its links survive, but queries stop serving it. Not for a merely wrong record — fix that with knowledge_update. in_favor_of is required and must be live. todos are refused (use board_remove / maintenance_remove).",
       inputSchema: strict({ id: z.string(), in_favor_of: z.string() }),
     },
     ({ id, in_favor_of }) => json(tools.knowledgeRetire(id, in_favor_of))
@@ -362,7 +362,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_supersede',
     {
       description:
-        'Atomically REPLACE a ruling record (decision / anti_pattern / research_finding only) with a NEW one: creates the replacement from `fields` (a COMPLETE create-shaped body, not a delta) and marks old_id superseded → the new id, in ONE transaction. Distinct from knowledge_update (a fix-forward DELTA within one lineage — pass only what changed) and knowledge_retire (a no-new-row duplicate tombstone, no replacement content). old_id resolves via the same uuid/slug/8-char-prefix ladder as knowledge_get. fields with no slug inherit the old record\'s slug so the concept handle survives; an explicit fields.slug is checked for collision like any other. ORPHAN DETECTION: when the old record\'s text enumerates 2+ numbered/bulleted rulings, a replacement that leaves any of them without substantive lexical coverage is REFUSED — naming the orphaned excerpts and both remedies (extend fields to carry the ruling forward, or re-call with orphans_acknowledged:true, which proceeds and discloses the accepted candidates). Fewer than 2 enumerated units never triggers the check. todo/feature_article/reference_material old_ids are refused, naming their real exit paths (board_remove/maintenance_remove, or knowledge_update/knowledge_retire respectively). Every refusal leaves the store untouched.',
+        "Atomically replace a decision / anti_pattern / research_finding with a NEW record built from `fields` (a complete create-shaped body, not a delta) and mark old_id superseded by it, in one transaction. A slugless `fields` inherits the old slug; an explicit slug is collision-checked. If the old record enumerates 2+ rulings and the replacement leaves any uncovered, the call is refused naming them — carry them forward, or pass orphans_acknowledged:true. Other types are refused naming their exit path (todo → board_remove/maintenance_remove; feature_article/reference_material → knowledge_update/knowledge_retire). Refusals write nothing.",
       inputSchema: strict({ old_id: z.string(), fields: passthrough, orphans_acknowledged: z.boolean().optional() }),
     },
     ({ old_id, fields, orphans_acknowledged }) => json(tools.knowledgeSupersede(old_id, fields, orphans_acknowledged))
@@ -372,7 +372,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_update',
     {
       description:
-        'Versioned update IN PLACE: the record\'s id NEVER changes, the server-owned version counter bumps by one, and the full prior body is archived (read it back with knowledge_get version:<n>). REPLACES each field you pass and KEEPS every field you do not — so revising what_it_does while leaving a contradicting intended_behavior ships a self-contradicting record; the result carries a warning when that shape is detected. `body` is a PARTIAL PATCH, not a knowledge_create body — provide only the changed mutable fields; omitted fields are preserved. To EXTEND an array (history, files, current_ac) without retransmitting it, use knowledge_append. Pass expected_version:<the version you read> to make the write conditional: a stale token is refused naming both versions with nothing written. A `version` inside body is server-owned and ignored (disclosed as a warning). The ONE exception to in-place: an attestation update is a concept replacement (new id, prior retired), because an inspection verdict is immutable. This write does NOT auto-close any maintenance item: pass resolves:[<item ids>] to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write — a bad id refuses the whole call, and the drain rides the write\'s own transaction); anything left unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt carrying version + previous_version (body dropped — you just authored it); pass projection:"full" for the whole stored record.',
+        "Versioned update in place: id stays, version bumps, the prior body is archived (knowledge_get version:<n>). `body` is a PARTIAL PATCH, not a knowledge_create body — pass only changed mutable fields; omitted fields are kept (a warning flags a what_it_does change that leaves intended_behavior contradicting it). expected_version:<read version> makes the write conditional; a stale token is refused naming both versions. status/superseded_by are refused; a `version` in body is ignored with a warning. Attestation updates mint a new id and retire the prior. To extend an array use knowledge_append; to replace a passage use knowledge_edit. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items on this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string(),
         body: passthrough,
@@ -397,7 +397,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_append',
     {
       description:
-        'Append entries to an ARRAY field (history, files, current_ac, live_test_refs, …) without retransmitting the whole array — the cheap path for adding a history entry to a long article. Goes through the same versioned update path, so the version bump, the retained prior version, and the file_baselines re-baseline are identical — including resolves: pass item ids to explicitly discharge open reconcile_needed/refresh_reference items on this record\'s chain (validated before the write); anything unnamed stays open and is warned on the receipt. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). The echo defaults to a one-line digest receipt (warnings kept) — a single full-record append echo once measured 49.8KB of content the caller had just written; pass projection:"full" for the whole stored record.',
+        "Append entries to an array field (history, files, current_ac, live_test_refs, …) without retransmitting it; same versioned write path as knowledge_update. Refuses an unknown field (naming the valid set), a non-array field, an empty entry list, and links (use knowledge_link). resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items on this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string(),
         field: z.string(),
@@ -416,7 +416,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_edit',
     {
       description:
-        "Replace a passage INSIDE a long string field (what_it_does, intended_behavior, statement, …) without retransmitting the whole field — the string sibling of knowledge_append. 'find' must match EXACTLY ONCE: zero matches and multiple matches are both refused with the count, because a blind replace inside a field too large to read is an unreviewable write (extend 'find' with surrounding text to disambiguate). ARRAY-ELEMENT ADDRESSING: field also accepts a selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\") to edit one string inside one array element — the selector must match exactly one element, same refuse-on-ambiguity contract, so a stale files[] role no longer needs a full-array retransmit. Goes through the same versioned update path as every other write, so the version bump, retained prior version, and baseline re-baseline are identical — including resolves: pass item ids to explicitly discharge open reconcile_needed/refresh_reference items on this record's chain (validated before the write); anything unnamed stays open and is warned on the receipt. The echo defaults to a one-line digest receipt (warnings + replaced counts kept — chars_before/chars_after prove the edit landed); pass projection:\"full\" for the whole stored record.",
+        "Replace one passage inside a string field without retransmitting it. `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count; extend find to disambiguate. `field` may be an array-element selector 'arr[key=value].sub' (e.g. \"files[path=scripts/prep.mjs].role\"), which must match exactly one element. Same versioned write path as knowledge_update. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items on this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt with chars_before/chars_after; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string(),
         field: z.string(),
@@ -436,7 +436,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_array_remove',
     {
       description:
-        'Remove ONE element from an ARRAY field (canonically a feature_article\'s files[]) by selector — the DELETE verb the append/edit family never had (board 39673f6a). knowledge_append only ADDS and knowledge_edit\'s arr[key=value].sub only replaces a STRING inside one element, so dropping a single stale path previously meant a knowledge_update retransmitting the whole array — the exact shape that produced a measured silent truncation (recorded in a consuming project store), where the write succeeds and the article quietly loses entries nobody re-sent. SAME SELECTOR GRAMMAR as knowledge_edit, one level shorter: \'arr[key=value]\' with NO trailing \'.sub\' (e.g. "files[path=scripts/prep.mjs]"), because the WHOLE matched element goes. Same refuse-on-any-count-but-one contract: zero matches and multiple matches are both refused with the count, nothing written. THIS CALL DESTROYS, so it is shaped accordingly: the EXACT FULL UUID ONLY — no slug, no 8-char citation prefix, even though knowledge_get/knowledge_update/knowledge_edit resolve all three (anti-pattern no-bounded-trail-guard-for-destructive-addressing: an abbreviation whose worst case is a recoverable edit is not the same abbreviation on a call that removes content) — and expected_version is REQUIRED rather than optional, a stale token refusing by naming BOTH versions. A non-positive or non-integer token is refused as an INVALID ARGUMENT rather than a version conflict (no record is ever at version 0, so retrying with the current version is not the fix), and a record carrying NO stored version refuses the removal outright — an unversionable record cannot satisfy the conditional-write contract the required token exists to provide, so ANY token would otherwise be accepted. A selector matches only elements that actually HAVE the named key: [key=undefined] never addresses a key-absent element (zero matches, not a deletion), while an element whose value genuinely IS the string "undefined" stays selectable. A feature_article must RETAIN AT LEAST ONE owned file, so removing the last files[] entry is refused (emptying an article is retire-and-replace; knowledge_split refuses a full donation for the same reason), and history may not be emptied either — the last history entry is floored because the audit trail is what every other destroying-call guard rests on. That floor is a POLICY choice, not a schema constraint: the schema permits an empty history, so the floor is stated here as policy rather than as a fact about record validity. current_ac and live_test_refs MAY be emptied, and that asymmetry rests on a schema-real difference: records are routinely born with those two empty, so a removal returning one to a birth-legal state is floored by nothing. Surviving elements keep their original order and bytes exactly. Otherwise it rides the ONE versioned update path — version bump, retained prior version, baseline re-baseline, and resolves\'s explicit claim contract. The echo defaults to a one-line digest receipt carrying the removed element; pass projection:"full" for the whole stored record.',
+        "Remove ONE element from an array field by selector 'arr[key=value]' (no trailing .sub), e.g. \"files[path=scripts/prep.mjs]\". Zero or multiple matches are refused with the count; a selector only matches elements that have the key. Destructive, so: id must be the EXACT FULL UUID (no slug or prefix), and expected_version is REQUIRED — a stale token is refused naming both versions; a non-positive token is refused as invalid; a record with no stored version is refused. Refused: removing a feature_article's last files[] entry, or the last history entry. current_ac and live_test_refs may be emptied. Surviving elements keep order and bytes. resolves:[<full item ids>] explicitly closes open reconcile_needed/refresh_reference items on this record's chain (validated before the write; unnamed items stay open and are warned on the receipt). The echo defaults to a digest receipt carrying the removed element; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({
         id: z.string().describe('the EXACT full uuid — this call destroys, so no slug and no 8-char prefix is accepted'),
         selector: z.string().describe("arr[key=value] — knowledge_edit's grammar with NO trailing '.sub'; the whole matched element is removed"),
@@ -460,7 +460,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_promote',
     {
       description:
-        'Promote a project-scoped record into a mounted domain store (§3.3): copies it to the domain (scope domain:<name>, informed_by the origin) and retires the project original as a superseded tombstone pointing at the copy. feature_article (always project) and todo never promote; an unmounted target domain is rejected. Draining any matching promotion_review is the review outcome. METADATA SANITISATION (board ff07e314): file_keys never crosses (repo-relative paths are project-scoped) and stack_tags is INTERSECTED with the target domain rather than copied wholesale — both disclosed on the receipt (dropped_file_keys/dropped_stack_tags/kept_stack_tags) alongside a warn-only scan for suspicious project-local labels (slice labels, repo-relative path mentions) still sitting in the promoted prose. The echoed record defaults to its one-line digest under `promoted`; pass projection:"full" for the whole stored record.',
+        "Promote a project-scoped record into a mounted domain store: copies it (scope domain:<name>, informed_by the origin) and supersedes the project original pointing at the copy. feature_article and todo never promote; an unmounted domain is refused. file_keys are dropped and stack_tags intersected with the domain (disclosed as dropped_file_keys/dropped_stack_tags/kept_stack_tags), with a warn-only scan for project-local labels left in the prose. Clears a matching promotion_review item. The echo (`promoted`) defaults to a digest; projection:\"full\" returns the whole record.",
       inputSchema: strict({ id: z.string(), domain: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, domain, projection }) => json(tools.writeProjected(tools.knowledgePromote(id, domain), projection))
@@ -470,7 +470,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_add',
     {
       description:
-        'Add a task to the board (source: user) or the maintenance queue (source: system, requires system_reason). EVERY user-source add answers parentage via `objective` (decision a8d2ce6c): when the task is a SLICE of a larger objective — the conductor slicing a big ask mints one board_add per slice, all sharing the objective name — pass objective:"<name>"; a freestanding task passes objective:"standalone" (exact lowercase, stored as ungrouped). The TUI groups slices under their objective, so declared parentage is what keeps the board readable as N objectives instead of N×slices. Omitting objective never loses the task — it saves ungrouped with a loud notice, and board_update can group it later. system-source items never take an objective (lane-keyed by system_reason). measured_at_head (decision board-provenance-measured-at-head) is server-stamped to HEAD unless you supply a resolvable 40-hex sha yourself — an unresolvable one is refused, never silently replaced. The echoed item defaults to its one-line digest; pass projection:"full" for the stored record.',
+        "Add a task to the board (source:\"user\") or the maintenance queue (source:\"system\", requires system_reason). User items declare `objective`: the shared name of the larger objective a slice belongs to, or \"standalone\" for a freestanding task (stored ungrouped); omitting it saves ungrouped with a notice. System items never take an objective. measured_at_head is stamped to HEAD unless you pass a resolvable 40-hex sha (an unresolvable one is refused). The echo defaults to a digest; projection:\"full\" returns the stored record.",
       inputSchema: strict({
         text: z.string(),
         source: z.enum(['user', 'system']),
@@ -491,7 +491,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_query',
     {
       description:
-        'List open board items. source=user is the board; source=system is the maintenance queue. objective narrows to the slices of ONE objective — the grouping key board_add requires and the TUI/H1 group and count by (decision a8d2ce6c) — matched exactly, and mirroring the write side\'s normalization: objective:"standalone" selects the UNGROUPED items (combine with source:"user" to exclude the maintenance queue, which is lane-keyed by system_reason and never objective-grouped). An objective no item carries narrows to nothing rather than erroring. contains narrows to items whose text contains that substring (case-insensitive, literal — never FTS5 query syntax). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, records}: capped=true means more items matched than are shown past this page — raise cap or page (by offset or cursor) before concluding the board or queue is shorter than it is. Paging walks a TOTAL, deterministic order (updated_at DESC, id DESC): this visits every matching item exactly once for an UNCHANGED board, but under CONCURRENT WRITES offset paging (offset:0, offset:cap, offset:2*cap, …) can SKIP an item bumped toward the head between page fetches. cursor (pass back next_cursor, present whenever capped) resumes by IDENTITY instead of position and never skips an item behind it, but still cannot surface one that jumps AHEAD of it after the cursor was minted — finish a churn-exposed walk with a head re-query either way. A cursor is bound to the filters it was minted under (source/objective/file_keys/contains); continuing it with different filters is refused, naming the mismatch — cap/projection may still vary freely. cursor and offset are mutually exclusive (refused together); a malformed cursor is refused naming the parameter. provenance (decision board-provenance-measured-at-head) states whether the one-shot git walk behind the per-item "⚠ file_keys changed in N commits since this item\'s evidence was measured (<sha7>)" annotation ran: \'checked\', or \'unavailable:<reason>\' when it could not (no git, detached HEAD, no eligible file_keys, or the walk\'s commit cap was hit) — an absent warning is never proof of freshness. projection:"digest" returns one clipped line per item instead of its full text; projection:"headline" is smaller still (id, priority, objective, first 80 chars of text — no source/status/type/size_chars) for auditing or paging a large board cheaply; read the full item only for the ones you act on. lane_advisory appears ONLY when two or more USER-source items in the FULL matched set (not just this page) declare a file_keys path in common, and it states the PER-LANE rule: a shared write path serializes the IMPLEMENTATION lane and ONLY that lane — the read-only-scoping and test-authoring lanes of a file-colliding slice stay dispatchable, so serializing a whole SLICE on a file collision is a mistake. Each collisions[] group names the shared paths and the colliding items as {id, name}, name first so no bare id faces a human. System-source items never join a group (maintenance debt is not parallel work), so maintenance_query never carries the key. STRICTLY ADVISORY: it never denies, filters, reorders or refuses anything, records comes back untouched, and it never counts agents toward a target — a lane being parallel-SAFE is not a reason to dispatch it, and "no parallel work" remains a complete answer. Every RETURNED item additionally carries artifact_evidence {count, records? (up to 3, as {id8, type, name}), file_key_check}: the durable knowledge records (decision, anti_pattern, feature_article, research_finding, disconfirmed_hypothesis, open_question, reference_material) written or updated since THAT item was created which either touch its file_keys or cite its id — the same derivation board_remove discloses on removal, brought forward to read time, computed for this page only. A LOOKUP, NEVER A VERDICT: a non-zero count means POSSIBLY ADDRESSED and nothing stronger — verify against HEAD before acting on it — and a zero count is equally weak the other way, since each arm is a bounded 200-record scan of the knowledge store only, never git (uncaptured work leaves no trace here). file_key_check:"skipped:no_file_keys" says the file-key arm could not run on an item declaring no paths (the citation arm still did). file_key_check:"unavailable:budget" says the file-key arm was not reached at all because the page\'s query budget was spent by earlier items, leaving that item\'s count a CITATION-ONLY floor (narrow the page to check it). artifact_evidence_provenance is \'checked\', \'checked:budget_truncated\' when that happened to any item, or \'unavailable:store_query_failed\' if the scan threw — it FAILS OPEN, so the items come back either way and an absent per-item block means "not checked", never "nothing found"; artifact_evidence_note carries the same reading instruction once per envelope.',
+        "List open board items. source:\"user\" is the board, source:\"system\" the maintenance queue. Filters (AND): objective (exact; \"standalone\" selects ungrouped items), file_keys, contains (case-insensitive literal substring). Returns {matched_filter, returned, cap, capped, offset, next_cursor?, provenance, reconcile_provenance, lane_advisory_count?|lane_advisory?, artifact_evidence_provenance, artifact_evidence_note, note?, records}. capped=true means more items matched — raise cap or page before concluding the board is shorter. Paging: order is updated_at DESC, id DESC. offset pages by position (can skip an item bumped between fetches); cursor (pass back next_cursor) resumes by identity and never skips an item behind it. cursor and offset are mutually exclusive; a cursor is bound to its filters (a mismatch is refused); cap/projection may vary. projection: \"text\" (default) — id, slug, objective, source, system_reason, status, priority, feature_link, updated_at, text clipped to 240 chars, artifact_evidence_count, and lane collisions as lane_advisory_count; \"headline\" — id, name, priority, objective/system_reason, 80-char text; \"digest\" — one clipped line per item; \"full\" — whole records with file_keys, per-item artifact_evidence {count, records?, file_key_check}, annotation prose, and the lane_advisory block. Use board_get for one whole item. Advisory annotations never filter or reorder: provenance / reconcile_provenance say whether the git-based staleness checks ran ('checked' or 'unavailable:<reason>'); artifact_evidence counts knowledge records written since the item that touch its file_keys or cite its id — a lookup, never a verdict (verify against HEAD); lane_advisory marks user items sharing a write path, which serializes only the implementation lane.",
       inputSchema: strict({
         source: z.enum(['user', 'system']).optional(),
         objective: z.string().optional(),
@@ -500,7 +500,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         cap: z.number().int().positive().optional(),
         offset: z.number().int().nonnegative().optional(),
         cursor: z.string().optional(),
-        projection: z.enum(['full', 'digest', 'headline']).optional(),
+        projection: z.enum(['text', 'full', 'digest', 'headline']).optional(),
       }),
     },
     (args) => json(tools.boardQueryResult(args))
@@ -510,7 +510,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_remove',
     {
       description:
-        "Remove a task — the only way items leave the board (done = removed, bound to the artifact-write). The result discloses artifact_evidence: durable records touching the item's file_keys written since the item was created. An empty list means the close rides YOUR word — legitimate for genuine abandonment, drift if work fulfilled the item and its capture is missing.",
+        "Remove a board or queue item — the only way an item leaves (done = removed, after its fulfilling artifact-write). Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). The result discloses artifact_evidence (records touching the item's file_keys written since it was created); an empty list means the close rests on your word. An already-removed id reports when it was removed.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardRemove(id))
@@ -520,7 +520,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_remove',
     {
       description:
-        "Remove a MAINTENANCE-QUEUE item (source:'system') once its fulfilling artifact exists — board_remove narrowed to the queue, so an agent that drains the queue can close what it drains. Refuses user-source board items: that board is the human's own surface and is not an agent's to clear. Removals are logged to the §3.2.7 drain-log audit trail exactly as board_remove's are, and the result discloses the same artifact_evidence (durable records touching the item's file_keys since its creation) — an empty list on a drain means verify against HEAD before closing.",
+        "Remove a maintenance-queue (source:\"system\") item once its fulfilling artifact exists; user board items are refused. Destructive: id must be the EXACT FULL UUID (no slug or 8-char prefix). Logged to the drain log; the result discloses artifact_evidence like board_remove — an empty list means verify against HEAD before closing.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.maintenanceRemove(id))
@@ -530,7 +530,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_update',
     {
       description:
-        'IN-PLACE edit of a board/queue item — text/priority/file_keys/objective/measured_at_head only, id stable, no new version is minted. Updating an item never closes it: board_remove, bound to the fulfilling artifact-write, remains the only way an item leaves the board (P4). objective (re)groups a task under a larger objective (decision a8d2ce6c — the remedy for a slice saved ungrouped or a late-discovered slice); objective:"standalone" un-groups it. A text or file_keys change re-stamps measured_at_head to the current HEAD automatically (decision board-provenance-measured-at-head — new evidence); a priority/objective-only patch leaves it untouched; pass measured_at_head yourself (a resolvable 40-hex sha) to re-verify without rewriting text — an unresolvable sha is refused, never silently replaced. Only todo records are editable this way; source/system_reason/status/id and every other field are refused by name (they decide which surface an item lives on, or are server-owned). At least one updatable field is required. The echoed item defaults to its one-line digest — board items run to several KB and you just wrote the change; pass projection:"full" for the stored record.',
+        "Edit a board/queue item in place (id stable, no new version): text, priority, file_keys, objective, measured_at_head. Never closes an item (use board_remove). objective (re)groups a task; \"standalone\" ungroups it. A text or file_keys change re-stamps measured_at_head to HEAD; pass a resolvable 40-hex sha to set it explicitly (unresolvable is refused). Todos only; source/system_reason/status/id and other fields are refused by name. At least one field is required. The echo defaults to a digest; projection:\"full\" returns the stored record.",
       inputSchema: strict({
         id: z.string(),
         text: z.string().optional(),
@@ -548,7 +548,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_get',
     {
       description:
-        'Fetch a board/queue item by id — the full, untruncated record (board_query\'s projection:"digest" clips text; this is the escape hatch back to the whole item). Resolves through the same ladder as knowledge_get: full uuid, exact slug, or an unambiguous 8-char citation prefix. An unknown id is refused, naming the id that was not found.',
+        "Fetch one board/queue item in full (untruncated text). Resolves a full uuid, exact slug, or unambiguous 8-char prefix; an unknown id is refused naming it. Returns the stored `slug` untouched (an immutable address, never re-derived) alongside a `label` — the display name derived from the item's CURRENT text, which is what a reader should be shown after a rename or renumbering.",
       inputSchema: strict({ id: z.string() }),
     },
     ({ id }) => json(tools.boardGet(id))
@@ -558,7 +558,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'board_edit',
     {
       description:
-        'Replace a passage INSIDE a board/queue item\'s text without retransmitting the whole field — knowledge_edit\'s exactly-once find/replace contract, but IN PLACE: id stable, no new version minted (decision a91c80b5 — board_update\'s identity semantics, not knowledge_update\'s supersession). \'find\' must match EXACTLY ONCE: zero matches and multiple matches are both refused, naming the count, with nothing written. Works identically on a user task or a system maintenance item. The echo defaults to a one-line digest receipt; pass projection:"full" for the whole stored record.',
+        "Replace one passage inside a board/queue item's text in place (id stable, no new version). `find` must match EXACTLY ONCE — zero or multiple matches are refused with the count, nothing written. Works on user and system items. The echo defaults to a one-line digest receipt; projection:\"full\" returns the whole stored record.",
       inputSchema: strict({ id: z.string(), find: z.string(), replace: z.string(), projection: z.enum(['full', 'digest']).optional() }),
     },
     ({ id, find, replace, projection }) => json(tools.writeProjected(tools.boardEdit(id, find, replace), projection))
@@ -568,27 +568,20 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'no_capture',
     {
       description:
-        "Declare that this session's direct-mode work produced NOTHING durable — satisfies H10's duty for every touch/debug/research event EARLIER than the declaration, ON THE LANE YOU DECLARE (later work re-arms it). LANE-SCOPED since 2026-08-22 (decision no-capture-discharge-is-lane-scoped): OMITTING lane declares the CAPTURE lane only — discharging the RESEARCH duty requires lane 'research' (or 'all' for both), because a locally-true 'typo fix, nothing durable' must never silently clear an unrelated earlier research duty. An unrecognized lane is refused, never coerced. A false declaration is drift, not a bypass: the reason is register-recorded. If a capture EXISTS and is merely landing later, use capture_pending instead. Replaces hunting for scripts/no-capture.mjs in the plugin clone; the script remains the no-server fallback (--lane there).",
+        "Declare that this session's work produced nothing durable, discharging H10's duty for events earlier than the declaration on the declared lane (later work re-arms it): omitted lane = capture only; lane:\"research\" for the research duty; lane:\"all\" for both. An unknown lane is refused. The reason is recorded. If a capture exists but lands later, use capture_pending.",
       inputSchema: strict({ reason: z.string(), lane: z.enum(NO_CAPTURE_LANES).optional() }),
     },
     ({ reason, lane }) => json(tools.noCapture(reason, lane))
   );
 
-  server.registerTool(
-    'enforcement_reconcile',
-    {
-      description:
-        "Run the enforcement taint clearer (scripts/enforcement-reconcile.mjs) — the only sanctioned removal path for H17's (B) surface taint latch, and the only way to mint the persistent (B) baseline list (decision b-baseline-hash-list-concrete-design, D2/D5). Default (adopt:false) is VERIFY: it clears the latch only on an exact match against the existing baseline list PLUS a clean tracked (A) enforcement surface, and refuses — latch intact — on any delta, any (A) dirt, a missing list, or any abnormal shape. adopt:true is the explicit human-acceptance operation: it re-mints the baseline from the current surface (the sanctioned discharge after a legitimate (B) change — a TUI config edit, sync-agents, init) and names (A) dirt loudly. Run it with agents QUIESCED; the returned {cleared, reason} is the module's own verdict, verbatim. THIS IS A FRONT DOOR, NOT AN AUTHORITY BOUNDARY, and the distinction is the ruling (fe861066's honesty clause): this server has no authenticated caller identity, an agent whose frontmatter omits `tools:` receives all mounted tools, and any caller able to run Node under this UID can import the module and self-assert callerRole. That no agent template grants this tool (pinned by AC-R11) is DISTRIBUTION POLICY only. 'Only the conductor can clear' is NOT claimed as a mechanical property — what this tool removes is the friction of the alternative (a raw `node -e \"import(...)\"`, the exact shape H15 denies), not an attacker's capability. DISCLOSED CHANNEL CHANGE (roster security review, 2026-09-06): H17's latch is registered on BASH in agent frontmatter and does not gate an agent's MCP, Edit, Write or Task calls, so the predecessor route sat INSIDE the latch's own denial perimeter — an agent that tripped the latch had its clearing route denied by the very latch it tripped — while this tool does not. No shipped agent template grants it, and the two Bash-bearing roster agents have Bash denied while the latch stands; the reachable case is a caller outside the roster (an all-tools dispatch whose frontmatter omits `tools:`, or direct Node import). Since adopt:true re-mints from the current surface in one pass with no diff against the prior list, that caller's tamper-then-clear is a single call. This is disclosure, not a claim of containment.",
-      inputSchema: strict({ adopt: z.boolean().default(false) }),
-    },
-    async ({ adopt }) => json(await tools.enforcementReconcile(adopt))
-  );
+  // enforcement_reconcile was removed together with H17 (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — see tools.ts.
 
   server.registerTool(
     'concept_designed',
     {
       description:
-        "Register that a domain concept FAMILY's design SETTLED this session (decision 7208729b) — H10 then demands the family's concept article (feature_article with concept_family) before the session ends, deferring to a concept_article_missing queue item if unmet. Pass the family slug(s). Replaces node scripts/concept-designed.mjs; the script remains the no-server fallback.",
+        "Register that a concept family's design settled this session (pass the family slug(s)); H10 then requires that family's concept article (feature_article with concept_family) before the session ends, or queues concept_article_missing.",
       inputSchema: strict({ families: z.array(z.string()).min(1) }),
     },
     ({ families }) => json(tools.conceptDesigned(families))
@@ -598,7 +591,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'capture_pending',
     {
       description:
-        "Declare that a capture EXISTS and its write is IN FLIGHT on a named target — a pending gated commit, a dispatched agent, a lane. H10 then defers the capture duty instead of nagging: the registers survive one Stop so the landed write settles the duty cleanly, and a still-pending duty on the next Stop becomes ONE deduped capture_owed item citing the target. Use this instead of a boilerplate no_capture when the truth is 'captured, landing later' — pending work defers or lands on the queue, it never evaporates.",
+        "Declare that a capture exists and its write is in flight on a named target (a pending commit, a dispatched agent). H10 defers the capture duty one Stop; if still pending at the next Stop it becomes one deduped capture_owed queue item citing the target.",
       inputSchema: strict({ target: z.string(), reason: z.string() }),
     },
     ({ target, reason }) => json(tools.capturePending(target, reason))
@@ -608,7 +601,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'config_set',
     {
       description:
-        "CONDUCTOR-RUN: config_set is not granted to any roster agent by design (this server authenticates no caller, so keeping it off every agent-template grant is what keeps posture knobs and review_ledger.stale_days out of subagent reach). The sanctioned in-session route to flip an ALLOWLISTED .sterling/config.json setting (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays) — H15's structured-write arm denies every raw Edit/Write into .sterling/ regardless of tool, and that denial STAYS; this tool is the one carve-out, narrowed to a positive allowlist of tunable keys (see CONFIG_SET_ALLOWLIST beside SterlingTools.configSet in tools.ts: models.<key>, tdd.enabled, mutation_verification.enabled, sparring_partner.enabled, sparring_partner.model, delegation.max_concurrent, maintenance_queue.deep_threshold, delivery.<key>, dispatch_register.stale_minutes, review_ledger.stale_days). Everything else — store_guard.*, toolchains.*, machine_role, backup_path, store_authority, review_ledger.code_globs, any unknown key — is REFUSED naming the path and the allowlist; an unrecognized leaf INSIDE an allowlisted family (e.g. delivery.typo) is refused separately, by the known keys for that family, never worded as an allowlist violation. `path` is a dotted key (e.g. 'tdd.enabled'); `value` is REQUIRED (an omitted value would delete the key). `expected_digest` is an optional CAS token (sha256 hex of the current config.json bytes) — a stale token refuses naming both digests, nothing written; PASS IT to avoid a last-rename-wins loss against a concurrent writer (e.g. the TUI's own config-writeback) — this call also re-checks the on-disk digest immediately before its own rename and refuses on any change even when expected_digest was omitted, though the sliver of time between that re-check and the rename itself is not covered (rename() is atomic for visibility, not for comparison). Reads/writes ONLY the active project's canonical .sterling/config.json (no path argument — a foreign project is unreachable by construction); a symlinked or non-regular config.json is refused (including a dangling symlink, and a symlinked .sterling directory itself). The whole resulting document is validated against the canonical config schema before anything is written; unrelated keys are byte-preserved, but the file is always RE-SERIALIZED as 2-space LF JSON — a CRLF or 4-space source is reformatted whole, and a leading UTF-8 BOM is stripped on read rather than treated as corruption. Returns {path, previous_value, value, digest} — digest is the NEW sha256, usable as the next call's expected_digest.",
+        "Conductor-only (not granted to roster agents): set one key in the active project's .sterling/config.json, validating the whole document against the config schema before writing. `path` is a dotted key (e.g. 'tdd.enabled'; intermediate objects are created); `value` is required; __proto__/constructor/prototype in the path are refused. `expected_digest` (sha256 of the current file bytes) makes the write conditional — a stale token is refused naming both digests. Pass it against concurrent writers such as the TUI: the call also re-checks the digest just before its atomic rename, but a small window between that re-check and the rename remains, so last write wins inside it. A symlinked or non-regular config.json or .sterling directory is refused. The file is re-serialized as 2-space LF JSON (BOM stripped; other keys preserved). Returns {path, previous_value, value, digest}; digest is the next expected_digest.",
       inputSchema: strict({
         path: z.string(),
         value: z.unknown().refine((v) => v !== undefined, { message: "'value' is required" }),
@@ -618,53 +611,15 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     ({ path, value, expected_digest }) => json(tools.configSet({ path, value, expected_digest }))
   );
 
-  server.registerTool(
-    'run_state',
-    {
-      description: 'Current run record — the conductor source of truth for run state (re-read after compaction; never trust recall).',
-      inputSchema: strict({ run_id: z.string().optional() }),
-    },
-    ({ run_id }) => json(tools.runState(run_id))
-  );
-
-  server.registerTool(
-    'agent_exit',
-    {
-      description:
-        'The exit wire (never prose): record your typed exit signal + payload before finishing. Signals: complete{handoff_ref} | research-needed{question,context,blocking} | review-unresolved | blocked{reason} | tests-invalid{evidence} | contract-violated{path,rule} | bug-found{description,location,depends_on_current_work,workaround_built} | phase-overflow{agent,fill_pct}. agent-died is conductor-reported, never agent-emitted. Invalid signal or payload is rejected — correct and re-call.',
-      inputSchema: strict({
-        run_id: z.string().optional(),
-        phase_id: z.string(),
-        agent_role: z.string(),
-        signal: z.string(),
-        payload: passthrough.optional(),
-      }),
-    },
-    (args) => json(tools.agentExit(args))
-  );
-
-  server.registerTool(
-    'run_signal',
-    {
-      description:
-        "The brain: computes the reaction to the recorded exit and returns the next action; the conductor executes exactly that. Routing (§5.2): abnormal exits come here immediately; normal 'complete' only at the PHASE BOUNDARY — intra-phase completes are consumed via scripts/consume-exit.mjs as the next §8.1 step, never signalled here.",
-      inputSchema: strict({
-        run_id: z.string().optional(),
-        exit: strict({ signal: z.string(), payload: passthrough.optional(), phase_id: z.string().optional(), agent_role: z.string().optional() }).optional(),
-      }),
-    },
-    (args) => json(tools.runSignal(args))
-  );
+  // run_state / agent_exit / run_signal — the staged pipeline's run protocol
+  // — were removed (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1). See tools.ts.
 
   server.registerTool(
     'knowledge_link',
     {
       description:
-        'Add a typed link between records: cites | informed_by | fulfills | supersedes | falsified_by. ' +
-        "`supersedes` is never writable here — it is a lifecycle transition, so use knowledge_supersede / knowledge_retire. " +
-        '`falsified_by` goes FROM the record whose central claim was disproven TO the durable record carrying the falsifying evidence; ' +
-        'the falsified record stays LIVE and readable (that is the point — a reader still meets it, now with the contradiction attached). ' +
-        'Use it when there is no successor claim to write yet; when there IS one, supersede instead.',
+        "Add a typed link: cites | informed_by | fulfills | falsified_by (supersedes is refused — use knowledge_supersede / knowledge_retire). falsified_by points FROM the record whose claim was disproven TO the record carrying the evidence; the falsified record stays live. When a successor claim exists, supersede instead.",
       inputSchema: strict({ from: z.string(), rel: z.string(), to: z.string() }),
     },
     ({ from, rel, to }) => json(tools.knowledgeLink(from, rel, to))
@@ -674,7 +629,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'knowledge_preflight',
     {
       description:
-        'THE PRE-WRITE CONFLICT CHECK: ask "does the store already govern this subject / does anything here conflict with it?" BEFORE dispatching, designing, asking the user a question, or drafting a new decision/research_finding/article — verify a brief, design agenda, question subject, or draft claim against store targets instead of discovering a governing or conflicting record only after the work (or the question) has gone out. Reuses the H20 delivery floors (axis-term extraction + record centrality) over anti_pattern + decision + feature_article + research_finding records. Pass ONE of: text (a single subject) or texts (an agenda — one verdict row per question, in order). Verdicts: "insufficient" means too little extractable vocabulary to judge at all (reason:"too_little_vocabulary"); "verify_targets" means the store governs this subject — verify against the named matches for a conflict before proceeding (open the records; a match row is a lookup, never the source); "ungoverned" means nothing in the store governs it (a genuinely open question). Single-text returns {terms, matches:[{id,type,title,matched_on,central}], answerability}; texts returns {verdicts:[{text, ...same}]}.',
+        "Pre-write conflict check: does the store already govern this subject? Run it before dispatching, designing, asking the user, or drafting a new record. Pass `text` (one subject) or `texts` (an agenda, one verdict per entry, in order). Matches anti_pattern, decision, feature_article, research_finding, disconfirmed_hypothesis and open_question records. Verdicts: \"verify_targets\" — the store governs this; open the named matches before proceeding (a match is a pointer, not the source); \"ungoverned\" — nothing governs it; \"insufficient\" — too little vocabulary to judge; the verdict and matched_total are decided from the centrality-passing candidate set only, not the capped `matches` window. Returns {terms, matched_total, capped (present/true only when `matches` was truncated), matches:[{id,type,title,matched_on,central}], answerability} or {verdicts:[…]}. `matches` is capped at 20, sorted centrality-first (a central match always outranks a merely-hitting one), then by raw hit count. `matches` may include records with `central:[]` (non-central) — record-centrality is no longer required to LIST a candidate, only to decide the verdict and matched_total. matched_total counts centrality-passing, qualifying records among the candidates evaluated (each record type's own query is itself capped at 40), not a true/exact/full count.",
       inputSchema: strict({ text: z.string().optional(), texts: z.array(z.string()).optional() }),
     },
     ({ text, texts }) => {
@@ -685,14 +640,8 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     }
   );
 
-  server.registerTool(
-    'run_escalate',
-    {
-      description: 'Surface a judgment branch / typed escalation onto the active run record.',
-      inputSchema: strict({ payload: passthrough }),
-    },
-    ({ payload }) => json(tools.runEscalate(payload))
-  );
+  // run_escalate was removed with the staged pipeline (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
   // maintenance_enqueue is deliberately NOT wire-registered (decision
   // 6269b714, todo-stays-one-type…keep): system items are minted only by
@@ -705,7 +654,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'maintenance_query',
     {
       description:
-        'List open maintenance-queue items (system todos), optionally by system_reason, file keys, contains (substring narrowing on text, case-insensitive, literal — never FTS5 query syntax), or feature_slug (narrows to items owned by ONE article, resolved from its slug and CHAIN-AWARE — an item raised against an earlier superseded version of the article still matches; every filter combines as a genuine AND). An unresolvable feature_slug narrows to nothing rather than erroring. Returns {matched_filter, returned, cap, capped, offset, next_cursor?, artifact_evidence_provenance, artifact_evidence_note, records}: capped=true means the queue is DEEPER than what is shown past this page — a drain that stops at the cap leaves the tail behind, so raise cap or page (by offset or cursor) until capped is false. Paging walks a TOTAL, deterministic order (updated_at DESC, id DESC): this visits every item exactly once for an UNCHANGED queue, even a 186-item queue a single capped call cannot see past item 1 of, but under CONCURRENT WRITES offset paging (offset:0, offset:cap, offset:2*cap, …) can SKIP an item bumped toward the head between page fetches — exactly the churn a drain routinely runs into. cursor (pass back next_cursor, present whenever capped) resumes by IDENTITY instead of position and never skips an item behind it, but still cannot surface one that jumps AHEAD of it after the cursor was minted — finish a churn-exposed drain with a head re-query either way. A cursor is bound to the filters it was minted under (system_reason/file_keys/contains/feature_slug); continuing it with different filters is refused, naming the mismatch — cap/projection may still vary freely. cursor and offset are mutually exclusive (refused together); a malformed cursor is refused naming the parameter. projection:"digest" returns one clipped line per item (with its system_reason lane); projection:"headline" is smaller still (id, priority, system_reason, first 80 chars of text) — the cheap way to size, sort, and page a deep queue before draining it. Every RETURNED item additionally carries artifact_evidence {count, records? (up to 3, as {id8, type, name}), file_key_check}: the durable knowledge records (decision, anti_pattern, feature_article, research_finding, disconfirmed_hypothesis, open_question, reference_material) written or updated since THAT item was created which either touch its file_keys or cite its id — the same derivation maintenance_remove discloses on removal, brought forward to read time, computed for this page only, so a drain can triage which items even look addressed before opening them. A LOOKUP, NEVER A VERDICT: a non-zero count means POSSIBLY ADDRESSED and nothing stronger — verify against HEAD before draining on it — and a zero count is equally weak the other way, since each arm is a bounded 200-record scan of the knowledge store only, never git (uncaptured work leaves no trace here). file_key_check:"skipped:no_file_keys" says the file-key arm could not run on an item declaring no paths, which is routine for the concept_article_missing / research_owed lanes (the citation arm still did). file_key_check:"unavailable:budget" says the file-key arm was not reached at all because the page\'s query budget was spent by earlier items, leaving that item\'s count a CITATION-ONLY floor (narrow the page to check it). artifact_evidence_provenance is \'checked\', \'checked:budget_truncated\' when that happened to any item, or \'unavailable:store_query_failed\' if the scan threw — it FAILS OPEN, so the items come back either way and an absent per-item block means "not checked", never "nothing found"; artifact_evidence_note carries the same reading instruction once per envelope.',
+        "List open maintenance-queue items. Filters (AND): system_reason, file_keys, contains (case-insensitive literal substring), feature_slug (items owned by one article, including earlier superseded versions; unresolvable = empty). Same envelope, paging and projections as board_query: capped=true means the queue is deeper than shown — page (offset, or cursor = next_cursor, which never skips an item behind it; mutually exclusive; bound to its filters) until capped is false. projection: \"text\" (default; text clipped to 240 chars, artifact_evidence_count), \"headline\", \"digest\", or \"full\" (per-item artifact_evidence detail and annotation prose). artifact_evidence is a lookup, never a verdict — verify against HEAD before draining on it.",
       inputSchema: strict({
         system_reason: z.string().optional(),
         file_keys: z.array(z.string()).optional(),
@@ -714,29 +663,14 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
         cap: z.number().int().positive().optional(),
         offset: z.number().int().nonnegative().optional(),
         cursor: z.string().optional(),
-        projection: z.enum(['full', 'digest', 'headline']).optional(),
+        projection: z.enum(['text', 'full', 'digest', 'headline']).optional(),
       }),
     },
     (args) => json(tools.maintenanceQueryResult(args))
   );
 
-  server.registerTool(
-    'handoff_write',
-    {
-      description: 'Write your phase handoff (schema-validated). Run-scoped transient state — never enters the durable store.',
-      inputSchema: strict({ run_id: z.string().optional(), handoff: passthrough }),
-    },
-    (args) => json(tools.handoffWrite(args))
-  );
-
-  server.registerTool(
-    'handoff_read',
-    {
-      description: 'Read handoffs for a phase, or those touching the given files.',
-      inputSchema: strict({ run_id: z.string().optional(), phase_id: z.string().optional(), files: z.array(z.string()).optional() }),
-    },
-    (args) => json(tools.handoffRead(args))
-  );
+  // handoff_write / handoff_read were removed with the staged pipeline
+  // (decision sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
   return { server, store, tools };
 }

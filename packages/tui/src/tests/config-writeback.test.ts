@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // ===========================================================================
-// CONFIG WRITE-BACK oracle (decision 752caf98, tdd-and-mutation-toggles-in-
+// CONFIG WRITE-BACK oracle (decision foreign_752caf98, tdd-and-mutation-toggles-in-
 // system-tab; test-writer work order item 3) — SPEC-ONLY, written against the
 // brief without reading main.ts or state.ts.
 //
@@ -239,7 +239,7 @@ test('config-writeback: applyMutationToggle on a config missing the mutation_ver
 
 // ===========================================================================
 // Explicit config-path argument (adjudicated from a MEDIUM review finding,
-// decision-752caf98 territory; test-writer regression pin) —
+// decision-foreign_752caf98 territory; test-writer regression pin) —
 // applyTddToggle / applyMutationToggle gain an OPTIONAL TRAILING explicit
 // config-path argument: when a caller passes an absolute path to a
 // config.json, the function reads and writes EXACTLY that file, regardless

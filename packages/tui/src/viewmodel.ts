@@ -1,6 +1,6 @@
 // TUI view models (spec §11): pure projections over the durable stores —
 // every tab is a live view; nothing here mutates anything.
-import { DRAIN_VERBS, RECORD_TYPES, displayHandle } from '@sterling/schemas';
+import { DRAIN_VERBS, RECORD_TYPES, displayHandle, boardDisplayLabel } from '@sterling/schemas';
 import type { SterlingStore, MountedStores } from '@sterling/store';
 
 export interface Card {
@@ -40,7 +40,7 @@ interface FeatureArticleRec {
   files: { path: string }[];
   dependencies: { relies_on: string[] };
   version: number;
-  // Board a9280db7 (decision c48380bf): on a probe|tool article this can now
+  // Board a9280db7 (decision foreign_c48380bf): on a probe|tool article this can now
   // be the structured not_applicable exemption object instead of an array —
   // widened here so the Array.isArray guard below is not fighting the type.
   current_ac?:
@@ -355,7 +355,7 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
 }
 
 /**
- * Tasks-tab cards. Items sharing an `objective` (decision a8d2ce6c) collapse
+ * Tasks-tab cards. Items sharing an `objective` (decision foreign_a8d2ce6c) collapse
  * under one `obj:<name>` header entry — children are emitted only when the
  * header id is in `expanded` (the same fold mechanism the Knowledge tree
  * uses), so the board reads as N objectives, not N×slices. Standalone items
@@ -389,23 +389,32 @@ export function knowledgeSubgroups(records: unknown[]): { key: string; label: st
  * (2) replace the split with an indexOf('\n') slice; both keep this shape and
  * move the ceiling several-fold. Only past roughly 1,500–2,000 items on this
  * text profile does the Knowledge tree's count-then-fetch-per-source pattern
- * (decision 5f8419c5) become genuinely required.
+ * (decision foreign_5f8419c5) become genuinely required.
  */
 export function todoCards(store: SterlingStore, expanded: string[] = []): Card[] {
   const groups = new Map<string, Card[]>();
   const flat: Card[] = [];
   for (const t of store.query({ types: ['todo'], source: 'user', cap: 500 })) {
     const todo = t as unknown as { id: string; text: string; slug?: string; priority?: string; file_keys?: string[]; objective?: string };
+    // `name (id8)` where a LABEL EXISTS (decision foreign_2e8c30e4; board 081508d0
+    // review round 2). Gated on the derived LABEL, NOT on whether a slug was
+    // ever minted (review round 2, HIGH finding): a legacy pre-mint item has
+    // real text and therefore a real label — omitting id8 for it left every
+    // such item, and every maintenance-queue item (which never mints a slug at
+    // all, S1), permanently unlabelled. `id8` is a uuid-prefix address, valid
+    // independent of slug. Only an item with NEITHER a slug NOR any non-blank
+    // text line has nothing to compose, and keeps the bare text line — no hex
+    // fragment dressed as a name (df361a0f). The label itself reads the
+    // item's CURRENT text (boardDisplayLabel, board 081508d0), never the
+    // stale slug — a renamed/renumbered item must not keep showing the
+    // headline it was minted under.
+    const label = boardDisplayLabel(todo.text, todo.slug);
     const card: Card = {
       id: todo.id,
       type: 'todo',
-      // `name (id8)` where a handle EXISTS (decision 2e8c30e4) — the row a
-      // reader scans leads with the name and keeps a citable id. Where none was
-      // minted nothing is composed: a legacy item keeps its bare text line
-      // rather than gaining a hex fragment dressed as a name (df361a0f).
       // The card `id` stays the FULL uuid — the id8 is a display abbreviation,
       // and selection effects plus every destroying call need the whole thing.
-      title: todo.slug ? displayHandle(todo.slug, todo.id) : todo.text.split('\n')[0],
+      title: label ? displayHandle(label, todo.id) : todo.text.split('\n')[0],
       body: todo.text,
       detail: [todo.priority && `priority: ${todo.priority}`, todo.file_keys?.length && `files: ${todo.file_keys.join(', ')}`]
         .filter(Boolean)
@@ -441,11 +450,16 @@ export function queueCards(store: SterlingStore): Card[] {
     .query({ types: ['todo'], source: 'system', cap: 200 })
     .map((t) => {
       const item = t as unknown as { id: string; text: string; slug?: string; system_reason?: string; file_keys?: string[] };
+      // Same rule as the board rows above (review round 2: gated on the
+      // derived LABEL, not on slug presence — maintenance items NEVER mint a
+      // slug, S1, so the old slug-gate left every ordinary queue row
+      // unlabelled). The label reads the item's CURRENT text, not a slug that
+      // was never there (boardDisplayLabel, board 081508d0).
+      const label = boardDisplayLabel(item.text, item.slug);
       return {
         id: item.id,
         type: 'todo',
-        // Same rule as the board rows above: compose only where a handle exists.
-        title: item.slug ? displayHandle(item.slug, item.id) : item.text.split('\n')[0],
+        title: label ? displayHandle(label, item.id) : item.text.split('\n')[0],
         body: item.text,
         detail: [item.system_reason, item.file_keys?.length && `files: ${item.file_keys.join(', ')}`].filter(Boolean).join(' · '),
       };

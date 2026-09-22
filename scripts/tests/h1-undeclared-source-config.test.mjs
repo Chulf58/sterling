@@ -11,7 +11,7 @@
 // one-file-per-concern convention (h1-objective-count / h1-tmpdir-janitor /
 // h1-session-residue are each split the same way).
 //
-// THE RULING THIS PINS (decision b128f79c, "abnormal shapes render, never
+// THE RULING THIS PINS (decision foreign_b128f79c, "abnormal shapes render, never
 // vanish"): on git absent / timeout / output cap / UNPARSEABLE CONFIG, H1
 // prints one bounded 'UNDECLARED SOURCE CHECK UNAVAILABLE: <reason>' line
 // and exits 0. Malformed config is UNAVAILABLE, NEVER "zero toolchains" —
@@ -264,7 +264,7 @@ test('(d2) MEASURED RED: a toolchain entry whose path_globs is not an array of s
 
 // =========================================================================
 // (h) NON-OBJECT root config — a bare array is valid JSON, not null, and not
-// an object. Final-pass review (cited alongside decision b128f79c) + gap
+// an object. Final-pass review (cited alongside decision foreign_b128f79c) + gap
 // analysis of the shipped ladder: it checks `config === null` and per-entry
 // shapes, but never the root value's own type, so a root `[]` currently
 // falls through instead of being refused. Same discrimination discipline as
@@ -332,7 +332,7 @@ test('(f) undeclared_source_exclude_globs present but the wrong type (a string, 
 
 // =========================================================================
 // (i) an exclude-globs ELEMENT that is not a string (e.g. a bare array
-// containing a number). Final-pass review (decision b128f79c) + gap
+// containing a number). Final-pass review (decision foreign_b128f79c) + gap
 // analysis: today this throws INSIDE glob matching and lands on UNAVAILABLE
 // by accident, with whatever generic reason the catch-all produces — the
 // marker is real (GREEN today) but the specific reason text is not a

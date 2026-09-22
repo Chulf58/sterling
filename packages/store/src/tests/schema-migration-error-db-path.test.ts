@@ -29,16 +29,19 @@
 // SEAM NOTE (disclosed, not verified by execution — this role has no Bash):
 // "the transaction backstop" is assumed to be the check that guards the
 // RETRY-LOOP CAS writers (updateRunOptimistic-backed methods and
-// casTransitionMerge), by direct analogy with how this suite already splits
-// the LIVE schema-version-drift guard into pin group B (simple autocommit
-// writers: create/remove/writeHandoff/writeSelection/recordCheckSkipped,
-// schema-version-live-write-guard.test.ts) versus pin group C (retry-loop
-// writers inside tx(), retry-loop-live-schema-guard.test.ts). E2 below
-// exercises casTransitionMerge for this reason. If assertV2Surface turns
-// out to route every writer through one single call site, E2 is still a
-// correct, non-hollow pin (casTransitionMerge on a legacy store must still
-// refuse with db_path) — it would simply not be distinguishing two call
-// sites the way it is designed to.
+// casTransitionMerge — both since removed per decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1), by direct analogy with
+// how this suite already split the LIVE schema-version-drift guard into pin
+// group B (simple autocommit writers: create/remove/writeSelection/
+// recordCheckSkipped — writeHandoff was a fourth until the same removal —
+// schema-version-live-write-guard.test.ts) versus pin group C (the
+// retry-loop writers' own test file, retry-loop-live-schema-guard.test.ts,
+// also removed with them — no retry-loop CAS writer survives in the store).
+// E2 (below, historically) exercised casTransitionMerge for this reason —
+// REMOVED per the same decision:
+// casTransitionMerge no longer exists and no other retry-loop CAS writer
+// survives in the store to carry this transaction-backstop coverage forward
+// (see the removal note further down, where E2 used to sit).
 //
 // Existing found/supported behavior (pin group A) is NOT rewritten here —
 // E3 is a NEW, additive regression-control pin proving the db_path addition
@@ -101,20 +104,6 @@ function decisionRecord(id: string) {
   };
 }
 
-function runRecord(over: Record<string, unknown> = {}) {
-  return {
-    id: 'r-e2',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-e2',
-    machine_state: 'running',
-    phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-    ...over,
-  };
-}
-
 test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequiredError whose db_path equals the fixture\'s absolute path, and whose message names both the path and the migrate-stores remediation command', () => {
   const { dir, path } = tempDbPath();
   try {
@@ -153,45 +142,11 @@ test('E1: a write against a legacy (pre-v2) store throws SchemaMigrationRequired
   }
 });
 
-test('E2 (transaction backstop): a retry-loop CAS writer (casTransitionMerge) against a legacy (pre-v2) store throws SchemaMigrationRequiredError carrying the same db_path and remediation message as the simple-writer path, and commits nothing', () => {
-  const { dir, path } = tempDbPath();
-  try {
-    const seed = new SterlingStore(path);
-    const run = seed.createRun(runRecord());
-    seed.close();
-    rawSetUserVersion(path, 1); // simulate a pre-v2 legacy store AFTER the run was seeded on a real v2 file
-    assert.equal(rawUserVersion(path), 1, 'precondition: the file now looks like a pre-v2 (legacy) store');
-
-    const store = new SterlingStore(path);
-    let caught: unknown;
-    try {
-      store.casTransitionMerge('running', run.id, (fresh) => ({ ...fresh, machine_state: 'completing' }));
-      assert.fail('casTransitionMerge against a pre-v2 store must throw');
-    } catch (err) {
-      caught = err;
-    }
-
-    assert.ok(caught instanceof Error, 'the refusal is a real Error');
-    assert.match((caught as Error).message, /migrat/i, 'the retry-loop writer refuses naming the migration too — not special-cased away from the guard');
-    assert.equal(
-      (caught as unknown as { db_path?: string }).db_path,
-      path,
-      'the transaction-backstop throw carries the same db_path as the assertWritable (E1) path'
-    );
-    assert.ok((caught as Error).message.includes(path), 'the backstop message also includes the offending absolute path');
-    assert.ok(
-      (caught as Error).message.includes(`scripts/migrate-stores.mjs --db '${path}'`),
-      'the backstop message also includes the remediation command, path POSIX SINGLE-quoted, matching E1'
-    );
-
-    const stillRunning = store.getRun(run.id);
-    assert.equal(stillRunning?.machine_state, 'running', 'the refused transition left the run body unchanged — no partial write, matching pin group C\'s no-partial-write contract');
-
-    store.close();
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-});
+// E2 (transaction-backstop coverage of the retry-loop CAS writer
+// casTransitionMerge) was removed with the staged-pipeline run/handoff
+// protocol (decision sterling-claude-code-scale-down-boundary, 2ad87dd1) —
+// casTransitionMerge no longer exists and no other retry-loop CAS writer
+// survives in the store to carry this backstop coverage forward.
 
 test('E3 (regression control): found/supported are unchanged by the db_path addition — both properties still present, alongside (not replaced by) db_path', () => {
   const supportedProbe = tempDbPath('sterling-migration-db-path-probe-');

@@ -170,6 +170,24 @@ const baselineAttestationsSchema = z
   )
   .optional();
 
+/**
+ * ABSENCE ATTESTATION PROVENANCE — deliberately separate from the byte
+ * attestation map. A tree miss proves no bytes, blob, or content hash; this
+ * shape therefore cannot be mistaken for an attestation of file content.
+ */
+const absenceAttestationsSchema = z
+  .record(
+    z.string(),
+    z
+      .object({
+        attested_at: z.string().min(1),
+        item_id: z.string().min(1),
+        head_commit: z.string().min(1),
+      })
+      .strict()
+  )
+  .optional();
+
 // §3.2.3 — versioned body + append-only history.
 export const featureArticleSchema = base
   .extend({
@@ -191,12 +209,13 @@ export const featureArticleSchema = base
     // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
     // drift check confirms a content change against this before flagging, so a
     // git merge/checkout that only resets mtimes no longer raises false
-    // reconcile_needed items (decision 65222971 → its baseline successor).
+    // reconcile_needed items (decision foreign_65222971 → its baseline successor).
     file_baselines: z.record(z.string(), z.string()).optional(),
     // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
     // above, which reference_material shares so the shape is defined once.
     baseline_attestations: baselineAttestationsSchema,
-    // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+    absence_attestations: absenceAttestationsSchema,
+    // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
     // axis, subsuming concept_family's role there — concept_family itself is
     // untouched, kept for compatibility (see below).
     article_kind: z.enum(['feature', 'probe', 'tool', 'concept']).default('feature'),
@@ -206,7 +225,7 @@ export const featureArticleSchema = base
     // superRefine below, since "which kind" is a whole-record fact a single
     // field's shape cannot express alone.
     current_ac: z.union([z.array(currentAcItemSchema), notApplicableExemptionSchema]) as unknown as z.ZodType<CurrentAcArray>,
-    // Concept-article marker (domain decision 7208729b, concept-article-layer
+    // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
     // standard): set ONLY on concept articles — one per recurring domain concept
     // FAMILY (items, weapons, …). Enables class/family enumeration without
     // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -220,7 +239,7 @@ export const featureArticleSchema = base
     // ownership) resolve per record or abstain LOUD on an unmapped name.
     working_tree: z.string().min(1).optional(),
     // relies_on/relied_by name other articles by SLUG — slugs survive version
-    // supersession, record ids do not (decision 474b1c71).
+    // supersession, record ids do not (decision foreign_474b1c71).
     dependencies: z.object({ relies_on: z.array(z.string()), relied_by: z.array(z.string()) }),
     steps_runbook: z.string().optional(),
     state: z.enum(['planned', 'built', 'wired_in', 'active', 'dormant', 'deprecated']),
@@ -249,7 +268,7 @@ export const featureArticleSchema = base
     if (rec.state === 'dormant' && (!rec.state_reason || !rec.wiring_todo_id)) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, message: "state 'dormant' requires state_reason and wiring_todo_id (§3.2.3)" });
     }
-    // Board a9280db7 (decision c48380bf): the not_applicable exemption on
+    // Board a9280db7 (decision foreign_c48380bf): the not_applicable exemption on
     // live_test_refs/current_ac is gated by article_kind — accepted ONLY on
     // probe|tool, and on probe|tool an empty array is rejected outright (both
     // are honest-ceremony rules a single field's shape cannot express alone).
@@ -317,7 +336,7 @@ export const researchFindingSchema = base
     source_date: isoDate,
     capture_date: isoDate,
     volatility_hint: z.enum(['fast', 'medium', 'stable']).optional(),
-    // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+    // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
     // seam, a library's behavior in one adapter) join the file-key economy the
     // same way decision/anti_pattern/todo do; many findings are fileless
     // (platform behavior, pricing) so this stays optional, never required.
@@ -331,7 +350,7 @@ export const researchFindingSchema = base
 
 // §3.2.5 models catalog: typed shape for KB-maintained model lists (run r-ea9e, AC7).
 // Free strings at schema level (tier/status enums and id-regex are phase-2/4 territory
-// per decision 98064d77 — do NOT add enum/regex constraints here).
+// per decision foreign_98064d77 — do NOT add enum/regex constraints here).
 export const modelsCatalogSchema = z.object({
   entries: z.array(
     z.object({
@@ -368,6 +387,7 @@ export const referenceMaterialSchema = base
     // naked baseline whose provenance lied about which write produced it. Shape
     // shared with featureArticleSchema, never re-declared.
     baseline_attestations: baselineAttestationsSchema,
+    absence_attestations: absenceAttestationsSchema,
     // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
     // unchanged (field_baselines optional-field precedent); a catalog-bearing record
     // carries a validated modelsCatalogSchema payload.
@@ -405,7 +425,7 @@ export const disconfirmedHypothesisSchema = base
   .superRefine(refineSupersession);
 
 // open_question — an EVIDENCED question with live hypotheses and NO answer
-// (decision open-question-record-type-authorized, 0857d3bb; board 4ffb95be, from
+// (decision open-question-record-type-authorized, foreign_0857d3bb; board 4ffb95be, from
 // the 2026-08-29 dome-farmer docs). research_finding's contract is question +
 // ANSWER, so a lane holding "three measurements, a derived geometry, two live
 // hypotheses, and no answer" had nowhere durable to put the most perishable
@@ -519,7 +539,7 @@ export const SYSTEM_REASONS = [
   'refresh_reference', // §3.2.5: repo-located doc changed out-of-band; refresh summary + source_date
   'article_missing', // §6 H10: direct-mode work in unowned territory ended without its owning article
   'research_owed', // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
-  'concept_article_missing', // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  'concept_article_missing', // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -611,7 +631,7 @@ export const todoSchema = base
     feature_link: z.string().uuid().optional(),
     priority: z.enum(['low', 'normal', 'high']).optional(),
     system_reason: z.enum(SYSTEM_REASONS).optional(),
-    // Board grouping key (decision a8d2ce6c): slices of one larger objective
+    // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
     // share this label and the TUI groups them under it. A grouping FIELD, not
     // a parent record — absent means standalone. The 'standalone' sentinel is
     // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -706,21 +726,20 @@ export const briefSchema = base
 // schemas.test.ts; coder_hard/classifiers are config-only keys (no installed
 // agent) and are NOT map keys.
 // ---------------------------------------------------------------------------
+// Slice 5/8 roster (decision sterling-claude-code-scale-down-boundary,
+// 2ad87dd1 change 3; "Roster shape and review pairing"): explorer -> scout,
+// coder -> implementor. config.models was renamed to match directly (coder ->
+// implementor, explorer -> scout — see packages/schemas/src/config.ts), so
+// this map is now a straight identity for every registered agent rather than
+// an indirection layer.
 export const AGENT_MODEL_KEY = {
-  'test-writer': 'test_writer',
-  coder: 'coder',
-  'reviewer-correctness': 'reviewers',
-  'reviewer-security': 'reviewers',
-  'reviewer-skeptic': 'reviewers',
-  'reviewer-performance': 'reviewers',
-  'implementation-architect': 'implementation_architect',
+  implementor: 'implementor',
   researcher: 'researcher',
-  explorer: 'explorer',
+  scout: 'scout',
   librarian: 'librarian',
-  debugger: 'debugger',
 } as Record<string, string>;
 
-// REVIEWER_ROLES (decision 628c4b7f, run r-d630, phase 1 — AC1): derived from
+// REVIEWER_ROLES (decision foreign_628c4b7f, run r-d630, phase 1 — AC1): derived from
 // AGENT_MODEL_KEY — exactly the keys that map to 'reviewers'. Single source of
 // truth; a hardcoded list was explicitly rejected (second source of truth would
 // drift from the roster). Totality-tested in schemas.test.ts vs registry.json.
@@ -728,40 +747,11 @@ export const REVIEWER_ROLES: Set<string> = new Set(
   Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === 'reviewers')
 );
 
-// ---------------------------------------------------------------------------
-// AGENT_CLASS — the roster holds TWO agent classes and the distinction is
-// LOAD-BEARING, not documentation (council wf_0d90ab18-436, black/green):
-//   'pipeline'         — dispatched inside a run; carries handoff_write/agent_exit;
-//                        slice-guarded and cap-counted by H8.
-//   'conductor_direct' — dispatched outside a run by the conductor; holds NO
-//                        agent_exit/handoff_write (both are run-scoped and refused
-//                        with `no active run`), so it reports its signal as the
-//                        first line of its final text.
-// Mirrors the `class` field in agent-templates/registry.json; totality-tested
-// against it in schemas.test.ts exactly as AGENT_MODEL_KEY is. Deriving H8's
-// guarded set from AGENT_MODEL_KEY's KEYS was the defect this replaces: adding a
-// conductor-direct agent silently enrolled it in pipeline slice-guarding and
-// cap-counting, so a mid-run dispatch was denied for lacking a knowledge slice it
-// was never meant to carry.
-// ---------------------------------------------------------------------------
-export const AGENT_CLASS = {
-  'test-writer': 'pipeline',
-  coder: 'pipeline',
-  'reviewer-correctness': 'pipeline',
-  'reviewer-security': 'pipeline',
-  'reviewer-skeptic': 'pipeline',
-  'reviewer-performance': 'pipeline',
-  'implementation-architect': 'pipeline',
-  researcher: 'pipeline',
-  explorer: 'pipeline',
-  librarian: 'conductor_direct',
-  debugger: 'conductor_direct',
-} as Record<string, string>;
-
-// The set H8 slice-guards and cap-counts: pipeline agents ONLY.
-export const PIPELINE_AGENT_TYPES: Set<string> = new Set(
-  Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === 'pipeline')
-);
+// AGENT_CLASS / PIPELINE_AGENT_TYPES deleted (scale-down decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1): the pipeline/
+// conductor_direct class distinction they encoded, and H8 (their sole
+// consumer), are both gone — direct mode is the only mode now, so no agent
+// needs a class marking.
 
 // ---------------------------------------------------------------------------
 // Record-type registry (invariant 3, spec §15): the single source of truth for
@@ -784,7 +774,7 @@ export interface RecordTypeEntry {
    * Unlike knownFieldsFor this CANNOT be derived from the schema: WHICH field is
    * the headline is an editorial judgement (anti_pattern leads with `trigger`,
    * research_finding with its two clocks), and no shape encodes that. So it is a
-   * hand-maintained list of field names — the exact thing decision 44e45931
+   * hand-maintained list of field names — the exact thing decision foreign_44e45931
    * warns about — and it is DECLARATIVE rather than a closure for that reason:
    * a map of names can be checked against knownFieldsFor(type), so renaming a
    * schema field fails the registry test loudly instead of silently emptying
@@ -900,7 +890,7 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
     // article (class enumeration stays a consumer-side filter on the field).
     fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join('\n'),
     fileKeys: (r) => ((r.files as { path: string }[] | undefined) ?? []).map((f) => f.path),
-    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
     // and the id in the envelope beside it is not. version + state say whether
     // this is a moving target and whether it is wired yet.
     digest: { slug: 'plain', title: 'plain', state: 'plain', version: 'plain', concept_family: 'plain' },
@@ -939,7 +929,7 @@ export const RECORD_TYPES: Record<string, RecordTypeEntry> = {
  * The shared digest envelope + the type's headline fields (§3.4 read side).
  *
  * `id` stays a FULL uuid deliberately: an 8-char prefix resolves through
- * knowledge_get since decision 27f148c2, but handing back a truncated id is how
+ * knowledge_get since decision foreign_27f148c2, but handing back a truncated id is how
  * a caller ends up pasting one into a tool that wants the whole thing. The
  * point of the digest is to make the NEXT call cheap, so the handle it returns
  * has to be the one that works everywhere.
@@ -1013,7 +1003,7 @@ export const HEADLINE_CLIP = 80;
  * below, the TUI board/queue card titles, and any other human-facing listing.
  *
  * NAME_CLIP = 48, ellipsis INCLUDED. Derivation rather than a number from the
- * air: the mint already clamps a slug at 60 characters (decision de1a7329);
+ * air: the mint already clamps a slug at 60 characters (decision foreign_de1a7329);
  * the ` (id8)` half costs exactly 11 — one space, two parentheses, eight hex —
  * so 60 − 11 = 49, rounded DOWN to 48 so the constant survives the id form
  * gaining a character. The composed handle then lands at 59, inside the same
@@ -1037,11 +1027,58 @@ export const clipName = (name: string): string =>
  *  absent one (an id printed twice is not a name — df361a0f). */
 export const displayHandle = (name: string, id: string): string => `${clipName(name)} (${id.slice(0, 8)})`;
 
+/**
+ * A board item's DISPLAY LABEL — the first non-blank line of its CURRENT
+ * `text`, never its (immutable) `slug` (board 081508d0: `updateTodo` never
+ * re-mints a slug after text changes, so a slug-derived name goes stale the
+ * moment an item is renamed or renumbered — "Slice 7" showed as
+ * "slice-6-..." because the slug predated the renumbering). Defined ONCE
+ * here (invariant 1) so every display site — this headline projection,
+ * board_get's `label`, the TUI card titles, lane-collision names — reads one
+ * function and cannot disagree about what a reader is shown.
+ *
+ * FIRST NON-BLANK LINE, WHITESPACE NORMALIZED, PARENTHETICALS KEPT.
+ * Deliberately NOT `todoHeadline` (tools.ts): that extractor MINTS a slug
+ * base and drops a parenthetical aside so it never eats the 60-char kebab
+ * budget. A display label has no such budget to protect, and dropping the
+ * aside would throw away meaningful text the reader is actually shown.
+ *
+ * FALLS BACK TO `slug` only when `text` yields nothing at all (blank or
+ * whitespace-only) — never the reverse. Returns '' when both are empty; a
+ * caller decides its own placeholder (e.g. boardItemName's
+ * '(unnamed board item)') rather than this shared helper inventing one.
+ */
+export function boardDisplayLabel(text: unknown, slug?: unknown): string {
+  const line = s(text)
+    .split('\n')
+    .find((l) => l.trim().length > 0);
+  const normalized = line ? line.trim().replace(/\s+/g, ' ') : '';
+  return normalized || s(slug).trim();
+}
+
 export function headlineRecord(record: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = { id: record.id, priority: record.priority };
   // The human half of the line, beside — never instead of — the full id above.
-  // Omitted entirely for a legacy slugless item: absent name over wrong name.
-  const name = s(record.slug);
+  //
+  // TODO RECORDS (board_query/maintenance_query, the only callers —
+  // headlineRecord is todo-only by construction): the label is derived from
+  // the item's CURRENT text UNCONDITIONALLY (board 081508d0, review round 2,
+  // HIGH finding). A maintenance-queue item NEVER mints a slug at all (S1
+  // design call, mintHeadlineOf) — gating composition on slug presence left
+  // every ordinary maintenance_query headline row permanently nameless, which
+  // is worse than the original defect: not stale, simply ABSENT. `id8` is a
+  // uuid-prefix address, safe to show regardless of whether a slug was ever
+  // minted, so "no slug" is no longer a reason to omit the name. Composition
+  // is gated on the LABEL alone (non-empty) — falling back to the stored slug
+  // only when text itself yields nothing (boardDisplayLabel's own contract),
+  // and omitted only when NEITHER yields anything: absent name over wrong
+  // name (df361a0f) still holds for that one genuinely-nameless case.
+  //
+  // EVERY OTHER REGISTERED TYPE keeps its PRE-FIX behaviour byte for byte:
+  // name is the stored slug, full stop — headlineRecord has no other actual
+  // caller today, but its signature is general and this keeps it honest.
+  const slug = s(record.slug);
+  const name = record.type === 'todo' ? boardDisplayLabel(record.text, slug) : slug;
   if (name) out.name = displayHandle(name, s(record.id));
   if (record.objective !== undefined && record.objective !== null && record.objective !== '') out.objective = record.objective;
   if (record.system_reason !== undefined && record.system_reason !== null && record.system_reason !== '') out.system_reason = record.system_reason;
@@ -1211,7 +1248,7 @@ function describeZodDetailed(node: unknown, depth = 0): { type: string; enum_val
       if (literals.length === opts.length && opts.length) {
         return { type: opts.map((o) => o.type.replace('literal ', '')).join(' | ') };
       }
-      // Board a9280db7 (decision c48380bf): current_ac/live_test_refs are now
+      // Board a9280db7 (decision foreign_c48380bf): current_ac/live_test_refs are now
       // a union of their real array shape with the structured not_applicable
       // exemption — surface the ARRAY branch's element_fields here too (one
       // level down, matching every other array-of-objects field), rather than
@@ -1599,7 +1636,7 @@ export function schemaFor(type: string): { type: string; fields: FieldShape[] } 
  * from `location`) was accepted, silently dropped, and the write returned
  * SUCCESS — caught only by later querying for the thing the write was supposed
  * to have done. Reported to a sibling project 2026-07-29, and the same defect
- * class as the tool-parameter strip closed by decision b47889b7: a write surface
+ * class as the tool-parameter strip closed by decision foreign_b47889b7: a write surface
  * must not claim to have stored what it discarded.
  *
  * Returns [] for an unregistered type — that is validateRecord's louder error to

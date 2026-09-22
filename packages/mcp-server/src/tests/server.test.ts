@@ -37,7 +37,7 @@ const SERVED_TOOLS = [
   // expected_version is REQUIRED here, unlike knowledge_update — a destroy
   // states what it read (board 39673f6a).
   'knowledge_array_remove',
-  // Mechanized article split enforcing the 8b87efcb invariants in one
+  // Mechanized article split enforcing the foreign_8b87efcb invariants in one
   // transaction (board 136091d2, decision compaction-tooling-windowed-read-plus-split).
   'knowledge_split',
   'knowledge_extract',
@@ -72,27 +72,19 @@ const SERVED_TOOLS = [
   'no_capture',
   'concept_designed',
   'capture_pending',
-  'run_state',
-  'run_escalate',
-  'agent_exit',
-  'run_signal',
-  // enforcement-taint front door: clears the taint latch (or, with the
-  // default adopt:false, reports why there is nothing to discharge). A FRONT
-  // DOOR, not an authority boundary — the MCP server has no authenticated
-  // caller identity (see enforcement-reconcile-tool.test.ts).
-  'enforcement_reconcile',
-  // maintenance_enqueue deliberately unregistered — decision 6269b714:
+  // maintenance_enqueue deliberately unregistered — decision foreign_6269b714:
   // system mints are server-internal (enqueueSystemTodo choke point).
   'maintenance_query',
   // board_remove scoped to the queue, so the librarian can close what it drains
   // (board afeae7d9).
   'maintenance_remove',
-  'handoff_write',
-  'handoff_read',
-  // The one sanctioned in-session config write: a positive allowlist of key
-  // paths, whole-document schema validation, CAS on the file digest — the raw
-  // Edit/Write denial on every .sterling file STAYS for both channels
-  // (decision config-writes-get-a-config-set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays).
+  // The one sanctioned in-session config write: any dotted key path is
+  // accepted (the positive allowlist was REMOVED — decision
+  // scale-down-enforcement-rules-and-locks-are-friction, knowledge_get
+  // 38c9e860), still gated by whole-document schema validation and CAS on
+  // the file digest — the raw Edit/Write denial on every .sterling file
+  // STAYS for both channels (decision config-writes-get-a-config-set-mcp-
+  // tool-with-positive-key-allowlist-raw-edit-denial-stays).
   'config_set',
 ];
 
@@ -116,7 +108,7 @@ function payload(result: unknown): unknown {
   return JSON.parse(content[0].text);
 }
 
-test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom store is created (P5, research_finding e518f9e5)', () => {
+test('main.ts refuses an unexpanded ${...} --store path loudly — no phantom store is created (P5, research_finding foreign_e518f9e5)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-phantom-'));
   try {
     const mainJs = join(dirname(fileURLToPath(import.meta.url)), '..', 'main.js');
@@ -224,7 +216,7 @@ test('main.ts (board b8639752): a RELATIVE --store argument resolves to an ABSOL
 // non-empty-export and clean-exit assertions stay green, proving the probe
 // itself still runs correctly under the sabotage).
 
-test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision 8dbbc85d, board b1de6fab)', async () => {
+test('MCP: research_finding gains file_keys — create normalizes it, query joins by path, other types stay refused (decision foreign_8dbbc85d, board b1de6fab)', async () => {
   const { client, cleanup } = await harness();
   try {
     // (2) knowledge_create accepts a research_finding WITH file_keys and
@@ -294,7 +286,7 @@ test('MCP: research_finding gains file_keys — create normalizes it, query join
     );
 
     // (5) a type that does NOT define file_keys still refuses it, naming the
-    // valid set — decision b47889b7 unchanged; reference_material is the control.
+    // valid set — decision foreign_b47889b7 unchanged; reference_material is the control.
     const refused = await client.callTool({
       name: 'knowledge_create',
       arguments: {
@@ -388,7 +380,7 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     assert.equal(bogusBoard.isError, true, 'strictness is a property of the whole tool surface');
     assert.match((bogusBoard.content as { text: string }[])[0].text, /limit/);
 
-    // WRITE-SIDE projection:"digest" over the wire (decision e23f38f8). This
+    // WRITE-SIDE projection:"digest" over the wire (decision foreign_e23f38f8). This
     // pins the server closures' {projection, ...rest} destructuring — the unit
     // tests exercise writeProjected directly, so only a wire call can prove
     // projection never leaks into field validation (board_add would refuse an
@@ -412,126 +404,15 @@ test('MCP integration: the spine tool surface is served and callable end-to-end'
     ) as { priority: string; text: string };
     assert.equal(bumped.priority, 'high', 'projection is split from the patch — a leak would be refused BY NAME');
     assert.match(bumped.text, /…$/, 'a projection-less write defaults to the clipped receipt');
-
-    // protocol loop over the wire
-    store.createRun({
-      id: 'r-0001',
-      brief_ref: randomUUID(),
-      branch: 'sterling/run-r-0001',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: '2026-06-10T12:00:00.000Z',
-    });
-
-    const badExit = await client.callTool({
-      name: 'agent_exit',
-      arguments: { phase_id: 'p1', agent_role: 'coder', signal: 'victory' },
-    });
-    assert.equal(badExit.isError, true, 'invalid signal rejected in-band so the agent can self-correct');
-    assert.match((badExit.content as { text: string }[])[0].text, /enum is closed/);
-
-    await client.callTool({
-      name: 'handoff_write',
-      arguments: {
-        handoff: {
-          phase_id: 'p1',
-          agent_role: 'coder',
-          what_changed: [{ path: 'src/x.ts', change_role: 'implemented' }],
-          wired: [],
-          deferred: [],
-          decisions_made: [],
-          tests_produced: [],
-          exit_signal: 'complete',
-          unresolved: [],
-        },
-      },
-    });
-    await client.callTool({
-      name: 'agent_exit',
-      arguments: { phase_id: 'p1', agent_role: 'coder', signal: 'complete', payload: { handoff_ref: 'p1/coder' } },
-    });
-    const signal = payload(await client.callTool({ name: 'run_signal', arguments: {} })) as {
-      action: { action: string };
-      machine_state: string;
-    };
-    assert.equal(signal.action.action, 'complete_run', 'single-phase run goes straight to the completion sequence');
-    assert.equal(signal.machine_state, 'completing');
-
-    const state = payload(await client.callTool({ name: 'run_state', arguments: {} })) as { machine_state: string };
-    assert.equal(state.machine_state, 'completing');
-
-    const handoffs = payload(
-      await client.callTool({ name: 'handoff_read', arguments: { files: ['src\\x.ts'] } })
-    ) as unknown[];
-    assert.equal(handoffs.length, 1, 'handoff file-key read joins across the path boundary');
   } finally {
     await cleanup();
   }
 });
 
-test('AC2 over the wire: a reviewer handoff without exact review_mandatory coverage is refused in-band (missing id named) with nothing written; exact coverage lands; non-reviewers untouched', async () => {
-  const { client, store, cleanup } = await harness();
-  try {
-    store.createRun({
-      id: 'r-0001',
-      brief_ref: randomUUID(),
-      branch: 'sterling/run-r-0001',
-      machine_state: 'running',
-      phases: [{ id: 'p1', status: 'in_progress', signals: [], commits: [] }],
-      dispatch_counts: {},
-      escalations: [],
-      started_at: '2026-06-10T12:00:00.000Z',
-    });
-    const m1 = randomUUID();
-    store.setRunReviewMandatory('r-0001', 'p1', [{ record_id: m1, reason: 'blocking anti-pattern' }]);
-
-    const base = {
-      phase_id: 'p1',
-      what_changed: [],
-      wired: [],
-      deferred: [],
-      decisions_made: [],
-      tests_produced: [],
-      exit_signal: 'complete',
-      unresolved: [],
-    };
-
-    // reviewer with NO dispositions against a non-empty mandatory set → refused in-band
-    const refused = await client.callTool({
-      name: 'handoff_write',
-      arguments: { handoff: { ...base, agent_role: 'reviewer-correctness' } },
-    });
-    assert.equal(refused.isError, true, 'uncovered reviewer handoff refused in-band so the agent can self-correct');
-    assert.match((refused.content as { text: string }[])[0].text, new RegExp(m1), 'the missing mandatory id is named in the refusal');
-
-    let read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
-    assert.equal(read.length, 0, 'the refused reviewer handoff wrote nothing over the wire');
-
-    // reviewer with exact coverage → lands
-    const ok = await client.callTool({
-      name: 'handoff_write',
-      arguments: {
-        handoff: { ...base, agent_role: 'reviewer-correctness', dispositions: [{ record_id: m1, disposition: 'addressed' }] },
-      },
-    });
-    assert.notEqual(ok.isError, true, 'exact-coverage reviewer handoff lands over the wire');
-    read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
-    assert.equal(read.length, 1, 'exact-coverage reviewer handoff persisted');
-
-    // non-reviewer against the same non-empty mandatory set, no dispositions → untouched, lands
-    const coder = await client.callTool({
-      name: 'handoff_write',
-      arguments: { handoff: { ...base, agent_role: 'coder' } },
-    });
-    assert.notEqual(coder.isError, true, 'non-reviewer handoff is unaffected by review_mandatory');
-    read = payload(await client.callTool({ name: 'handoff_read', arguments: { phase_id: 'p1' } })) as unknown[];
-    assert.equal(read.length, 2, 'the non-reviewer handoff landed alongside the reviewer one');
-  } finally {
-    await cleanup();
-  }
-});
+// The AC2-over-the-wire reviewer-handoff-coverage test that lived here was
+// removed with the staged-pipeline run/handoff protocol (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) — handoff_write,
+// agent_exit and setRunReviewMandatory no longer exist.
 
 test('§3.2.5 repo-located docs: only a real content change (not an mtime-only bump) → verify_before_use + exactly one refresh_reference item; url-kind inert', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ref-'));
@@ -783,16 +664,16 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     assert.equal(arts.find((r) => r.id === b.id)?.verify_before_use, true, 'deleted owned file flags the article');
     assert.match((reconciled('feat-b')[0] as { text: string }).text, /no longer exists/);
 
-    // DEDUP IS PER (reason, feature_link, FILE) — this assertion REVERSED on
-    // 2026-08-04 (board 2ded3b4b, decision 30d18443's sibling), deliberately.
-    // It used to assert that an open item on src/other.mjs SUPPRESSED a new item
-    // for src/c.mjs, on the reasoning that one article should present "one drain
-    // surface". That conflated one SURFACE (the queue) with one ITEM, and the
-    // conflation lost data: because knowledge_update re-baselines EVERY owned
-    // file, reconciling the seeded file absorbed c.mjs's drift into a fresh
-    // baseline, so the second finding neither queued nor survived. Two DIFFERENT
-    // files are two real obligations and get two items; the same file twice is
-    // the duplicate, and that still collapses (asserted below).
+    // DEDUP IS PER (reason, feature_link) FOR reconcile_needed, file_keys
+    // UNIONED IN — board b0bb9d96 / I-29 ("the mint storm"), superseding the
+    // 2026-08-04 per-file reading this assertion used to pin (board 2ded3b4b,
+    // decision foreign_30d18443's sibling). That reading fixed a real silent-loss bug
+    // (a second drifting file was suppressed entirely), but its FIX — one item
+    // PER file — let a read-time singleton and a settlement grouped item for
+    // the SAME article coexist as duplicates, because the choke point's old key
+    // included the exact file_keys set. The data-loss concern still holds — see
+    // the union assertion below, which proves BOTH files survive — but they now
+    // survive as one item's file_keys, not two competing items.
     const cPath = join(dir, 'src', 'c.mjs');
     writeFileSync(cPath, 'v1');
     utimesSync(cPath, old, old);
@@ -803,11 +684,15 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     tools.knowledgeQuery({ types: ['feature_article'] });
     const cReason = (t: unknown) => (t as { feature_link?: string }).feature_link === c.id;
     let cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter(cReason);
-    assert.equal(cItems.length, 2, 'a DIFFERENT owned file is a distinct obligation, not a duplicate');
+    assert.equal(
+      cItems.length,
+      1,
+      'a DIFFERENT owned file on the SAME article WIDENS the existing item — SABOTAGE: reverting the fold-to-union makes this go RED (2 items)'
+    );
     assert.deepEqual(
-      cItems.map((t) => (t as { file_keys?: string[] }).file_keys?.[0]).sort(),
+      [...((cItems[0] as { file_keys?: string[] }).file_keys ?? [])].sort(),
       ['src/c.mjs', 'src/other.mjs'],
-      'and each item names the file it is about'
+      'no data lost: the union names both files, not just the one the read-time mint just found'
     );
 
     // The duplicate half: re-reading re-enqueues the SAME (reason, link, file)
@@ -817,7 +702,7 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     tools.knowledgeQuery({ types: ['feature_article'] });
     tools.knowledgeQuery({ types: ['feature_article'] });
     cItems = tools.maintenanceQuery({ system_reason: 'reconcile_needed', cap: 1000 }).filter(cReason);
-    assert.equal(cItems.length, 2, 'repeat reads of the same drift add nothing');
+    assert.equal(cItems.length, 1, 'repeat reads of the same drift add nothing');
   } finally {
     store.close();
     rmSync(dir, { recursive: true, force: true });
@@ -1029,8 +914,8 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
     // an article WITHOUT working_tree owning a copy-only path gets the false
     // deletion item (the bug); knowledge_update adding working_tree re-baselines
     // against the right tree. Closing the resulting debt is no longer implicit
-    // (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1 retired the old
-    // knowledge_update auto-drain from decision 8ecd435f) — the SAME fix write
+    // (decision foreign_68988832 retired the old
+    // knowledge_update auto-drain from decision foreign_8ecd435f) — the SAME fix write
     // now names the false-deletion item via an explicit `resolves` claim, which
     // is exactly how an operator would perform this healing in practice: one
     // write that both re-baselines the tree AND discharges the debt it caused.
@@ -1064,14 +949,14 @@ test('working_tree resolution (comsoft-juiced incident): copy files resolve agai
   }
 });
 
-test('knowledge_create is typed per-type (decision 7c7f6db1, probe research_finding 15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
+test('knowledge_create is typed per-type (decision foreign_7c7f6db1, probe research_finding foreign_15c8e6b5): served anyOf, discriminator-hint description, server-owned absence, size guard', async () => {
   const { client, tools, cleanup } = await harness();
   try {
     const tool = (await client.listTools()).tools.find((t) => t.name === 'knowledge_create');
     assert.ok(tool, 'knowledge_create is served');
 
     // (f) the SDK serves z.discriminatedUnion as a bare anyOf (discriminator
-    // keyword lost — research_finding 15c8e6b5), so the description carries the
+    // keyword lost — research_finding foreign_15c8e6b5), so the description carries the
     // hint a model needs to pick the right branch and stay inside it.
     assert.match(
       tool!.description ?? '',
@@ -1139,7 +1024,7 @@ test('knowledge_create is typed per-type (decision 7c7f6db1, probe research_find
     assert.deepEqual(seenTypes.sort(), registeredTypes, 'every registered type gets exactly one variant, no more, no fewer');
 
     // (e) size guard: the served tool definition (description + schema) stays
-    // well under the 25KB ceiling research_finding 15c8e6b5 measured for the
+    // well under the 25KB ceiling research_finding foreign_15c8e6b5 measured for the
     // WRITE_REFUSED_FIELDS-stripped union (~15.3KB / ~3,834 tokens).
     const servedBytes = Buffer.byteLength(JSON.stringify(tool), 'utf8');
     assert.ok(servedBytes < 25_000, `served knowledge_create tool definition is ${servedBytes} bytes, expected < 25000`);

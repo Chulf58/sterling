@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Hardening spec for the DEAD-SLUG DISCLOSURE fallthrough on knowledge_get
-// (dead-slug-disclosure.test.ts / decision de1a7329 / board
+// (dead-slug-disclosure.test.ts / decision foreign_de1a7329 / board
 // 2b9f2f1a-15ac-4195-9651-8837c1c39558 part 3). A review found TWO behaviors
 // the frozen spec file does not pin, both load-bearing on the fallthrough
 // added there ("when a slug's live carrier lookup finds nothing, fall
@@ -168,7 +168,7 @@ test('collision refusal survives the dead-slug fallthrough: two LIVE records sha
 // Carriers must be a SLUG-BEARING type: reference_material defines no slug
 // field, so a forged slug on it is stripped at store.create's schema parse
 // and the carrier never matches json_extract('$.slug') — the original
-// fixture's silent hole. decision carries slug (de1a7329).
+// fixture's silent hole. decision carries slug (foreign_de1a7329).
 test('cross-store newest carrier: a dead slug carried by tombstones in TWO mounted stores resolves to the NEWER one, regardless of project-first store ordering', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-dead-slug-hardening-crossstore-'));
   const domainDb = join(dir, 'domains', 'genesys', 'sterling.db');

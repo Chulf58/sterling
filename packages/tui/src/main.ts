@@ -78,7 +78,7 @@ const showBanner = process.env.STERLING_NO_BANNER !== '1';
 let ui: UiState = initialUi;
 
 // System tab (run r-f9a7): the agent roster snapshot, read ON TAB ACTIVATION
-// only (never the 1 Hz redraw loop, per decision 98064d77 — perf). Undefined
+// only (never the 1 Hz redraw loop, per decision foreign_98064d77 — perf). Undefined
 // until the tab is first activated; recomputed after a swap so drift markers and
 // the new values reflect the write.
 let roster: AgentRosterSnapshot | undefined;
@@ -123,7 +123,7 @@ function probeCodexWired(): boolean {
 
 /** Build the AgentRosterSnapshot at tab activation: installed frontmatter +
  *  config.models + a bootstrapped catalog with its precomputed status. Enqueues
- *  a deduped refresh when the catalog is stale (decision 98064d77). */
+ *  a deduped refresh when the catalog is stale (decision foreign_98064d77). */
 function loadRoster(): AgentRosterSnapshot {
   const nowISO = new Date().toISOString();
   let config: unknown;
@@ -223,7 +223,7 @@ async function applySwap(e: ModelSwapEffect): Promise<void> {
       );
     }
 
-    // 3. durable swap decision (AC5) — reuse the decision type (decision 98064d77)
+    // 3. durable swap decision (AC5) — reuse the decision type (decision foreign_98064d77)
     store.create({
       id: randomUUID(),
       type: 'decision',
@@ -238,7 +238,7 @@ async function applySwap(e: ModelSwapEffect): Promise<void> {
       title: e.decisionTitle,
       statement: `config.models['${e.key}'] set to ${e.to.model} / ${e.to.effort} (was ${e.from.model} / ${e.from.effort}); ${e.agents.length} installed agent file(s) re-stamped via the System tab.`,
       rationale:
-        'Model/effort pin changed from the TUI System tab (decision 98064d77 — config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL↔Windows machine boundary, d53dc92c).',
+        'Model/effort pin changed from the TUI System tab (config.models is authoritative; a swap re-stamps the installed frontmatter surgically without crossing the WSL↔Windows machine boundary, d53dc92c).',
       alternatives_rejected: [],
     });
   } catch (err) {
@@ -301,9 +301,14 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   if (toggleFailure !== undefined) {
     notice(toggleFailure);
   } else if (toggleWrote) {
-    notice(
-      'this changed the enforcement (B) surface; run enforcement_reconcile {adopt:true} from the MCP surface before the next agent Bash call (H17 latch).'
-    );
+    // Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's
+    // config-write taint latch and enforcement_reconcile were both removed
+    // per decision sterling-claude-code-scale-down-boundary (2ad87dd1); there
+    // is no latch left to clear. Hooks re-read config.json from disk on
+    // every invocation, so they see this write immediately; the MCP server
+    // is the one long-lived reader that does not — restart the session to
+    // pick the new value up there.
+    notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
   }
   if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || mutationToggles.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {

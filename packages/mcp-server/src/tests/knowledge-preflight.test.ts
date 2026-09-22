@@ -108,30 +108,43 @@ test('AC-a: knowledge_preflight — text repeating >=2 of a stored record\'s CEN
   }
 });
 
-test('AC-b: knowledge_preflight — text hitting only the record\'s PERIPHERAL words answers ready with empty matches (centrality floor)', () => {
-  const { tools, cleanup } = harness();
-  try {
-    seedCentralAntiPattern(tools);
-    // Shares every peripheral, freq-1 word (game/field/cell) — enough distinct,
-    // non-generic hits to satisfy the OLDER stage-2 floors on their own — but
-    // NONE of the six dominant modeling terms. Reconstructs the 2026-08-09
-    // Blender false positive at the preflight surface: without the centrality
-    // floor this record would wrongly surface as a match.
-    const result = preflight(
-      tools,
-      'Write tests for the game field cell logic: cover the game field cell grid, ' +
-        'the field cell adjacency rules, and the game field cell lifecycle events.'
-    );
-    assert.equal(
-      result.answerability,
-      'ungoverned',
-      "the record's central vocabulary never appears in this text — only its peripheral words do"
-    );
-    assert.deepEqual(result.matches, [], 'peripheral-only overlap must not surface the record as a target');
-  } finally {
-    cleanup();
+test(
+  'AC-b: knowledge_preflight — text hitting only the record\'s PERIPHERAL words answers ungoverned, but the ' +
+    'record now LISTS as a non-central match (B2G: centrality is no longer a listing floor, only an ' +
+    'answerability floor)',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = seedCentralAntiPattern(tools);
+      // Shares every peripheral, freq-1 word (game/field/cell) — enough distinct,
+      // non-generic hits to satisfy the OLDER stage-2 floors on their own — but
+      // NONE of the six dominant modeling terms. Reconstructs the 2026-08-09
+      // Blender false positive at the preflight surface: hasRecordCentralityHit
+      // still fails on this text, so matched_total/answerability are unaffected
+      // by this record — but B2G (findings f6ada94d and
+      // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+      // september-2026) widened the LIST itself to include a centrality-failing
+      // survivor as a disclosed, non-central candidate rather than hiding it.
+      const result = preflight(
+        tools,
+        'Write tests for the game field cell logic: cover the game field cell grid, ' +
+          'the field cell adjacency rules, and the game field cell lifecycle events.'
+      ) as unknown as { answerability: string; matched_total: number; matches: { id: string; central: string[] }[] };
+      assert.equal(
+        result.answerability,
+        'ungoverned',
+        "the record's central vocabulary never appears in this text — only its peripheral words do, so " +
+          'answerability still reads the store as not governing this subject'
+      );
+      assert.equal(result.matched_total, 0, 'matched_total is still computed from the centrality-passing subset — zero here');
+      assert.equal(result.matches.length, 1, 'the peripheral-only survivor now appears in the widened matches list');
+      assert.equal(result.matches[0].id, record.id);
+      assert.deepEqual(result.matches[0].central, [], "the listed record is explicitly non-central — its central field is empty");
+    } finally {
+      cleanup();
+    }
   }
-});
+);
 
 test('AC-c: knowledge_preflight — fewer than 2 extractable terms answers insufficient/too_little_vocabulary with no matches', () => {
   const { tools, cleanup } = harness();
@@ -275,7 +288,7 @@ test('AC-g3: knowledge_query envelope — a normal, uncapped, non-empty result a
 
 // --- H23 regression pins: a ruling's transferable principle is unretrievable by its
 // own subject when the record's body is dominated by the incident that justified it
-// (knowledge_get 5f3e0a42, reproducing decision e9387b85 / research_finding 79942bda's
+// (knowledge_get 5f3e0a42, reproducing decision foreign_e9387b85 / research_finding foreign_79942bda's
 // SHAPE — never their real ids/content, which would rot and would bind this test to
 // production data). Every fixture below is synthetic, seeded fresh per test. This file
 // was authored spec-only, blind to any fix: no scoring/centrality internals were read.
@@ -300,7 +313,7 @@ const INCIDENT_BODY = INCIDENT_SENTENCE.repeat(20);
 
 // CORRECTED (this session, see AC1 below): the matcher's narrow text for a
 // `decision` record is `title + statement` only — `rationale` is excluded
-// entirely (field mapping confirmed via decision 00b23915, which cites
+// entirely (field mapping confirmed via decision foreign_00b23915, which cites
 // axis.ts:97; cited rather than read — H4 forbids reading axis.ts itself
 // from this role, field mapping only). The ORIGINAL shape of this fixture
 // put INCIDENT_BODY in `rationale`, a field the matcher never looks at, so
@@ -385,7 +398,7 @@ test(
 );
 
 // NOTE on scope (checked this session, not fixed): a research_finding's narrow text is `question`
-// ONLY — slug and answer are both excluded (confirmed via decision 00b23915, which cites axis.ts:99;
+// ONLY — slug and answer are both excluded (confirmed via decision foreign_00b23915, which cites axis.ts:99;
 // field mapping cited, axis.ts itself not read by this role per H4). The same decision states the
 // title-union arm's "title-ish" text for research_finding is ALSO just `question`. So narrowText ===
 // titleishText for this type, always — the union is a mathematical no-op and NO fixture, however the
@@ -474,6 +487,606 @@ test(
       );
       assert.equal(result.answerability, 'ungoverned');
       assert.deepEqual(result.matches, []);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+// --- candidate-sort tie-break pins (decision 17fa1c59, STEP 1; sort key order
+// UPDATED for knowledgePreflight by this session's B2G widening — see sort pin 3
+// below): the sort tie-break must never fall back to the fixed per-type query
+// concatenation order (anti_pattern, decision, feature_article, ...) on a tie
+// (measured cause: research_finding a6503bf7, mechanism 4, benchmark cases
+// p-003/p-006). axisCandidateMatches' OWN internal sort (tools.ts, shared with
+// same_subject) still goes hit count desc, then record-centrality hits desc,
+// then updated_at desc, then id asc — unchanged, and still what decides
+// same_subject's order. knowledgePreflight's FINAL `matches` order is now
+// centrality hits desc FIRST, then hit count desc, then the same updated_at/id
+// tie-break — hits desc is the primary key only where centrality hits are
+// already tied (pins 1, 2, 4, 5 and AC-h5 below all tie on centrality, so they
+// hold unchanged; pin 3 does not tie and is rewritten accordingly).
+//
+// Fixture math below is verified directly against axisHits/recordCentralityHits
+// (packages/store/src/axis.ts), not guessed: a record with <= AXIS_RECORD_TOP_K (6)
+// distinct extractable narrow terms has EVERY one of them central (documented "known
+// limit" on hasRecordCentralityHit); a record whose narrow text adds >=6 higher-frequency
+// filler words crowds its shared terms out of that top-6, leaving only its TITLE-arm
+// terms central (decision foreign_00b23915's title-union) — this is what lets two
+// fixtures share an equal raw hit count while differing in centrality.
+const QUERY_TEXT = 'Quaternion manifold topology geodesic curvature analysis.';
+const FILLER_TERMS =
+  'vertex vertex vertex lattice lattice lattice tensor tensor tensor scalar scalar scalar ' +
+  'vector vector vector matrix matrix matrix';
+
+function seedFeatureArticle(tools: SterlingTools, title: string) {
+  return tools.knowledgeCreate('feature_article', {
+    slug: 'quaternion-manifold-topology',
+    title,
+    what_it_does: 'Owns the math.',
+    intended_behavior: 'Stable output.',
+    files: [{ path: 'src/quat.ts', role: 'impl' }],
+    current_ac: [],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active',
+    version: 1,
+    history: [{ date: new Date().toISOString(), event: 'seed' }],
+    live_test_refs: [],
+  }).record;
+}
+
+test(
+  'sort pin 1 (centrality, not type order): equal hit counts break by record-centrality hits ' +
+    'descending — an article tied with a decision on hits, but with MORE central hits, sorts first',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // decision: 4 raw hits (quaternion, manifold, topology, geodesic all present in
+      // title+statement) but only 2 are CENTRAL — the statement's six filler words
+      // (freq 3 each) crowd topology/geodesic out of the record's own top-6
+      // narrow-central set, leaving only quaternion/manifold central via the title arm.
+      const decision = tools.knowledgeCreate('decision', {
+        title: 'quaternion manifold',
+        statement: `${FILLER_TERMS} topology geodesic`,
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      // feature_article: same 4 raw hits, but its narrow text (slug+family+title) is
+      // small enough that all 4 are automatically central.
+      const article = seedFeatureArticle(tools, 'quaternion manifold topology geodesic');
+      const result = preflight(tools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2, 'both the decision and the article qualify as candidates');
+      assert.equal(
+        result.matches[0].id,
+        article.id,
+        'equal hits (4=4): the article, with MORE central hits (4 vs 2), sorts first — the fixed type ' +
+          'order (anti_pattern, decision, feature_article, ...) would have put the decision first on this tie'
+      );
+      assert.equal(result.matches[1].id, decision.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 2 (recency, not type order): equal hits AND equal centrality break by updated_at ' +
+    'descending — the more recently updated record sorts first regardless of type',
+  () => {
+    const { store, cleanup } = harness();
+    try {
+      const OLDER = '2026-08-01T00:00:00.000Z';
+      const NEWER = '2026-09-01T00:00:00.000Z';
+      const olderTools = new SterlingTools({ store, now: () => OLDER });
+      const newerTools = new SterlingTools({ store, now: () => NEWER });
+      // decision is earlier than feature_article in axisCandidateMatches' fixed
+      // per-type query order — under the old hit-count-only sort, a tie would fall
+      // to that concatenation order and the OLDER decision would wrongly win.
+      const decision = olderTools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology geodesic',
+        statement: 'Quaternion manifold topology geodesic rule.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const article = seedFeatureArticle(newerTools, 'quaternion manifold topology geodesic');
+      const result = preflight(newerTools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(
+        result.matches[0].id,
+        article.id,
+        'equal hits (4=4) and equal centrality (4=4): the more recently updated record (the article) ' +
+          'sorts first, even though it is LATER in the fixed per-type concatenation order'
+      );
+      assert.equal(result.matches[1].id, decision.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  // REWRITTEN (B2G, decision quoted in this session's brief: "sort the list by
+  // centrality hit count DESC, then hits DESC"): knowledgePreflight's OWN
+  // sort key order flipped from hits-primary/centrality-secondary to
+  // centrality-primary/hits-secondary — the old title/assertion here
+  // ("primary key unchanged: more raw hits still outranks fewer hits with
+  // higher centrality") pinned exactly the contract this change reverses for
+  // knowledgePreflight. axisCandidateMatches' OWN internal sort (still used
+  // unchanged by sameSubjectDigest / same_subject) stays hits-primary — see
+  // same-subject-surfacing.test.ts, which this file's fixtures never touch.
+  'sort pin 3 (B2G: centrality is now the PRIMARY sort key for knowledge_preflight): fewer raw hits with ' +
+    'higher centrality now outranks more raw hits with lower centrality',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // anti_pattern: 5 raw hits (quaternion, curvature, geodesic, manifold, topology)
+      // but only 2 are central — the filler-diluted trigger crowds the rest out of
+      // its own top-6 narrow-central set.
+      const moreHits = tools.knowledgeCreate('anti_pattern', {
+        title: 'quaternion manifold',
+        trigger: `topology geodesic curvature ${FILLER_TERMS} topology geodesic`,
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      // decision: only 3 raw hits (quaternion, manifold, topology) but ALL 3 are
+      // central (small, undiluted narrow text).
+      const moreCentral = tools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology',
+        statement: 'Rule applies always.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const result = preflight(tools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(
+        result.matches[0].id,
+        moreCentral.id,
+        'centrality hit count is now the PRIMARY sort key: the 3-hit decision, with MORE central hits ' +
+          '(3 vs 2), now sorts ahead of the 5-hit anti_pattern'
+      );
+      assert.equal(result.matches[1].id, moreHits.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 4 (updated_at compared numerically, not lexicographically — cross-family review MEDIUM finding): ' +
+    'equal hits and equal centrality, updated_at values differing ONLY in fractional-second precision — the ' +
+    'string-larger-but-epoch-older record must NOT win',
+  () => {
+    const { store, cleanup } = harness();
+    try {
+      // z.string().datetime() (packages/schemas/src/envelope.ts) permits variable
+      // UTC precision, so both of these are schema-valid — but '...:00Z' sorts
+      // AFTER '...:00.001Z' lexicographically ('Z' > '.' at that byte) even
+      // though '...:00.001Z' is 1ms LATER in real time (Date.parse difference
+      // verified: 1767261600000 vs 1767261600001). A lexicographic compare picks
+      // the wrong record; a numeric epoch compare does not.
+      const STRING_LARGER_BUT_OLDER = '2026-01-01T10:00:00Z';
+      const STRING_SMALLER_BUT_NEWER = '2026-01-01T10:00:00.001Z';
+      const olderEpochTools = new SterlingTools({ store, now: () => STRING_LARGER_BUT_OLDER });
+      const newerEpochTools = new SterlingTools({ store, now: () => STRING_SMALLER_BUT_NEWER });
+      const decision = olderEpochTools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology geodesic',
+        statement: 'Quaternion manifold topology geodesic rule.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const article = seedFeatureArticle(newerEpochTools, 'quaternion manifold topology geodesic');
+      const result = preflight(newerEpochTools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(
+        result.matches[0].id,
+        article.id,
+        "equal hits (4=4) and equal centrality (4=4): the article's updated_at (...:00.001Z) is 1ms LATER " +
+          "by epoch than the decision's (...:00Z), even though the decision's string sorts lexicographically " +
+          'larger — the article must sort first'
+      );
+      assert.equal(result.matches[1].id, decision.id);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+// --- V4 one-hit minimum pins (measured 2026-09-21, research findings on the
+// preflight-floor counterfactual and its validation): knowledgePreflight now
+// admits a candidate on ONE matched term once hasDiscriminatingHit and
+// hasRecordCentralityHit both already pass — sameSubjectDigest (the write-time
+// same_subject surface, pinned separately in same-subject-surfacing.test.ts)
+// keeps the AXIS_MIN_HITS=2 floor unchanged. The centrality pass below relies
+// on the SAME prefix quirk the validation finding documents for p-009: a
+// record narrow text containing both an inflected pair ('manifold' /
+// 'manifolds') as separate top-K central terms lets one query word cover both
+// via symmetric prefix matching, so hasRecordCentralityHit's minTerms=2 floor
+// is satisfied even though axisHits only ever counts ONE distinct matched term.
+
+test(
+  'AC-h1 (V4 one-hit): a record whose single shared term is discriminating and passes centrality is now returned — previously excluded by the two-hit floor',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = tools.knowledgeCreate('anti_pattern', {
+        title: 'Manifold subsystem',
+        trigger:
+          'manifold manifold manifold manifolds manifolds manifolds other padding words here to fill space and avoid collision',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      const result = preflight(
+        tools,
+        'Investigate the manifold behavior during unrelated deployment scheduling review.'
+      );
+      assert.equal(
+        result.answerability,
+        'verify_targets',
+        'a single discriminating, central hit is now sufficient to qualify a candidate'
+      );
+      const match = result.matches.find((m) => m.id === record.id);
+      assert.ok(match, 'the one-hit record surfaces as a match');
+      assert.deepEqual(match!.matched_on, ['manifold'], 'exactly one matched term, not two');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'AC-h2 (discriminating floor still applies, centrality genuinely passes): a record whose only hit is a GENERIC dev term is NOT returned, even though that same hit already clears centrality — the discriminating floor alone must be what blocks it',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // REBUILT (fix round, cross-family review HIGH finding): the prior
+      // fixture failed hasRecordCentralityHit too (the query covered only
+      // one central term), so it stayed 'ungoverned' even with the
+      // discriminating floor stubbed out — a hollow proof. Repeats BOTH
+      // 'test' and 'tests' (mirroring the p-009 quirk documented in the
+      // validation finding) so the single query word 'test' symmetric-prefix
+      // covers two central terms ('test', 'tests') and centrality passes
+      // GENUINELY on its own — see the single-protection proof below.
+      tools.knowledgeCreate('anti_pattern', {
+        title: 'Xylophone resonance study',
+        trigger:
+          'test test test tests tests tests padding filler placeholder more random content here',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      });
+      const query = 'Please test the widget before shipping it forward for review.';
+      // Fixture guard (kept blind to the centrality helper, per this file's
+      // own spec: assert through knowledgePreflight's own result only): AC-a
+      // above already pins that this store returns 'verify_targets' whenever
+      // centrality genuinely passes on a record's dominant vocabulary; the
+      // single-protection proof that THIS fixture's centrality independently
+      // passes on 'test'/'tests' was run out-of-band against a temporarily
+      // neutralized discriminating check (fix-round session evidence) rather
+      // than baked in here as a direct import of the centrality helper.
+      const result = preflight(tools, query);
+      assert.equal(
+        result.answerability,
+        'ungoverned',
+        "a lone GENERIC hit ('test') is still rejected by hasDiscriminatingHit even though centrality independently passes"
+      );
+      assert.deepEqual(result.matches, []);
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'AC-h3 (centrality floor still applies to answerability; B2G widens the LIST): a record whose only hit is a ' +
+    'discriminating but PERIPHERAL term still answers ungoverned, but now lists as a non-central match',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // Single-protection fixture (confirmed genuine, fix-round session
+      // evidence): 'gizmo' independently clears hasDiscriminatingHit (it is
+      // not in GENERIC_DEV_TERMS) — only hasRecordCentralityHit rejects it,
+      // since 'gizmo' never appears among the record's top-K central terms.
+      const record = tools.knowledgeCreate('anti_pattern', {
+        title: 'Boolean modifier mesh manifold topology solver',
+        trigger:
+          'boolean modifier boolean modifier mesh manifold mesh manifold topology solver topology solver gizmo',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      const result = preflight(tools, 'Please check the gizmo compatibility with unrelated hardware today.') as unknown as {
+        answerability: string;
+        matched_total: number;
+        matches: { id: string; central: string[] }[];
+      };
+      assert.equal(
+        result.answerability,
+        'ungoverned',
+        "'gizmo' is discriminating but never central to the record's own dominant vocabulary — hasRecordCentralityHit still rejects it for answerability"
+      );
+      assert.equal(result.matched_total, 0, 'matched_total is still decided from the centrality-passing subset');
+      assert.equal(
+        result.matches.length,
+        1,
+        'B2G: centrality is no longer required to LIST a candidate — this non-central survivor now appears'
+      );
+      assert.equal(result.matches[0].id, record.id);
+      assert.deepEqual(result.matches[0].central, [], 'the listed record is explicitly non-central');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test('AC-h4 (input guard unchanged): a one-word question still answers insufficient/too_little_vocabulary, even with a store record that would otherwise one-hit-qualify', () => {
+  const { tools, cleanup } = harness();
+  try {
+    tools.knowledgeCreate('anti_pattern', {
+      title: 'Manifold subsystem',
+      trigger:
+        'manifold manifold manifold manifolds manifolds manifolds other padding words here to fill space and avoid collision',
+      guidance: 'guidance',
+      wrong_way: 'wrong way',
+      right_way: 'right way text',
+      source_evidence: 'evidence',
+    });
+    const result = preflight(tools, 'manifold');
+    assert.equal(
+      result.answerability,
+      'insufficient',
+      'one MATCHING word in a candidate is now enough, but a one-word INPUT is a separate guard and stays insufficient'
+    );
+    assert.equal(result.reason, 'too_little_vocabulary');
+    assert.deepEqual(result.matches, []);
+  } finally {
+    cleanup();
+  }
+});
+
+test(
+  'AC-h5 (order pin): a two-hit record still sorts ahead of a one-hit record newly admitted by the relaxed floor',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const twoHit = tools.knowledgeCreate('decision', {
+        title: 'Widget calibration',
+        statement: 'Widget calibration procedure text short.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const oneHit = tools.knowledgeCreate('anti_pattern', {
+        title: 'Manifold subsystem',
+        trigger:
+          'manifold manifold manifold manifolds manifolds manifolds other padding words here to fill space and avoid collision',
+        guidance: 'guidance',
+        wrong_way: 'wrong way',
+        right_way: 'right way text',
+        source_evidence: 'evidence',
+      }).record;
+      const result = preflight(
+        tools,
+        'Investigate the widget calibration behavior during unrelated deployment scheduling review manifold.'
+      );
+      assert.equal(result.matches.length, 2, 'both the two-hit decision and the one-hit anti_pattern qualify');
+      // Both fixtures tie on centrality hits (2=2: twoHit's short, undiluted
+      // narrow text makes both its hits central; oneHit's single query word
+      // 'manifold' symmetric-prefix-covers BOTH its central terms 'manifold'
+      // and 'manifolds') — centrality is the primary key and does not
+      // discriminate here, so hit count desc decides this tie, same as before.
+      assert.equal(result.matches[0].id, twoHit.id, 'hit count desc decides the tie once centrality hits are equal');
+      assert.equal(result.matches[1].id, oneHit.id, 'the one-hit addition lands after every existing (higher-hit) match');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'sort pin 5 (id ascending is the final tie-break — cross-family review LOW finding): equal hits, equal ' +
+    'centrality and equal updated_at — order is decided by id ascending',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // Same fixed NOW for both (harness's default clock) — updated_at ties too,
+      // so nothing but id can decide the order. Ids are server-minted UUIDs the
+      // public create path gives no way to choose, so the expected order is
+      // read back from the created records and compared against their own
+      // ascending sort, per the reviewer's suggested approach.
+      const decision = tools.knowledgeCreate('decision', {
+        title: 'quaternion manifold topology geodesic',
+        statement: 'Quaternion manifold topology geodesic rule.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const article = seedFeatureArticle(tools, 'quaternion manifold topology geodesic');
+      const result = preflight(tools, QUERY_TEXT);
+      assert.equal(result.matches.length, 2);
+      assert.equal(decision.updated_at, article.updated_at, 'sanity: both records share the same updated_at');
+      const expectedOrder = [decision.id, article.id].sort();
+      assert.deepEqual(
+        result.matches.map((m) => m.id),
+        expectedOrder,
+        'with hits, centrality and updated_at all tied, the listed order equals the ids sorted ascending — ' +
+          'reversing the id branch would list them the other way around'
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+// --- PREFLIGHT_MATCH_CAP pins (fix round, cross-family review MEDIUM finding):
+// the relaxed one-hit floor makes a very large qualifying set plausible (up to
+// 6 types x 40 candidates surviving the floors). `matches` is capped AFTER the
+// sort at 20; `matched_total` always reports the true pre-cap count;
+// `capped: true` is present only when the cap actually bound; the verdict is
+// decided from the full set, not the window.
+
+function seedCapCandidate(tools: SterlingTools, i: number) {
+  return tools.knowledgeCreate('decision', {
+    title: `Zephyr triton calibration variant ${i}`,
+    statement: `Zephyr triton procedure for variant ${i} short text.`,
+    alternatives_rejected: [],
+    rationale: 'rationale',
+  }).record;
+}
+
+const CAP_QUERY = 'Investigate the zephyr triton behavior for deployment scheduling.';
+
+test('AC-h6 (cap): more than PREFLIGHT_MATCH_CAP qualifying records returns exactly 20, in sort order, with matched_total the true count and capped:true', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const records = [];
+    for (let i = 0; i < 25; i++) {
+      records.push(seedCapCandidate(tools, i));
+    }
+    const result = preflight(tools, CAP_QUERY) as unknown as {
+      answerability: string;
+      matched_total: number;
+      capped?: boolean;
+      matches: { id: string }[];
+    };
+    assert.equal(result.matched_total, 25, 'matched_total reports the true pre-cap count, not the windowed length');
+    assert.equal(result.capped, true, 'capped is present and true once the cap bound');
+    assert.equal(result.matches.length, 20, '`matches` is truncated to the cap');
+    assert.equal(result.answerability, 'verify_targets', 'the verdict is decided from the full 25-record set, not the 20-record window');
+    // Every fixture ties on hits, centrality and updated_at (same harness
+    // clock) — the sort's final tie-break, id ascending, decides order, so
+    // the returned window is exactly the 20 smallest ids among the 25.
+    const expectedWindow = records.map((r) => r.id as string).sort().slice(0, 20);
+    assert.deepEqual(result.matches.map((m) => m.id), expectedWindow, 'the window holds the first 20 in sort order, not an arbitrary 20');
+  } finally {
+    cleanup();
+  }
+});
+
+test('AC-h7 (cap, negative control): a small qualifying set carries matched_total but no capped flag at all', () => {
+  const { tools, cleanup } = harness();
+  try {
+    for (let i = 0; i < 3; i++) {
+      seedCapCandidate(tools, i);
+    }
+    const result = preflight(tools, CAP_QUERY) as unknown as {
+      matched_total: number;
+      capped?: boolean;
+      matches: { id: string }[];
+    };
+    assert.equal(result.matched_total, 3);
+    assert.equal(result.matches.length, 3);
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(result, 'capped'),
+      false,
+      'capped is OMITTED (never `false`) when the window is already complete — mirrors inbound_supersedes-style presence-only disclosure'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+// --- B2G widening pins (this session): the record-centrality floor is no
+// longer required to LIST a candidate in knowledge_preflight's `matches` —
+// only to decide matched_total/answerability, exactly as before. See
+// findings f6ada94d and
+// preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+// september-2026. Test (a) (a non-central-only survivor, ungoverned with
+// matched_total 0 but matches.length 1) is already pinned above by the
+// rewritten AC-b and AC-h3. The two tests below cover (b) centrality-first
+// sort against a higher-hit non-central competitor, and (c) `capped`
+// reflecting the widened (not just centrality-passing) list length.
+
+test(
+  'AC-i1 (B2G sort): a central record with FEWER raw hits sorts ahead of a non-central record with MORE raw ' +
+    'hits — centrality is the primary key regardless of which side has more matched terms',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // CENTRAL: 2 hits (boolean, modifier), both central (covered >= min(2,6)).
+      const central = seedCentralAntiPattern(tools);
+      // NON-CENTRAL: 5 hits (alpha/beta/gamma/delta/epsilon), all peripheral —
+      // FILLER_TERMS' six words (freq 3 each) dominate this record's own
+      // top-6 narrow-central set, crowding every alpha/beta/gamma/delta/epsilon
+      // (freq 1 each) out of it entirely.
+      const nonCentral = tools.knowledgeCreate('decision', {
+        title: 'Filler decision baseline',
+        statement: `${FILLER_TERMS} alpha beta gamma delta epsilon`,
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const result = preflight(
+        tools,
+        'Investigate boolean modifier alpha beta gamma delta epsilon issue for review.'
+      ) as unknown as { answerability: string; matched_total: number; matches: { id: string; central: string[] }[] };
+      assert.equal(result.answerability, 'verify_targets', 'the central record alone already governs this subject');
+      assert.equal(result.matched_total, 1, 'only the central record passes the centrality floor for matched_total');
+      assert.equal(result.matches.length, 2, 'both the central and the widened non-central survivor are listed');
+      assert.equal(
+        result.matches[0].id,
+        central.id,
+        'centrality is the PRIMARY sort key: 2 central hits outranks 5 non-central hits'
+      );
+      assert.equal(result.matches[1].id, nonCentral.id);
+      assert.deepEqual(result.matches[1].central, [], 'the lower-ranked survivor is explicitly non-central');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'AC-i2 (B2G cap): the widened list caps at 20 even when the centrality-passing subset (matched_total) is far ' +
+    'smaller — capped reflects the FULL widened list, not just the central survivors',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // The one centrality-passing record: a small, undiluted narrow text
+      // (title+statement) where every extractable term is automatically
+      // central (<=6 distinct terms total).
+      const central = tools.knowledgeCreate('decision', {
+        title: 'Kappa nexus register',
+        statement: 'Kappa nexus register control plane operation.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      // 20 non-central survivors: each shares exactly one peripheral,
+      // discriminating word ('omega') with the query, crowded out of its own
+      // top-6 narrow-central set by FILLER_TERMS' six higher-frequency words.
+      const fillers = [];
+      for (let i = 0; i < 20; i++) {
+        fillers.push(
+          tools.knowledgeCreate('decision', {
+            title: `Filler variant ${i}`,
+            statement: `${FILLER_TERMS} omega`,
+            alternatives_rejected: [],
+            rationale: 'rationale',
+          }).record
+        );
+      }
+      const result = preflight(tools, 'Kappa nexus omega review today.') as unknown as {
+        answerability: string;
+        matched_total: number;
+        capped?: boolean;
+        matches: { id: string }[];
+      };
+      assert.equal(result.matched_total, 1, 'matched_total counts only the one centrality-passing record');
+      assert.equal(
+        result.capped,
+        true,
+        'the widened list (1 central + 20 non-central = 21 survivors) exceeds the 20 cap even though matched_total is 1'
+      );
+      assert.equal(result.matches.length, 20, '`matches` is truncated to the cap over the WIDENED list');
+      assert.equal(result.matches[0].id, central.id, 'the sole central survivor still sorts first');
+      const expectedFillerWindow = fillers.map((r) => r.id as string).sort().slice(0, 19);
+      assert.deepEqual(
+        result.matches.slice(1).map((m) => m.id),
+        expectedFillerWindow,
+        'the remaining 19 slots hold the 19 smallest-id non-central fillers (tied on hits/centrality/updated_at)'
+      );
     } finally {
       cleanup();
     }

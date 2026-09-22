@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// git-ro — the read-only git wrapper for Bash-holding subagents.
+// git-ro — the read-only git wrapper for subagents.
 //
 // SPEC: decision `git-ro-wrapper-fixed-recipes-no-caller-flags`
 // (knowledge_get 1a7f3926-703a-471c-b33a-c3907bc9c3b3). Four verbs
@@ -10,18 +10,9 @@
 // short-option clustering make such a registry a standing drift+bypass
 // surface).
 //
-// TRUST MODEL — WHY H14 TRUSTS THIS FILE'S CONTENTS. H14 enforces SCOPE
-// DISCIPLINE, not code-execution containment (research_finding bc00be84, and
-// H14's own header). It grants the single exact prefix `node scripts/git-ro.mjs`
-// to the Bash-holding roster roles (coder, debugger); the wrapper is
-// REPO-CONTROLLED source, reviewed and version-controlled like any other hook,
-// so H14 trusts its contents exactly as it trusts the declared toolchain
-// commands. What the wrapper adds on top of that grant is the guarantee that a
-// git invocation reaching the outside world is one of four audited read-only
-// recipes — which is why the four direct read-only git verb prefixes (board
-// 4c7b84d3 lineage) were REMOVED from H14 in the same slice: keeping them
-// beside the wrapper "preserves a bypass around every guarantee the wrapper
-// adds".
+// TRUST MODEL. The wrapper is repo-controlled source, reviewed and
+// version-controlled like any other script. It guarantees that a git invocation
+// reaching the outside world is one of four audited read-only recipes.
 //
 // Standalone and dependency-light (hook-style): node builtins only, no
 // workspace imports.
@@ -106,8 +97,8 @@ const refuse = (message) => fail(EXIT_RULE, message);
 //    repository's objects: a `.git` GITDIR POINTER file, `objects/info/
 //    alternates`, or a local config `include`. Rejecting those was ruled out —
 //    it would break linked worktrees and submodules, which are legitimate and
-//    common. The residual is accepted under H14's scope-discipline model
-//    because reaching it requires WRITING INSIDE .git/, which is already full
+//    common. The residual is accepted because reaching it requires WRITING
+//    INSIDE .git/, which is already full
 //    repository control. What IS closed is the env-side half: the positive-set
 //    child env below means no inherited GIT_DIR / GIT_WORK_TREE /
 //    GIT_OBJECT_DIRECTORY / GIT_CONFIG_* can redirect the child from outside.
@@ -188,7 +179,7 @@ const CHILD_ENV = {
   // alias.*). Point it at the null device so the child reads no global config
   // at all. WIN32: 'NUL' is the documented null device and git-for-Windows
   // accepts it here, but that is NOT VERIFIABLE FROM WSL — VERIFY AT BUILD ON
-  // WINDOWS (decision 19678617's verify-at-build register). If the win32 form
+  // WINDOWS (decision foreign_19678617's verify-at-build register). If the win32 form
   // is wrong the failure is loud (git refuses to read the config path), never a
   // silent re-enabling of the global config.
   GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null',
@@ -437,8 +428,8 @@ async function establishRoot() {
 // ---------------------------------------------------------------------------
 const VERBS = ['log', 'show', 'show-stat', 'diff-names'];
 // The usage line echoes the ABSOLUTE two-token spelling the caller actually
-// used, never the old cwd-relative literal: that literal is exactly what H14
-// now denies (S1.2), so printing it would teach a refused invocation.
+// used, never the old cwd-relative literal, so printing it would teach a
+// refused invocation.
 const USAGE =
   `usage: ${process.execPath} "${process.argv[1]}" <verb> [rev ...] [-- path ...]  |  verbs: ${VERBS.join(', ')} ` +
   `(log [rev] [-- paths], show <object>, show-stat <object>, diff-names <commit> <commit> [-- paths]).`;

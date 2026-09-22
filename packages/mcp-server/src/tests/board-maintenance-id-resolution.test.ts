@@ -22,7 +22,7 @@
 //      permission to delete.
 //   3. Prefix resolution spans every mounted store while the guard read only
 //      the project store.
-// THE NEW, STANDING CONTRACT (decision 6d5a6719, superseding 2debab53's
+// THE NEW, STANDING CONTRACT (decision foreign_6d5a6719, superseding foreign_2debab53's
 // "board_remove... still demands the exact full id" clause back into force
 // for board_remove, maintenance_remove AND validateResolveClaim):
 //   - board_remove and maintenance_remove accept an EXACT ID ONLY. An 8-char
@@ -101,7 +101,7 @@ const UNRESOLVABLE = 'zzz-totally-unresolvable-identifier-ffff';
 // anything under the old ladder.
 const UNRESOLVABLE_PREFIX = 'zzzzzzzz';
 
-// The new contract's required refusal content (decision 6d5a6719): names the
+// The new contract's required refusal content (decision foreign_6d5a6719): names the
 // full-uuid requirement, and names WHY (hard-delete / silent-retarget risk).
 // Flexible alternation, not an exact string match — the precise wording is
 // the implementer's to choose; the SUBSTANCE is what the ruling pins.
@@ -111,10 +111,10 @@ const HARD_DELETE_REASON = /hard.?delet|permanent(ly)? delet|irreversib|retarget
 // ---------------------------------------------------------------------------
 // UNCHANGED — board_update keeps the ladder (recoverable in-place edit).
 // These three cases were true under the original ruling and remain true
-// unchanged under the reversal; they are NOT touched by decision 6d5a6719.
+// unchanged under the reversal; they are NOT touched by decision foreign_6d5a6719.
 // ---------------------------------------------------------------------------
 
-test('board_update: an unambiguous 8-char prefix of an existing board item resolves and updates it (KEPT — board_update is not a destructive path, decision 6d5a6719 leaves it on the ladder)', () => {
+test('board_update: an unambiguous 8-char prefix of an existing board item resolves and updates it (KEPT — board_update is not a destructive path, decision foreign_6d5a6719 leaves it on the ladder)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user', priority: 'low' }) as unknown as {
@@ -137,7 +137,7 @@ test('board_update: an unambiguous 8-char prefix of an existing board item resol
   }
 });
 
-test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity — never resolves to either record, writes nothing (KEPT, unchanged by decision 6d5a6719)', () => {
+test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity — never resolves to either record, writes nothing (KEPT, unchanged by decision foreign_6d5a6719)', () => {
   const { store, tools, cleanup } = harness();
   try {
     const { record: original } = tools.boardAdd({ text: 'ship csv export', source: 'user' }) as unknown as {
@@ -159,7 +159,7 @@ test('board_update: an AMBIGUOUS 8-char prefix is refused, naming the ambiguity 
   }
 });
 
-test('board_update: a genuinely unresolvable identifier is refused naming it, never a silent no-op (KEPT, unchanged by decision 6d5a6719)', () => {
+test('board_update: a genuinely unresolvable identifier is refused naming it, never a silent no-op (KEPT, unchanged by decision foreign_6d5a6719)', () => {
   const { tools, cleanup } = harness();
   try {
     tools.boardAdd({ text: 'untouched item', source: 'user' });
@@ -180,7 +180,7 @@ test('board_update: a genuinely unresolvable identifier is refused naming it, ne
 });
 
 // ---------------------------------------------------------------------------
-// FLIPPED — board_remove is now exact-id-only (decision 6d5a6719 retracts
+// FLIPPED — board_remove is now exact-id-only (decision foreign_6d5a6719 retracts
 // the collision guard AND the prefix rung for this destructive tool).
 // ---------------------------------------------------------------------------
 
@@ -240,7 +240,7 @@ test('board_remove: an AMBIGUOUS 8-char prefix is refused the same exact-id-only
   }
 });
 
-test('board_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, item pool untouched (KEPT, unchanged by decision 6d5a6719 — this was never about a prefix candidate)', () => {
+test('board_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, item pool untouched (KEPT, unchanged by decision foreign_6d5a6719 — this was never about a prefix candidate)', () => {
   const { tools, cleanup } = harness();
   try {
     tools.boardAdd({ text: 'untouched item', source: 'user' });
@@ -276,7 +276,7 @@ test('board_remove: a FULL uuid still succeeds and removes the item — the exac
 // FLIPPED — maintenance_remove is now exact-id-only, same as board_remove.
 // ---------------------------------------------------------------------------
 
-test('maintenance_remove: an 8-char prefix that WOULD have resolved unambiguously is now REFUSED — RULING REVERSAL (decision 6d5a6719): names the full-uuid requirement and the hard-delete reason, item SURVIVES, and the refusal is NEVER the drain-log/aged-out wording (that misdiagnosis was a separately-fixed defect and must stay fixed)', () => {
+test('maintenance_remove: an 8-char prefix that WOULD have resolved unambiguously is now REFUSED — RULING REVERSAL (decision foreign_6d5a6719): names the full-uuid requirement and the hard-delete reason, item SURVIVES, and the refusal is NEVER the drain-log/aged-out wording (that misdiagnosis was a separately-fixed defect and must stay fixed)', () => {
   const { tools, cleanup } = harness();
   try {
     const { record: item } = tools.maintenanceEnqueue({
@@ -350,7 +350,7 @@ test('maintenance_remove: an 8-char-SHAPED identifier that would not have matche
   }
 });
 
-test('maintenance_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, never via drain-log wording (KEPT, unchanged by decision 6d5a6719 — this was never about a prefix candidate)', () => {
+test('maintenance_remove: a genuinely unresolvable (non-prefix-shaped) identifier is refused naming it, never via drain-log wording (KEPT, unchanged by decision foreign_6d5a6719 — this was never about a prefix candidate)', () => {
   const { tools, cleanup } = harness();
   try {
     assert.throws(

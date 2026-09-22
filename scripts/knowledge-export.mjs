@@ -3,7 +3,7 @@
 // names as a standing gap: both existing payloads (2026-07-19-chulf,
 // 2026-07-26-chulf) were hand-assembled — a recorded P3 violation. Follows
 // the knowledge-transfer-export article's payload convention exactly
-// (feature_article 'knowledge-transfer-export', ca9b783f-9f0a-4acf-992b-
+// (feature_article 'knowledge-transfer-export', foreign_ca9b783f-9f0a-4acf-992b-
 // e6f4b8af27e8) — read it (knowledge_get) before changing this script's
 // output shape; it is the spec.
 //

@@ -42,13 +42,13 @@
 // is what would happen if the text were appended somewhere central by mistake.
 //
 // FIXTURE NOTES. (1) Provenance DDL is HARDCODED, never introspected — the same
-// discipline (and the same composite-PK trap, anti_pattern 0059fa66) as the
+// discipline (and the same composite-PK trap, anti_pattern foreign_0059fa66) as the
 // v2-guard suite, whose header documents these three shapes:
 //     record_versions(record_id, version, archived_at, body) PK(record_id,version)
 //     record_aliases(historical_id PK, canonical_id, archived_version, created_at)
 //     record_relations(source_id, rel, target_id, created_at) PK(source_id,rel,target_id)
 // (2) oneLine() flattens a child-process stream only inside an assertion's own
-// MESSAGE, never its TARGET (anti_pattern ee89c3fd).
+// MESSAGE, never its TARGET (anti_pattern foreign_ee89c3fd).
 // (3) Each guard is reached with the MINIMUM fixture that trips it and nothing
 // else, so the four refusal arms produce DISJOINT red sets under mutation —
 // reverting one message's disclosure must redden that message's test alone.
@@ -231,7 +231,7 @@ test('ESCAPE-HATCH-CONTROL: the record_relations refusal was ALREADY honest and 
   const out = `${r.stdout}\n${r.stderr}`;
   // GREEN BEFORE AND AFTER — that is the point. This arm must pass for the
   // OPPOSITE reason to the three above: it holds the assertion shape to the
-  // wording decision 88f3db69 already ratified. If it were ever red, the three
+  // wording decision foreign_88f3db69 already ratified. If it were ever red, the three
   // arms above would be pinning phrasing this file made up.
   assert.strictEqual(r.code, 2, `the relations guard still refuses: ${oneLine(out)}`);
   assert.match(out, /record_relations/, 'and still names the table it found');

@@ -8,8 +8,7 @@
 // r-dd88; the config was recorded under native Windows pre-WSL-migration).
 //
 // Policy (decision: WSL-directional): translate Windows drive paths -> /mnt
-// form ONLY when NOT on native Windows (i.e. under WSL/Linux, where dispose-run
-// realistically runs). On native Windows a drive path is already correct and is
+// form ONLY when NOT on native Windows (i.e. under WSL/Linux). On native Windows a drive path is already correct and is
 // left untouched. The reverse (/mnt -> drive under native Windows node) is a
 // deliberately-unhandled known limitation — pipeline disposal is a WSL-primary
 // flow and no native-Windows disposal flow is observed.
@@ -32,7 +31,7 @@ export function toWslPath(p) {
  * a Windows drive path is rewritten to /mnt form so resolve() treats it as
  * absolute; on native Windows it is left as-is (a drive path is the correct
  * native form). The one place the WSL-directional policy lives, shared by
- * init.mjs (recording) and dispose-run.mjs (consumption).
+ * init.mjs and its callers.
  */
 export function backupPathForRuntime(p) {
   return process.platform === 'win32' ? p : toWslPath(p);

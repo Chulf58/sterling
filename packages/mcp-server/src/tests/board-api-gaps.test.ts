@@ -11,7 +11,7 @@ import { SterlingTools } from '../tools.js';
 // Spec for board e725979c — three additions to the board/queue API:
 //   1. board_edit(id, find, replace)   — exactly-once find/replace on a board
 //      item's text, in place (mirrors board_update's identity semantics —
-//      decision a91c80b5 — NOT knowledge_edit's version-bump semantics).
+//      decision foreign_a91c80b5 — NOT knowledge_edit's version-bump semantics).
 //   2. board_get(id)                   — full untruncated item by id/prefix,
 //      mirroring the knowledge id ladder (8-char prefix, refuse-if-ambiguous).
 //   3. maintenance_query({feature_slug}) — narrows the queue to items owned
@@ -95,7 +95,7 @@ test('AC1: board_edit replaces a unique passage in a user board item text withou
     // landed and this arm is retained as its regression pin.
     const after = editedItem(laterTools.boardEdit(original.id, 'with header', 'with headers'));
 
-    assert.equal(after.id, original.id, 'the id is PRESERVED — board_edit is an in-place edit, not a supersession (decision a91c80b5)');
+    assert.equal(after.id, original.id, 'the id is PRESERVED — board_edit is an in-place edit, not a supersession (decision a91c80b5)'); // not-a-citation: fixture id
     assert.equal(after.text, 'ship csv export with headers', 'exactly the matched passage changed, the rest of the text intact');
     assert.equal(after.updated_at, LATER, 'updated_at moves to the write-time clock');
     assert.notEqual(after.updated_at, original.updated_at, 'and differs from the original stamp');

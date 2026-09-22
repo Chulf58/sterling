@@ -5,7 +5,7 @@
 // INVARIANT (register): this module is the ONE authority for the transient
 // dispatch register's persisted shape (RegisterEntry), its parser, its
 // TRI-STATE liveness classifier, and the owner-mkdir lock primitive shared
-// with the review ledger. A dispatch's liveness is never a binary live/dead
+// with a legacy compatibility lock. A dispatch's liveness is never a binary live/dead
 // verdict — the platform emits no death signal for a killed subagent, so an
 // expired lease is UNKNOWN, never confirmed dead; only an explicit terminal
 // event (`ended`) yields inactive-confirmed. Stop MARKS an entry ended; it is
@@ -46,7 +46,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, existsSync, statSync, lstatSync, readdirSync } from 'node:fs';
 import { hostname } from 'node:os';
-import { join, basename, dirname } from 'node:path';
+import { join, dirname } from 'node:path';
 import { randomBytes, createHash } from 'node:crypto';
 import { refusal, disclosure, render } from './review-errors.mjs';
 
@@ -60,10 +60,6 @@ export function registerPath(root) {
 
 export function registerLockDir(root) {
   return join(root, '.sterling', 'transient', 'dispatch-register.lock');
-}
-
-function ledgerLockDir(root) {
-  return join(root, '.sterling', 'review-ledger.lock');
 }
 
 function sessionPath(root) {
@@ -86,25 +82,11 @@ export function readSessionId(root) {
   }
 }
 
-// resolveSessionIdentity — THE ONE session-identity resolver shared by every
-// CLI that reads STERLING_SESSION_ID (commit-reviewed.mjs, review-ledger.mjs).
-// A19/A20: STERLING_SESSION_ID WINS when set — it is always the effective
-// identity (a hook-launched process, or an explicit escape hatch, both need
-// this) — but the OVERRIDE DISCLOSURE fires on a narrower, laundering-shaped
-// condition: the env var is set AND a session marker (H1's
-// .sterling/transient/session.json) exists AND the two DISAGREE. Env-only
-// identity with NO marker file present is the ordinary test-fixture / no-hook
-// shape and is never disclosed — there is nothing to override when nothing
-// else claims an identity (frozen pin R1-D20: a clean run's disclosures stay
-// present-as-empty).
-export function resolveSessionIdentity(root, env = process.env) {
-  const envSessionId = env.STERLING_SESSION_ID;
-  const markerSessionId = readSessionId(root);
-  const override = envSessionId !== undefined && markerSessionId !== null && markerSessionId !== envSessionId;
-  const session_id = envSessionId !== undefined ? envSessionId : markerSessionId;
-  const source = envSessionId !== undefined ? 'env' : markerSessionId !== null ? 'marker' : 'none';
-  return { session_id, source, override };
-}
+// resolveSessionIdentity (a session-identity resolver over STERLING_SESSION_ID
+// vs H1's session.json marker) is DELETED — no caller anywhere, test or
+// production (grepped scripts/ packages/ hooks/, excluding this module and
+// bundles). readSessionId above (the marker-only half) survives: it is what
+// inFlightAdvisory uses to fill in ctx.sessionId.
 
 function readStaleMinutesDefault(root) {
   try {
@@ -202,7 +184,7 @@ export function readRegister(root) {
 
 // ---------------------------------------------------------------------------
 // withOwnerMkdirLock — the ONE lock primitive, shared by the register and the
-// review ledger. mkdir-exclusivity + an owner.json {pid, host, at, nonce}.
+// legacy compatibility lock. mkdir-exclusivity + an owner.json {pid, host, at, nonce}.
 // Takeover ONLY when owner.host === this host AND owner.pid is verified not
 // running (process.kill(pid, 0) -> ESRCH). NEVER by age. A lock whose owner
 // cannot be verified dead on this host refuses (coordination, not evidence);
@@ -213,13 +195,13 @@ export function readRegister(root) {
 // caller (register and ledger alike) awaits it.
 // ---------------------------------------------------------------------------
 
-const LOCK_CODE_BY_BASENAME = {
-  'dispatch-register.lock': 'register_lock_held',
-  'review-ledger.lock': 'ledger_lock_held',
-};
-
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename(lockDir)] ?? 'register_lock_held';
+// lockCodeFor used to branch on the lock dir's basename to distinguish the
+// register lock from a legacy 'review-ledger.lock' compatibility lock
+// (withLedgerLock, DELETED — no caller anywhere, grepped). withOwnerMkdirLock
+// is now reached only through withRegisterLock, so every refusal it throws is
+// a register refusal.
+function lockCodeFor() {
+  return 'register_lock_held';
 }
 
 function isPidAlive(pid) {
@@ -314,7 +296,7 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
                   `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) — left as a tombstone at ${tombstone}; verify and remove by hand\n`
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender — refusing this call rather than proceeding on unverified state`
                 );
@@ -326,7 +308,7 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} — coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -353,10 +335,6 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 
 export function withRegisterLock(root, fn, opts = {}) {
   return withOwnerMkdirLock(registerLockDir(root), fn, opts);
-}
-
-export function withLedgerLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(ledgerLockDir(root), fn, opts);
 }
 
 // ---------------------------------------------------------------------------

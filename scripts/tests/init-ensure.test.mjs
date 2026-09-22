@@ -10,7 +10,6 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { ProjectRegistry, SterlingStore } from '@sterling/store';
-import { SANCTIONED_SCRIPTS } from '../lib/store-remediation.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -159,13 +158,13 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
   try {
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 0, r.stderr);
-    for (const a of [...ARTIFACTS, '.sterling/sterling.db', '.sterling/runs', 'docs/briefs', '.claude/agents/coder.md']) {
+    for (const a of [...ARTIFACTS, '.sterling/sterling.db', '.sterling/runs', 'docs/briefs', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, a)), `created ${a}`);
     }
     // a consuming project gets NO per-project .mcp.json — the plugin declares sterling
     assert.ok(!existsSync(join(dir, '.mcp.json')), 'no per-project .mcp.json — the plugin declares the sterling server');
     assert.match(r.stdout, /^\.mcp\.json\s+matches\s+not written — the plugin declares sterling/m);
-    // init never manages .claude/settings.local.json (decision 097851ed, refined): the MCP
+    // init never manages .claude/settings.local.json (decision foreign_097851ed, refined): the MCP
     // dual-role is gone (the plugin declares its server via plugin.json mcpServers, not a root
     // .mcp.json), so no enable-flag enforcement is needed — a consuming project keeps its own.
     assert.ok(!existsSync(join(dir, '.claude', 'settings.local.json')), 'consuming project: settings.local.json left to the user (init never writes it)');
@@ -175,7 +174,7 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.equal(config.project_name, 'ensure-target', 'project name recorded for flagless re-runs');
     assert.ok(config.backup_path.endsWith('/backups'), 'backup path recorded absolute, forward slashes');
-    assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)');
+    assert.deepEqual(config.stack_tags, ['node', 'sterling'], 'fresh init gets the universal sterling domain on top of declared tags (decision 47be4388)'); // not-a-citation: fixture id
     // native-Windows launcher (sterling-windows.bat): fully native, generated from the fake win-node
     assert.match(r.stdout, /^sterling-windows\.bat\s+created\b/m);
     const nat = readFileSync(join(dir, 'sterling-windows.bat'), 'utf8');
@@ -187,11 +186,11 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     // option B: native claude loads the Windows MCP config and strictly ignores the plugin's WSL server
     assert.match(nat, /--mcp-config "[^"]*\\\.claude-plugin\\sterling-mcp-win\.json" --strict-mcp-config/, 'native claude loads the Windows MCP config strictly');
 
-    // --- decision ffe7c416 / board 3873d33b: THE WSL BRIDGE IS GONE -------
+    // --- decision foreign_ffe7c416 / board 3873d33b: THE WSL BRIDGE IS GONE -------
     // WAS (P5, AC8): the native launcher shelled to wsl.exe EXACTLY ONCE, to
     // refresh a VACUUM-INTO snapshot of the WSL-resident domain stores before
     // launching the native panes — a native process cannot live-read WAL stores
-    // over 9p (research_finding 5c6437d8, `database is locked`). That bridge
+    // over 9p (research_finding foreign_5c6437d8, `database is locked`). That bridge
     // served a MIXED host.
     //
     // NOW (ffe7c416, user-decided 2026-08-27; board 3873d33b): Sterling users
@@ -343,7 +342,7 @@ test('native launcher SKIPPED loudly when no Windows node is resolvable (P5), wi
     const r = init(dir, FRESH_FLAGS, { STERLING_WIN_NODE: '' });
     assert.equal(r.code, 0, r.stderr); // the rest of init still completes
     assert.match(r.stdout, /^sterling-windows\.bat\s+skipped\b/m, 'reports skipped, not silently absent');
-    // STILL CORRECT AFTER decision ffe7c416, and deliberately so — do not
+    // STILL CORRECT AFTER decision foreign_ffe7c416, and deliberately so — do not
     // "modernize" this into the host-native mode note. STERLING_WIN_NODE is
     // DEFINED here (empty string), which under ffe7c416's resolution order is an
     // EXPLICIT OVERRIDE that says "use this Windows node" and names nothing. That
@@ -373,7 +372,7 @@ test('ensure outcome 2 — skip matching: a flagless re-run reports matches and 
     for (const item of ['\\.sterling/config\\.json', 'CLAUDE\\.md', 'sterling\\.bat', 'sterling-windows\\.bat', 'tui\\.bat', 'sterling-launch\\.sh', 'sterling-update\\.bat', '\\.mcp\\.json', '\\.gitignore']) {
       assert.match(rerun.stdout, new RegExp(`^${item}\\s+matches\\b`, 'm'), `${item} reported as matching`);
     }
-    assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+matches\b/m);
+    assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+matches\b/m);
     assert.match(rerun.stdout, /^\.sterling\/sterling\.db\s+exists\b/m, 'store is data — exists, never compared or recreated');
     assert.match(rerun.stdout, /no agent changes — no restart required/);
     assert.ok(!/RESTART REQUIRED/.test(rerun.stdout), 'no restart demanded when nothing changed');
@@ -390,28 +389,28 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     // tune the config, edit the contract, modify an installed agent body
     const configPath = join(dir, '.sterling', 'config.json');
     const tuned = JSON.parse(readFileSync(configPath, 'utf8'));
-    tuned.caps.inner_loop_n = 7;
+    tuned.delegation.max_concurrent = 7;
     writeFileSync(configPath, JSON.stringify(tuned, null, 2));
     appendFileSync(join(dir, 'CLAUDE.md'), '\n## Local additions\n- the human wrote this\n');
-    appendFileSync(join(dir, '.claude', 'agents', 'coder.md'), '\nlocal tweak\n');
+    appendFileSync(join(dir, '.claude', 'agents', 'librarian.md'), '\nlocal tweak\n');
     const before = snapshot(dir);
-    const agentBefore = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8');
+    const agentBefore = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8');
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+differs\s+left untouched/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
-    assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+differs\s+locally modified/m);
+    assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+differs\s+locally modified/m);
     assert.deepEqual(snapshot(dir), before, 'hand-edited files untouched');
-    assert.equal(readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8'), agentBefore, 'modified agent untouched');
-    // tuned declarations still drive the run: caps came from the recorded config
-    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).caps.inner_loop_n, 7);
+    assert.equal(readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8'), agentBefore, 'modified agent untouched');
+    // tuned declarations still drive the run: delegation came from the recorded config
+    assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).delegation.max_concurrent, 7);
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
 
-test('universal sterling domain: a config lacking it gains it on re-init (refreshed), hand-tunings preserved (decision 47be4388)', () => {
+test('universal sterling domain: a config lacking it gains it on re-init (refreshed), hand-tunings preserved (decision foreign_47be4388)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
@@ -419,7 +418,7 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
     // simulate a project init'd by older code: strip the universal tag, AND tune a field
     const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
     cfg.stack_tags = cfg.stack_tags.filter((t) => t !== 'sterling'); // → ['node']
-    cfg.caps.inner_loop_n = 7; // a hand-tuning that MUST survive the managed add
+    cfg.delegation.max_concurrent = 7; // a hand-tuning that MUST survive the managed add
     writeFileSync(configPath, JSON.stringify(cfg, null, 2));
 
     const rerun = init(dir); // flagless re-init
@@ -427,277 +426,11 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\s+added the universal 'sterling' domain/m);
     const after = JSON.parse(readFileSync(configPath, 'utf8'));
     assert.deepEqual(after.stack_tags, ['node', 'sterling'], 'sterling appended; declared tag kept');
-    assert.equal(after.caps.inner_loop_n, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
+    assert.equal(after.delegation.max_concurrent, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
-
-// =============================================================================
-// Board 52c1d504 — config-space SANCTIONED-script merge (generalizes the
-// board 1b3c7bf3 / decision bc0f81e3 remediation reach). SPEC-ONLY: init.mjs's
-// implementation was NOT read to author these — only the dispatch SPEC and
-// store-remediation.mjs's declared exports (SANCTIONED_SCRIPTS,
-// appendMissingSanctioned) were used, mirroring the universal-domain
-// managed-refresh test above (same 'refreshed' vocabulary, same
-// read-modify-write-then-still-validates shape).
-//
-// SPEC: a recorded config whose store_guard.allow_scripts is missing any of
-// SANCTIONED_SCRIPTS (config.ts's shipped allow_scripts default) gains
-// EXACTLY the missing ones on a flagless re-run, reported 'refreshed' with the
-// added scripts disclosed in the detail text; existing entries/order
-// preserved; the merged raw JSON still validates via parseConfig.
-// Already-fully-covered is NOT rewritten for this reason (falls through to
-// the normal matches/differs outcome). A wrong-shaped store_guard or
-// allow_scripts skips the merge with a warning, field left untouched.
-//
-// RE-CUT 2026-09-07 (re-cut discipline per decision 77c5b85a
-// `sanctioned-script-reach-carries-the-shipped-list`).
-//   OLD PREMISE: the four tests below spell the shipped list out as a 9-entry
-//     literal (and seed their "fully covered" fixture with those nine).
-//   NEW PREMISE: the list is 15 entries and grows by individual disposition
-//     (commits 5a9fe39e, b93a096e), so a re-spelled literal here made these
-//     MERGE tests a second CONTENTS pin that reds on every sanctioned addition.
-//   WHAT DID NOT CHANGE: what they pin — only the missing shipped entries are
-//     appended, after all existing entries, in SANCTIONED_SCRIPTS order;
-//     existing entries/order and hand-tunings survive; every appended entry is
-//     disclosed by name in the report detail; a fully-covered config is never
-//     'refreshed' for the merge reason and stays byte-identical.
-//   WHERE THE CONTENTS ARE PINNED: scripts/tests/store-remediation.test.mjs,
-//     which spells the literal out ONCE (and would red on a corrupted or
-//     emptied export). The anti-vacuity floor below refuses a degenerate
-//     constant here too, so deriving is not self-certification.
-assert.ok(
-  Array.isArray(SANCTIONED_SCRIPTS) && SANCTIONED_SCRIPTS.length >= 9,
-  `ANTI-VACUITY: the merge expectations below derive from SANCTIONED_SCRIPTS, so a degenerate constant would make them pass vacuously — got ${JSON.stringify(SANCTIONED_SCRIPTS)}`
-);
-assert.ok(
-  SANCTIONED_SCRIPTS.every((s) => typeof s === 'string' && s.length > 0 && !s.startsWith('/') && !s.includes('\\')),
-  'ANTI-VACUITY: SANCTIONED_SCRIPTS must be repo-relative POSIX strings (path invariant)'
-);
-assert.equal(new Set(SANCTIONED_SCRIPTS).size, SANCTIONED_SCRIPTS.length, 'ANTI-VACUITY: a duplicate in the shipped list would make the merge/no-op expectations ambiguous');
-
-/** What the merge must produce: recorded entries in their recorded order, then
- *  ONLY the shipped entries they lack, in SANCTIONED_SCRIPTS order. */
-const sanctionedMergedWith = (preExisting) => [
-  ...preExisting,
-  ...SANCTIONED_SCRIPTS.filter((s) => !preExisting.includes(s)),
-];
-/** Exactly the entries the merge must append — and exactly the names its
- *  'refreshed' detail must contain (the shipped detail lists them all,
- *  comma-separated and untruncated). */
-const sanctionedAddedTo = (preExisting) => SANCTIONED_SCRIPTS.filter((s) => !preExisting.includes(s));
-/** A FULLY-COVERED fixture in deliberately NON-CANONICAL order, `extra` entries
- *  among them: presence is membership, never position, so this must be a no-op
- *  for the merge. Derived, so a newly sanctioned script cannot leave the seed
- *  silently incomplete — which is exactly how this fixture went stale. */
-const sanctionedFullyCoveredNonCanonical = (extra = []) => {
-  const reversed = [...SANCTIONED_SCRIPTS].reverse();
-  return [reversed[0], ...extra, ...reversed.slice(1)];
-};
-// =============================================================================
-
-test('store_guard sanctioned merge: a config missing PART of the shipped sanctioned list gains exactly the missing part on re-init (refreshed), hand-tunings and existing allow_scripts entries/order preserved', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
-  try {
-    assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const configPath = join(dir, '.sterling', 'config.json');
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    // simulate a config frozen partway through the shipped list's growth: one
-    // shipped entry (migration-preflight.mjs) present, in a store_guard that
-    // also carries an unrelated admin-sanctioned entry, everything else missing.
-    const preExisting = ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'];
-    cfg.store_guard = { allow_scripts: preExisting };
-    cfg.caps.inner_loop_n = 7; // a hand-tuning that MUST survive the managed add
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-
-    const rerun = init(dir); // flagless re-init
-    assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\b/m, 'reported refreshed, not differs/created');
-    const line = rerun.stdout.match(/^\.sterling\/config\.json\s+refreshed\s+.+$/m)[0];
-    // the detail text is derived, not a hardcoded name: EVERY appended script is
-    // named in it, and no already-present shipped entry is claimed as added.
-    for (const added of sanctionedAddedTo(preExisting)) {
-      assert.ok(line.includes(added), `every added script is disclosed by name in the detail text — '${added}' missing from: ${line}`);
-    }
-    assert.ok(
-      !line.includes('scripts/migration-preflight.mjs'),
-      `the detail never claims an entry that was already recorded as added: ${line}`
-    );
-
-    const after = JSON.parse(readFileSync(configPath, 'utf8'));
-    assert.deepEqual(
-      after.store_guard.allow_scripts,
-      sanctionedMergedWith(preExisting),
-      'only the MISSING shipped sanctioned scripts are appended; existing entries and their order are untouched'
-    );
-    assert.equal(after.caps.inner_loop_n, 7, 'hand-tuning preserved — managed add, not regenerate-from-defaults');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE: have the merge regenerate store_guard.allow_scripts from the
-// schema default instead of read-modify-write appending onto the recorded
-// array — the caps.inner_loop_n hand-tuning assertion goes red (or the
-// 'scripts/some-admin-script.mjs' entry vanishes from `after`).
-// SABOTAGE (order): reorder allow_scripts into SANCTIONED_SCRIPTS canonical
-// order on merge — the deepEqual on `after.store_guard.allow_scripts` goes red
-// because 'scripts/some-admin-script.mjs' would no longer lead the array.
-
-test('store_guard sanctioned merge: a config missing EVERY shipped sanctioned script gains them all, in SANCTIONED_SCRIPTS order, appended after existing entries; all disclosed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
-  try {
-    assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const configPath = join(dir, '.sterling', 'config.json');
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    const preExisting = ['scripts/some-admin-script.mjs'];
-    cfg.store_guard = { allow_scripts: preExisting };
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-
-    const rerun = init(dir);
-    assert.equal(rerun.code, 0, rerun.stderr);
-    const line = rerun.stdout.match(/^\.sterling\/config\.json\s+refreshed\s+.+$/m);
-    assert.ok(line, 'refreshed line present');
-    // the whole shipped list is missing here, so EVERY shipped entry must be
-    // disclosed by name in the detail — derived, so the disclosure claim cannot
-    // silently shrink to whichever three names a stale literal happened to hold.
-    for (const added of sanctionedAddedTo(preExisting)) {
-      assert.ok(line[0].includes(added), `every added script is disclosed by name — '${added}' missing from: ${line[0]}`);
-    }
-    assert.match(line[0], /packages\/tui\/bundle\/sterling-tui\.mjs/, 'the TUI launcher is disclosed by name — repo-relative, never a bare basename');
-
-    const after = JSON.parse(readFileSync(configPath, 'utf8'));
-    assert.deepEqual(
-      after.store_guard.allow_scripts,
-      sanctionedMergedWith(preExisting),
-      'every missing script appended, in SANCTIONED_SCRIPTS order, after the pre-existing entry'
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE: append the two missing scripts in reversed order (migrate-stores
-// before migration-preflight) — the `after.store_guard.allow_scripts` deepEqual
-// goes red on element order.
-// SABOTAGE (silent): perform the merge but never mention the added script
-// names in the report line (e.g. print a bare "refreshed" with no detail) —
-// both `assert.match(line[0], ...)` disclosure assertions go red.
-
-test('store_guard sanctioned merge: already fully covered — NOT rewritten for this reason; a flagless re-run of a TUNED config (custom allow_scripts) reports differs (not refreshed), byte-identical, order untouched', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
-  try {
-    assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const configPath = join(dir, '.sterling', 'config.json');
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    // EVERY shipped sanctioned script present, deliberately in NON-canonical
-    // order with an unrelated admin entry among them — presence, not canonical
-    // order, is what must be checked (board 52c1d504 re-cut: the old fixture
-    // listed only the two migration scripts, a premise the ruling invalidated —
-    // such a config is now missing seven entries and MUST be refreshed).
-    // The extra admin entry keeps this array unequal to the schema default, so
-    // the config as a whole is TUNED and the correct overall outcome is
-    // 'differs'; the merge-specific claim is narrower: never 'refreshed' for
-    // the merge reason, and byte-identical.
-    // DERIVED since the 2026-09-07 re-cut: a hand-listed "fully covered" seed
-    // stops being fully covered the moment a script is sanctioned, and then this
-    // test silently changes what it pins (it flipped from 'differs' to
-    // 'refreshed' — the exact failure this re-cut answers).
-    cfg.store_guard = { allow_scripts: sanctionedFullyCoveredNonCanonical(['scripts/some-admin-script.mjs']) };
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-    const before = readFileSync(configPath, 'utf8');
-
-    const rerun = init(dir);
-    assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+differs\b/m, 'a tuned allow_scripts makes the whole config differ from the schema default — reported differs');
-    assert.ok(!/^\.sterling\/config\.json\s+refreshed\b/m.test(rerun.stdout), 'never reported refreshed for the merge reason — every shipped sanctioned script is already present');
-    assert.equal(readFileSync(configPath, 'utf8'), before, 'byte-identical — the non-canonical order is left exactly as recorded, never touched by the sanctioned merge');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE: check presence via a strict canonical-order subsequence match
-// instead of plain membership — this non-canonical-order fixture would then
-// be (wrongly) treated by the sanctioned merge as missing something, and
-// the byte-identical assertion goes red (the merge would rewrite the file
-// even though every shipped sanctioned script is already present).
-
-// =============================================================================
-// Round 2 (board 1b3c7bf3 supersession) — RAW-SERIALIZE preserves unknown keys.
-// SPEC-ONLY: init.mjs's implementation was NOT read to author this — only the
-// dispatch SPEC. parseConfig's own non-strict-object behavior (unknown keys
-// STRIP from its parsed/returned value — pinned independently in
-// packages/schemas/src/tests/config.test.ts, e.g. the legacy
-// blast_radius_hard_threshold-stripped case) is a sibling-test-verified fact,
-// not an implementation read. The merge must therefore serialize the RAW
-// mutated JSON object back to disk — using parseConfig only as a
-// throws-or-not validation gate — or any unknown top-level key present in a
-// recorded config (a future field this init build doesn't know about yet)
-// would silently vanish on the very re-init that also performs the
-// sanctioned-script merge.
-// =============================================================================
-
-test('config raw-serialize: an unknown/future top-level key survives byte-for-byte through a re-init that ALSO performs the sanctioned-script merge (parseConfig is a validation gate only, never the serialized shape)', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
-  try {
-    assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const configPath = join(dir, '.sterling', 'config.json');
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    // an unknown top-level key this build's schema does not declare — schema-valid
-    // overall because unrecognized keys are tolerated (non-strict), not rejected.
-    cfg.future_policy = { some_future_field: 'x', nested: { a: 1, b: [1, 2, 3] } };
-    // AND, in the same write, missing sanctioned scripts — so the merge path
-    // that writes the file back is actually exercised, not just the load gate.
-    const preExisting = ['scripts/some-admin-script.mjs', 'scripts/migration-preflight.mjs'];
-    cfg.store_guard = { allow_scripts: preExisting };
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-
-    const rerun = init(dir); // flagless re-init
-    assert.equal(rerun.code, 0, rerun.stderr);
-    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+refreshed\b/m, 'the sanctioned merge fired — refreshed, not matches/differs');
-
-    const after = JSON.parse(readFileSync(configPath, 'utf8'));
-    assert.deepEqual(
-      after.future_policy,
-      { some_future_field: 'x', nested: { a: 1, b: [1, 2, 3] } },
-      'the unknown top-level key survives the write byte-for-byte-equivalent (raw serialize) even though this build\'s schema does not declare it'
-    );
-    assert.deepEqual(
-      after.store_guard.allow_scripts,
-      sanctionedMergedWith(preExisting),
-      'the sanctioned merge itself still ran correctly in the same write'
-    );
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE: serialize parseConfig(mutated)'s RETURN value instead of the raw
-// mutated object (e.g. `writeFileSync(configPath, JSON.stringify(parseConfig(cfg), ...))`)
-// — parseConfig's non-strict object strips future_policy on output, so
-// after.future_policy is undefined and the first deepEqual goes red.
-
-test('a schema-invalid store_guard makes init REFUSE outright (exit 2, "does not validate") — the anti-destructive load gate, not the sanctioned merge, is what actually guards this path', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
-  try {
-    assert.equal(init(dir, FRESH_FLAGS).code, 0);
-    const configPath = join(dir, '.sterling', 'config.json');
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8'));
-    cfg.store_guard = 'not-an-object'; // schema-invalid shape
-    writeFileSync(configPath, JSON.stringify(cfg, null, 2));
-    const before = readFileSync(configPath, 'utf8');
-
-    const rerun = init(dir);
-    assert.equal(rerun.code, 2, 'a schema-invalid recorded config refuses rather than being silently merged or regenerated');
-    assert.match(rerun.stderr, /does not validate/i, 'the refusal names the reason');
-    assert.equal(readFileSync(configPath, 'utf8'), before, 'the refusal happens before any write — the malformed file is left byte-identical');
-  } finally {
-    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
-  }
-});
-// SABOTAGE: move the parseConfig validation gate to AFTER an attempted
-// remediation-merge (or drop it and let the merge code's own typeof guard be
-// the only line of defense) — init would then exit 0 and either leave a
-// still-invalid file in place or attempt to interpret 'not-an-object', so the
-// exit-2 assertion goes red.
 
 test('never-clobber: a pre-existing CLAUDE.md survives the FIRST init byte-for-byte; init completes around it', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
@@ -708,7 +441,7 @@ test('never-clobber: a pre-existing CLAUDE.md survives the FIRST init byte-for-b
     assert.equal(r.code, 0, `init completes around the existing CLAUDE.md, no refusal: ${r.stderr}`);
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), ownContract, 'NEVER clobbered');
     assert.match(r.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
-    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/coder.md']) {
+    for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, a)), `the rest of the manifest still created: ${a}`);
     }
   } finally {
@@ -736,12 +469,12 @@ test('individually regenerable: deleted artifacts are recreated by a flagless re
     assert.equal(init(dir, FRESH_FLAGS).code, 0);
     const launcherBefore = readFileSync(join(dir, 'sterling.bat'), 'utf8');
     unlinkSync(join(dir, 'sterling.bat'));
-    unlinkSync(join(dir, '.claude', 'agents', 'coder.md'));
+    unlinkSync(join(dir, '.claude', 'agents', 'librarian.md'));
 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^sterling\.bat\s+created\b/m);
-    assert.match(rerun.stdout, /^\.claude\/agents\/coder\.md\s+created\b/m);
+    assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+created\b/m);
     assert.match(rerun.stdout, /^CLAUDE\.md\s+matches\b/m, 'untouched items still match');
     assert.match(rerun.stdout, /RESTART REQUIRED/, 'reinstalled agent → restart instruction again');
     assert.equal(readFileSync(join(dir, 'sterling.bat'), 'utf8'), launcherBefore, 'regenerated identically');
@@ -802,7 +535,7 @@ test('MCP store args: plugin config stays bare ${CLAUDE_PROJECT_DIR}; the --mcp-
   );
 });
 
-test('init notes the project in the shared registry (decision 8f9e6db2)', () => {
+test('init notes the project in the shared registry (decision foreign_8f9e6db2)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     const r = init(dir, FRESH_FLAGS);
@@ -813,7 +546,7 @@ test('init notes the project in the shared registry (decision 8f9e6db2)', () => 
       const me = reg.list().find((p) => p.repo_path === dir.replace(/\\/g, '/'));
       assert.ok(me, 'this project is registered, keyed by its absolute POSIX repo path');
       assert.equal(me.name, 'ensure-target');
-      assert.deepEqual(me.stack_tags, ['node', 'sterling'], 'declared tag + the auto-injected universal sterling domain (decision 47be4388)');
+      assert.deepEqual(me.stack_tags, ['node', 'sterling'], 'declared tag + the auto-injected universal sterling domain (decision 47be4388)'); // not-a-citation: fixture id
       assert.deepEqual(me.toolchains, ['node']);
       assert.equal(me.first_init_at, me.last_init_at, 'fresh init: first_init_at == last_init_at');
       assert.equal(me.last_seen_at, null, 'no session-start touch yet');
@@ -843,9 +576,9 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 
     // config.models is present and pinned in the config init just wrote.
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
-    assert.ok(config.models && config.models.coder, 'init wrote config.models with a coder entry');
+    assert.ok(config.models && config.models.librarian, 'init wrote config.models with a librarian entry');
 
-    for (const name of ['coder.md', 'reviewer-correctness.md']) {
+    for (const name of ['librarian.md', 'scout.md']) {
       const installed = readFileSync(join(dir, '.claude', 'agents', name), 'utf8');
       const fm = installed.match(/^---\n([\s\S]*?)\n---/)[1];
       assert.ok(!installed.includes('{{'), `${name}: no substitution token survives install`);
@@ -853,10 +586,10 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
       assert.match(fm, /^effort: [a-z]+$/m, `${name}: effort resolved to a concrete value`);
     }
 
-    // coder resolves to the shipped-default coder model — config.models is the
-    // authoritative source at install (matches config.test.ts's shipped default).
-    const coderFm = readFileSync(join(dir, '.claude', 'agents', 'coder.md'), 'utf8').match(/^---\n([\s\S]*?)\n---/)[1];
-    assert.match(coderFm, /^model: claude-sonnet-5$/m, 'coder installs on the shipped-default coder model (config.models authoritative)');
+    // librarian resolves to the shipped-default librarian model — config.models is
+    // the authoritative source at install (matches config.test.ts's shipped default).
+    const librarianFm = readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8').match(/^---\n([\s\S]*?)\n---/)[1];
+    assert.match(librarianFm, /^model: claude-sonnet-5$/m, 'librarian installs on the shipped-default librarian model (config.models authoritative)');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
@@ -865,7 +598,7 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 // =============================================================================
 // P5 — domain-knowledge snapshot bridge: scripts/snapshot-domains-for-windows.mjs
 //
-// SCOPE NARROWED BY decision ffe7c416 / board 3873d33b (2026-08-27) — READ THIS
+// SCOPE NARROWED BY decision foreign_ffe7c416 / board 3873d33b (2026-08-27) — READ THIS
 // BEFORE TRUSTING THE PARAGRAPH BELOW. The native launcher NO LONGER invokes
 // this script: under never-cross-usage a Windows-only user's native processes
 // open their own %USERPROFILE%\.sterling\domains directly, so the launch-path
@@ -880,7 +613,7 @@ test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed 
 // domain store into the Windows-local default path at startup; the native TUI
 // opens those read-only and shows their records (stale-as-of-launch). The WSL
 // side of that bridge is this script. A native process cannot live-read the
-// WSL-resident WAL stores (research_finding 5c6437d8) — so the source domain
+// WSL-resident WAL stores (research_finding foreign_5c6437d8) — so the source domain
 // stores are snapshotted (VACUUM INTO, reusing SterlingStore.snapshot /
 // MountedStores.snapshotAll) into the Windows-local default path read-only.
 //
@@ -1068,7 +801,7 @@ test('P5 snapshot script: refreshes over an existing snapshot — a second run r
 
 // =============================================================================
 // Part C (sparring-partner slice 1) — codex MCP-server wiring through init's
-// plugin-repo branch (decision cd019e0b, concept slug
+// plugin-repo branch (decision foreign_cd019e0b, concept slug
 // sparring-partner-partnership-shape). Spec only, per the dispatch — init.mjs's
 // implementation body was NOT read to author these.
 //
@@ -1367,12 +1100,12 @@ test('sparring-partner-win case 1 (CONTROL ARM for case 9 below): probe OK with 
     assert.ok(existsSync(mcpPath), 'native-Windows MCP config generated (plugin-repo branch)');
     const mcp = JSON.parse(readFileSync(mcpPath, 'utf8'));
     assert.ok(mcp.mcpServers && mcp.mcpServers.sterling, 'sterling entry present alongside codex');
-    // COMMENT CORRECTED per decision ffe7c416 (host-native init, user-decided
+    // COMMENT CORRECTED per decision foreign_ffe7c416 (host-native init, user-decided
     // 2026-08-27). This assertion's original message claimed the win entry is
     // "the same entry object the WSL branch wires, not a win-specific variant".
     // That is now INVERTED: defect (2) of the ruling is that discarding the
     // resolved absolute path left codex-on-Windows unable to spawn after a
-    // SUCCESSFUL probe (npm ships codex.cmd; research_finding 0c712d94 measured
+    // SUCCESSFUL probe (npm ships codex.cmd; research_finding foreign_0c712d94 measured
     // PATH to be an unreliable presence oracle on the target host). So the win
     // entry IS win-specific WHENEVER the probe resolved a path — case 9 below
     // pins exactly that. What survives is the FALLBACK: a probe that resolved
@@ -1604,7 +1337,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 // rewrite. That is exactly the discrimination this control arm buys.
 
 // =============================================================================
-// Part F (decision ffe7c416 — host-native init with a dev-machine escape hatch,
+// Part F (decision foreign_ffe7c416 — host-native init with a dev-machine escape hatch,
 // USER-DECIDED 2026-08-27; boards 99f53af8 / 4c3a8e59 / 3873d33b). SPEC-ONLY:
 // scripts/init-impl.mjs's implementation body was NOT read to author these.
 //
@@ -1613,7 +1346,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 //   (1) HOST-NATIVE IS THE DEFAULT MODE, and a missing Windows launcher on a
 //       non-Windows host is that MODE, not a broken PATH. ffe7c416 defect (1):
 //       `where.exe node` gated BOTH the native launcher AND the Windows MCP
-//       config, and research_finding 0c712d94 MEASURED node to be absent from
+//       config, and research_finding foreign_0c712d94 MEASURED node to be absent from
 //       the Windows PATH on the very host this must serve — so one PATH miss
 //       cost a Windows user both artifacts. The resolution order is now
 //       STERLING_WIN_NODE (honored on KEY PRESENCE, defined-even-empty) ->
@@ -1641,7 +1374,7 @@ test('sparring-partner-win case 8 (CONTROL ARM for case 6): re-init with the win
 //   • The `process.platform === 'win32' -> process.execPath` arm has NO
 //     injection seam by design, so it cannot be exercised from a Linux/WSL test
 //     run. Faking one would test the fake. It is owed a real native-Windows
-//     sitting; note that research_finding 0c712d94 measured the h17 suite
+//     sitting; note that research_finding foreign_0c712d94 measured the h17 suite
 //     returning 0 pass / 36 SKIP on that host, so a pin added "for Windows"
 //     today would be permanently skipped, i.e. hollow by construction. The
 //     host-native arms below are therefore explicitly skipped ON win32 rather
@@ -1741,7 +1474,7 @@ test('ffe7c416 (1): with NO Windows node and NO opt-in, the native launcher and 
     assert.equal(r.code, 0, `host-native is a MODE, not a failure — init still exits 0: ${r.stderr}`);
 
     assert.ok(!existsSync(join(dir, 'sterling-windows.bat')), 'no Windows launcher on disk — nothing half-written, no launcher pointing at a node that does not exist');
-    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no Windows MCP config either — the same host-native decision governs both artifacts (ffe7c416 defect 1: one PATH lookup used to gate both)');
+    assert.ok(!existsSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json')), 'no Windows MCP config either — the same host-native decision governs both artifacts (ffe7c416 defect 1: one PATH lookup used to gate both)'); // not-a-citation: fixture id
 
     // Loud, per P5 — an absent artifact is REPORTED, never silently missing.
     assert.match(r.stdout, /^sterling-windows\.bat\s+skipped\b/m, 'the launcher skip is reported');
@@ -1762,7 +1495,7 @@ test('ffe7c416 (1): with NO Windows node and NO opt-in, the native launcher and 
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m, 'init completed the rest of the manifest');
     assert.ok(existsSync(join(dir, 'sterling.bat')), 'the Linux/WSL launcher is still generated');
     assert.ok(existsSync(join(dir, '.sterling', 'config.json')), 'config still written');
-    assert.ok(existsSync(join(dir, '.claude', 'agents', 'coder.md')), 'agents still installed');
+    assert.ok(existsSync(join(dir, '.claude', 'agents', 'librarian.md')), 'agents still installed');
   } finally {
     rmSync(ctlDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
@@ -1945,7 +1678,7 @@ test('sparring-partner-win case 9 (ffe7c416 defect 2): the win MCP config carrie
     // is that init WRITES that path — a successful probe must prove the entry it
     // generates will actually spawn (npm ships codex.cmd, hostile to shell-less
     // spawning; PATH is a measured-unreliable oracle on the target host,
-    // research_finding 0c712d94).
+    // research_finding foreign_0c712d94).
     const r = init(dir, FRESH_FLAGS, { STERLING_PLUGIN_ROOT_MATCH: dir, STERLING_CODEX_PROBE_WIN: 'ok', STERLING_CODEX_WIN_PATH: PROBED });
     assert.equal(r.code, 0, r.stderr);
     const mcp = JSON.parse(readFileSync(join(dir, '.claude-plugin', 'sterling-mcp-win.json'), 'utf8'));
@@ -2017,7 +1750,7 @@ test('sparring-partner-win case 10: the MANAGED REFRESH carries the probed path 
 // builder that carries this verdict.
 
 // =============================================================================
-// Part G — the FOUR review-driven fixes that landed on top of decision ffe7c416
+// Part G — the FOUR review-driven fixes that landed on top of decision foreign_ffe7c416
 // (slug host-native-init-with-dev-machine-escape-hatch) with NO frozen pin. A
 // green suite over them proved only that nothing BROKE; every one of them is a
 // behaviour a future edit can silently delete.
@@ -2606,7 +2339,7 @@ test('H containment: the whole suite leaves THIS clone\'s live plugin MCP config
     assert.deepEqual(
       liveStamps(),
       LIVE_STAMPS_AT_LOAD,
-      'this clone\'s live .claude-plugin/sterling-mcp{,-win}.json must be byte-and-timestamp untouched across the entire suite: they are the MCP config the running session loads, and a suite that rewrites them repoints the live session at the test runner\'s interpreter (anti_pattern 37b3cb0a, severity block)'
+      'this clone\'s live .claude-plugin/sterling-mcp{,-win}.json must be byte-and-timestamp untouched across the entire suite: they are the MCP config the running session loads, and a suite that rewrites them repoints the live session at the test runner\'s interpreter (anti_pattern 37b3cb0a, severity block)' // not-a-citation: fixture id
     );
   } finally {
     for (const d of [pluginDir, plainDir]) rmSync(d, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });

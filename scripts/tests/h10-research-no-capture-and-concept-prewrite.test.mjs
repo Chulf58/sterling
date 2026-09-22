@@ -212,7 +212,7 @@ const owed = (store, reason) => store.query({ types: ['todo'], cap: 100 }).filte
 // lives in scripts/tests/h10-no-capture-lane-scope.test.mjs as L2,
 // asserting the OPPOSITE outcome (bare does NOT discharge research) —
 // coverage of the bare case moved and inverted, it was not dropped.
-test('SPEC1a (revised per decision 51ebe0dd, no-capture-discharge-is-lane-scoped): an explicit `--lane research` no_capture declaration AT/AFTER the research event discharges the research duty — symmetry with the capture lane', () => {
+test('SPEC1a (revised per decision foreign_51ebe0dd, no-capture-discharge-is-lane-scoped): an explicit `--lane research` no_capture declaration AT/AFTER the research event discharges the research duty — symmetry with the capture lane', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     seedEventsConfig(dir);

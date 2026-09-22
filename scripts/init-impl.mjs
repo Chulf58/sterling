@@ -28,12 +28,11 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
-import { syncAgents, findDeadTerms, RESTART_INSTRUCTION } from './lib/agent-distribution.mjs';
+import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
 import { probeCodex, probeCodexWin, withCodexEntry, codexSkipLine } from './lib/codex-mcp.mjs';
-import { appendMissingSanctioned } from './lib/store-remediation.mjs';
 import { renderUnavailable } from './hooks/lib/undeclared-source.mjs';
 import { computeUndeclaredSourceDisclosure } from './hooks/lib/undeclared-source-scan.mjs';
 
@@ -139,7 +138,7 @@ const eff = recorded
 
 // Every Sterling-initialized project mounts a universal `sterling` domain so
 // general Sterling-tooling knowledge (gotchas, conventions, anti_patterns about
-// using Sterling itself) is shared across ALL projects (decision 47be4388). It
+// using Sterling itself) is shared across ALL projects (decision foreign_47be4388). It
 // is force-added to the §3.3 mount manifest regardless of what the project
 // declares — deduped, ordered AFTER the project's own tags so project/tech
 // knowledge still ranks ahead of the shared tooling domain.
@@ -205,7 +204,7 @@ if (!recorded) {
   let mutated = rawRecorded;
   const mutationNotes = [];
 
-  // managed mutation (decision 47be4388): every project mounts the universal
+  // managed mutation (decision foreign_47be4388): every project mounts the universal
   // `sterling` domain. Surgically ADD it, preserving every hand-tuned field —
   // NOT a regenerate-from-defaults (that would clobber tunings).
   if (!recorded.stack_tags.includes(UNIVERSAL_DOMAIN)) {
@@ -213,40 +212,12 @@ if (!recorded) {
     mutationNotes.push(`added the universal '${UNIVERSAL_DOMAIN}' domain to stack tags (now [${eff.stackTags.join(', ')}])`);
   }
 
-  // Sanctioned-script reach (board 52c1d504; original trap: decision bc0f81e3,
-  // board 1b3c7bf3): a config frozen with an EXPLICIT store_guard.allow_scripts
-  // before the schema default grew never gains newly-sanctioned scripts,
-  // because an explicit array REPLACES the zod default rather than extending
-  // it — measured for the mandated migration scripts (the one thing an
-  // H15-denied consumer could never run to escape a read-only store) and again
-  // for the TUI launcher. The merge carries exactly what config.ts SHIPS as
-  // sanctioned, so it changes which projects that list reaches, never what is
-  // on it. Additive-only, disclosed below (never silent — anti_pattern
-  // 94f16632); a wrong-shaped store_guard/allow_scripts is warned about and
-  // left alone, never replaced.
-  const rawGuard = mutated.store_guard;
-  if (rawGuard !== undefined) {
-    if (rawGuard === null || typeof rawGuard !== 'object' || Array.isArray(rawGuard)) {
-      warns.push('warn: .sterling/config.json store_guard is not an object — skipping the sanctioned-script reach merge (board 52c1d504); its shape was not written by init and will not be replaced');
-    } else if (rawGuard.allow_scripts !== undefined && !Array.isArray(rawGuard.allow_scripts)) {
-      warns.push('warn: .sterling/config.json store_guard.allow_scripts is not an array — skipping the sanctioned-script reach merge (board 52c1d504); its shape was not written by init and will not be replaced');
-    } else if (Array.isArray(rawGuard.allow_scripts)) {
-      const { next, added } = appendMissingSanctioned(rawGuard.allow_scripts);
-      if (added.length) {
-        mutated = { ...mutated, store_guard: { ...rawGuard, allow_scripts: next } };
-        mutationNotes.push(`store_guard.allow_scripts gained script(s) Sterling ships as sanctioned that this explicit array was missing: ${added.join(', ')}`);
-      }
-    }
-    // allow_scripts absent on an explicit store_guard object: the schema
-    // default already supplies the grown list — nothing to merge.
-  }
-
   if (mutationNotes.length) {
     // parseConfig is a VALIDATION GATE only — it throws (refuses the write) if
     // the merged config is invalid, but its RETURN value is discarded. Zod
     // materializes every absent default and STRIPS tolerated unknown/future
     // keys, so serializing its return would silently rewrite policy the merge
-    // never touched (additive-only violation, anti_pattern 94f16632). Serialize
+    // never touched (additive-only violation, anti_pattern foreign_94f16632). Serialize
     // the RAW `mutated` object instead — rawRecorded plus only the additive
     // changes above — so unknown keys survive and no defaults are materialized
     // beyond what was already recorded on disk.
@@ -309,7 +280,7 @@ if (!existsSync(claudeMdPath)) {
   items.push({ item: 'CLAUDE.md', status: 'differs', detail: 'left untouched — merge the conductor contract by hand (template: templates/target-claude-md.md)' });
 }
 
-// WSL/tmux launchers (§11, decision bb5e25cd): all projects are WSL (company
+// WSL/tmux launchers (§11, decision foreign_bb5e25cd): all projects are WSL (company
 // policy), so init generates the new-way launchers — a thin Windows .bat that
 // double-clicks into `wt -> wsl --cd <project> -> bash -lic ./sterling-launch.sh`,
 // plus the per-project tmux launcher sterling-launch.sh (claude left, TUI right).
@@ -370,7 +341,7 @@ const dualContext = process.argv.includes('--dual-context') || process.env.STERL
 // STERLING_CODEX_PROBE — honored at THIS call site only. unset/'' -> the real host
 // predicate; 'host-native' / 'dual-context' force the arm. It exists because the
 // host-native arm is otherwise unreachable from the Linux host the suite runs on, and a
-// permanently-skipped pin is a hollow pin (research_finding 0c712d94, M6: 36 tests that
+// permanently-skipped pin is a hollow pin (research_finding foreign_0c712d94, M6: 36 tests that
 // reported 0 failures by running none). Unknown value halts loud (P5).
 const nativeMcpModeOverride = process.env.STERLING_NATIVE_MCP_MODE;
 const nativeMcpNeedsWinConfig = !nativeMcpModeOverride
@@ -666,17 +637,26 @@ for (const a of agentReport) {
   const map = {
     installed: { status: 'created', detail: 'installed with version/hash header' },
     refreshed: { status: 'refreshed', detail: 'clean install, newer template — regenerated' },
+    header_repaired: { status: 'refreshed', detail: 'Sterling header repaired in place — content unchanged' },
+    machine_rebaked: { status: 'refreshed', detail: 'machine-specific paths re-baked for this host (node/hooks dir), template unchanged' },
     up_to_date: { status: 'matches', detail: 'template hash + content hash match' },
     locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
     refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
     foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },
+    retired: { status: 'retired', detail: 'removed a clean Sterling-generated agent no longer in the registry' },
+    retired_unrecognized: { status: 'refused', detail: 'Sterling-marked retired agent has an unrecognized header — left untouched (see guidance below)' },
+    retired_but_modified: { status: 'refused', detail: 'retired Sterling agent was locally modified — left untouched (see guidance below)' },
+    retired_identity_mismatch: { status: 'refused', detail: 'retired Sterling agent identity is ambiguous — left untouched (see guidance below)' },
+    retired_read_failed: { status: 'refused', detail: 'retired Sterling agent could not be read — left untouched (see guidance below)' },
+    retired_delete_failed: { status: 'refused', detail: 'retired Sterling agent could not be deleted (see guidance below)' },
+    retired_scan_failed: { status: 'refused', detail: 'agent directory could not be scanned for retired Sterling agents (see guidance below)' },
   }[a.status];
   items.push({ item: `.claude/agents/${a.name}.md`, status: map.status, detail: map.detail });
   if (a.instruction) agentInstructions.push(a.instruction);
 }
-const restartNeeded = agentReport.some((a) => a.status === 'installed' || a.status === 'refreshed');
+const restartNeeded = agentChangesRequireRestart(agentReport);
 
-// MCP packaging (decision 097851ed, refined): the Sterling MCP server is declared
+// MCP packaging (decision foreign_097851ed, refined): the Sterling MCP server is declared
 // ONCE as the PLUGIN's server — but NOT via a root .mcp.json. A root .mcp.json is
 // BOTH auto-discovered by the plugin AND read as Sterling-self's project-scope config
 // (the dual-role), and bare ${CLAUDE_PROJECT_DIR} does not substitute in project scope
@@ -807,7 +787,7 @@ const codexIsThisRunsConcern = initIsPluginRepo || !pluginMcpExists || !existing
 const codexProbe = !codexIsThisRunsConcern
   ? undefined
   : (forcedCodexProbe ?? (process.platform === 'win32' ? probeCodexWin() : probeCodex()));
-if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason));
+if (codexProbe && !codexProbe.ok) warns.push(codexSkipLine(codexProbe.reason, codexProbe.version));
 const desired = {
   mcpServers: codexProbe
     ? withCodexEntry({ sterling: pluginMcpEntry }, codexProbe)
@@ -966,7 +946,7 @@ if (!initIsPluginRepo) {
 
 if (initIsPluginRepo) {
   // ALSO — IN DUAL-CONTEXT MODE ONLY — the native-claude Windows MCP config (option B,
-  // decision a756e5d9 / native-claude-mcp-via-strict-win-config): sterling-windows.bat
+  // decision foreign_a756e5d9 / native-claude-mcp-via-strict-win-config): sterling-windows.bat
   // launches claude.exe with `--mcp-config <this> --strict-mcp-config` so NATIVE claude
   // runs the MCP server on the WINDOWS node, because the plugin's sterling-mcp.json names
   // THIS (non-Windows) interpreter and cannot run under native claude (-32000). Generated
@@ -1032,7 +1012,7 @@ if (initIsPluginRepo) {
           : codexProbeWinOverride === 'not-logged-in'
             ? { ok: false, reason: 'not-logged-in' }
             : fail(`STERLING_CODEX_PROBE_WIN must be 'ok', 'absent', or 'not-logged-in' (got '${codexProbeWinOverride}')`, 2);
-    if (!codexProbeWin.ok) warns.push(codexSkipLine(codexProbeWin.reason));
+    if (!codexProbeWin.ok) warns.push(codexSkipLine(codexProbeWin.reason, codexProbeWin.version));
     const desiredWin = {
       mcpServers: withCodexEntry(
         { sterling: { command: winNode, args: [winMcpServerEntry, '--store', '${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db'] } },
@@ -1158,7 +1138,7 @@ if (missing.length) {
 // (dead-term check now runs per-render before each write — see assertNoDeadTerms,
 // audit finding 22/43 — so no poisoned file reaches disk before the refusal.)
 
-// shared project registry (decision 8f9e6db2): note this project in the
+// shared project registry (decision foreign_8f9e6db2): note this project in the
 // machine-global registry so the others are aware it exists. Upsert by repo_path,
 // bound to the init event (P4); the H1 hook later touches last_seen_at per session.
 const pluginPkg = (() => {

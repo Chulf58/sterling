@@ -35,6 +35,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { recordRevision } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -121,7 +122,7 @@ function makeProject() {
 // `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
 // knowledge_get 7c515e52 — opened, not paraphrased): H19 no longer recovers
 // the dispatch prompt from the PARENT TRANSCRIPT (3.4-5.5 s of lag, 4 of 6
-// spawns saw an older unrelated block — finding 51506eec). A dispatch is now
+// spawns saw an older unrelated block — finding foreign_51506eec). A dispatch is now
 // declared by firing its real PreToolUse Task event through
 // h22-dispatch-register.mjs, the registered owner of that seam (§7(d)), and
 // SubagentStart's transcript_path points at a file that does NOT exist.
@@ -172,7 +173,7 @@ const subagentStart = (dir, transcriptPath, extra = {}) => ({
 });
 
 const guardOf = (dir, agentId) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', `guard-agent-${agentId}.json`);
+  const p = join(dir, '.sterling', 'transient', 'delivery', 's1', `guard-agent-${agentId}.json`);
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
 };
 
@@ -232,7 +233,15 @@ test('a. no path in the prompt, but the prompt matches a stored anti_pattern\'s 
     assert.ok(rec, 'fixture record recorded in the store');
     const guard = guardOf(dir, 'agent-1');
     assert.ok(guard, 'guard file written for the spawned agent');
-    assert.ok(guard.records.includes(rec.id), 'subject-matched record id appended to the guard');
+    // Guard schema v2 (decision 92088a62): a subject-matched anti_pattern
+    // still renders as a WHOLE hazard block (substance, never a pointer), so
+    // it earns a `guard.substance` mark, not a flat `guard.records` entry —
+    // keyed on the FULL (id, revision) pair, not id alone (fix-round test-
+    // integrity requirement).
+    assert.ok(
+      guard.substance.some((e) => e.id === rec.id && e.revision === recordRevision(rec)),
+      'subject-matched hazard earns a substance mark at its exact revision'
+    );
   } finally {
     cleanup();
   }
@@ -313,7 +322,7 @@ test('d. a record reachable through BOTH the path channel (owns the named file) 
 // --- e. guard dedup on a second identical dispatch -------------------------
 
 // REPAIRED (this dispatch): the second call is contract-only, not empty —
-// the absorbed H28 contract carries no staging guard (decision 04982f45),
+// the absorbed H28 contract carries no staging guard (decision foreign_04982f45),
 // so it fires again on the repeat call even while the KNOWLEDGE DELIVERY
 // payload stays guarded. The arm's original negative intent (no re-delivery
 // of the subject-matched record) is preserved via the doesNotMatch
@@ -408,7 +417,7 @@ test('g. no path candidates AND no subject match in the prompt: contract-only un
 //        visible to this Start (was: per-prompt matching inside a union;
 //        review finding 5, commit follows 45bb722) -------------------------
 //
-// RE-CUT BY DECISION 7c515e52 (board 5445066b). The original arm pinned that
+// RE-CUT BY DECISION foreign_7c515e52 (board 5445066b). The original arm pinned that
 // subject matching ran PER PROMPT *within a union of the dispatching message's
 // prompts* — the union was the thing that could dilute a short prompt, and
 // per-prompt matching was the fix. The UNION SEMANTICS ARE DELETED: a Start
@@ -425,8 +434,7 @@ test('g. no path candidates AND no subject match in the prompt: contract-only un
 // DISCLOSED, NOT GUESSED: §3 names the label but no exact rendered sentence,
 // so this pin asserts only the ABSENCE of the hedge (which the ruling states
 // directly) — the positive wording stays unpinned here rather than invented,
-// and is owned by the porch/header pins in
-// scripts/tests/h19-dispatch-porch.test.mjs.
+// and is owned by the H19 staging delivery assertions.
 test('h. parallel dispatch: a Start sees only ITS OWN prompt, so a long sibling prompt cannot dilute a short matching one to silence', () => {
   const { dir, store, cleanup } = makeProject();
   try {

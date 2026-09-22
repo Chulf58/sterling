@@ -31,14 +31,15 @@
 //   (a) `parallel_safe_lanes` order is NOT pinned — AC2 only requires BOTH
 //       lanes be named, so the assertion is order-insensitive (sorted-array
 //       compare) rather than pinning the brief's example order literally.
-//   (b) `name` on a collision item (AC7, "human-readable name beside its
-//       id") is assumed to be the item's already-minted `slug` (S1,
-//       board-item-slug-mint.test.ts / board-item-name-render.test.ts
-//       establish `slug` as this codebase's one existing human-readable-name
-//       concept for a todo). If the real field derives the name some other
-//       way (e.g. from `text`), this is the line to move; the ANTI-bare-id
-//       verdict (name !== id, name is a non-empty string distinct from the
-//       raw uuid) is the part of AC7 pinned independently of that guess.
+//   (b) SUPERSEDED 2026-09-21 (board 081508d0): `name` on a collision item
+//       was assumed to be the item's already-minted `slug`. That reading was
+//       itself the defect the fix closes — a slug is minted once and never
+//       re-derived (updateTodo), so a collision name sourced from it goes
+//       stale the moment the item is renamed or renumbered. `name` now reads
+//       the item's CURRENT text via the shared boardDisplayLabel helper
+//       (falling back to slug only when text is blank — see GAP3a/GAP3b).
+//       The ANTI-bare-id verdict (name !== id, non-empty, not a raw uuid) is
+//       unaffected and stays pinned independently of this.
 //   (c) the scan is keyed on EXACT shared file_keys path strings (not globs
 //       or prefixes) — the brief says "sharing a file_keys path", read
 //       literally as string equality, matching how file_keys is filtered
@@ -129,14 +130,14 @@ test('AC8 (control): a single item, and items with no shared file_keys, behave e
   const { tools, cleanup } = harness();
   try {
     const solo = addRecord(tools, { text: 'A LONE ITEM.\n\nbody.', source: 'user', file_keys: ['src/solo.ts'] });
-    const r1 = tools.boardQueryResult({ source: 'user' });
+    const r1 = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.equal(r1.matched_filter, 1, 'sanity: one item on the board');
     assert.ok(!('lane_advisory' in r1), 'a single item can never collide — no lane_advisory key at all');
     assert.equal((r1.records[0].id as string), solo.id, 'the one item is returned unchanged');
 
     const a = addRecord(tools, { text: 'ITEM A.\n\nbody.', source: 'user', file_keys: ['src/a.ts'] });
     const b = addRecord(tools, { text: 'ITEM B.\n\nbody.', source: 'user', file_keys: ['src/b.ts'] });
-    const r2 = tools.boardQueryResult({ source: 'user' });
+    const r2 = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.equal(r2.matched_filter, 3, 'sanity: three items now, disjoint file_keys');
     assert.ok(!('lane_advisory' in r2), 'disjoint file_keys across every item — still no collision, still no key');
     assert.deepEqual(
@@ -164,7 +165,7 @@ test('AC3: no USER-source collision => lane_advisory key is ABSENT from the enve
     addRecord(tools, { text: 'USER OWNS SHARED.\n\nbody.', source: 'user', file_keys: ['src/shared.ts'] });
     addRecord(tools, { text: 'SYSTEM ALSO TOUCHES SHARED', source: 'system', system_reason: 'reconcile_needed', file_keys: ['src/shared.ts'] });
 
-    const r = tools.boardQueryResult({});
+    const r = tools.boardQueryResult({ projection: 'full' });
     assert.equal(r.matched_filter, 2, 'sanity: both items matched by the unfiltered query');
     assert.ok(
       !('lane_advisory' in r),
@@ -193,7 +194,7 @@ test('AC1/AC2/AC7: two USER items sharing a file_keys path produce a collision g
     const b = addRecord(tools, { text: 'WIRE THE SHARED MODULE.\n\nbody.', source: 'user', file_keys: ['src/shared.ts', 'src/b-only.ts'] });
     const c = addRecord(tools, { text: 'AN UNRELATED ITEM.\n\nbody.', source: 'user', file_keys: ['src/unrelated.ts'] });
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.equal(r.matched_filter, 3, 'sanity: three user items');
     assert.ok(r.lane_advisory, 'AC1: two items sharing a path must produce a lane_advisory block');
 
@@ -217,8 +218,20 @@ test('AC1/AC2/AC7: two USER items sharing a file_keys path produce a collision g
     );
 
     // AC7 — every item in the group carries {id, name}, name human-readable,
-    // never a bare id. See ASSUMPTION (b): name is checked against the
-    // item's already-minted slug, the one existing "name" concept for a todo.
+    // never a bare id.
+    //
+    // CHANGED 2026-09-21 (board 081508d0): ASSUMPTION (b) at the file header —
+    // "name is the item's already-minted slug" — is now WRONG, and was itself
+    // the defect this fix closes: a slug is minted once and never re-derived
+    // (updateTodo), so a collision name sourced from it goes stale on a rename
+    // (the "Slice 7 showed as slice-6-..." report). `boardItemName` now reads
+    // the item's CURRENT text (boardDisplayLabel) first, falling to slug only
+    // when text is blank — see GAP3a/GAP3b below, which already pinned the
+    // text-fallback shape this arm now expects as the PRIMARY behaviour.
+    const expectedName: Record<string, string> = {
+      [a.id as string]: 'IMPLEMENT THE SHARED MODULE.',
+      [b.id as string]: 'WIRE THE SHARED MODULE.',
+    };
     for (const rawItem of [a, b]) {
       const entry = group.items.find((i) => i.id === rawItem.id);
       assert.ok(entry, `AC7: item ${String(rawItem.id)} is present in the group`);
@@ -226,7 +239,11 @@ test('AC1/AC2/AC7: two USER items sharing a file_keys path produce a collision g
       assert.ok(entry!.name.length > 0, 'AC7: name is non-empty');
       assert.notEqual(entry!.name, entry!.id, 'AC7: name is never the bare id repeated');
       assert.ok(!/^[0-9a-f-]{36}$/.test(entry!.name), 'AC7: name is not itself a uuid dressed up as a name');
-      assert.equal(entry!.name, rawItem.slug as string, "AC7 (assumption b): name is the item's minted slug — the codebase's one existing human-readable-name concept for a todo");
+      assert.equal(
+        entry!.name,
+        expectedName[rawItem.id as string],
+        "AC7 (revised): name is the item's CURRENT TEXT headline, never the immutable slug"
+      );
     }
   } finally {
     cleanup();
@@ -252,7 +269,7 @@ test('AC4: a SYSTEM-source item sharing the same path as a genuine user/user col
       file_keys: ['src/shared.ts'],
     });
 
-    const r = tools.boardQueryResult({});
+    const r = tools.boardQueryResult({ projection: 'full' });
     assert.equal(r.matched_filter, 3, 'sanity: all three items matched by an unfiltered query');
     assert.ok(r.lane_advisory, 'the genuine user/user collision still fires');
     const group = r.lane_advisory!.collisions[0];
@@ -285,7 +302,7 @@ test('AC5: with cap SMALLER than the colliding set, the collision is still repor
     const b = addRecord(tools, { text: 'ITEM TWO ON SHARED.\n\nbody.', source: 'user', file_keys: ['src/shared.ts'] });
     const c = addRecord(tools, { text: 'ITEM THREE ON SHARED.\n\nbody.', source: 'user', file_keys: ['src/shared.ts'] });
 
-    const r = tools.boardQueryResult({ source: 'user', cap: 1 });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user', cap: 1 });
     assert.equal(r.matched_filter, 3, 'the TRUE matched total is still 3 — cap never changes matched_filter');
     assert.equal(r.records.length, 1, 'sanity: the records window is genuinely capped to 1');
     assert.equal(r.capped, true, 'sanity: capped is true — more matched than shown');
@@ -320,7 +337,7 @@ test('AC6: `records` is returned COMPLETELY UNCHANGED when a collision fires —
     const b = addRecord(tools, { text: bText, source: 'user', priority: 'low', file_keys: ['src/shared.ts'] });
     const c = addRecord(tools, { text: cText, source: 'user', file_keys: ['src/unrelated.ts'] });
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.ok(r.lane_advisory, 'sanity: the collision does fire on this fixture');
     assert.equal(r.matched_filter, 3, 'sanity: three items matched');
     assert.equal(r.records.length, 3, 'AC6: no record was filtered out because it participates in a collision');
@@ -356,7 +373,7 @@ test('GAP1a: two items sharing TWO file_keys paths merge into ONE collision grou
     const a = addRecord(tools, { text: 'GAP1A ITEM A SHARES TWO PATHS.\n\nbody.', source: 'user', file_keys: ['src/gap1-p1.ts', 'src/gap1-p2.ts'] });
     const b = addRecord(tools, { text: 'GAP1A ITEM B SHARES TWO PATHS.\n\nbody.', source: 'user', file_keys: ['src/gap1-p1.ts', 'src/gap1-p2.ts'] });
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.ok(r.lane_advisory, 'the shared paths produce a collision');
     const groups = r.lane_advisory!.collisions;
     assert.equal(groups.length, 1, 'GAP1a: exactly ONE group — the two paths merge because A and B share BOTH of them identically, nobody else touches either');
@@ -383,7 +400,7 @@ test('GAP1b (negative — the merge is exact-item-set-only): a THIRD item sharin
     const bId = b.id as string;
     const cId = c.id as string;
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.ok(r.lane_advisory, 'the shared paths still produce collisions');
     const groups = r.lane_advisory!.collisions;
 
@@ -435,7 +452,7 @@ test('GAP2a: collision groups sort WIDEST (most colliding items) FIRST — pinne
       addRecord(tools, { text: 'GAP2A NARROW ITEM 2.\n\nbody.', source: 'user', file_keys: ['src/gap2-narrow.ts'] }),
     ];
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.equal(r.matched_filter, 9, 'sanity: four + three + two items, three disjoint paths');
     assert.ok(r.lane_advisory, 'three independent path collisions fire');
     const groups = r.lane_advisory!.collisions;
@@ -479,7 +496,7 @@ test('GAP2b: paths within a single collision group are returned SORTED, never le
       file_keys: ['src/gap2b-mmm.ts', 'src/gap2b-zzz.ts', 'src/gap2b-aaa.ts'],
     });
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.ok(r.lane_advisory, 'the three shared paths produce a collision');
     assert.equal(r.lane_advisory!.collisions.length, 1, 'sanity: one group, formed by all three shared paths');
     const [group] = r.lane_advisory!.collisions;
@@ -541,7 +558,7 @@ test('GAP3a: the slugless NAME FALLBACK is the clipped first NON-BLANK line of `
     });
     addRecord(tools, { text: 'A NORMAL SIBLING ON THE SAME PATH.\n\nbody.', source: 'user', file_keys: ['src/gap3a-shared.ts'] });
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.ok(r.lane_advisory, 'the shared path produces a collision, exercising boardItemName for both items');
     const group = r.lane_advisory!.collisions[0];
     const entry = group.items.find((i) => i.id === legacyId);
@@ -569,7 +586,7 @@ test('GAP3b: the slugless name fallback is the LITERAL string "(unnamed board it
     });
     addRecord(tools, { text: 'A NORMAL SIBLING ON THE SAME PATH.\n\nbody.', source: 'user', file_keys: ['src/gap3b-shared.ts'] });
 
-    const r = tools.boardQueryResult({ source: 'user' });
+    const r = tools.boardQueryResult({ projection: 'full', source: 'user' });
     assert.ok(r.lane_advisory, 'the shared path produces a collision, exercising boardItemName for both items');
     const group = r.lane_advisory!.collisions[0];
     const entry = group.items.find((i) => i.id === legacyId);

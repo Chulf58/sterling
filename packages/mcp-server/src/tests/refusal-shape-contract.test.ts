@@ -16,7 +16,7 @@ import { SterlingTools } from '../tools.js';
 // Accurate but useless: it never says what a history entry should CONTAIN,
 // so the caller has to separately call knowledge_schema or knowledge_get an
 // existing record to learn the shape. This breaks the store surface's own
-// standard that a refusal names its discriminator (decision d0b88e27, "A
+// standard that a refusal names its discriminator (decision foreign_d0b88e27, "A
 // gate's refusal must name its DISCRIMINATOR, not just its rule") — every
 // other refusal on this boundary (unknown field, knowledge_edit's zero/many
 // find-match) already does this; this one path drops to raw library output.
@@ -39,7 +39,7 @@ import { SterlingTools } from '../tools.js';
 //     a usable path
 //  9. both knowledge_append and knowledge_create share this contract
 //
-// KNOWLEDGE-BASE CHECK (per the work order): queried decision d0b88e27 ("A
+// KNOWLEDGE-BASE CHECK (per the work order): queried decision foreign_d0b88e27 ("A
 // gate's refusal must name its DISCRIMINATOR..."), 9948475b (knowledge_schema
 // derives per-field {name, required, type, enum_values?} from the registered
 // zod schema via a shared objectShapeFor helper — nothing hand-listed), and

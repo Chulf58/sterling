@@ -1,4 +1,4 @@
-// Registry-coverage scan (board 6ce18724, research_finding 0038af7c) — the
+// Registry-coverage scan (board 6ce18724, research_finding foreign_0038af7c) — the
 // AUTHORING side of the agent-currency blind spot.
 //
 // /sterling:update's agent sync fans out over the SHARED PROJECT REGISTRY, so
@@ -138,7 +138,7 @@ export function scanAgentCoverage({ roots = [], registeredProjects = [] } = {}) 
     try {
       entries = readdirSync(root);
     } catch (err) {
-      // P5, and the whole lesson of anti_pattern 02a1ed39: a silently skipped
+      // P5, and the whole lesson of anti_pattern foreign_02a1ed39: a silently skipped
       // root makes "0 unregistered projects" indistinguishable from "half the
       // machine was never looked at". Report it, and keep scanning the rest.
       unreadable_roots.push({ root, error: err?.message ?? String(err) });

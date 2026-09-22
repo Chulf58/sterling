@@ -1,15 +1,15 @@
 // H20 — mechanism-axis delivery at DISPATCH (board 62806222; concept family
 // knowledge-delivery, member 7). Registered at PreToolUse on TWO matcher entries:
 // Task|Agent (the dispatch surface) and AskUserQuestion (the question surface,
-// decision f5638a84). Every delivery member elsewhere NEVER blocks; AC7 still
+// decision foreign_f5638a84). Every delivery member elsewhere NEVER blocks; AC7 still
 // holds for the dispatch/consult surfaces here. The AskUserQuestion surface is
-// the ONE exception (decision 68332e4b, 2026-08-24): a first-attempt question
+// the ONE exception (decision foreign_68332e4b, 2026-08-24): a first-attempt question
 // whose subject STRONGLY matches a store RULING (decision/anti_pattern) is
 // DENIED (exit 2) before it ever reaches the user — see the DENY-ONCE block
 // below and its plumbing in lib/delivery.mjs. Everywhere else this file still
 // never exits 2.
 //
-// TIMING, probed live 2026-08-11 (research_finding 63a9646d-2f0d-406e-8a36-9e95d0b11dbd):
+// TIMING, probed live 2026-08-11 (research_finding foreign_63a9646d):
 // PreToolUse additionalContext reaches the model WITH the tool result — and
 // structurally, a PreToolUse hook fires only after the model has already emitted
 // the call. On the dispatch surface that is still pre-flight enough to matter
@@ -38,7 +38,7 @@
 // WHY THE DISPATCH SEAM: a fan-out multiplies one bad premise by N, so "I am
 // about to brief" is the last cheap moment to intervene. Both consuming-project
 // documents name it independently. And PreToolUse on Task is PROVEN to deliver
-// additionalContext to the DISPATCHING agent (research_finding e14dcf9a, issue
+// additionalContext to the DISPATCHING agent (research_finding foreign_e14dcf9a, issue
 // #39814) — which is the right destination here, because the conductor writing
 // the prompt is who needs stopping. (That same finding is why this is NOT the
 // seam for H19 AC5 dispatch staging: for staging knowledge INTO the subagent,
@@ -48,14 +48,14 @@
 // exists): it is SILENT unless a real match survives both stages. A hook that
 // fires on every dispatch would train the reader to skip it, which is precisely
 // the H10 file-count failure this must not repeat. Measured 2026-08-04
-// (board 648bb497, research_finding bf74c65f): on THIS repo it was firing
+// (board 648bb497, research_finding foreign_bf74c65f): on THIS repo it was firing
 // 15/15, dominated by universal dev vocabulary that AXIS_MIN_HITS alone could
 // not exclude — stage 2 now also requires hasDiscriminatingHit, a third floor
 // that a match matching ONLY generic terms (test, check, file, ...) cannot
 // clear on its own.
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { readStdin, allow, deny, warnNonBlocking, exitAfterWrite, openStore, loadConfig } from './lib/common.mjs';
+import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfig } from './lib/common.mjs';
 import { recordAdvisoryFire } from './lib/advisory-counter.mjs';
 import { MAX_RANK_TERMS } from '@sterling/store';
 import {
@@ -63,33 +63,26 @@ import {
   readGuard,
   writeGuard,
   extractAxisTerms,
-  extractAxisTermsUncapped,
-  stripCitations,
   axisHits,
   outgoingProposalText,
-  renderHazards,
   renderDecisionPointers,
   renderArticlePointers,
   ARTICLE_POINTER_CAP,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  AXIS_MIN_DISCRIMINATING_HITS,
   hasRecordCentralityHit,
   recordCentralityHits,
-  HAZARD_CAP,
-  isDelivered,
-  markDelivered,
+  isKnownDelivered,
+  markSubstanceDelivered,
+  markDiscoveryDelivered,
+  hazardParts,
+  recordRevision,
   DENY_RULING_TYPES,
-  STRICT_MIN_HITS,
-  hasFullNarrowCentralityCoverage,
-  DELTA_MIN_NEW_TERMS,
-  DELTA_TERMS_VERSION,
   subQuestionText,
-  denyLedgerPath,
-  readDenyLedger,
-  writeDenyLedger,
-  denyIntentKey,
-  idCitedIn,
-  renderDenyOnceMessage,
+  assembleDelivery,
+  resolveTotalCap,
+  decisionBlockPointer,
 } from './lib/delivery.mjs';
 
 // Injection ceilings. Deliberately tighter than H19's file-touch payload: a
@@ -124,7 +117,7 @@ const input = readStdin();
 
 // ===========================================================================
 // CODEX MODEL PIN — THE FIRST STEP, AHEAD OF EVERYTHING BELOW (board 7423f7a2
-// slice 5; decision 8b329d57 as CORRECTED FORWARD; research_finding be284452).
+// slice 5; decision foreign_8b329d57 as CORRECTED FORWARD; research_finding foreign_be284452).
 //
 // config.sparring_partner.model is the per-project SOURCE for which model a
 // consult lands on, and until now NOTHING read it — the TUI wrote the value and
@@ -146,7 +139,7 @@ const input = readStdin();
 // inherits its opener's model), so the injection guard is the EXACT opener name,
 // not the 'mcp__codex__' matcher prefix that isConsult uses for the header.
 //
-// ADVISORY ALWAYS (decision ea68735d point 3): enabled:false prints a loud OFF
+// ADVISORY ALWAYS (decision foreign_ea68735d point 3): enabled:false prints a loud OFF
 // line and changes nothing else — enablement and model selection are separate
 // axes, and an explicitly user-asked consult still runs. An explicit call-site
 // model always wins. A missing, unreadable or empty-valued config injects
@@ -174,7 +167,7 @@ function buildModelPin(inp) {
   // bounds a value planted to flood the payload.
   // SCOPE, deliberately: this escapes what is DISPLAYED, never what is INJECTED
   // — updatedInput.model still crosses byte-for-byte, which frozen pin M-8
-  // requires and decision 8b329d57 rules ("free non-empty string verbatim, no
+  // requires and decision foreign_8b329d57 rules ("free non-empty string verbatim, no
   // validation" — there is no shell/TOML boundary on this route and codex
   // validates ids server-side with a loud 400).
   const show = (v) => {
@@ -208,7 +201,7 @@ function buildModelPin(inp) {
   if (sp && sp.enabled === false) {
     lines.push(
       `${PIN} — the codex sparring partner is OFF for this project (config.sparring_partner.enabled:false). ` +
-        `That is ADVISORY, NEVER A GATE (decision ea68735d point 3): this consult is not blocked, and the model below still applies. ` +
+        `That is ADVISORY, NEVER A GATE: this consult is not blocked, and the model below still applies. ` +
         `Turn it back on in the TUI System tab if the OFF state is stale.`
     );
   }
@@ -319,10 +312,10 @@ const isConsult = typeof input.tool_name === 'string' && input.tool_name.startsW
 // callback exits.
 function main(input) {
   try {
-    // BOTH OF THESE SIT INSIDE THE TRY (reviewer-correctness, 2026-09-05), where
+    // BOTH OF THESE SIT INSIDE THE TRY (2026-09-05), where
     // they were not before: outgoingProposalText reads an arbitrary tool_input and
     // openStore THROWS on a corrupt or locked db (it returns null only for an
-    // ABSENT one — anti-pattern e13f0fb5 pins that distinction). An uncaught throw
+    // ABSENT one — anti-pattern foreign_e13f0fb5 pins that distinction). An uncaught throw
     // exits 1, and an exit-1 hook's stdout is not the envelope Claude Code reads
     // updatedInput from, so the consult would silently lose its model pin — the
     // exact loss the catch arm below was written to prevent, one statement too
@@ -400,278 +393,19 @@ function main(input) {
     }
     if (!candidates.length) return finish();
 
-    // DENY-ONCE PRE-STEP (decision 68332e4b) — AskUserQuestion ONLY. Runs over the
-    // SAME stage-1 candidate pool built above with the canonical rank_terms
-    // extraction (amendment 4: one pool, two thresholds — loose STAGE 2 below is
-    // unchanged and keeps driving the existing post-answer audit; this block adds
-    // a STRICTER floor whose only job is deny eligibility). Scored PER
-    // SUB-QUESTION (amendment 2): a form's outgoing text is the concatenation of
-    // every sub-question, so scoring only the whole blob would let one ruled
-    // sub-question hide behind an unrelated one, or a false match on the
-    // combined text deny an otherwise-clean single question.
-    if (isQuestion) {
-      const questions = input.tool_input.questions;
-      const perQuestion = questions.map((q, index) => {
-        const subText = subQuestionText(q);
-        const subTerms = extractAxisTerms(subText, MAX_RANK_TERMS);
-        const strict = candidates
-          .filter((r) => DENY_RULING_TYPES.includes(r.type))
-          .map((r) => ({ record: r, hits: axisHits(r, subTerms) }))
-          .filter(
-            (x) =>
-              x.hits.length >= STRICT_MIN_HITS &&
-              hasDiscriminatingHit(x.hits) &&
-              // FULL coverage of the record's PRE-UNION narrow top-K. NOT
-              // hasRecordCentralityHit: this rung exits 2 and blocks the user's
-              // question, so it must never see the title-union central set (a
-              // bigger set makes full coverage a weaker per-term demand — see
-              // hasFullNarrowCentralityCoverage in packages/store/src/axis.ts).
-              hasFullNarrowCentralityCoverage(x.record, subText)
-          );
-        // Truthy fallback, not nullish (fix 3, dual-review finding): header:''
-        // is falsy but not nullish, so `??` let an empty-string header win over
-        // the question text — `||` falls through to the question whenever the
-        // header is absent OR empty, while staying undefined-safe via `?.`.
-        return { index, label: q?.header || q?.question, subText, subTerms, strict };
-      });
-
-      const ledgerPath = denyLedgerPath(input.cwd, input.agent_id);
-      const ledger = readDenyLedger(ledgerPath);
-      const unresolved = [];
-      const openIndexes = new Set();
-
-      // THE NOVELTY SURFACE, SEPARATE FROM THE RETRIEVAL SURFACE (decision
-      // h20-novelty-counted-over-citation-stripped-uncapped-terms). `p.subTerms`
-      // above stays CAPPED at MAX_RANK_TERMS — that is what the store query and
-      // the strict axisHits matching want, and nothing here changes it. Measuring
-      // how much a re-ask ADDED is a different question and gets its own terms:
-      //   - CITATION-STRIPPED, because citing the denied ruling's id is MANDATORY
-      //     for an override, so it cannot also be evidence of explanation. A raw
-      //     uuid decomposes into 4-5 hex fragments that all read as novel words;
-      //   - UNCAPPED, because past a saturated 16-slot window added novelty
-      //     DISPLACES existing terms instead of accumulating, which made the
-      //     printed remedy ("add >= 5 new terms") unreachable — a user could
-      //     follow it exactly and watch the number stand still.
-      // Computed per ledger entry rather than once per sub-question: the known
-      // 8-char prefixes that may be stripped are the CITED ENTRY's record ids,
-      // and only those (an arbitrary 8-hex token is a word).
-      const deltaTermsFor = (text, recordIds) => extractAxisTermsUncapped(stripCitations(text, recordIds));
-
-      for (const p of perQuestion) {
-        // OVERRIDE CHECK FIRST, independent of whether THIS attempt still
-        // strict-matches anything on its own (decision 68332e4b, amendment 1).
-        // A valid override's own explanatory text legitimately drifts away from
-        // full centrality coverage once it states the delta — e.g. "for a
-        // debug-only diagnostic overlay" pulls the text off the ruling's own
-        // vocabulary on purpose — so recognition rides on CITING a
-        // PREVIOUSLY-DENIED ruling id (from the ledger) plus a delta, never on
-        // re-clearing the strict floor a second time. Checked against every
-        // ledger entry, not just this attempt's own strict matches, so an
-        // override is recognized even when the retry no longer strict-matches
-        // at all.
-        // When THIS attempt still strict-matches something, a cited entry only
-        // counts as overriding IT if the cited entry's recordIds INTERSECT this
-        // attempt's own strict-matched ids — otherwise citing an unrelated prior
-        // denial (R1) would let a live, never-denied match (R2) sail through just
-        // by pasting R1's id and adding filler words (reviewer finding).
-        const currentStrictIds = new Set(p.strict.map((x) => x.record.id));
-        let overridden = null;
-        // THE SHORTFALL, for the deny text (board fb7c43fb): a re-ask that CITED a
-        // denied ruling and still fell under the floor used to be denied with no
-        // hint that the floor is a count, let alone which count it missed — so the
-        // remedy read as "say it again" and the next attempt missed by the same
-        // margin. Best (largest) new-term count over the cited-and-eligible ledger
-        // entries; stays null for a first attempt, which cited nothing and has no
-        // delta to report.
-        let shortfall = null;
-        // CITED-BUT-UNRESOLVED BOOKKEEPING. `reseeded` marks that a stale-
-        // representation repair happened on this pass (Codex round 2, item 2);
-        // `citedUnresolvedIds` collects the ruling ids of EVERY cited eligible
-        // entry that did not grant an override — re-seeded or merely short. Both
-        // feed the forced-denial block below the loop; see it for why citing at
-        // all is what makes strict matching irrelevant.
-        let reseeded = false;
-        const citedUnresolvedIds = new Set();
-        for (const [key, entry] of Object.entries(ledger.entries)) {
-          if (!entry.recordIds.some((id) => idCitedIn(p.subText, id))) continue;
-          if (p.strict.length > 0 && !entry.recordIds.some((id) => currentStrictIds.has(id))) continue;
-          // STALE-REPRESENTATION RE-SEED (Codex review, 2026-09-06). The ledger is
-          // session-transient but the hook can be upgraded mid-session, leaving an
-          // entry whose `terms` are the v1 representation (capped at
-          // MAX_RANK_TERMS, citation NOT stripped). Diffing v2 terms against that
-          // compares unlike sides, and it fails OPEN: the v1 side is bounded at 16
-          // and still contains the citation's own hex fragments, so a bare re-ask
-          // can post a large spurious novelty count and be waved through as an
-          // override. So an under-versioned entry is re-seeded from THIS attempt
-          // and its override check is skipped — the question is denied once more
-          // (no delta line, because there is no comparable prior side to report a
-          // shortfall against) and the NEXT re-ask is measured like against like.
-          //
-          // UNION, NEVER REPLACE (Codex round 2, item 1). Re-seeding with ONLY the
-          // current attempt's terms LAUNDERS NOVELTY: every word the ORIGINAL
-          // denied question contained but this attempt happens to omit falls out
-          // of the baseline, so a THIRD attempt can reintroduce those same words
-          // and have them counted as new. The re-seeded baseline is therefore the
-          // UNION of the entry's existing terms and this attempt's — and the old
-          // side is itself pushed back through stripCitations/extraction, because
-          // a v1 entry's terms still contain the citation's own hex fragments and
-          // boilerplate, which must not survive into the v2 baseline as words a
-          // later attempt could "re-add". Any legacy term the union keeps that a
-          // v2 extraction would not have produced fails CLOSED: an extra baseline
-          // term can only make the floor harder to clear, never easier.
-          if (!(Number(entry.terms_version) >= DELTA_TERMS_VERSION)) {
-            const carried = extractAxisTermsUncapped(
-              stripCitations(Array.isArray(entry.terms) ? entry.terms.join(' ') : '', entry.recordIds)
-            );
-            entry.terms = [...new Set([...carried, ...deltaTermsFor(p.subText, entry.recordIds)])];
-            entry.terms_version = DELTA_TERMS_VERSION;
-            reseeded = true;
-            for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
-            continue;
-          }
-          const newTerms = deltaTermsFor(p.subText, entry.recordIds).filter((t) => !entry.terms.includes(t));
-          if (newTerms.length >= DELTA_MIN_NEW_TERMS) {
-            overridden = { key, recordIds: entry.recordIds };
-            break;
-          }
-          if (shortfall === null || newTerms.length > shortfall.new_terms) {
-            shortfall = { new_terms: newTerms.length, required: DELTA_MIN_NEW_TERMS };
-          }
-          for (const id of entry.recordIds ?? []) citedUnresolvedIds.add(id);
-        }
-        // A RE-SEED OUTRANKS AN OVERRIDE (Codex round 3, item 1). This branch sits
-        // ABOVE the `overridden` handling deliberately. A sub-question can cite
-        // SEVERAL eligible ledger entries; with the order reversed, one stale v1
-        // entry could be re-seeded while a different, current-version entry
-        // satisfied the override on the same pass — and the sub-question was then
-        // ALLOWED, with the re-seed's whole purpose (deny once, then measure
-        // like-for-like) skipped. So if ANY cited entry was re-seeded on this
-        // attempt, the sub-question is forced unresolved regardless of
-        // `overridden`, and NO override is logged: an override adjudicated in the
-        // same breath as a representation repair is not an override anyone can
-        // trust. When this attempt still strict-matches, the ordinary path below
-        // already denies it, so only the strict-empty case is materialized here.
-        // NAMED RESIDUAL: the loop still `break`s on the first satisfying override,
-        // so a cited stale entry sitting AFTER that one is not visited and not
-        // re-seeded on this pass. That is bounded and self-correcting — the entry
-        // stays v1 and is re-seeded the next time it is cited — and the override
-        // that won was itself measured against a current-version entry.
-        //
-        // AND THE SAME HOLE EXISTS FOR AN ORDINARY SHORTFALL — CITING *IS* THE
-        // CLAIM OF A RE-ASK. A sub-question that cites an eligible entry, fails the
-        // floor (newTerms < DELTA_MIN_NEW_TERMS) and no longer strict-matches used
-        // to fall through to the "never matched anything" release below and be
-        // ALLOWED. That is the deny-once gate opened by paraphrase: a re-ask that
-        // states its delta drifts off the ruling's own vocabulary BY DESIGN, which
-        // is precisely why the override check does not re-run the strict floor —
-        // so the release was reachable on the ordinary honest path, not only an
-        // adversarial one. Strict matching decides whether a FIRST attempt is
-        // ruled; once an attempt CITES a previously-denied ruling it has declared
-        // itself a re-ask, and the only question left is whether it cleared the
-        // floor. It did not, so it is denied and told by how much.
-        if ((reseeded || shortfall !== null) && p.strict.length === 0) {
-          // A BODILESS DENIAL IS NOT A DENIAL (reviewer-security S1). `candidates`
-          // is THIS attempt's retrieval pool, and this branch exists precisely for
-          // an attempt that has DRIFTED off the ruling's vocabulary — so the pool
-          // is exactly where the ruling is most likely to be missing. Resolving
-          // only from it produced an empty `decisions` array, and
-          // renderDenyOnceMessage then emitted a header, a "settled by the store
-          // below" line with nothing below it, and an id-less override fallback:
-          // a denial the reader cannot act on and cannot even cite to override.
-          // So: pool first (free), then the STORE by id (the same read stage 1
-          // uses), and finally a BARE-ID stub — never a dropped row. The stub
-          // renders through the existing no-substance marker path, so the reader
-          // still gets `decision [<id>]` plus a knowledge_get target.
-          // The store read is wrapped: openStore THROWS on a corrupt/locked db
-          // (anti-pattern e13f0fb5), and an escape here reaches the outer catch →
-          // warnNonBlocking → exit 1 → the runner reads non-2 as NON-BLOCKING and
-          // the question is ALLOWED. Failing to name a ruling must never become
-          // failing to deny it.
-          const byId = new Map(candidates.map((r) => [r.id, r]));
-          const records = [...citedUnresolvedIds].map((id) => {
-            const pooled = byId.get(id);
-            if (pooled) return pooled;
-            try {
-              return store.get(id) ?? { id };
-            } catch {
-              return { id };
-            }
-          });
-          // delta stays null on a re-seed pass: the baseline was just repaired, so
-          // there is no comparable prior side to report a shortfall against.
-          unresolved.push({ index: p.index, label: p.label, decisions: records, delta: reseeded ? null : shortfall });
-          continue;
-        }
-
-        if (!reseeded && overridden) {
-          // OVERRIDES LOGGED (amendment 3) — written to the SAME ledger file,
-          // BEFORE writeDenyLedger below runs and BEFORE any allow/deny exit, so
-          // a crash after this point fails toward an extra log line, never an
-          // unlogged override.
-          ledger.overrides.push({ key: overridden.key, recordIds: overridden.recordIds, at: new Date().toISOString() });
-          openIndexes.add(p.index);
-          continue;
-        }
-
-        if (p.strict.length === 0) {
-          // Reached only when this attempt cited NOTHING eligible — a genuine
-          // first look at a question no ledger entry speaks for.
-          openIndexes.add(p.index);
-          continue;
-        }
-
-        // Keyed on the matched RECORD ids, never the raw prompt text (decision
-        // 68332e4b) — the same underlying question about the same ruling(s)
-        // still matches the same records across a paraphrase, so it resolves to
-        // the SAME key instead of dodging as a "fresh" first attempt (see
-        // denyIntentKey for why the prompt's own hit terms are NOT part of the
-        // key).
-        const recordIds = [...new Set(p.strict.map((x) => x.record.id))];
-        const key = denyIntentKey(recordIds);
-        // First attempt under this key (or a retry that never validly cited
-        // it): (re)seed the ledger entry so a LATER retry can be measured
-        // against THIS attempt's terms, never silently overwritten.
-        // BOTH SIDES OF THE COMPARISON ARE SEEDED THE SAME WAY (decision
-        // h20-novelty-counted-over-citation-stripped-uncapped-terms, ruling 2):
-        // uncapped and citation-stripped, so `newTerms` above is a difference
-        // between two comparable sets rather than between a capped snapshot and
-        // an uncapped one.
-        // terms_version STAMPS THE REPRESENTATION, so an entry written by an older
-        // hook is recognisable rather than silently mis-compared (see
-        // DELTA_TERMS_VERSION in lib/delivery.mjs and the re-seed above).
-        if (!ledger.entries[key])
-          ledger.entries[key] = { terms: deltaTermsFor(p.subText, recordIds), recordIds, terms_version: DELTA_TERMS_VERSION };
-        unresolved.push({ index: p.index, label: p.label, decisions: p.strict.map((x) => x.record), delta: shortfall });
-      }
-
-      writeDenyLedger(ledgerPath, ledger);
-      // ANY strongly-matched, non-overridden sub-question denies the WHOLE form
-      // (amendment 2). `open` names every sub-question that is NOT still
-      // unresolved — never matched anything, OR was matched but validly
-      // overridden — so a sub-question that was ruled but legitimately
-      // overridden is not dropped from BOTH lists; it belongs in "open" (nothing
-      // further is owed on it) exactly as much as a never-matched one.
-      // THE DENIAL STAYS SYNCHRONOUS (decision hook-stdout-exit-after-write-
-      // callback-bound-exit-deny-stays-synchronous): deny() is non-returning
-      // control flow the whole suite relies on, its message is bounded far below
-      // the measured synchronous window, and a blocking exit must never become
-      // asynchronous. The counter therefore still fires BEFORE the hard exit
-      // here (the eager-persist rule), unlike the delivery write below.
-      if (unresolved.length) {
-        const open = perQuestion.filter((p) => openIndexes.has(p.index)).map((p) => ({ index: p.index, label: p.label }));
-        recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
-        return deny(renderDenyOnceMessage(unresolved, questions.length, open));
-      }
-      // Every ruled sub-question was validly overridden (or never ruled at
-      // all) — fall through to the unchanged loose audit below (the override
-      // does not silence the audit; it only clears the pre-step gate).
-    }
+    // DENY-ONCE PRE-STEP removed (scale-down decision
+    // sterling-claude-code-scale-down-boundary, 2ad87dd1): H20 no longer
+    // denies (exit 2) a first-attempt AskUserQuestion -- it is advisory-only
+    // now, falling straight through to the loose STAGE 2 audit below, which
+    // still runs post-answer and warns non-blocking. `DENY_RULING_TYPES` and
+    // `subQuestionText` remain imported from delivery.mjs for candidate
+    // selection above; see the audit below for what H20 enforces.
 
     // STAGE 2 — require precision against the NARROW fields (trigger/title, not
     // rationale). Stage 1's index spans long discursive fields, so an FTS hit is
     // not yet a reason to interrupt anyone.
     // GENERIC-TERM FLOOR (board 648bb497, tuned on the measured 15/15 fire
-    // rate in research_finding bf74c65f): AXIS_MIN_HITS alone is satisfied by
+    // rate in research_finding foreign_bf74c65f): AXIS_MIN_HITS alone is satisfied by
     // universal dev vocabulary in a store whose own subject IS this repo's
     // machinery, so a payload matched PURELY on generic terms goes silent here
     // — at least one matched term must actually discriminate.
@@ -681,7 +415,7 @@ function main(input) {
     // in passing in its own trigger (the measured 2026-08-09 Blender case).
     const scored = candidates
       .map((r) => ({ record: r, hits: axisHits(r, terms) }))
-      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits) && hasRecordCentralityHit(x.record, outgoing))
+      .filter((x) => x.hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(x.hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(x.record, outgoing))
       .sort((a, b) => b.hits.length - a.hits.length);
     if (!scored.length) return finish();
 
@@ -689,12 +423,25 @@ function main(input) {
     // already delivered by file-touch is already in this context — re-injecting it
     // at dispatch is the duplicate H19's own guard exists to prevent, and the
     // reverse holds too (what H20 delivers, H19 will not repeat).
-    const gPath = guardPath(input.cwd, input.agent_id);
+    const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
     const guard = readGuard(gPath);
-    const fresh = scored.filter((x) => !isDelivered(guard, x.record));
+    // Conservative pre-filter: a candidate already shown at ALL this session
+    // (either ledger) is dropped from consideration here — the per-type
+    // render below (hazard=substance, everything else=discovery) is what
+    // actually earns the mark, but re-showing something already fully known
+    // is noise this stage need not risk (decision 92088a62's split still
+    // holds: an owner shown here as a mere article POINTER is untouched by
+    // this check's effect on H19, which guards SUBSTANCE independently).
+    const fresh = scored.filter((x) => !isKnownDelivered(guard, x.record));
     if (!fresh.length) return finish();
 
-    const hazards = fresh.filter((x) => x.record.type === 'anti_pattern').slice(0, HAZARD_CAP);
+    // NOT sliced to HAZARD_CAP here (fix-round MEDIUM 5): `hazardParts` below
+    // already applies the SAME cap internally (cappedHazards) and, crucially,
+    // DISCLOSES the omitted count — an early slice here would hand it an
+    // already-≤3 list and the "N more hazard(s) NOT shown" line would never
+    // fire even when the true match count was higher (decision 92088a62:
+    // "at most 3 per package... with the omitted count stated").
+    const hazards = fresh.filter((x) => x.record.type === 'anti_pattern');
     const decisions = fresh.filter((x) => x.record.type === 'decision').slice(0, MAX_DECISIONS);
     // NOT sliced here — renderArticlePointers itself caps at ARTICLE_POINTER_CAP
     // and discloses the overflow, the same shape as renderHazards/
@@ -742,18 +489,35 @@ function main(input) {
     const decisionTerms = [...new Set(decisions.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(',');
 
+    const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
+    // Hazards render WHOLE here too (they always have, `renderHazards` at
+    // MAX_SAFE_INTEGER) — a whole hazard IS substance, on every surface that
+    // renders one (decision 92088a62 item 4). Decisions stay pointer-only —
+    // discovery.
+    const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
     const hazardDecisionBlocks = [
-      ...renderHazards(hazards.map((x) => x.record), NARROW_CLIP, {
+      ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
       }),
       ...(decisions.length
         ? [
-            renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, {
-              remedy: `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`,
-            }),
+            {
+              kind: 'ordinary', contentClass: 'discovery',
+              identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+              text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
+              pointer: decisionBlockPointer(decisions.length, decisionRemedy),
+              suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
+            },
           ]
         : []),
     ];
+    // Only the SHOWN (capped) article pointers are eligible for a discovery
+    // mark — same rule as cappedHazards: an article capped out of the payload
+    // was never actually read by the recipient, so it stays eligible for a
+    // later dispatch instead of being silently lost for the rest of the
+    // session (board a470046d slice 1's rule, now enforced by the assembler
+    // itself rather than a second hand-derived slice here).
+    const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
     const articleBlocks = articles.length
       ? [
           renderArticlePointers(articles.map((x) => x.record), ARTICLE_POINTER_CAP, {
@@ -808,17 +572,45 @@ function main(input) {
     // matched article is never withheld either way (AC3) — only its POSITION
     // in the payload moves.
     const promptIsQuestionShaped = isQuestionShapedPrompt(outgoing);
+    const asPart = (text, widen, identities) => ({ kind: 'ordinary', contentClass: 'discovery', identities, text, pointer: `▸ held back by the delivery cap — ${widen}` });
+    const articleParts = articleBlocks.map((t) =>
+      asPart(
+        t,
+        `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
+        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a) }))
+      )
+    );
+    const priorParts = priorBlocks.map((t) =>
+      asPart(
+        t,
+        `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(',')}] cap:${priorAnswers.length}`,
+        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record) }))
+      )
+    );
+    // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery — decision
+    // 92088a62's ONE ASSEMBLER): hazards are complete unbudgeted substance;
+    // header, decisions, prior answers and article pointers are ordinary and
+    // degrade under the cap. The codex model pin (if this is a consult) is
+    // folded in as a LEADING, PINNED-but-CHARGED chrome part (item 6) so it
+    // is charged on the FINAL composed context exactly like every other
+    // caller, rather than prepended after capping the way `envelopeFor`
+    // does for every OTHER call site in this file (none of which combine a
+    // pin with a capped carriage the way this one does).
+    const pin = modelPin();
+    const pinPart = pin?.line ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: pin.line }] : [];
     const blocks = [
-      header,
+      { kind: 'ordinary', contentClass: 'chrome', text: header },
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
       ...(promptIsQuestionShaped
-        ? [...priorBlocks, ...articleBlocks, ...hazardDecisionBlocks]
-        : [...hazardDecisionBlocks, ...priorBlocks, ...articleBlocks]),
+        ? [...priorParts, ...articleParts, ...hazardDecisionBlocks]
+        : [...hazardDecisionBlocks, ...priorParts, ...articleParts]),
     ];
+    const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input.cwd));
+    const carriage = assembled.text;
 
-    // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19 (council wf_db9a59aa-0af):
+    // SIDE EFFECT FIRST, GUARD SECOND — same rule as H19:
     // the guard is what makes delivery once-per-session, so writing it before the
     // delivery lands turns any failure into permanent silent loss with no retry.
     // THAT ORDERING IS NOW MECHANICAL, not positional: the bookkeeping rides the
@@ -828,25 +620,30 @@ function main(input) {
     // reporting a clean delivery.
     // Composed, not replaced: on a codex consult this envelope carries BOTH the
     // model pin and the carriage (board 7423f7a2 — the pin is on every output
-    // path, and this is the one that already had an envelope).
-    return emitEnvelope(blocks.join('\n\n'), {
+    // path) — but `carriage` above ALREADY contains the pin line (folded in as
+    // a charged part), so this uses the raw envelope shape directly rather
+    // than `emitEnvelope`/`envelopeFor`, which would prepend the pin a SECOND
+    // time.
+    const hookSpecificOutput = { hookEventName: input.hook_event_name };
+    if (pin?.updatedInput) hookSpecificOutput.updatedInput = pin.updatedInput;
+    if (carriage) hookSpecificOutput.additionalContext = carriage;
+    return exitAfterWrite(JSON.stringify({ hookSpecificOutput }), 0, {
       onWritten: () => {
         recordAdvisoryFire(input.cwd, 'h20', input.session_id); // expiring campaign scaffolding — see lib/advisory-counter.mjs
         // POST-ENVELOPE BOOKKEEPING IS ITS OWN FAILURE DOMAIN (outside-family
         // review, 2026-09-05). These marks cannot run before the write — that
-        // is the H19 council ordering rule, and inverting it would turn a
+        // is the H19 ordering rule, and inverting it would turn a
         // failed delivery into permanent silent loss. The shared helper already
         // contains an onWritten throw (one stderr line, exit code unchanged);
         // this local catch is kept because the DISCLOSURE has to say that the
         // envelope was ALREADY WRITTEN, which is what distinguishes a
         // bookkeeping failure from one that prevented the delivery.
         try {
-          // Only the SHOWN (capped) article pointers are marked delivered — same rule
-          // as cappedHazards: an article capped out of the payload was never actually
-          // read by the recipient, so it stays eligible for a later dispatch instead
-          // of being silently lost for the rest of the session.
-          const shownArticles = articles.slice(0, ARTICLE_POINTER_CAP).map((x) => x.record);
-          markDelivered(guard, [...hazards.map((x) => x.record), ...decisions.map((x) => x.record), ...shownArticles, ...shownPrior.map((x) => x.record)]);
+          // Only what the assembler says it actually emitted — never a
+          // re-scan of the composed text (decision 92088a62's ONE ASSEMBLER
+          // CONTRACT).
+          markSubstanceDelivered(guard, assembled.emittedSubstance);
+          markDiscoveryDelivered(guard, assembled.emittedDiscovery);
           writeGuard(gPath, guard);
         } catch (e) {
           // Cheap failure vs expensive one: a lost guard write costs at most a repeat

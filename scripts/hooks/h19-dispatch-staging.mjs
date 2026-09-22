@@ -7,7 +7,7 @@
 // reasoning from one stale premise before any of their own Read/Edit ever
 // fires the file-touch hook.
 //
-// LIVE-PROBED, not inferred (2026-08-04, research_finding 35a89a0f):
+// LIVE-PROBED, not inferred (2026-08-04, research_finding foreign_35a89a0f):
 // SubagentStart's hookSpecificOutput.additionalContext lands in the SPAWNED
 // subagent's own context (not the parent's), on the WSL CLI headless surface,
 // CC 2.1.220. Its stdin carries session_id, transcript_path, cwd, prompt_id,
@@ -24,7 +24,7 @@
 // non-blocking (P5) — dispatch staging is an aid layered on top of the file-
 // touch delivery, never a second place that can deny a spawn.
 //
-// H28 FOLD (2026-08-30, decision 04982f45): h28-return-contract.mjs absorbed
+// H28 FOLD (2026-08-30, decision foreign_04982f45): h28-return-contract.mjs absorbed
 // here — same SubagentStart event, same advisory/fail-open posture (both
 // warnNonBlocking). EXEMPT_AGENT_TYPES and RETURN_CONTRACT below are its
 // unchanged substance; the return contract is injected on EVERY dispatch
@@ -40,7 +40,7 @@ import { readStdin, allow, warnNonBlocking, exitAfterWrite, openStore, loadConfi
 // h1-session-start.mjs and scripts/plan-lock.mjs.
 import { readLock as readPlanLock, sanitizeForContext, sterlingDirOf } from './lib/plan-lock.mjs';
 // Path extraction lives in lib/dispatch-prompt.mjs — one mechanism, imported
-// never reimplemented (decision f5638a84). Prompt RECOVERY no longer reads the
+// never reimplemented (decision foreign_f5638a84). Prompt RECOVERY no longer reads the
 // parent transcript (decision dispatch-state-machine-pre-slot-post-binding-
 // locked-start-resolution-replaces-transcript-attribution): this hook resolves
 // its own dispatch's prompt through the dispatch-state machine instead.
@@ -52,24 +52,30 @@ import {
   readGuard,
   writeGuard,
   renderArticle,
+  isOwnerDiscoveryOnly,
   renderReference,
-  renderHazards,
-  cappedHazards,
   renderDecisionPointers,
-  DECISION_POINTER_CAP,
   rankFileDecisionPointers,
-  renderPayload,
   payloadHeaderLine,
-  porchHeaderLine,
-  renderPorch,
-  resolvePorchBudget,
   extractAxisTerms,
   axisHits,
   AXIS_MIN_HITS,
   hasDiscriminatingHit,
+  AXIS_MIN_DISCRIMINATING_HITS,
   hasRecordCentralityHit,
   recordCentralityHits,
   stripReviewTerritoryLine,
+  assembleDelivery,
+  hazardParts,
+  recordRevision,
+  resolveTotalCap,
+  isSubstanceDelivered,
+  isDiscoveryDelivered,
+  markSubstanceDelivered,
+  markDiscoveryDelivered,
+  ownerPointer,
+  ownerSuffix,
+  decisionBlockPointer,
 } from './lib/delivery.mjs';
 
 // Subject-channel decision ceiling — mirrors H20's MAX_DECISIONS: a keyword
@@ -91,17 +97,11 @@ const RETURN_CONTRACT =
   'logs, or step-by-step narration. Report only the outcome, decisive evidence, ' +
   'relevant files/tests, and unresolved risks.';
 
-// PORCH BUDGET (config.delivery.preview_budget_bytes) — resolvePorchBudget is
-// now ONE shared resolver in lib/delivery.mjs (decision 0050a536 §5 amendment,
-// consolidation rule: the porch gained a second caller — h19-knowledge-
-// delivery.mjs's direct-inject rungs — so the resolver moved to the one file
-// both hooks already import from, rather than a second hand-copied reader).
-
 const input = readStdin();
 
-// TDD / MUTATION-VERIFICATION POSTURE (decision 752caf98
-// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): coder and
-// test-writer dispatches get the SAME live per-project posture line H1
+// TDD / MUTATION-VERIFICATION POSTURE (decision foreign_752caf98
+// tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): implementor
+// dispatches (the roster's one writing role) get the SAME live per-project posture line H1
 // injects at SessionStart — read fresh here via loadConfig rather than
 // relying on a copy baked into the agent template at install time, so a
 // toggle flipped mid-session still reaches a freshly spawned agent's own
@@ -109,7 +109,7 @@ const input = readStdin();
 // Guarded like every other config read in this file: a malformed config
 // costs only this line, never the knowledge payload or the return contract.
 // Only an explicit `false` reads as OFF — absent/undefined is the documented
-// schema default (both true, decision 752caf98), never invented.
+// schema default (both true, decision foreign_752caf98), never invented.
 //
 // THREE-STATE TREATMENT, mirroring h1-session-start.mjs's configUnreadable
 // guard exactly (review 2026-09-06 — H19 reproduced the same false-posture
@@ -119,7 +119,7 @@ const input = readStdin();
 // chains to undefined for either shape, which would otherwise render a
 // confident "ON / ON" for a config that was never actually read. Both shapes
 // fold into one `cfgUnusable` flag and render the SAME UNKNOWN wording H1
-// uses, rather than the old silent catch: a coder seeing no posture line
+// uses, rather than the old silent catch: an implementor seeing no posture line
 // while the session banner (H1) says UNKNOWN is a divergence someone would
 // have to notice and track down later, so this deliberately matches H1
 // instead of staying silent.
@@ -128,7 +128,7 @@ const input = readStdin();
 // THE COMPARISON MUST STAY A NULL TEST, NOT A TRUTHINESS TEST — `if (cfg &&
 // ...)` would wrongly swallow `false`, `0` and `""` back into a confident
 // ON/ON reading (same hazard named in H1's comment).
-const TDD_POSTURE_AGENT_TYPES = new Set(['coder', 'test-writer']);
+const TDD_POSTURE_AGENT_TYPES = new Set(['implementor']);
 let tddPostureLine = '';
 try {
   if (TDD_POSTURE_AGENT_TYPES.has(input.agent_type)) {
@@ -162,11 +162,11 @@ try {
 
 // ACTIVE PLAN (decision `plan-lock-approved-plan-bound-at-exit-plan-mode-delivered-at-every-reentry`):
 // one bounded line telling a WRITING lane which approved plan its slice belongs
-// to. Scoped to coder/debugger/test-writer — a reviewer judges a diff against
-// the store and the brief, not against the plan's ordering, so the line would be
-// noise there. Omitted entirely with no lock (P1, no ceremony). Bounded here as
+// to. Scoped to the implementor (the writing role) — a researcher, scout or
+// reviewer judges against the store and the brief, not the plan's ordering, so
+// the line would be noise there. Omitted entirely with no lock (P1, no ceremony). Bounded here as
 // well as at the write, because the lock file is not necessarily H31's.
-const PLAN_LINE_AGENT_TYPES = new Set(['coder', 'debugger', 'test-writer']);
+const PLAN_LINE_AGENT_TYPES = new Set(['implementor']);
 const PLAN_TITLE_MAX = 120;
 const PLAN_PATH_MAX = 320;
 let activePlanLine = '';
@@ -271,7 +271,7 @@ async function main(input) {
     // SUBJECT CHANNEL (relevance slice 3): the same mechanism-axis match H20
     // applies at the conductor's dispatch seam, run over the SAME recovered
     // prompt text, delivered to the SPAWNED agent — one mechanism, imported
-    // never reimplemented (decision f5638a84 constraint). All three stage-2
+    // never reimplemented (decision foreign_f5638a84 constraint). All three stage-2
     // floors apply (AXIS_MIN_HITS, discriminating hit, record centrality) so the
     // measured 1-in-3 noise problem is not replicated one seam deeper. Records
     // the path channel already carries are excluded — one payload, one mention.
@@ -305,7 +305,7 @@ async function main(input) {
       for (const r of candidatesBySubject) {
         if (pathIds.has(r.id) || seenSubject.has(r.id)) continue;
         const hits = axisHits(r, terms);
-        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits) && hasRecordCentralityHit(r, subjectText)) {
+        if (hits.length >= AXIS_MIN_HITS && hasDiscriminatingHit(hits, AXIS_MIN_DISCRIMINATING_HITS) && hasRecordCentralityHit(r, subjectText)) {
           seenSubject.add(r.id);
           subjectMatches.push({ record: r, hits, prompt: subjectText });
         }
@@ -319,15 +319,23 @@ async function main(input) {
     // second frontier surface).
     if (!owners.length && !hazards.length && !decisions.length && !subjectMatches.length) return finish('');
 
-    const gPath = guardPath(input.cwd, input.agent_id);
+    const gPath = guardPath(input.cwd, input.agent_id, input.session_id);
     const guard = readGuard(gPath);
 
-    const freshOwners = owners.filter((r) => !guard.records.includes(r.id));
-    const freshHazards = hazards.filter((r) => !guard.records.includes(r.id));
+    // Hazards render as SUBSTANCE (whole hazard block) here; decisions and the
+    // subject channel's own hazards/decisions split the same way
+    // h19-knowledge-delivery.mjs's do — see its equivalent comment.
+    const freshHazards = hazards.filter((r) => !isSubstanceDelivered(guard, r));
+    // OWNERS SPLIT BY WHAT THEY WILL ACTUALLY RENDER AS (fix-round MEDIUM 3) —
+    // see h19-knowledge-delivery.mjs's identical comment: a reference_material
+    // or oversize (digested) article never renders as substance, so filtering
+    // it against `isSubstanceDelivered` alone left it permanently "fresh" —
+    // the SAME pointer/digest re-delivered on every touch, forever.
+    const freshOwners = owners.filter((r) => (isOwnerDiscoveryOnly(r) ? !isDiscoveryDelivered(guard, r) : !isSubstanceDelivered(guard, r)));
     // RANKED ONCE, AT THE BIRTH POINT — the SAME defect and the same repair as
-    // h19-knowledge-delivery.mjs (reviewer-correctness, 2026-09-06). This is the
+    // h19-knowledge-delivery.mjs (2026-09-06). This is the
     // PATH channel: the store's file_keys join degenerates to newest-first, so
-    // capping at DECISION_POINTER_CAP below evicted the older standing rulings on
+    // capping in the renderer below evicted the older standing rulings on
     // any file carrying more decisions than the cap. Ranking here — not at the
     // slice, not at the renderer — is what keeps the guard slice, the render call
     // and this array in ONE order; re-sorting at any of them would mark one set
@@ -336,133 +344,131 @@ async function main(input) {
     // ordered by axis-hit strength against the dispatch prompt, which is the
     // correct key for a subject match — this ranking answers the file-touch
     // question ("which rulings govern this territory"), not the relevance one.
-    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !guard.records.includes(r.id)));
-    const freshSubject = subjectMatches.filter((x) => !guard.records.includes(x.record.id));
+    const freshDecisions = rankFileDecisionPointers(decisions.filter((r) => !isDiscoveryDelivered(guard, r)));
+    // subjectMatches is anti_pattern or decision only (the two queries above) —
+    // route each to the SAME ledger its rendered contentClass will spend.
+    const freshSubject = subjectMatches.filter((x) =>
+      x.record.type === 'anti_pattern' ? !isSubstanceDelivered(guard, x.record) : !isDiscoveryDelivered(guard, x.record)
+    );
     if (!freshOwners.length && !freshHazards.length && !freshDecisions.length && !freshSubject.length) return finish('');
 
-    const charCap = loadConfig(input.cwd)?.delivery?.payload_char_cap ?? 2400;
+    // LOAD-BEARING, deliberately uncaught: a corrupt config.json must fail the
+    // staging payload shut under the shared-fate ruling pinned by
+    // h19-dispatch-staging.test.mjs:533 ("H19+H28 shared-fate"). Do not wrap
+    // this or replace it with an unused binding; the outer catch preserves the
+    // return contract while withholding knowledge delivery. Its POSITION is
+    // load-bearing too: throwing before dispatch resolution leaves its slot unbound.
+    loadConfig(input.cwd);
 
-    // PORCH BUDGET applies to the PREFIX OF THE COMPLETE additionalContext —
-    // combinedContext() places activePlanLine BEFORE the payload, so its bytes
-    // (plus the '\n\n' separator combinedContext joins with) are subtracted
-    // here rather than the porch being sized against the payload alone, which
-    // would silently overrun once a plan-lock line is present.
-    const rawPorchBudget = resolvePorchBudget(input.cwd);
-    const planLinePrefixBytes = activePlanLine ? Buffer.byteLength(`${activePlanLine}\n\n`, 'utf8') : 0;
-    const porchBudget = Math.max(0, rawPorchBudget - planLinePrefixBytes);
-
-    // SUBJECT CHANNEL RENDERED SLICES — computed HERE, ahead of the porch build
-    // below, so the porch-end line's subject counts are the RENDERED (post-cap)
-    // ACTUALS the ruling requires (decision 0050a536 §5 amendment), not the raw
-    // candidate counts freshSubject.length would give. Splitting subjectHazards/
-    // subjectDecisions out of freshSubject is unchanged from before — only the
-    // POSITION moved, so the "beyond any file the task names" block below reads
-    // identically off the same two arrays.
+    // Split subject matches by their delivery class. The “beyond any file the
+    // task names” block below reads from these same arrays.
     const subjectHazards = freshSubject.filter((x) => x.record.type === 'anti_pattern').map((x) => x.record);
     const subjectDecisions = freshSubject.filter((x) => x.record.type === 'decision').map((x) => x.record);
-    const shownSubjectHazards = cappedHazards(subjectHazards);
-    const shownSubjectDecisions = subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS);
 
-    const parts = [];
-    if (freshOwners.length || freshHazards.length || freshDecisions.length) {
-      const shownDecisionsForPorch = freshDecisions.slice(0, DECISION_POINTER_CAP);
-      // The porch's own hazard cap mirrors renderHazards' (HAZARD_CAP,
-      // severity-sorted) — the SAME rendered slice is what stays out of the
-      // remainder below (hazards appear once, in the porch).
-      // articleBodiesCount / referencePointerCount split (roster reviewer,
-      // same round as the Codex review): a reference_material owner renders
-      // as ONE POINTER LINE below (renderReference), never an article body —
-      // folding it into a single count made the porch-end line's own
-      // self-report disagree with what actually renders.
-      const referenceOwnersForPorch = freshOwners.filter((r) => r.type === 'reference_material');
-      const porch =
-        porchBudget > 0
-          ? renderPorch(porchHeaderLine(rels), freshHazards, freshOwners, porchBudget, {
-              articleBodiesCount: freshOwners.length - referenceOwnersForPorch.length,
-              referencePointerCount: referenceOwnersForPorch.length,
-              pathDecisionPointerCount: shownDecisionsForPorch.length,
-              hasSubjectChannel: true,
-              subjectHazardCount: shownSubjectHazards.length,
-              subjectDecisionPointerCount: shownSubjectDecisions.length,
-              fileKeys: rels,
-            })
-          : { text: '', hazardsRendered: false };
-      // THE REMAINDER: unchanged from today MINUS renderHazards, but ONLY when
-      // the porch itself actually rendered hazard substance (hazardsRendered).
-      // renderPorch can return non-empty text WITHOUT having rendered hazards
-      // — its own MINIMAL-porch fallback, which defers hazard substance to the
-      // remainder rather than clamping a fragment — so this is keyed on
-      // `porch.hazardsRendered`, never on `porch.text` truthiness alone; every
-      // owner still gets its full renderArticle/renderReference (not only
-      // porch-admitted ones), and the same capped renderDecisionPointers call
-      // as before.
-      const remainderBlocks = [
-        ...(porch.hazardsRendered ? [] : renderHazards(freshHazards, charCap, { fileKeys: rels })),
-        ...freshOwners.map((r) => (r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r, charCap))),
-        ...(freshDecisions.length ? [renderDecisionPointers(rels.join(', '), freshDecisions)] : []),
-      ];
-      if (porch.text) {
-        parts.push([porch.text, ...remainderBlocks].join('\n\n'));
-      } else {
-        // budget 0 (disabled), MISCONFIGURED, or decision-pointers-only (no
-        // porch by design): output is BYTE-IDENTICAL to before the porch —
-        // remainderBlocks above already includes renderHazards in every one
-        // of these cases, since hazardsRendered is always false when text is ''.
-        parts.push(renderPayload(rels.join(', '), remainderBlocks, { unowned: false }));
-      }
-    }
-    if (subjectHazards.length || subjectDecisions.length) {
-      const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
-      // Centrality is per record AGAINST ITS OWN matching prompt — the union
-      // never enters the match, so the header cannot credit a sibling's terms.
-      const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(', ');
-      // The dispatch-state resolver attributes exactly one prompt (or none) to
-      // THIS spawn — there is no longer a sibling-ambiguous case to hedge for
-      // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
-      // resolution-replaces-transcript-attribution §6).
-      const subjectLabel = `your task's SUBJECT`;
-      // A subject match has no file_keys answer — the widening query is
-      // rank_terms-shaped (review finding 4).
-      const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
-      const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(',')}] cap:${subjectHazards.length || 1}`;
-      const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(',')}] cap:${subjectDecisions.length || 1}`;
-      parts.push(
-        [
-          `STERLING MECHANISM-AXIS STAGING (H19) — the store holds records matching ${subjectLabel} ` +
-            `(matched on: ${matched}; central to the record: ${central}), beyond any file the task names. ` +
-            `Path-scoped delivery cannot find these — consult them before acting on the premise they govern.`,
-          ...renderHazards(subjectHazards, charCap, { remedy }),
-          ...(subjectDecisions.length ? [renderDecisionPointers('(subject match)', subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy })] : []),
-        ].join('\n\n')
-      );
-    }
-    const payload = parts.join('\n\n');
-    // Hazards guard the severity-sorted RENDERED slice only (board a470046d
-    // slice 1) — same AC8 rule as the decision slice beside it.
-    const fresh = [
-      ...freshOwners,
-      ...cappedHazards(freshHazards),
-      ...freshDecisions.slice(0, DECISION_POINTER_CAP),
-      ...shownSubjectHazards,
-      ...shownSubjectDecisions,
+    // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery in
+    // lib/delivery.mjs — decision 92088a62's ONE ASSEMBLER). Hazards are
+    // complete unbudgeted substance; article bodies, decisions,
+    // and every other ordinary line share the cap and degrade to
+    // `knowledge_get <id>` pointers. CHROME IS CHARGED TOO (item 6): the
+    // active-plan line, TDD posture, unattributable-start disclosure and the
+    // h28 return contract are folded in as PINNED-BUT-CHARGED parts (leading
+    // and trailing respectively) in the SAME assembleDelivery call that caps
+    // the knowledge payload — the cap is charged on the FINAL composed
+    // context, never the knowledge payload alone, which is exactly what let a
+    // smaller cap escape by 12,888 B when this text was appended AFTER
+    // capping (Sol's reproduction).
+    const totalCap = resolveTotalCap(input.cwd);
+    const leadingChromeParts = activePlanLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: activePlanLine }] : [];
+    const trailingChromeParts = [
+      ...(tddPostureLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: tddPostureLine }] : []),
+      ...(unattributableLine ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: unattributableLine }] : []),
+      ...(!EXEMPT_AGENT_TYPES.has(input.agent_type) ? [{ kind: 'ordinary', pinned: true, contentClass: 'chrome', text: RETURN_CONTRACT }] : []),
     ];
+    const assemble = () => {
+      const parts = [];
+      if (freshOwners.length || freshHazards.length || freshDecisions.length) {
+        const decisionWiden = `knowledge_query types:["decision"] file_keys:[${rels.map((r) => `"${r}"`).join(',')}] cap:${freshDecisions.length}`;
+        const ownerParts = freshOwners.map((r) => {
+          const text = r.type === 'reference_material' ? renderReference(r) : renderArticle(store, r);
+          const contentClass = isOwnerDiscoveryOnly(r) ? 'discovery' : 'substance';
+          return { kind: 'ordinary', contentClass, identity: r.id, revision: recordRevision(r), text, pointer: ownerPointer(text, r), suffix: ownerSuffix(r) };
+        });
+        const decisionParts = freshDecisions.length
+          ? [{
+              kind: 'ordinary', contentClass: 'discovery',
+              identities: freshDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+              text: renderDecisionPointers(rels.join(', '), freshDecisions),
+              pointer: decisionBlockPointer(freshDecisions.length, decisionWiden),
+              suffix: `  … the rest held back by the delivery cap — ${decisionWiden}`,
+            }]
+          : [];
+        parts.push(
+          { kind: 'ordinary', contentClass: 'chrome', text: payloadHeaderLine(rels.join(', ')) },
+          ...hazardParts(freshHazards, { fileKeys: rels }),
+          ...ownerParts,
+          ...decisionParts
+        );
+      }
+      if (subjectHazards.length || subjectDecisions.length) {
+        const matched = [...new Set(freshSubject.flatMap((x) => x.hits))].join(', ');
+        const central = [...new Set(freshSubject.flatMap((x) => recordCentralityHits(x.record, x.prompt)))].join(', ');
+        const subjectLabel = `your task's SUBJECT`;
+        const subjectTerms = [...new Set(freshSubject.flatMap((x) => x.hits))];
+        const remedy = `knowledge_query types:["anti_pattern"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(',')}] cap:${subjectHazards.length || 1}`;
+        const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${subjectTerms.map((t) => `"${t}"`).join(',')}] cap:${subjectDecisions.length || 1}`;
+        parts.push(
+          {
+            text:
+              `STERLING MECHANISM-AXIS STAGING (H19) — the store holds records matching ${subjectLabel} ` +
+              `(matched on: ${matched}; central to the record: ${central}), beyond any file the task names. ` +
+              `Path-scoped delivery cannot find these — consult them before acting on the premise they govern.`,
+            kind: 'ordinary',
+            contentClass: 'chrome',
+          },
+          ...hazardParts(subjectHazards, { remedy }),
+          ...(subjectDecisions.length
+            ? [
+                {
+                  kind: 'ordinary', contentClass: 'discovery',
+                  identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
+                  text: renderDecisionPointers('(subject match)', subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy }),
+                  pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
+                  suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
+                },
+              ]
+            : [])
+        );
+      }
+      const allParts = [...leadingChromeParts, ...parts, ...trailingChromeParts];
+      const assembled = assembleDelivery(allParts, totalCap);
+      return { payload: assembled.text, emittedSubstance: assembled.emittedSubstance, emittedDiscovery: assembled.emittedDiscovery };
+    };
+    // `built.payload` is now the WHOLE composed context — chrome (plan line,
+    // TDD posture, unattributable-start line, return contract) was assembled
+    // IN, not appended after (item 6) — so there is no separate
+    // combinedContext(payload) call left to make on this path.
+    const built = assemble();
+    const out = built.payload;
 
-    // Side effect first, guard second (council wf_db9a59aa-0af precedent,
+    // Side effect first, guard second (the ordering rule
     // mirrored from h19-knowledge-delivery.mjs): a throw before this line leaves
     // the guard untouched, so a later touch of the same territory — the main
     // file-touch hook, or a later dispatch — still delivers it. The return
-    // contract (h28 fold) rides the SAME emission — combinedContext() folds it
-    // in — so a fresh knowledge payload and the return contract never clobber
-    // each other in two separate writes.
+    // contract (h28 fold) rides the SAME emission — it is folded into
+    // `built.payload` above — so a fresh knowledge payload and the return
+    // contract never clobber each other in two separate writes.
     // THE ORDERING IS NOW MECHANICAL: the guard write rides `onWritten`, so it
     // runs only after the stream has actually taken the envelope — a failed
     // write leaves every staged record eligible for the next dispatch, and the
     // process exits non-zero rather than reporting a clean staging.
     const recordStaged = () => {
-      guard.records.push(...fresh.map((r) => r.id));
+      // Guard only what the assembler says it actually emitted — never a
+      // re-scan of the composed text (decision 92088a62's ONE ASSEMBLER
+      // CONTRACT).
+      markSubstanceDelivered(guard, built.emittedSubstance);
+      markDiscoveryDelivered(guard, built.emittedDiscovery);
       writeGuard(gPath, guard);
     };
-    const out = combinedContext(payload);
     if (!out) {
       recordStaged();
       return allow();
@@ -497,4 +503,4 @@ async function main(input) {
   }
 }
 
-await main(input);
+main(input);

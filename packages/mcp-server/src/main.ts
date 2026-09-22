@@ -15,7 +15,7 @@ const storePathArg = args[storeIdx + 1];
 
 // P5: an unexpanded config placeholder must refuse boot loudly, never open a
 // store. Project-scope and --mcp-config configs do NOT env-expand
-// ${CLAUDE_PROJECT_DIR} at parse time (research_finding e518f9e5), so a bare
+// ${CLAUDE_PROJECT_DIR} at parse time (research_finding foreign_e518f9e5), so a bare
 // placeholder reaches this process literally — proceeding would mkdir a phantom
 // '${...}/.sterling/' store at cwd and silently serve an empty knowledge base
 // (the 2026-06-24 native-launcher incident).
@@ -31,10 +31,14 @@ if (storePathArg.includes('${')) {
 // so the documented `${CLAUDE_PROJECT_DIR:-.}/.sterling/sterling.db` form —
 // which degrades to `./.sterling/sterling.db` when the variable is unset —
 // produced the repoRoot string '.'. That value is TRUTHY, so every
-// `if (!this.repoRoot)` guard in tools.ts passes it through, and it reaches
-// enforcement_reconcile as the spawn cwd of a DESTRUCTIVE script: a relative
-// root is resolved against whatever cwd the server process happens to hold,
-// which is not necessarily the project. EXPORTED as the observation seam: main.ts
+// `if (!this.repoRoot)` guard in tools.ts passes it through, and (historically,
+// before enforcement_reconcile was removed per decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1) it reached
+// enforcement_reconcile as the spawn cwd of a destructive script — the same
+// hazard applies to any surviving tools.ts caller that resolves a filesystem
+// path against repoRoot: a relative root is resolved against whatever cwd the
+// server process happens to hold, which is not necessarily the project.
+// EXPORTED as the observation seam: main.ts
 // is the stdio entry, so importing it runs the entry — a pin can only read this
 // resolution as a named export (spawn a probe that imports main.js with argv
 // '--store <relative>' and assert isAbsolute). The pin itself is NOT authored

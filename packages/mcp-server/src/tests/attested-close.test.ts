@@ -74,7 +74,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, utimesSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
@@ -229,6 +229,10 @@ function baselinesOf(rec: Loose): Record<string, string> {
 
 function attestationsOf(rec: Loose): Record<string, Loose> {
   return (rec.baseline_attestations as Record<string, Loose>) ?? {};
+}
+
+function absenceAttestationsOf(rec: Loose): Record<string, Loose> {
+  return (rec.absence_attestations as Record<string, Loose>) ?? {};
 }
 
 const queryDrift = (tools: SterlingTools, articleId: string): string[] => {
@@ -511,6 +515,112 @@ test('[R9-9] a dirty worktree (uncommitted edit) on the claimed path is refused 
 });
 
 // ===========================================================================
+// ABSENCE ATTESTATION REGRESSIONS — a literal HEAD-tree miss is a proven paid
+// state, whether the old path was deleted, renamed, or is an untracked file
+// present on disk. The close records no hash for any of these paths.
+// ===========================================================================
+test('[R9-ABS-1] a DELETED subject path closes as a proven absence attestation, with no byte baseline or byte attestation', () => {
+  const { dir, tools, git, headSha, cleanup } = gitFixture();
+  try {
+    commitFile(dir, git, 'docs/deleted.md', 'old draft');
+    const article = mkArticle(tools, 'deleted-absence', [{ path: 'docs/deleted.md' }]);
+    git('rm', 'docs/deleted.md');
+    git('commit', '-qm', 'delete old draft');
+    const head = headSha();
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed', text: "reconcile 'deleted-absence'", file_keys: ['docs/deleted.md'], feature_link: article.id as string,
+    });
+
+    const receipt = tools.maintenanceRemove(item.id as string) as unknown as { note: string; absence_paths: string[] };
+    assert.equal(idOf(receipt), item.id, 'the deletion debt closes');
+    assert.deepEqual(receipt.absence_paths, ['docs/deleted.md']);
+    assert.match(receipt.note, /proven ABSENCE ATTESTATIONS/);
+    assert.doesNotMatch(receipt.note, /the prose already describes these bytes/);
+    // This is the exact historical refusal that made the item permanently
+    // unclosable; a successful absence receipt must not emit it.
+    const supersededRefusal = `cannot be closed as ALREADY-PAID — attestation refused for 'docs/deleted.md': no entry with this exact name in the tree of commit ${head} (untracked, absent, or a name that only differs by an alias). An attestation states that the article's prose already describes bytes that are COMMITTED, so it refuses the WHOLE close rather than stamp a claim nobody could re-check. Nothing was written.`;
+    assert.ok(!receipt.note.includes(supersededRefusal), 'the former whole-close refusal is replaced only by a proven tree-miss receipt');
+
+    const after = tools.knowledgeGet(article.id as string) as unknown as Loose;
+    assert.ok(!('docs/deleted.md' in baselinesOf(after)), 'absence creates no content baseline');
+    assert.ok(!('docs/deleted.md' in attestationsOf(after)), 'absence creates no byte attestation');
+    assert.deepEqual(absenceAttestationsOf(after)['docs/deleted.md'], { attested_at: NOW, item_id: item.id, head_commit: head });
+  } finally {
+    cleanup();
+  }
+});
+
+test('[R9-ABS-2] a RENAMED subject path closes as a proven absence attestation even though its former bytes survive at another name', () => {
+  const { dir, tools, git, headSha, cleanup } = gitFixture();
+  try {
+    commitFile(dir, git, 'docs/old-name.md', 'moved bytes');
+    const article = mkArticle(tools, 'renamed-absence', [{ path: 'docs/old-name.md' }]);
+    git('mv', 'docs/old-name.md', 'docs/new-name.md');
+    git('commit', '-qm', 'rename draft');
+    const head = headSha();
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed', text: "reconcile 'renamed-absence'", file_keys: ['docs/old-name.md'], feature_link: article.id as string,
+    });
+
+    const receipt = tools.maintenanceRemove(item.id as string) as unknown as { note: string; absence_paths: string[] };
+    assert.equal(idOf(receipt), item.id, 'the renamed-path debt closes');
+    assert.deepEqual(receipt.absence_paths, ['docs/old-name.md']);
+    assert.match(receipt.note, /NO entry whose name equals the path BYTE-FOR-BYTE/);
+    const after = tools.knowledgeGet(article.id as string) as unknown as Loose;
+    assert.deepEqual(absenceAttestationsOf(after)['docs/old-name.md'], { attested_at: NOW, item_id: item.id, head_commit: head });
+    assert.equal(git('ls-tree', '--name-only', 'HEAD', '--', 'docs/new-name.md'), 'docs/new-name.md', 'control: the content survived only at its new name');
+  } finally {
+    cleanup();
+  }
+});
+
+test('[R9-ABS-3] an UNTRACKED BUT PRESENT subject path closes from the HEAD-tree miss, never from a filesystem absence check', () => {
+  const { dir, tools, git, headSha, cleanup } = gitFixture();
+  try {
+    commitFile(dir, git, 'README.md', 'establish HEAD');
+    const article = mkArticle(tools, 'untracked-presence', [{ path: 'docs/untracked.md' }]);
+    const untracked = join(dir, 'docs', 'untracked.md');
+    mkdirSync(join(dir, 'docs'), { recursive: true });
+    writeFileSync(untracked, 'readable but never committed');
+    assert.ok(existsSync(untracked), 'precondition: the file EXISTS on disk');
+    assert.equal(git('ls-tree', '--name-only', 'HEAD', '--', 'docs/untracked.md'), '', 'precondition: HEAD has no exact-name entry');
+    const head = headSha();
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed', text: "reconcile 'untracked-presence'", file_keys: ['docs/untracked.md'], feature_link: article.id as string,
+    });
+
+    const receipt = tools.maintenanceRemove(item.id as string) as unknown as { note: string; absence_paths: string[] };
+    assert.equal(idOf(receipt), item.id, 'the untracked-but-present debt closes');
+    assert.deepEqual(receipt.absence_paths, ['docs/untracked.md']);
+    assert.match(receipt.note, /No file was read, no blob or sha256 exists/);
+    const after = tools.knowledgeGet(article.id as string) as unknown as Loose;
+    assert.deepEqual(absenceAttestationsOf(after)['docs/untracked.md'], { attested_at: NOW, item_id: item.id, head_commit: head });
+  } finally {
+    cleanup();
+  }
+});
+
+test('[R9-ABS-4] a path PRESENT in HEAD whose worktree bytes mismatch is still refused, never recast as absence', () => {
+  const { dir, tools, git, cleanup } = gitFixture();
+  try {
+    commitFile(dir, git, 'src/mismatch.ts', 'committed bytes');
+    const article = mkArticle(tools, 'present-mismatch-control', [{ path: 'src/mismatch.ts' }]);
+    writeFileSync(join(dir, 'src', 'mismatch.ts'), 'different worktree bytes');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed', text: "reconcile 'present-mismatch-control'", file_keys: ['src/mismatch.ts'], feature_link: article.id as string,
+    });
+
+    assert.throws(() => tools.maintenanceRemove(item.id as string), /worktree bytes are not the content committed/);
+    assert.ok(tools.maintenanceQuery({ cap: 1000 }).some((t) => (t as Loose).id === item.id), 'the mismatched item remains open');
+    const after = tools.knowledgeGet(article.id as string) as unknown as Loose;
+    assert.ok(!('src/mismatch.ts' in absenceAttestationsOf(after)), 'a present path cannot acquire an absence attestation');
+    assert.equal(baselinesOf(after)['src/mismatch.ts'], sha256('committed bytes'), 'the genuine mismatch did not alter the existing baseline');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
 // PIN [R9-9b] — settled ruling: an UNMAPPED working_tree refuses (never
 // falls through). No baseline exists to compare against, but the article's
 // declared working_tree names a real symbolic tree this process simply
@@ -624,8 +734,8 @@ test('[R9-11] an attested path is not exempted from future drift detection — a
 });
 
 // ===========================================================================
-// PIN [R9-13] — baseline_attestations is server-owned: a caller cannot set
-// it directly through knowledge_create or knowledge_update. Refused BY NAME
+// PIN [R9-13] — byte and absence attestations are server-owned: a caller cannot
+// set either directly through knowledge_create or knowledge_update. Refused BY NAME
 // — whether as an explicitly-guarded server-owned field, or (per the
 // knowledge_schema('feature_article') introspection not yet listing this
 // field — see the report) at minimum as an unrecognized key. Either shape
@@ -633,10 +743,11 @@ test('[R9-11] an attested path is not exempted from future drift detection — a
 // SABOTAGE: accept baseline_attestations verbatim on knowledge_create /
 // knowledge_update → both assert.throws calls below fail.
 // ===========================================================================
-test('[R9-13] baseline_attestations cannot be set directly by a caller through knowledge_create or knowledge_update', () => {
+test('[R9-13] byte and absence attestations cannot be set directly by a caller through knowledge_create or knowledge_update', () => {
   const { tools, cleanup } = gitFixture();
   try {
     const forgedAttestation = { attested_at: NOW, item_id: 'x', head_commit: 'a'.repeat(40), sha256: 'x' };
+    const forgedAbsence = { attested_at: NOW, item_id: 'x', head_commit: 'a'.repeat(40) };
     assert.throws(
       () =>
         tools.knowledgeCreate('feature_article', {
@@ -660,12 +771,36 @@ test('[R9-13] baseline_attestations cannot be set directly by a caller through k
     );
     assert.equal(tools.knowledgeQuery({ types: ['feature_article'] }).length, 0, 'the refused create wrote nothing');
 
+    assert.throws(
+      () =>
+        tools.knowledgeCreate('feature_article', {
+          slug: 'try-set-absence-attest',
+          title: 'x', what_it_does: 'x', intended_behavior: 'x',
+          files: [{ path: 'src/a.ts', role: 'impl' }],
+          current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+          dependencies: { relies_on: [], relied_by: [] }, state: 'active', version: 1,
+          history: [{ date: NOW, event: 'seed' }], live_test_refs: [],
+          absence_attestations: { 'src/gone.ts': forgedAbsence },
+        } as unknown as Parameters<SterlingTools['knowledgeCreate']>[1]),
+      (err: Error) => {
+        assert.match(err.message, /absence_attestations/);
+        return true;
+      }
+    );
+
     const article = mkArticle(tools, 'try-update-attest', [{ path: 'src/a.ts' }]);
     assert.throws(
       () =>
         tools.knowledgeUpdate(article.id as string, { baseline_attestations: { 'src/a.ts': forgedAttestation } } as unknown as Record<string, unknown>),
       (err: Error) => {
         assert.match(err.message, /baseline_attestations/);
+        return true;
+      }
+    );
+    assert.throws(
+      () => tools.knowledgeUpdate(article.id as string, { absence_attestations: { 'src/gone.ts': forgedAbsence } } as unknown as Record<string, unknown>),
+      (err: Error) => {
+        assert.match(err.message, /absence_attestations/);
         return true;
       }
     );

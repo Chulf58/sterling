@@ -7,9 +7,9 @@ var __export = (target, all) => {
 
 // scripts/hooks/h10-direct-capture.mjs
 import { randomUUID as randomUUID3, createHash as createHash3 } from "node:crypto";
-import { spawnSync as spawnSync4 } from "node:child_process";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync2, writeSync, rmSync as rmSync3, existsSync as existsSync5, mkdirSync as mkdirSync4, renameSync as renameSync2 } from "node:fs";
-import { join as join5, basename as basename3 } from "node:path";
+import { spawnSync as spawnSync5 } from "node:child_process";
+import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, writeSync, rmSync as rmSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, renameSync as renameSync4 } from "node:fs";
+import { join as join6, basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -4225,6 +4225,11 @@ var baselineAttestationsSchema = external_exports.record(external_exports.string
   head_commit: external_exports.string().min(1),
   sha256: external_exports.string().min(1)
 })).optional();
+var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1)
+}).strict()).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4244,12 +4249,13 @@ var featureArticleSchema = base.extend({
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
   // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision 65222971 → its baseline successor).
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
   // above, which reference_material shares so the shape is defined once.
   baseline_attestations: baselineAttestationsSchema,
-  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  absence_attestations: absenceAttestationsSchema,
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
   article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
@@ -4259,7 +4265,7 @@ var featureArticleSchema = base.extend({
   // superRefine below, since "which kind" is a whole-record fact a single
   // field's shape cannot express alone.
   current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -4273,7 +4279,7 @@ var featureArticleSchema = base.extend({
   // ownership) resolve per record or abstain LOUD on an unmapped name.
   working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision 474b1c71).
+  // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -4352,7 +4358,7 @@ var researchFindingSchema = base.extend({
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
@@ -4393,6 +4399,7 @@ var referenceMaterialSchema = base.extend({
   // naked baseline whose provenance lied about which write produced it. Shape
   // shared with featureArticleSchema, never re-declared.
   baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -4494,7 +4501,7 @@ var SYSTEM_REASONS = [
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -4553,7 +4560,7 @@ var todoSchema = base.extend({
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
   system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -4629,33 +4636,12 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  scout: "scout",
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 var s = (v) => typeof v === "string" ? v : "";
 var RECORD_TYPES = {
   decision: {
@@ -4749,7 +4735,7 @@ var RECORD_TYPES = {
     // article (class enumeration stays a consumer-side filter on the field).
     fts: (r) => [s(r.slug), s(r.title), s(r.concept_family), s(r.what_it_does), s(r.intended_behavior), s(r.steps_runbook)].join("\n"),
     fileKeys: (r) => (r.files ?? []).map((f) => f.path),
-    // slug leads: it is the STABLE handle across versions (decision 474b1c71),
+    // slug leads: it is the STABLE handle across versions (decision foreign_474b1c71),
     // and the id in the envelope beside it is not. version + state say whether
     // this is a moving target and whether it is wired yet.
     digest: { slug: "plain", title: "plain", state: "plain", version: "plain", concept_family: "plain" }
@@ -4796,75 +4782,6 @@ function validateRecord(input2) {
 }
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4881,79 +4798,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -5023,7 +4867,7 @@ var configSchema = external_exports.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -5053,57 +4897,31 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
-  }).default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
     stale_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -5114,41 +4932,24 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5176,7 +4977,7 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -5233,7 +5034,7 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -5243,39 +5044,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5298,7 +5066,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -5319,33 +5087,25 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard used for other config-derived delivery values.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
@@ -5357,7 +5117,7 @@ var configSchema = external_exports.object({
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
   }).default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -5369,32 +5129,14 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 function parseConfig(raw) {
   return configSchema.parse(raw);
@@ -5585,7 +5327,6 @@ var SchemaMigrationRequiredError = class extends Error {
     this.db_path = dbPath;
   }
 };
-var ACTIVE_STATES = ["running", "completing", "awaiting_merge_gate", "halted"];
 function activityTitleOf(record) {
   const r = record;
   const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
@@ -5602,7 +5343,25 @@ function deepReplaceString(value, from, to) {
   return value;
 }
 var MAX_RANK_TERMS = 16;
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base2 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base2;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 var DEFAULT_QUERY_CAP = 20;
 var MAX_BODY_COMPARE_DEPTH = 64;
 var COMPARE_WORK_BUDGET = 1e7;
@@ -5757,6 +5516,10 @@ var JournalDemotionRefusedError = class extends Error {
     this.name = "JournalDemotionRefusedError";
   }
 };
+function buildReconcileText(owner, fileKeys) {
+  const files = [...fileKeys].sort();
+  return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
+}
 var SterlingStore = class _SterlingStore {
   db;
   /**
@@ -6271,7 +6034,7 @@ var SterlingStore = class _SterlingStore {
    * name. Both entries are already in the tool layer's WRITE_REFUSED_FIELDS, so
    * neither is ever caller-supplied.
    */
-  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations"];
+  static METADATA_WRITE_FIELDS = ["file_baselines", "baseline_attestations", "absence_attestations"];
   /**
    * NARROW VERSIONED METADATA WRITE (board 8c8b6d78 / R9) — a full in-place
    * write of server-owned drift metadata that DELIBERATELY PRESERVES the
@@ -6358,6 +6121,17 @@ var SterlingStore = class _SterlingStore {
    * record's paths, retired ones included. It is deliberately not reachable
    * from the public triad — a content write still goes to the live successor.
    *
+   * `internal.suppressReconcilePrune` is the OTHER renameFileKey-only flag
+   * (board 7e779e1f): a rename's before/after file-key diff LOOKS like a
+   * shrink (the old path leaves, the new one arrives) but is not one — the
+   * debt must FOLLOW the renamed path, never be pruned, and renameFileKey's
+   * own deepReplaceString already rewrites any queue item naming the old path
+   * (it is itself one of the rows `record_file_keys` matches). Set ONLY by
+   * renameFileKey's own call and by pruneReconcileNeeded's own nested rewrite
+   * of the queue item it is shrinking (which can never legitimately own a
+   * reconcile_needed item pinned to ITSELF, so the flag there is pure
+   * belt-and-braces against a wasted scan, not a correctness requirement).
+   *
    * `internal.activityAt` SEPARATES TWO CLOCKS THAT ARE OTHERWISE ONE (board
    * 8c8b6d78 / R9). The row's `updated_at` comes from the CANDIDATE BODY, so a
    * caller that deliberately preserves the stored `updated_at` — see
@@ -6384,6 +6158,16 @@ var SterlingStore = class _SterlingStore {
       }
       if (opts.expected_version !== void 0 && opts.expected_version !== identity.version) {
         throw new Error(`${op}: stale expected_version \u2014 the caller supplied expected_version ${opts.expected_version} but record '${id}' is at version ${identity.version}. Nothing was written; re-read the record and retry against version ${identity.version}.`);
+      }
+      const removedRelation = opts.remove_relation === void 0 ? void 0 : linkSchema.parse(opts.remove_relation);
+      if (removedRelation?.rel === "supersedes") {
+        throw new Error(`${op}: rel 'supersedes' cannot be removed as a raw edge \u2014 it is the authoritative carrier of a lifecycle transition. Use knowledge_supersede / knowledge_retire for lifecycle changes; nothing was written.`);
+      }
+      if (removedRelation) {
+        const exists = this.db.prepare("SELECT 1 FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").get(id, removedRelation.rel, removedRelation.target_id);
+        if (!exists) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' no longer exists \u2014 nothing was written; re-read the record and retry.`);
+        }
       }
       const candidate = buildPatch(current);
       candidate.id = id;
@@ -6420,16 +6204,32 @@ var SterlingStore = class _SterlingStore {
       for (const tag of new Set(validated.stack_tags)) {
         this.db.prepare("INSERT INTO record_stack_tags (record_id, tag) VALUES (?, ?)").run(id, tag);
       }
+      const beforeFileKeys = new Set(entry.fileKeys(current));
+      const afterFileKeys = new Set(entry.fileKeys(stored));
       this.db.prepare("DELETE FROM record_file_keys WHERE record_id = ?").run(id);
-      for (const path of new Set(entry.fileKeys(stored))) {
+      for (const path of afterFileKeys) {
         this.db.prepare("INSERT INTO record_file_keys (record_id, path) VALUES (?, ?)").run(id, path);
       }
       for (const link of validated.links)
         this.insertRelation(id, link.rel, link.target_id, now);
+      if (removedRelation) {
+        const deleted = this.db.prepare("DELETE FROM record_relations WHERE source_id = ? AND rel = ? AND target_id = ?").run(id, removedRelation.rel, removedRelation.target_id);
+        if (deleted.changes !== 1) {
+          throw new Error(`${op}: relation '${removedRelation.rel}' from '${id}' to '${removedRelation.target_id}' changed during removal \u2014 the transaction was rolled back; re-read and retry.`);
+        }
+      }
       this.db.prepare("UPDATE records_fts SET text = ? WHERE record_id = ?").run(entry.fts(stored), id);
       this.logActivity("updated", validated, internal.activityAt ?? stored.updated_at ?? now);
       if (opts.resolves?.length)
-        this.drainResolves(op, opts.resolves, now);
+        this.drainResolves(op, opts.resolves, now, opts.resolvedReceipt);
+      if (!internal.suppressReconcilePrune) {
+        const droppedPaths = /* @__PURE__ */ new Set();
+        for (const path of beforeFileKeys)
+          if (!afterFileKeys.has(path))
+            droppedPaths.add(path);
+        if (droppedPaths.size > 0)
+          this.pruneReconcileNeeded(id, droppedPaths, now, opts.prunedReceipt);
+      }
       served = this.withDerivedReliedBy(this.hydrateAll([stored])[0]);
     });
     return served;
@@ -6440,8 +6240,18 @@ var SterlingStore = class _SterlingStore {
    * already-closed claim throws, which rolls the ENTIRE write back — an
    * unclaimed write must never appear to succeed against a dead reference, and
    * a partial drain is worse than none.
+   *
+   * `receipt`, when supplied, is filled with ONE COMMITTED SNAPSHOT per claimed
+   * item — read here, inside this same transaction, in the instant before that
+   * item's own `remove` call (board b0bb9d96 fix-round HIGH). This is
+   * deliberately NOT the caller's earlier pre-transaction validation read: this
+   * lane's own fold can widen an item's file_keys between an outer caller
+   * validating a claim and this drain actually removing it, and a receipt
+   * built from the stale read would describe a narrower close than the one
+   * that actually happened. Reading `item` (below) IS that snapshot — nothing
+   * else touches this id between the read and the remove.
    */
-  drainResolves(op, ids, at) {
+  drainResolves(op, ids, at, receipt) {
     for (const claimed of new Set(ids)) {
       const item = this.get(claimed);
       if (!item) {
@@ -6450,7 +6260,75 @@ var SterlingStore = class _SterlingStore {
       if (item.type !== "todo") {
         throw new Error(`${op}: resolves claim '${claimed}' is a ${item.type}, not a maintenance item (todo) \u2014 the whole write rolled back`);
       }
+      if (receipt)
+        receipt.push({ id: item.id, system_reason: item.system_reason, file_keys: item.file_keys ?? [], text: item.text });
       this.remove(claimed, at);
+    }
+  }
+  /**
+   * PATH PRUNING FOR reconcile_needed (board 7e779e1f). Called from
+   * applyInPlace, strictly AFTER drainResolves, with the set of paths the
+   * record just stopped claiming: for every open reconcile_needed item pinned
+   * to `ownerId` (feature_link match) that names one of those paths, the path
+   * is removed from that item's file_keys IN THIS SAME TRANSACTION — never a
+   * second write, and never through the caller's own resolves claim.
+   *
+   * This undoes exactly what enqueueSystemTodo's fold committed to, one path
+   * at a time: a shrinking item's text is regenerated through the SAME
+   * `buildReconcileText` builder the fold uses, and an item pruned to zero
+   * paths is removed through the SAME `remove()` normal-removal path every
+   * other closed system todo takes — so the drain log and the FTS row stay
+   * honest either way. `decision reconcile-needed-identity-is-reason-plus-
+   * owner-file-keys-unioned` means there is at most one such item per owner in
+   * practice, but this loops over every match rather than assuming it, so a
+   * legacy duplicate is not silently skipped.
+   *
+   * PRUNING IS BOOKKEEPING, NOT EVIDENCE ANYONE RECONCILED ANYTHING — it only
+   * says the debt's OWNER changed, never that the new bytes were checked. The
+   * caller-facing drift disclosure this feeds lives in tools.ts (`prunedReceipt`
+   * carries id/removed/pruned_paths/remaining_file_keys; the filesystem-facing
+   * "was the pruned path actually drifted against the OLD baseline" verdict is
+   * computed there, from that disclosure, because this layer touches no
+   * filesystem and no git tree).
+   *
+   * SAME-DB BY CONSTRUCTION: this scans `this.db` alone — the exact database
+   * the triggering write is landing in. A queue item pinned to `ownerId` but
+   * living in a DIFFERENT physical store (a different SterlingStore instance,
+   * e.g. under MountedStores when scope and physical holder have drifted)
+   * simply never appears in this query, so nothing is pruned and nothing is
+   * falsely disclosed as pruned — there is no cross-db case to detect.
+   *
+   * A RENAME IS NOT A SHRINK — callers gate this whole method out via
+   * `internal.suppressReconcilePrune` rather than this method trying to tell a
+   * rename from a genuine drop (see applyInPlace's doc comment).
+   */
+  pruneReconcileNeeded(ownerId, droppedPaths, at, receipt) {
+    const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+    for (const r of rows) {
+      const t = _SterlingStore.decodeLiveRecord("pruneReconcileNeeded", r);
+      if (t.source !== "system" || t.system_reason !== "reconcile_needed" || t.feature_link !== ownerId)
+        continue;
+      const currentFiles = t.file_keys ?? [];
+      const prunedPaths = currentFiles.filter((f) => droppedPaths.has(f));
+      if (prunedPaths.length === 0)
+        continue;
+      const keptFiles = currentFiles.filter((f) => !droppedPaths.has(f));
+      if (receipt) {
+        receipt.push({
+          id: t.id,
+          system_reason: t.system_reason,
+          removed: keptFiles.length === 0,
+          pruned_paths: prunedPaths,
+          remaining_file_keys: keptFiles
+        });
+      }
+      if (keptFiles.length === 0) {
+        this.remove(t.id, at);
+        continue;
+      }
+      const owner = this.get(ownerId);
+      const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: ownerId }, keptFiles);
+      this.applyInPlace("pruneReconcileNeeded", t.id, (cur) => ({ ...cur, file_keys: keptFiles, text }), {}, { suppressReconcilePrune: true });
     }
   }
   /**
@@ -6475,10 +6353,22 @@ var SterlingStore = class _SterlingStore {
    *      file absorbed the second file's drift into a fresh baseline: the finding
    *      neither queued nor survived.
    *
-   * The key is therefore (system_reason, feature_link, file_keys SET), and the
-   * check runs inside the same BEGIN IMMEDIATE transaction as the insert, so a
-   * concurrent caller blocks on the write lock and then SEES the committed row
-   * instead of racing it.
+   * The key is therefore (system_reason, feature_link, file_keys SET) for
+   * every lane EXCEPT reconcile_needed with a feature_link (board b0bb9d96 /
+   * I-29, "the mint storm"): THAT one lane's identity is (system_reason,
+   * feature_link) ALONE — the file_keys SET is deliberately excluded from the
+   * match, and instead gets UNIONED into the surviving (oldest) open item
+   * rather than distinguishing a second one. The exact-SET reading above
+   * fixed the silent-loss bug (2) by making the file part of the key; the
+   * reconcile_needed exception keeps that same guarantee (no file is ever
+   * dropped — see the union below) while also closing bug (1)'s SIBLING for
+   * this lane: two DIFFERENT keys (a singleton [a], then [a,b]) used to
+   * coexist as two legitimate-looking open items for one article, which is
+   * exactly what a reader saw as duplicates even though neither was a
+   * byte-identical TOCTOU race. See the isReconcileFold branch below. The
+   * check still runs inside the same BEGIN IMMEDIATE transaction as the
+   * insert/fold, so a concurrent caller blocks on the write lock and then
+   * SEES the committed row instead of racing it.
    *
    * A MATCH WHOSE TEXT DIFFERS IS UPDATED, NOT DISCARDED. Same file, escalating
    * severity — edited today, deleted tomorrow, both reconcile_needed, the first
@@ -6516,10 +6406,67 @@ var SterlingStore = class _SterlingStore {
       const strip = (s2) => s2.replace(/\d+(?= bytes of code on disk)/g, "#");
       return strip(a) === strip(b);
     };
+    const isReconcileFold = candidate.system_reason === "reconcile_needed" && !!candidate.feature_link;
     let existing;
     let textUpdated = false;
+    let insertedText;
     this.tx(() => {
       const rows = this.db.prepare("SELECT body, scope FROM records WHERE type = 'todo' AND status != 'superseded'").all();
+      if (isReconcileFold) {
+        const matches = [];
+        for (const r of rows) {
+          const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
+          if (t.source !== "system")
+            continue;
+          if (t.system_reason !== "reconcile_needed" || t.feature_link !== candidate.feature_link)
+            continue;
+          matches.push(t);
+        }
+        if (matches.length === 0) {
+          const fileKeys = candidate.file_keys ?? [];
+          if (fileKeys.length > 1) {
+            const owner = this.get(candidate.feature_link);
+            const canonicalText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, fileKeys);
+            this.insertRecord({ ...candidate, text: canonicalText });
+            insertedText = canonicalText;
+          } else {
+            this.insertRecord(candidate);
+          }
+          return;
+        }
+        matches.sort((a, b) => a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        const [survivor, ...folded] = matches;
+        const unionSet = new Set(survivor.file_keys ?? []);
+        for (const f of folded)
+          for (const k of f.file_keys ?? [])
+            unionSet.add(k);
+        for (const k of candidate.file_keys ?? [])
+          unionSet.add(k);
+        const unionFiles = [...unionSet].sort();
+        const priorFiles2 = [...survivor.file_keys ?? []].sort();
+        const filesChanged2 = JSON.stringify(priorFiles2) !== JSON.stringify(unionFiles);
+        const widening = folded.length > 0 || unionFiles.length > 1;
+        let nextText = candidate.text ?? "";
+        if (widening) {
+          const owner = this.get(candidate.feature_link);
+          nextText = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: candidate.feature_link }, unionFiles);
+        }
+        const textChanged2 = !textsEquivalent(survivor.text ?? "", nextText);
+        if (textChanged2 || filesChanged2) {
+          existing = this.applyInPlace("enqueueSystemTodo", survivor.id, (cur) => ({
+            ...cur,
+            updated_at: candidate.updated_at,
+            ...textChanged2 ? { text: nextText } : {},
+            ...filesChanged2 ? { file_keys: unionFiles } : {}
+          }), {});
+          textUpdated = textChanged2;
+        } else {
+          existing = survivor;
+        }
+        for (const f of folded)
+          this.remove(f.id, candidate.updated_at);
+        return;
+      }
       for (const r of rows) {
         const t = _SterlingStore.decodeLiveRecord("enqueueSystemTodo", r);
         if (t.source !== "system")
@@ -6548,7 +6495,15 @@ var SterlingStore = class _SterlingStore {
       }
     });
     return existing ? { record: this.hydrateAll([existing])[0], deduped: true, text_updated: textUpdated } : {
-      record: this.hydrateAll([_SterlingStore.storableBody(candidate)])[0],
+      // The echo must agree with the ROW this call actually inserted, not
+      // with the caller's pre-canonicalization `candidate` — see
+      // `insertedText`'s own doc comment (board b0bb9d96 fix-round MEDIUM).
+      record: this.hydrateAll([
+        _SterlingStore.storableBody({
+          ...candidate,
+          ...insertedText !== void 0 ? { text: insertedText } : {}
+        })
+      ])[0],
       deduped: false,
       text_updated: false
     };
@@ -6748,7 +6703,7 @@ var SterlingStore = class _SterlingStore {
   }
   /**
    * Every SUPERSEDED record carrying this exact slug, newest first — the
-   * dead-slug counterpart of recordsBySlug (decision df361a0f, board 2b9f2f1a
+   * dead-slug counterpart of recordsBySlug (decision foreign_df361a0f, board 2b9f2f1a
    * part 3, 'supersede + disclose'). knowledge_get's dead-slug fallthrough
    * uses this ONLY after live-slug and id-prefix resolution both fail, so it
    * can never shadow a live record: a slug still carried by a non-superseded
@@ -6763,7 +6718,7 @@ var SterlingStore = class _SterlingStore {
     return this.withDerivedReliedByAll(_SterlingStore.decodeLiveRecords("supersededRecordsBySlug", rows));
   }
   /**
-   * Follows superseded_by from `id` to the chain end (decision de1a7329: ids
+   * Follows superseded_by from `id` to the chain end (decision foreign_de1a7329: ids
    * stay version-pinned — this DISCLOSES where the chain currently ends, it
    * never redirects the pinned record itself). A live (non-superseded)
    * record resolves to itself at hops:0. Unknown id -> null. Never throws
@@ -6795,7 +6750,7 @@ var SterlingStore = class _SterlingStore {
   /**
    * INBOUND rel:'supersedes' edges — every record elsewhere holding a
    * supersedes link TARGETING `id` (board c6e3561f part (a)). resolveTerminus
-   * above is the OUTBOUND, whole-record-supersession walk (decision de1a7329):
+   * above is the OUTBOUND, whole-record-supersession walk (decision foreign_de1a7329):
    * it only ever has something to say about a record that was itself retired
    * via supersede(). A record can also be named the target of a rel:'supersedes'
    * link WITHOUT ever being retired — a clause-level or partial override
@@ -7136,223 +7091,17 @@ var SterlingStore = class _SterlingStore {
     this.db.close();
   }
   // -------------------------------------------------------------------------
-  // Run protocol (spec §3.2.9, §5.2) — run records are run-scoped transient
-  // state, but they live in SQLite, not in a shared mutable file (P4), because
-  // brain transitions need atomic compare-and-swap and the TUI reads them live.
-  // They are NOT knowledge records: knowledge_query never sees them.
+  // The staged-pipeline run/handoff protocol (spec §3.2.9, §5.2 — createRun,
+  // getRun, casTransition, casTransitionMerge, recordPendingExit/
+  // getPendingExit, writeHandoff/readHandoffs, updateRunOptimistic and its
+  // dependents appendRunEscalation/appendRunReconcileNeeded/
+  // appendRunScopeAmendment/setRunReviewMandatory/incrementDispatchCount) was
+  // removed per decision sterling-claude-code-scale-down-boundary (2ad87dd1).
+  // The `runs`/`handoffs` SQLite tables are left in place, unused — no FK
+  // references them and no startup validation scans them, so leaving them is
+  // safe; a DROP TABLE migration is optional cleanup, not a correctness
+  // requirement (see the migration list at the bottom of this file).
   // -------------------------------------------------------------------------
-  /** Run begins at gate approval. One active run at a time (§7.5). */
-  createRun(input2) {
-    const run = runRecordSchema.parse(input2);
-    this.tx(() => {
-      const active = this.getRun();
-      if (active) {
-        throw new Error(`createRun: run '${active.id}' is still active (${active.machine_state}) \u2014 one active run at a time`);
-      }
-      this.db.prepare("INSERT INTO runs (id, machine_state, pending_exit, body, updated_at) VALUES (?, ?, NULL, ?, ?)").run(run.id, run.machine_state, JSON.stringify(run), run.started_at);
-    });
-    return run;
-  }
-  /** By id, or the single active run when no id is given. */
-  getRun(id) {
-    const row = id ? this.db.prepare("SELECT body FROM runs WHERE id = ?").get(id) : this.db.prepare(`SELECT body FROM runs WHERE machine_state IN (${ACTIVE_STATES.map(() => "?").join(",")}) ORDER BY updated_at DESC LIMIT 1`).get(...ACTIVE_STATES);
-    return row ? runRecordSchema.parse(JSON.parse(row.body)) : void 0;
-  }
-  /**
-   * The pending-exit column holds a FIFO QUEUE since board 81bc3409 (a JSON
-   * array; a LEGACY single-object value reads as a one-element queue), so
-   * parallel agent exits append instead of refusing on a sibling's unconsumed
-   * exit — on 2026-07-03 three separate reviewer exits were refused on one
-   * sibling's slot and each needed a conductor resume round-trip. Consumers
-   * (run_signal / consume-exit) read the HEAD via getPendingExit; the brain
-   * transition that consumes it POPS the head and preserves the tail.
-   */
-  static parsePendingQueue(raw) {
-    if (!raw)
-      return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-  static serializePendingQueue(queue) {
-    return queue.length ? JSON.stringify(queue) : null;
-  }
-  /**
-   * §5.2 brain transition: atomic compare-and-swap on machine_state
-   * (UPDATE … WHERE machine_state = <observed>). Zero rows updated means the
-   * caller carried stale state — rejected loudly, never re-applied. POPS the
-   * HEAD pending exit (the one this transition consumes) and PRESERVES the
-   * queued tail (board 81bc3409); the read-pop pair runs inside BEGIN
-   * IMMEDIATE, so a concurrent recordPendingExit append cannot be lost
-   * between the read and the write.
-   */
-  casTransition(observed, next) {
-    const run = runRecordSchema.parse(next);
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(run.id);
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row?.pending_exit ?? null).slice(1));
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(run.machine_state, tail, JSON.stringify(run), (/* @__PURE__ */ new Date()).toISOString(), run.id, observed);
-      if (res.changes === 0) {
-        throw new Error(`CAS rejected: run '${run.id}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-    });
-    return run;
-  }
-  /**
-   * §5.2 brain transition, MERGE-SAFE (audit findings 1/43, 18/43). Like
-   * casTransition it CAS-guards machine_state, but instead of overwriting the
-   * whole body from a caller's stale snapshot it re-reads the FRESH body inside a
-   * retry loop and applies `mutate` to it — so a concurrent hook write (H7
-   * appendRunReconcileNeeded, H6/H8 appendRunEscalation, all via
-   * updateRunOptimistic) landing between the caller's read and this transition is
-   * PRESERVED, not clobbered. The UPDATE guards on body, machine_state AND
-   * pending_exit: a body OR queue change under us retries against the fresh row
-   * (so a concurrent recordPendingExit append is never overwritten by a stale
-   * tail); a machine_state change is a stale caller and throws (casTransition's
-   * CAS-rejected semantics). POPS the HEAD pending exit and preserves the tail
-   * (board 81bc3409). State moves through this path or casTransition, never
-   * updateRunOptimistic.
-   */
-  casTransitionMerge(observed, runId, mutate, attempts = 5) {
-    this.assertWritable("casTransitionMerge");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      const row = this.db.prepare("SELECT body, machine_state, pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`casTransitionMerge: no run '${runId}'`);
-      this.assertLiveSchemaVersion("casTransitionMerge");
-      if (row.machine_state !== observed) {
-        throw new Error(`CAS rejected: run '${runId}' is not in observed state '${observed}' \u2014 stale caller; re-read run_state, never re-apply (\xA75.2)`);
-      }
-      const current = runRecordSchema.parse(JSON.parse(row.body));
-      const next = runRecordSchema.parse(mutate(current));
-      const tail = _SterlingStore.serializePendingQueue(_SterlingStore.parsePendingQueue(row.pending_exit).slice(1));
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = ?, body = ?, updated_at = ? WHERE id = ? AND body = ? AND machine_state = ? AND pending_exit IS ?").run(next.machine_state, tail, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body, observed, row.pending_exit).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`casTransitionMerge: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /**
-   * agent_exit lands here; run_signal/consume-exit consume the HEAD. Parallel
-   * exits QUEUE (FIFO, board 81bc3409) instead of refusing on a sibling's
-   * unconsumed exit. One pending exit per (phase, agent_role) still holds: the
-   * same agent re-exiting before its first exit is consumed is a protocol
-   * violation and is refused loudly with nothing recorded (P5) — a duplicate
-   * would drive the brain twice from one dispatch.
-   */
-  recordPendingExit(runId, exit) {
-    this.tx(() => {
-      const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`recordPendingExit: no run '${runId}'`);
-      const queue = _SterlingStore.parsePendingQueue(row.pending_exit);
-      const dup = queue.find((e) => (e.phase_id ?? null) === (exit.phase_id ?? null) && (e.agent_role ?? null) === (exit.agent_role ?? null));
-      if (dup) {
-        throw new Error(`recordPendingExit: run '${runId}' already has an unconsumed exit from ${dup.agent_role ?? "unknown"} on phase '${dup.phase_id ?? "?"}' ('${dup.signal}') \u2014 one exit per dispatched agent; call run_signal (or consume-exit) first`);
-      }
-      this.db.prepare("UPDATE runs SET pending_exit = ? WHERE id = ?").run(_SterlingStore.serializePendingQueue([...queue, exit]), runId);
-    });
-  }
-  /** The HEAD of the pending-exit queue — the exit the next run_signal/consume-exit will consume. */
-  getPendingExit(runId) {
-    const row = this.db.prepare("SELECT pending_exit FROM runs WHERE id = ?").get(runId);
-    if (!row)
-      throw new Error(`getPendingExit: no run '${runId}'`);
-    return _SterlingStore.parsePendingQueue(row.pending_exit)[0];
-  }
-  /** Transient pair (§10): run-scoped, never enters the durable knowledge tables. */
-  writeHandoff(runId, input2, at) {
-    this.assertWritable("writeHandoff");
-    const handoff = handoffSchema.parse(input2);
-    if (!this.db.prepare("SELECT 1 FROM runs WHERE id = ?").get(runId)) {
-      throw new Error(`writeHandoff: no run '${runId}'`);
-    }
-    this.tx(() => {
-      this.db.prepare("INSERT INTO handoffs (run_id, phase_id, agent_role, body, created_at) VALUES (?, ?, ?, ?, ?)").run(runId, handoff.phase_id, handoff.agent_role, JSON.stringify(handoff), at);
-    });
-    return handoff;
-  }
-  readHandoffs(runId, filter = {}) {
-    const rows = filter.phase_id ? this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? AND phase_id = ? ORDER BY created_at").all(runId, filter.phase_id) : this.db.prepare("SELECT body FROM handoffs WHERE run_id = ? ORDER BY created_at").all(runId);
-    let handoffs = rows.map((r) => handoffSchema.parse(JSON.parse(r.body)));
-    if (filter.files?.length) {
-      const wanted = new Set(filter.files.map(normalizeRepoPath));
-      handoffs = handoffs.filter((h) => h.what_changed.some((c) => wanted.has(c.path)));
-    }
-    return handoffs;
-  }
-  /**
-   * Optimistic non-state mutation of the run record (hooks write concurrently
-   * with the brain): retries on body change, fails loudly if it keeps losing
-   * the race — never a silent drop (P5). machine_state is CAS-only and must
-   * not change through this path.
-   */
-  updateRunOptimistic(runId, mutate, attempts = 5) {
-    this.assertWritable("updateRunOptimistic");
-    for (let i = 0; i < attempts; i++) {
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const row = this.db.prepare("SELECT body FROM runs WHERE id = ?").get(runId);
-      if (!row)
-        throw new Error(`updateRunOptimistic: no run '${runId}'`);
-      this.assertLiveSchemaVersion("updateRunOptimistic");
-      const current = JSON.parse(row.body);
-      const next = runRecordSchema.parse(mutate(current));
-      if (next.machine_state !== current.machine_state) {
-        throw new Error("updateRunOptimistic: machine_state changes go through casTransition only (\xA75.2)");
-      }
-      let changes = 0;
-      this.tx(() => {
-        changes = Number(this.db.prepare("UPDATE runs SET body = ?, updated_at = ? WHERE id = ? AND body = ?").run(JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, row.body).changes);
-      });
-      if (changes === 1)
-        return next;
-    }
-    throw new Error(`updateRunOptimistic: lost the optimistic race ${attempts}x for run '${runId}' (P5: failing loudly)`);
-  }
-  /** H6 context warns + run_escalate land here (§6). */
-  appendRunEscalation(runId, entry) {
-    this.updateRunOptimistic(runId, (run) => ({ ...run, escalations: [...run.escalations, entry] }));
-  }
-  /** H7 pipeline mark (§6): article reconciliation due at completion; idempotent. */
-  appendRunReconcileNeeded(runId, articleId) {
-    this.updateRunOptimistic(runId, (run) => (run.reconcile_needed ?? []).includes(articleId) ? run : { ...run, reconcile_needed: [...run.reconcile_needed ?? [], articleId] });
-  }
-  /**
-   * Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-   * the conductor's human-gated append of an exact repo-relative path to the run
-   * record. Idempotent-on-path — a duplicate path is skipped and the first
-   * {reason, at} stands. Never changes machine_state (updateRunOptimistic
-   * enforces that). Deliberately NOT on the ToolStore Pick — agent-invisible.
-   */
-  appendRunScopeAmendment(runId, amendment) {
-    this.updateRunOptimistic(runId, (run) => (run.scope_amendments ?? []).some((a) => a.path === amendment.path) ? run : { ...run, scope_amendments: [...run.scope_amendments ?? [], amendment] });
-  }
-  /**
-   * Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-   * REPLACES all review_mandatory entries for phaseId with new items, each stamped
-   * with phase_id from the phaseId param. Other phases are untouched (replace-by-
-   * phase, not global). An empty items list clears that phase only. Uses
-   * updateRunOptimistic (CAS, never machine_state). Deliberately NOT on ToolStore
-   * Pick — agent-invisible (decision 628c4b7f).
-   */
-  setRunReviewMandatory(runId, phaseId, items) {
-    this.updateRunOptimistic(runId, (run) => {
-      const kept = (run.review_mandatory ?? []).filter((m) => m.phase_id !== phaseId);
-      const added = items.map((item) => ({ phase_id: phaseId, record_id: item.record_id, reason: item.reason }));
-      return { ...run, review_mandatory: [...kept, ...added] };
-    });
-  }
-  /** H8 (§6): per-agent-type dispatch counter; returns the new count. Respawns count too. */
-  incrementDispatchCount(runId, agentType) {
-    const next = this.updateRunOptimistic(runId, (run) => ({
-      ...run,
-      dispatch_counts: { ...run.dispatch_counts, [agentType]: (run.dispatch_counts[agentType] ?? 0) + 1 }
-    }));
-    return next.dispatch_counts[agentType];
-  }
   /**
    * H2 selection row (§6, §11): the TUI writes it; H2 consumes it one-shot,
    * transactionally — read + delete in one transaction, never a signal file (P4).
@@ -7391,15 +7140,28 @@ var SterlingStore = class _SterlingStore {
     this.assertWritable("renameFileKey");
     const from = normalizeRepoPath(oldPath);
     const to = normalizeRepoPath(newPath);
-    const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+    let count = 0;
     this.tx(() => {
+      const rows = this.db.prepare("SELECT record_id FROM record_file_keys WHERE path = ?").all(from);
+      count = rows.length;
       for (const { record_id } of rows) {
         if (!this.get(record_id))
           continue;
-        this.applyInPlace("renameFileKey", record_id, (current) => deepReplaceString(current, from, to), {}, { allowRetired: true });
+        this.applyInPlace("renameFileKey", record_id, (current) => {
+          const patched = deepReplaceString(current, from, to);
+          const c = current;
+          if (c.type === "todo" && c.source === "system" && c.system_reason === "reconcile_needed") {
+            const fileKeys = [...new Set(patched.file_keys ?? [])].sort();
+            const featureLink = patched.feature_link;
+            const owner = featureLink ? this.get(featureLink) : void 0;
+            const text = buildReconcileText(owner ? { type: owner.type, slug: owner.slug, title: owner.title } : { type: "feature_article", slug: featureLink }, fileKeys);
+            return { ...patched, file_keys: fileKeys, text };
+          }
+          return patched;
+        }, {}, { allowRetired: true, suppressReconcilePrune: true });
       }
     });
-    return rows.length;
+    return count;
   }
   /** knowledge_link (§10): typed graph edge, traversable both directions (§3.1 c4).
    *  targetValidated is set ONLY by MountedStores.addLink, which has already resolved
@@ -7429,54 +7191,12 @@ var SterlingStore = class _SterlingStore {
     });
     return this.hydrateAll([stored])[0];
   }
-  /**
-   * Disposal of run-scoped SQLite rows (§16.1 Slice 5; H9): folds the
-   * summaries onto the run record (the only facts that survive — §3.7),
-   * advances completing → awaiting_merge_gate via CAS, and deletes the
-   * run-scoped handoff + check_skipped rows — one transaction, lifecycle
-   * binding follows the data (P4). The run record itself persists: the merge
-   * gate still needs it. Callers (dispose-run) verify promotion conditions
-   * and snapshot BEFORE calling this.
-   */
-  disposeRunRows(runId, summaries) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`disposeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "completing") {
-      throw new Error(`disposeRunRows: run '${runId}' is '${run.machine_state}', not 'completing' \u2014 disposal is the completion sequence only`);
-    }
-    const next = runRecordSchema.parse({ ...run, machine_state: "awaiting_merge_gate", summaries });
-    this.tx(() => {
-      const res = this.db.prepare("UPDATE runs SET machine_state = ?, pending_exit = NULL, body = ?, updated_at = ? WHERE id = ? AND machine_state = ?").run(next.machine_state, JSON.stringify(next), (/* @__PURE__ */ new Date()).toISOString(), runId, "completing");
-      if (res.changes === 0)
-        throw new Error(`disposeRunRows: CAS rejected for run '${runId}' (stale caller)`);
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-    return next;
-  }
-  /**
-   * Terminal-run row purge (P4): deletes the run-scoped handoff + check_skipped
-   * rows of a run that has already reached a TERMINAL state ('rejected' via
-   * --abort, 'merged'/'rejected' via the merge gate). disposeRunRows is the
-   * completion sequence (folds summaries, CAS-advances); this is the lifecycle
-   * sweep for the paths that end a run WITHOUT that sequence — an aborted run's
-   * rows previously had no disposal event and accreted forever, and the merge
-   * gate's own post-disposal skip rows outlived the run (R2 board 82f04007).
-   * Refuses on a non-terminal run — never a back door around disposal.
-   */
-  purgeRunRows(runId) {
-    const run = this.getRun(runId);
-    if (!run)
-      throw new Error(`purgeRunRows: no run '${runId}'`);
-    if (run.machine_state !== "rejected" && run.machine_state !== "merged") {
-      throw new Error(`purgeRunRows: run '${runId}' is '${run.machine_state}', not terminal \u2014 rows of a live run are disposed only by disposeRunRows`);
-    }
-    this.tx(() => {
-      this.db.prepare("DELETE FROM handoffs WHERE run_id = ?").run(runId);
-      this.db.prepare("DELETE FROM check_skipped WHERE run_id = ?").run(runId);
-    });
-  }
+  // disposeRunRows / purgeRunRows (the staged-pipeline run-row disposal pair)
+  // were removed alongside the run/handoff protocol above (decision
+  // sterling-claude-code-scale-down-boundary, 2ad87dd1) — their sole callers
+  // (dispose-run.mjs, merge-gate.mjs) are pipeline apparatus. check_skipped
+  // rows now accumulate under the NULL-run cap below only; a run-scoped row
+  // is unreachable once nothing calls createRun.
   /** §16.1.9: every unimplemented full-spec check emits check_skipped where it would have run — never silent success. */
   recordCheckSkipped(check, reason, runId, at) {
     this.assertWritable("recordCheckSkipped");
@@ -7537,7 +7257,7 @@ var SterlingStore = class _SterlingStore {
    * Enqueue exactly ONE refresh_reference maintenance item for the models catalog.
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
-   * must NOT suppress the enqueue (§3.2.5, decision 98064d77).
+   * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
    */
   enqueueRefreshReferenceOnce(nowISO) {
     const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
@@ -7832,7 +7552,7 @@ function openStore(cwd) {
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join as join3, basename as basename2, dirname as dirname3 } from "node:path";
+import { join as join3, dirname as dirname3 } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -7841,7 +7561,7 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_corrupt",
   "ledger_absent",
   "ledger_digest_mismatch",
-  "ledger_lock_held",
+  "compatibility_lock_held",
   "entry_not_found",
   "entry_selector_ambiguous",
   "entry_not_active",
@@ -7866,7 +7586,7 @@ var CODES = /* @__PURE__ */ new Set([
   "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
-  // §1.4 commit-reviewed
+  // commit operation
   "nothing_staged",
   "message_missing",
   "no_spendable_receipt",
@@ -8005,12 +7725,8 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_CODE_BY_BASENAME = {
-  "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "ledger_lock_held"
-};
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+function lockCodeFor() {
+  return "register_lock_held";
 }
 function isPidAlive(pid) {
   try {
@@ -8079,7 +7795,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 `
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
@@ -8090,7 +7806,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -8158,8 +7874,9 @@ var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3 } from "node:fs";
-import { join as join4 } from "node:path";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3, renameSync as renameSync2 } from "node:fs";
+import { spawnSync as spawnSync2 } from "node:child_process";
+import { join as join4, dirname as dirname4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
 var LOCK_STALE_MS = 3e3;
 var LOCK_POLL_MS = 20;
@@ -8264,7 +7981,7 @@ function buildReconcileItem(article, fileKeys, now) {
     links: [],
     scope: "project",
     stack_tags: [],
-    text: article.type === "reference_material" ? `reconcile reference '${article.title}' \u2014 its document changed content in direct mode (settled): ${fileKeys.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${article.slug}' \u2014 owned file(s) changed content in direct mode (settled): ${fileKeys.join(", ")}`,
+    text: buildReconcileText(article, fileKeys),
     source: "system",
     system_reason: "reconcile_needed",
     file_keys: fileKeys,
@@ -8275,12 +7992,6 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
   const exempt = loadGeneratedProjections(root);
   const paths = [...new Set((candidatePaths ?? []).filter(Boolean))].filter((rel) => !exempt.has(rel));
   if (!paths.length) return [];
-  const openByArticle = /* @__PURE__ */ new Map();
-  for (const t of store2.query({ types: ["todo"], cap: 1e3 })) {
-    if (t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link && !openByArticle.has(t.feature_link)) {
-      openByArticle.set(t.feature_link, t);
-    }
-  }
   const byArticle = /* @__PURE__ */ new Map();
   for (const rel of paths) {
     const owners = store2.query({ types: ["feature_article", "reference_material"], file_keys: [rel], cap: 100 }).filter((r) => !r.working_tree);
@@ -8291,26 +8002,92 @@ function mintSettlementReconcile(store2, root, candidatePaths, now = (/* @__PURE
   }
   const minted = [];
   for (const { article, freshPaths } of byArticle.values()) {
-    const existing = openByArticle.get(article.id);
-    const existingSet = new Set((existing?.file_keys ?? []).filter((k) => !exempt.has(k)));
-    const newlyDrifted = [...freshPaths].filter((rel) => !existingSet.has(rel)).filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
-    if (!newlyDrifted.length) continue;
-    if (!existing) {
-      const fileKeys = newlyDrifted.sort();
-      store2.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
-      minted.push({ article_id: article.id, paths: fileKeys });
-      continue;
-    }
-    const widened = [.../* @__PURE__ */ new Set([...existingSet, ...newlyDrifted])].sort();
-    const { record: widenedRecord } = store2.enqueueSystemTodo(buildReconcileItem(article, widened, now));
-    for (const t of store2.query({ types: ["todo"], cap: 1e3 })) {
-      if (t.source === "system" && t.system_reason === "reconcile_needed" && t.feature_link === article.id && t.id !== widenedRecord.id) {
-        store2.remove(t.id, now);
-      }
-    }
-    minted.push({ article_id: article.id, paths: widened });
+    const drifted = [...freshPaths].filter((rel) => contentChangedAgainstBaseline(root, rel, article.file_baselines));
+    if (!drifted.length) continue;
+    const fileKeys = drifted.sort();
+    const { record } = store2.enqueueSystemTodo(buildReconcileItem(article, fileKeys, now));
+    minted.push({ article_id: article.id, paths: record.file_keys ?? fileKeys });
   }
   return minted;
+}
+var GIT_SETTLED_REL = ".sterling/transient/git-settled.json";
+var EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+function gitZ(root, args) {
+  const r = spawnSync2("git", args, { cwd: root, encoding: "utf8", timeout: 3e4, maxBuffer: 64 * 1024 * 1024 });
+  if (r.status !== 0) throw new Error(`git ${args[0]} failed: ${(r.stderr || r.error?.message || "").trim()}`);
+  return r.stdout.split("\0").filter(Boolean);
+}
+function changedSince(root, base2) {
+  const diff = ["diff", "--name-only", "-z", "--no-renames", "--relative"];
+  return /* @__PURE__ */ new Set([
+    ...gitZ(root, [...diff, base2]),
+    ...gitZ(root, [...diff, "--cached", base2]),
+    ...gitZ(root, ["ls-files", "--others", "--exclude-standard", "-z"])
+  ]);
+}
+var isMachinery = (rel) => rel === ".sterling" || rel.startsWith(".sterling/") || rel.startsWith(".git/");
+function readGitSettled(root) {
+  try {
+    const s2 = JSON.parse(readFileSync3(join4(root, GIT_SETTLED_REL), "utf8"));
+    return typeof s2?.sha === "string" && s2.dirty && typeof s2.dirty === "object" ? s2 : null;
+  } catch {
+    return null;
+  }
+}
+function gitTouches(root, now) {
+  let head;
+  try {
+    const r = spawnSync2("git", ["rev-parse", "--verify", "-q", "HEAD"], { cwd: root, encoding: "utf8", timeout: 3e4 });
+    if (r.status === 0) head = r.stdout.trim();
+    else if (spawnSync2("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root, encoding: "utf8", timeout: 3e4 }).status === 0) head = EMPTY_TREE;
+    else return { ok: false, reason: "no_git" };
+    const settled = readGitSettled(root);
+    let base2 = settled?.sha;
+    if (base2 && base2 !== EMPTY_TREE && (spawnSync2("git", ["cat-file", "-e", `${base2}^{tree}`], { cwd: root, timeout: 3e4 }).status !== 0 || spawnSync2("git", ["merge-base", "--is-ancestor", base2, head], { cwd: root, timeout: 3e4 }).status !== 0)) base2 = null;
+    const hashOf = (p) => hashFile(root, p) ?? null;
+    const dirtyNow = [...changedSince(root, head)].filter((p) => !isMachinery(p));
+    const next = { sha: head, dirty: Object.fromEntries(dirtyNow.map((p) => [p, hashOf(p)])), at: now };
+    if (!settled) return { ok: true, settled: null, candidates: [], changed: /* @__PURE__ */ new Set(), next };
+    const differs = (p) => !Object.hasOwn(settled.dirty, p) || settled.dirty[p] !== hashOf(p);
+    const pool = /* @__PURE__ */ new Set([...base2 ? changedSince(root, base2) : dirtyNow, ...Object.keys(settled.dirty)]);
+    const changed = new Set([...pool].filter((p) => !isMachinery(p) && differs(p)));
+    const candidates = [...changed].map((path) => {
+      let at = settled.at;
+      try {
+        at = statSync3(join4(root, path)).mtime.toISOString();
+      } catch {
+      }
+      return { path, at: typeof at === "string" ? at : now };
+    });
+    return { ok: true, settled, candidates, changed, next, base_lost: Boolean(settled.sha && !base2) };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e) };
+  }
+}
+function writeGitSettled(root, snapshot, { ifAbsent = false } = {}) {
+  const p = join4(root, GIT_SETTLED_REL);
+  mkdirSync3(dirname4(p), { recursive: true });
+  if (ifAbsent) {
+    try {
+      writeFileSync2(p, JSON.stringify(snapshot), { flag: "wx" });
+      return true;
+    } catch (e) {
+      if (e?.code === "EEXIST") return false;
+      throw e;
+    }
+  }
+  writeFileSync2(`${p}.tmp`, JSON.stringify(snapshot));
+  renameSync2(`${p}.tmp`, p);
+  return true;
+}
+function gitTrackedSubset(root, paths) {
+  const list = (paths ?? []).filter(Boolean);
+  if (!list.length) return /* @__PURE__ */ new Set();
+  try {
+    return new Set(gitZ(root, ["ls-files", "-z", "--", ...list.map((p) => `:(literal)${p}`)]));
+  } catch {
+    return null;
+  }
 }
 
 // scripts/hooks/lib/transcript.mjs
@@ -8360,7 +8137,7 @@ function fillPct(usage, windowSize) {
 }
 
 // scripts/hooks/lib/dispatch-residue.mjs
-import { spawnSync as spawnSync2 } from "node:child_process";
+import { spawnSync as spawnSync3 } from "node:child_process";
 
 // scripts/hooks/lib/dispatch-prompt.mjs
 var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
@@ -8392,7 +8169,7 @@ function probeDirtyPaths(projectDir, files) {
   if (declared.length === 0) return { verified: true, dirty: [] };
   let r;
   try {
-    r = spawnSync2("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
+    r = spawnSync3("git", ["status", "--porcelain", "-z", "-uall", "--", ...declared], {
       cwd: projectDir,
       encoding: "utf8",
       timeout: 1e4
@@ -8427,9 +8204,9 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 }
 
 // scripts/lib/test-integrity.mjs
-import { spawnSync as spawnSync3 } from "node:child_process";
+import { spawnSync as spawnSync4 } from "node:child_process";
 function gitTestIntegrity({ cwd, testGlobs }) {
-  const r = spawnSync3("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
+  const r = spawnSync4("git", ["diff", "HEAD", "--name-status"], { cwd, encoding: "utf8", timeout: 3e4 });
   if (r.status !== 0) return { no_git: true, modified: [], deleted: [] };
   const modified = [];
   const deleted = [];
@@ -8451,6 +8228,25 @@ function gitTestIntegrity({ cwd, testGlobs }) {
   }
   return { no_git: false, modified, deleted };
 }
+
+// scripts/hooks/lib/delivery.mjs
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
+import { join as join5, dirname as dirname5 } from "node:path";
+function noticesDir(cwd) {
+  return join5(cwd, ".sterling", "transient", "notices");
+}
+function publishNotice(cwd, text) {
+  const dir = noticesDir(cwd);
+  mkdirSync4(dir, { recursive: true });
+  const name = `h10-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.json`;
+  const target = join5(dir, name);
+  const tmp = `${target}.tmp`;
+  writeFileSync3(tmp, JSON.stringify({ text: String(text) }), { flag: "wx" });
+  renameSync3(tmp, target);
+  return target;
+}
+var GAP_EVIDENCE_CHAR_CAP = 400;
+var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/hooks/h10-direct-capture.mjs
 async function computeDeadDispatchResidue(cwd, sessionId) {
@@ -8479,7 +8275,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
   }
   if (stampIds.size) {
     try {
-      mkdirSync4(join5(cwd, ".sterling", "transient"), { recursive: true });
+      mkdirSync5(join6(cwd, ".sterling", "transient"), { recursive: true });
       await withRegisterLock(
         cwd,
         () => {
@@ -8490,11 +8286,11 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
               entry.residue_reported_at = nowIso;
             }
           }
-          const transient = join5(cwd, ".sterling", "transient");
-          mkdirSync4(transient, { recursive: true });
-          const tmpPath = join5(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
-          writeFileSync2(tmpPath, JSON.stringify(fresh));
-          renameSync2(tmpPath, registerPath2);
+          const transient = join6(cwd, ".sterling", "transient");
+          mkdirSync5(transient, { recursive: true });
+          const tmpPath = join6(transient, `${basename2(registerPath2)}.tmp-${process.pid}`);
+          writeFileSync4(tmpPath, JSON.stringify(fresh));
+          renameSync4(tmpPath, registerPath2);
         },
         { retryMs: 1e3, timeoutMs: 1e4 }
       );
@@ -8522,11 +8318,10 @@ if (!store) {
   if (residueLines.length) process.stderr.write(residueLines.join("\n\n"));
   allow();
 }
-var touchesPath = join5(input.cwd, ".sterling", "transient", "touches.json");
-var eventsPath = join5(input.cwd, ".sterling", "transient", "session-events.json");
-var nagMarker = join5(input.cwd, ".sterling", "transient", "capture-nagged.json");
+var touchesPath = join6(input.cwd, ".sterling", "transient", "touches.json");
+var eventsPath = join6(input.cwd, ".sterling", "transient", "session-events.json");
+var nagMarker = join6(input.cwd, ".sterling", "transient", "capture-nagged.json");
 try {
-  if (store.getRun()) allow();
   const config = parseConfig(loadConfig(input.cwd) ?? {});
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const disclose = (line) => {
@@ -8543,7 +8338,7 @@ try {
 `);
     }
   };
-  const pressureMarker = join5(input.cwd, ".sterling", "transient", "pressure-nagged.json");
+  const pressureMarker = join6(input.cwd, ".sterling", "transient", "pressure-nagged.json");
   const pressure = (() => {
     try {
       const cw = config.context_watch;
@@ -8553,20 +8348,22 @@ try {
         store.recordCheckSkipped("conductor-pressure", reason ?? "format_unparseable", void 0, now);
         sample = { session_id: input.session_id, level: "unknown", fill_pct: null, reason, at: now };
       } else {
-        const mapped = Boolean(model && cw.windows[model]);
-        const windowSize = mapped ? cw.windows[model] : cw.windows.default;
-        const unmapped = !mapped && model ? { unmapped_model: model } : {};
-        const fill = fillPct(usage, windowSize);
-        if (fill > 100) {
+        const baseModel = model ? String(model).replace(/\[[^\]]*\]$/, "") : null;
+        const windowSize = model ? cw.windows[model] ?? cw.windows[baseModel] : void 0;
+        const fill = windowSize ? fillPct(usage, windowSize) : null;
+        if (!windowSize) {
+          store.recordCheckSkipped("conductor-pressure", `window_unmapped:${model ?? "no-model-id"}`, void 0, now);
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: null, model: model ?? null, reason: "window_unmapped", ...model ? { unmapped_model: model } : {}, at: now };
+        } else if (fill > 100) {
           store.recordCheckSkipped("conductor-pressure", `window_mismatch:${model ?? "unknown-model"}:${fill.toFixed(1)}pct`, void 0, now);
-          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", ...unmapped, at: now };
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...unmapped, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
         }
       }
-      mkdirSync4(join5(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync2(join5(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
+      mkdirSync5(join6(input.cwd, ".sterling", "transient"), { recursive: true });
+      writeFileSync4(join6(input.cwd, ".sterling", "transient", "conductor-pressure.json"), JSON.stringify(sample));
       return sample;
     } catch (e) {
       try {
@@ -8579,7 +8376,7 @@ try {
   const dirtyPaths = (() => {
     if (pressure.level !== "soft" && pressure.level !== "hard") return 0;
     try {
-      const st = spawnSync4("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
+      const st = spawnSync5("git", ["status", "--porcelain"], { cwd: input.cwd, encoding: "utf8", timeout: 15e3 });
       if (st.status !== 0) {
         store.recordCheckSkipped("conductor-pressure", "boundary_no_git", void 0, now);
         return 0;
@@ -8594,126 +8391,26 @@ try {
     }
   })();
   const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
-  const rotationCmd = process.env.CLAUDE_PLUGIN_ROOT ? `node "${join5(process.env.CLAUDE_PLUGIN_ROOT, "scripts", "rotation-note.mjs")}"` : "node scripts/rotation-note.mjs";
-  const pressurePart = () => pressure.level === "hard" ? `H10 conductor context pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 hard threshold ${config.context_watch.conductor.hard_pct}% (${pressure.window}-tok window) \u2192 finish/commit open work, delegate reads & mechanical work to subagents (P1).${boundaryLine()} Once committed: ${rotationCmd} --next-slice "<next slice>" (--objective/--risks/--pointers optional), then say READY TO CLEAR.` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
+  const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
-      const m = JSON.parse(readFileSync4(pressureMarker, "utf8"));
+      const m = JSON.parse(readFileSync5(pressureMarker, "utf8"));
       return m.session_id === input.session_id ? m : null;
     } catch {
       return null;
     }
   };
-  const spendPressureMarker = (level) => writeFileSync2(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
-  const gaugeMarker = join5(input.cwd, ".sterling", "transient", "gauge-warned.json");
+  const spendPressureMarker = (level) => writeFileSync4(pressureMarker, JSON.stringify({ session_id: input.session_id, level, at: now }));
+  const gaugeMarker = join6(input.cwd, ".sterling", "transient", "gauge-warned.json");
   const gaugeSpent = () => {
     try {
-      return JSON.parse(readFileSync4(gaugeMarker, "utf8")).session_id === input.session_id;
+      return JSON.parse(readFileSync5(gaugeMarker, "utf8")).session_id === input.session_id;
     } catch {
       return false;
     }
   };
-  const spendGaugeMarker = () => writeFileSync2(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 measured against the ${pressure.window}-tok default (may mislead). Add context_watch.windows["${pressure.unmapped_model}"] to .sterling/config.json. (once per session)`;
-  const delegationMarker = join5(input.cwd, ".sterling", "transient", "delegation-nagged.json");
-  const delegationSpent = () => {
-    try {
-      return !!input.session_id && JSON.parse(readFileSync4(delegationMarker, "utf8")).session_id === input.session_id;
-    } catch {
-      return false;
-    }
-  };
-  const articleWritesPath = join5(input.cwd, ".sterling", "transient", "article-writes.json");
-  const readArticleWrites = () => {
-    try {
-      const raw = JSON.parse(readFileSync4(articleWritesPath, "utf8"));
-      return raw.session_id === input.session_id && Number.isFinite(raw.count) ? raw.count : 0;
-    } catch {
-      return 0;
-    }
-  };
-  const statsPath = join5(input.cwd, ".sterling", "transient", "delegation-stats.json");
-  const writeDelegationStats = (stats) => {
-    try {
-      mkdirSync4(join5(input.cwd, ".sterling", "transient"), { recursive: true });
-      writeFileSync2(statsPath, JSON.stringify(stats));
-    } catch {
-    }
-  };
-  const delegation = (() => {
-    try {
-      if (delegationSpent()) return null;
-      const dw = config.delegation_watch;
-      const tPath = input.transcript_path ?? "";
-      if (!tPath || !existsSync5(tPath)) {
-        store.recordCheckSkipped("delegation-watch", "transcript_missing", void 0, now);
-        return null;
-      }
-      const readFiles = /* @__PURE__ */ new Set();
-      let searches = 0;
-      let dispatches = 0;
-      let maxBatch = 0;
-      let soloDispatches = 0;
-      let assistantEntries = 0;
-      let contentArrays = 0;
-      for (const line of readFileSync4(tPath, "utf8").split("\n")) {
-        if (!line.trim()) continue;
-        let entry;
-        try {
-          entry = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (entry.type !== "assistant") continue;
-        if (entry.isSidechain === true) continue;
-        assistantEntries++;
-        const content = entry.message?.content;
-        if (!Array.isArray(content)) continue;
-        contentArrays++;
-        let batchCount = 0;
-        for (const b of content) {
-          if (!b || b.type !== "tool_use") continue;
-          if (b.name === "Read") {
-            if (b.input?.file_path) readFiles.add(b.input.file_path);
-          } else if (b.name === "Grep" || b.name === "Glob") {
-            searches++;
-          } else if (b.name === "Task" || b.name === "Agent") {
-            dispatches++;
-            batchCount++;
-          }
-        }
-        if (batchCount > maxBatch) maxBatch = batchCount;
-        if (batchCount === 1) soloDispatches++;
-      }
-      if (assistantEntries > 0 && contentArrays === 0) {
-        store.recordCheckSkipped("delegation-watch", "format_unparseable", void 0, now);
-        return null;
-      }
-      const articleWrites = readArticleWrites();
-      writeDelegationStats({
-        session_id: input.session_id,
-        hand_reads: readFiles.size,
-        searches,
-        dispatches,
-        max_batch: maxBatch,
-        solo_dispatches: soloDispatches,
-        article_writes: articleWrites,
-        at: now
-      });
-      if (readFiles.size + searches >= dw.min_hand_work && dispatches <= dw.max_dispatches) {
-        return { hand_reads: readFiles.size, searches, dispatches, max_batch: maxBatch, solo_dispatches: soloDispatches, article_writes: articleWrites };
-      }
-      return null;
-    } catch (e) {
-      try {
-        store.recordCheckSkipped("delegation-watch", String(e && e.message || e), void 0, now);
-      } catch {
-      }
-      return null;
-    }
-  })();
-  const spendDelegationMarker = () => writeFileSync2(delegationMarker, JSON.stringify({ session_id: input.session_id, at: now }));
-  const delegationPart = () => `H10 delegation watch: hand-read ${delegation.hand_reads} file(s), ${delegation.searches} search(es), ${delegation.dispatches} dispatch(es) (max batch ${delegation.max_batch}, solo ${delegation.solo_dispatches}), ${delegation.article_writes} hand-run article write(s) \u2192 delegate reads/sweeps/mechanical work (opus judgment / sonnet mechanical). (once per session)`;
+  const spendGaugeMarker = () => writeFileSync4(gaugeMarker, JSON.stringify({ session_id: input.session_id, at: now }));
+  const gaugePart = () => `H10 window gauge: model '${pressure.unmapped_model}' has no entry in context_watch.windows \u2014 context fill is UNRELIABLE and is not reported. Add context_watch.windows["${pressure.unmapped_model}"] = <window tokens> to .sterling/config.json. (once per session)`;
   const writeThenSpend = (text, spends) => {
     let delivered = false;
     try {
@@ -8738,28 +8435,35 @@ try {
     process.exit(2);
   };
   const releaseWithPressure = () => {
+    let advisoryText = "";
+    const advisorySpends = [];
     if (!input.stop_hook_active) {
       const parts = [];
       const spent = pressureMarkerState();
       if (pressure.level === "hard" && (!spent || spent.level !== "hard")) {
-        spendPressureMarker("hard");
         parts.push(pressurePart());
+        advisorySpends.push(() => spendPressureMarker("hard"));
       } else if (pressure.level === "soft" && dirtyPaths > 0 && !spent) {
-        spendPressureMarker("soft");
         parts.push(`${pressurePart()} (once per session)`);
-      }
-      if (delegation && !delegationSpent()) {
-        spendDelegationMarker();
-        parts.push(delegationPart());
+        advisorySpends.push(() => spendPressureMarker("soft"));
       }
       if (pressure.unmapped_model && !gaugeSpent()) {
-        spendGaugeMarker();
         parts.push(gaugePart());
+        advisorySpends.push(spendGaugeMarker);
       }
-      if (parts.length) writeThenSpend([...disclosureParts, ...parts].join("\n\n"), [spendDispatchUnknownKeys]);
+      advisoryText = parts.join("\n\n");
     }
-    if (disclosureParts.length) {
-      exitAfterWrite(JSON.stringify({ systemMessage: disclosureParts.join("\n\n") }), 0, {
+    if (advisoryText) {
+      try {
+        publishNotice(input.cwd, advisoryText);
+        for (const spend of advisorySpends) spend();
+      } catch (e) {
+        disclose(`H10: context advisory publish failed \u2014 ${String(e && e.message || e)}; it will retry on the next Stop
+`);
+      }
+    }
+    if (disclosureParts.length || advisoryText) {
+      exitAfterWrite(JSON.stringify({ systemMessage: [...disclosureParts, advisoryText].filter(Boolean).join("\n\n") }), 0, {
         onWritten: spendDispatchUnknownKeys
       });
       throw Object.assign(new Error("h10-release-in-flight"), { h10ReleaseInFlight: true });
@@ -8772,25 +8476,40 @@ try {
     touchesPath,
     () => {
       let orphanedTouches = [];
-      if (existsSync5(touchesClaimPath)) {
+      if (existsSync6(touchesClaimPath)) {
         try {
-          orphanedTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
+          orphanedTouches = parseTouchesContent(readFileSync5(touchesClaimPath, "utf8"));
         } catch {
           orphanedTouches = [];
         }
       }
       let freshTouches = [];
       try {
-        renameSync2(touchesPath, touchesClaimPath);
-        freshTouches = parseTouchesContent(readFileSync4(touchesClaimPath, "utf8"));
+        renameSync4(touchesPath, touchesClaimPath);
+        freshTouches = parseTouchesContent(readFileSync5(touchesClaimPath, "utf8"));
       } catch (e) {
         if (e && e.code !== "ENOENT") throw e;
       }
       touches = [...orphanedTouches, ...freshTouches];
-      if (orphanedTouches.length) writeFileSync2(touchesClaimPath, JSON.stringify(touches));
+      if (orphanedTouches.length) writeFileSync4(touchesClaimPath, JSON.stringify(touches));
     },
     { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
   );
+  const git = gitTouches(input.cwd, now);
+  let lostSettlementMessage = "";
+  if (!git.ok) {
+    skipRow("h10-git-touches", git.reason);
+  } else if (git.settled) {
+    if (git.base_lost) {
+      skipRow("h10-git-touches", `settled_sha_unreachable:${git.settled.sha}`);
+      lostSettlementMessage = `\u26A0 H10 SETTLEMENT HISTORY REWRITTEN: persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}. Duties for commits between them could not be derived; reconcile them by hand from git log.`;
+    }
+    const unchanged = [...new Set(touches.map((t) => t?.path).filter(Boolean))].filter((p) => !git.changed.has(p));
+    const tracked = gitTrackedSubset(input.cwd, unchanged) ?? /* @__PURE__ */ new Set();
+    touches = touches.filter((t) => !tracked.has(t?.path));
+    const registered = new Set(touches.map((t) => t?.path));
+    touches = [...touches, ...git.candidates.filter((c) => !registered.has(c.path))];
+  }
   const discardTouchesClaim = () => {
     withFileLock(
       touchesPath,
@@ -8802,7 +8521,7 @@ try {
     withFileLock(
       touchesPath,
       () => {
-        if (existsSync5(touchesClaimPath) && !existsSync5(touchesPath)) renameSync2(touchesClaimPath, touchesPath);
+        if (existsSync6(touchesClaimPath) && !existsSync6(touchesPath)) renameSync4(touchesClaimPath, touchesPath);
       },
       { onTimeout: () => store.recordCheckSkipped("h10-touches-lock", "lock_timeout", void 0, now) }
     );
@@ -8810,15 +8529,15 @@ try {
   let settlementFailed = false;
   let sessionEvents = [];
   try {
-    if (existsSync5(eventsPath)) {
-      const raw = JSON.parse(readFileSync4(eventsPath, "utf8"));
+    if (existsSync6(eventsPath)) {
+      const raw = JSON.parse(readFileSync5(eventsPath, "utf8"));
       if (Array.isArray(raw)) sessionEvents = raw;
     }
   } catch {
     sessionEvents = [];
   }
   const touchedExisting = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))].filter(
-    (p) => existsSync5(join5(input.cwd, p))
+    (p) => existsSync6(join6(input.cwd, p))
   );
   const staleMinutes = config.dispatch_register.stale_minutes;
   const nowMs = Date.parse(now);
@@ -8847,22 +8566,23 @@ try {
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
   const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
   const disclosureParts = [];
+  if (lostSettlementMessage) disclosureParts.push(lostSettlementMessage);
   if (residueLines.length) disclosureParts.push(...residueLines);
   if (deferredPaths.length) {
     const PATH_DISPLAY_CAP = 8;
     const pathsDisplay = deferredPaths.length > PATH_DISPLAY_CAP ? `${deferredPaths.slice(0, PATH_DISPLAY_CAP).join(", ")} +${deferredPaths.length - PATH_DISPLAY_CAP} more` : deferredPaths.join(", ");
     disclosureParts.push(
-      `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}]: ${pathsDisplay} \u2014 duty re-arms when they land (repeats by design while the dispatch(es) stay live \u2014 fan-out-aware duty deferral, decision ec9eacaa; not a stuck nag)`
+      `\u2022 deferred: ${deferredPaths.length} file(s) owned by live dispatch(es) [${deferredAgents.join(", ")}]: ${pathsDisplay} \u2014 duty re-arms when they land (repeats by design while the dispatch(es) stay live \u2014 fan-out-aware duty deferral; not a stuck nag)`
     );
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));
   const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
-  const dispatchUnknownNotedPath = join5(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
+  const dispatchUnknownNotedPath = join6(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
     if (!hasSession) return /* @__PURE__ */ new Set();
     try {
-      const raw = JSON.parse(readFileSync4(dispatchUnknownNotedPath, "utf8"));
+      const raw = JSON.parse(readFileSync5(dispatchUnknownNotedPath, "utf8"));
       if (raw.session_id !== input.session_id) return /* @__PURE__ */ new Set();
       if (!Array.isArray(raw.keys) || !raw.keys.every((k) => typeof k === "string")) return /* @__PURE__ */ new Set();
       return new Set(raw.keys);
@@ -8892,7 +8612,7 @@ try {
     try {
       const merged = new Set(dispatchUnknownNotedKeys);
       for (const k of pendingDispatchUnknownKeys) merged.add(k);
-      writeFileSync2(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
+      writeFileSync4(dispatchUnknownNotedPath, JSON.stringify({ session_id: input.session_id, keys: [...merged] }));
     } catch {
     }
   };
@@ -8907,20 +8627,31 @@ try {
       )
     );
   }
-  const clearRegisters = () => {
+  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
     if (deferredPaths.length || settlementFailed) {
       releaseTouchesClaim();
     } else {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
-      rmSync3(eventsPath, { force: true });
+      const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
+      if (pendingDeclarations.length) {
+        writeFileSync4(eventsPath, JSON.stringify(pendingDeclarations));
+      } else {
+        rmSync3(eventsPath, { force: true });
+      }
     }
     rmSync3(nagMarker, { force: true });
   };
   const runSettlement = () => {
     try {
       mintSettlementReconcile(store, input.cwd, settlementCandidates, now);
+      if (git.ok && git.base_lost) {
+        const text = `capture owed: settlement history rewritten \u2014 persisted SHA ${git.settled.sha} is unreachable from HEAD ${git.next.sha}; duties for commits between them could not be derived. Reconcile them by hand from git log.`;
+        const exists = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed" && t.text === text);
+        if (!exists) store.enqueueSystemTodo({ id: randomUUID3(), type: "todo", created_at: now, updated_at: now, author: "system", status: "active", superseded_by: null, links: [], scope: "project", stack_tags: [], text, source: "system", system_reason: "capture_owed", file_keys: [] });
+      }
+      if (git.ok && !deferredPaths.length) writeGitSettled(input.cwd, git.next);
     } catch (e) {
       settlementFailed = true;
       try {
@@ -8979,7 +8710,7 @@ try {
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
-  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync5(join5(input.cwd, p)));
+  const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync6(join6(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
   const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
@@ -9010,7 +8741,7 @@ try {
       ["ls-files", "-z", "--", ...clean],
       ["ls-tree", "-r", "-z", "HEAD", "--name-only", "--", ...clean]
     ]) {
-      const res = spawnSync4("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
+      const res = spawnSync5("git", argv, { cwd, encoding: "utf8", timeout: 3e4 });
       if (res.status !== 0) return null;
       for (const p of (res.stdout || "").split("\0").filter(Boolean)) seen.add(p);
     }
@@ -9063,7 +8794,7 @@ try {
     const carriedAll = [...new Set(reachedMissing.flatMap((t) => t.file_keys ?? []))];
     const carriedIgnored = gitIgnored(carriedAll, input.cwd);
     if (carriedIgnored === null) skipRow("article-demand-carried-gitignore", "no_git");
-    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync5(join5(input.cwd, p))));
+    const prunable = new Set(carriedAll.filter((p) => (carriedIgnored ? carriedIgnored.has(p) : false) || !existsSync6(join6(input.cwd, p))));
     const sameSet = (a, b) => JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
     const subsetOf = (a, b) => {
       const big = new Set(b);
@@ -9109,7 +8840,7 @@ try {
   }
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync4("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync5("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4
@@ -9125,7 +8856,7 @@ try {
   const imageBinaryOnly = paths.length > 0 && paths.every((p) => IMAGE_BINARY_EXT.test(p));
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
     releaseWithPressure();
   }
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
@@ -9162,13 +8893,14 @@ try {
   const conceptSatisfied = unmetFamilies.length === 0;
   const captureSatisfied = !hasCaptureDuty || captured;
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
+    const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters();
+    clearRegisters({ preservePendingDeclaration });
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    if (!existsSync5(nagMarker)) {
-      writeFileSync2(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+    if (!existsSync6(nagMarker)) {
+      writeFileSync4(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
       releaseTouchesClaim();
       releaseWithPressure();
     }
@@ -9209,7 +8941,7 @@ try {
     }
   }
   const H10_HEADER = "H10 \u25B8 act, then Stop again:";
-  if (!input.stop_hook_active && !existsSync5(nagMarker)) {
+  if (!input.stop_hook_active && !existsSync6(nagMarker)) {
     const parts = [...disclosureParts];
     const hasDebug = activeDebugEvents.length > 0;
     const captureLaneOpen = hasCaptureDuty && !captured && !pendingDetail;
@@ -9243,11 +8975,11 @@ try {
         deferral_owners: [...deferredAgents].sort()
       })
     ).digest("hex");
-    const dutyNaggedMarker = join5(input.cwd, ".sterling", "transient", "duty-nagged.json");
+    const dutyNaggedMarker = join6(input.cwd, ".sterling", "transient", "duty-nagged.json");
     const priorDutyNag = (() => {
       if (!input.session_id) return null;
       try {
-        const raw = JSON.parse(readFileSync4(dutyNaggedMarker, "utf8"));
+        const raw = JSON.parse(readFileSync5(dutyNaggedMarker, "utf8"));
         if (raw.session_id !== input.session_id) return null;
         if (typeof raw.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(raw.fingerprint)) return null;
         return raw;
@@ -9301,21 +9033,17 @@ try {
       parts.push(pressurePart());
       spendPressureMarker(pressure.level);
     }
-    if (delegation && !delegationSpent()) {
-      spendDelegationMarker();
-      parts.push(delegationPart());
-    }
     releaseTouchesClaim();
     const dutyText = compact ? parts.join("\n\n") : `${H10_HEADER}
 ${parts.join("\n\n")}`;
     writeThenSpend(dutyText, [
-      () => writeFileSync2(nagMarker, JSON.stringify({ at: now })),
+      () => writeFileSync4(nagMarker, JSON.stringify({ at: now })),
       // FIX 2: never persist a sessionless duty-nagged marker — the reader
       // above (priorDutyNag) already refuses to compact without a session;
       // this is the matching guard on the WRITE side.
       () => {
         if (!hasSession) return;
-        writeFileSync2(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
+        writeFileSync4(dutyNaggedMarker, JSON.stringify({ session_id: input.session_id, fingerprint, at: dutyNagAt }));
       },
       spendDispatchUnknownKeys
     ]);
@@ -9344,7 +9072,7 @@ ${parts.join("\n\n")}`;
   if (articleDemand) {
     const overlapping = articleMissingOpen().find((t) => (t.file_keys ?? []).some((k) => unowned.includes(k)));
     const demandKeysRaw = overlapping ? overlapping.file_keys ?? [] : unowned;
-    const vanished = demandKeysRaw.filter((p) => !existsSync5(join5(input.cwd, p)));
+    const vanished = demandKeysRaw.filter((p) => !existsSync6(join6(input.cwd, p)));
     let demandKeys = demandKeysRaw;
     if (vanished.length) {
       const known = gitKnowsNow(vanished, input.cwd);
@@ -9383,7 +9111,7 @@ ${parts.join("\n\n")}`;
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article \u2014 create/update the feature_article with concept_family '${family}' (decision 7208729b)`,
+        text: `concept article missing: design settled for concept family '${family}' and the session ended without its concept article \u2014 create/update the feature_article with concept_family '${family}'`,
         source: "system",
         system_reason: "concept_article_missing"
       });
@@ -9411,7 +9139,7 @@ ${parts.join("\n\n")}`;
     }
   }
   runSettlement();
-  clearRegisters();
+  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

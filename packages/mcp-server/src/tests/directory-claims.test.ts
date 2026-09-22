@@ -393,6 +393,92 @@ test('(5) knowledge_update REFUSES on the MERGED CANDIDATE when the record alrea
 // arm uniquely provides.
 
 // ---------------------------------------------------------------------------
+// (5b) a record carrying TWO stale directory claims is repaired ATOMICALLY by
+// one knowledge_update supplying the complete corrected leaf-path files[]
+// array — assertClaimedPaths validates the FULLY MERGED CANDIDATE, and
+// knowledgeUpdate builds that candidate as `{...old, ...overrides}`, so a
+// supplied `files` array REPLACES the stale one wholesale BEFORE validation
+// (board b0bb9d96, group (b) I-36).
+// ---------------------------------------------------------------------------
+
+test('(5b) knowledge_update repairs a record carrying TWO stale directory claims atomically: one update supplying the complete corrected leaf files[] array succeeds, and the stored files[] equals exactly the supplied array', () => {
+  const { dir, store, tools, cleanup } = repoHarness();
+  try {
+    mkdirSync(join(dir, 'src', 'stale-dir-one'));
+    mkdirSync(join(dir, 'src', 'stale-dir-two'));
+    writeFileSync(join(dir, 'src', 'a.mjs'), 'x');
+    const id = randomUUID();
+    // Forged directly, same mechanism as test (5) above — the write-boundary
+    // guard refuses this shape at every legitimate create/update, so a record
+    // already carrying TWO directory claims is only reachable by bypassing the
+    // tool surface entirely.
+    store.create(rawArticleEnvelope(id, ['src/stale-dir-one', 'src/stale-dir-two', 'src/a.mjs']) as never);
+    const before = tools.knowledgeGet(id) as unknown as { version: number };
+
+    const correctedFiles = [{ path: 'src/a.mjs', role: 'impl' }];
+    const updated = tools.knowledgeUpdate(id, { files: correctedFiles }, undefined, before.version) as unknown as {
+      version: number;
+      files: { path: string; role: string }[];
+    };
+
+    assert.deepEqual(
+      updated.files,
+      correctedFiles,
+      'the stored files[] equals EXACTLY the supplied leaf array — no directory entry survives and nothing merged back in'
+    );
+    assert.equal(updated.version, before.version + 1, 'the version advanced by exactly one');
+
+    const after = tools.knowledgeGet(id) as unknown as { files: { path: string; role: string }[]; version: number };
+    assert.deepEqual(after.files, correctedFiles, 're-reading the record confirms the same repaired array was actually persisted');
+    assert.equal(after.version, before.version + 1);
+  } finally {
+    cleanup();
+  }
+});
+// EXPECTED SHAPE TODAY: GREEN per the claim above — assertClaimedPaths
+// validates the merged candidate `next = {...old, ...overrides}` (tools.ts,
+// symbol assertClaimedPaths / knowledgeUpdate), and a caller-supplied `files`
+// array is a whole-field override, so the stale directory entries are gone
+// from the candidate BEFORE the guard ever runs. If this test is instead RED,
+// the merge-then-validate claim in board b0bb9d96 group (b) I-36 is false.
+// SABOTAGE: merge `files[]` by path union with the OLD array instead of a
+// whole-field replace -> the stale directory entries would survive in the
+// candidate and this call would wrongly refuse, going red while test (5)
+// (which never touches files[]) stays green.
+
+test('(5c) with the SAME two-directory-claim seed, knowledge_array_remove of ONE directory claim is still refused, naming the OTHER surviving directory path — incremental repair stays refused while a full-array replace succeeds', () => {
+  const { dir, store, tools, cleanup } = repoHarness();
+  try {
+    mkdirSync(join(dir, 'src', 'stale-dir-one'));
+    mkdirSync(join(dir, 'src', 'stale-dir-two'));
+    const id = randomUUID();
+    store.create(rawArticleEnvelope(id, ['src/stale-dir-one', 'src/stale-dir-two']) as never);
+    const before = tools.knowledgeGet(id) as unknown as { version: number };
+
+    assert.throws(
+      () => tools.knowledgeArrayRemove(id, 'files[path=src/stale-dir-one]', before.version),
+      (err: Error) => {
+        assertDirectoryRefusal(err, 'src/stale-dir-two');
+        return true;
+      },
+      'removing one directory claim still leaves the OTHER in the merged candidate, so the removal is refused rather than admitted as a partial repair'
+    );
+    const after = tools.knowledgeGet(id) as unknown as { version: number };
+    assert.equal(after.version, before.version, 'no version minted by the refused removal — this is policy, not a bug: incremental removal stays refused while another directory claim survives');
+  } finally {
+    cleanup();
+  }
+});
+// EXPECTED SHAPE TODAY: this call reaches assertClaimedPaths the same way
+// knowledge_update's merged-candidate check does (knowledgeArrayRemove
+// delegates through the same knowledgeUpdate merge path), so the SURVIVING
+// stale-dir-two claim refuses the write exactly like test (5)'s unrelated-
+// field case. SABOTAGE: validate array_remove's candidate against only the
+// REMOVED element rather than the fully merged remainder -> this call would
+// wrongly succeed, going red while (5b) (which supplies a fully clean array)
+// still passes for an unrelated reason.
+
+// ---------------------------------------------------------------------------
 // (6) knowledge_append to files[] with a directory path refuses.
 // ---------------------------------------------------------------------------
 

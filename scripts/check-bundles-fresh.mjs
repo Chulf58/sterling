@@ -3,7 +3,7 @@
 // 890705ed) — shipped GENERATED artifacts only matter if they match a fresh
 // build of their sources. Iterates the BUNDLED_ARTIFACT graph
 // (scripts/lib/bundled-artifacts.mjs): each descriptor's REAL build function
-// runs into a temp target (never in place — anti_pattern 37b3cb0a) and the
+// runs into a temp target (never in place — anti_pattern foreign_37b3cb0a) and the
 // EMITTED MANIFEST is byte-compared against the shipped files; any divergence
 // fails loud naming the stale file and its rebuild command. The esbuild
 // options live once, in the shared build functions — this file no longer
@@ -16,7 +16,7 @@
 //   DIST GUARD a build vendors compiled workspace dist; when a guard package's
 //              src is newer than its dist, BOTH sides of the byte-compare
 //              vendor the same stale code and the compare is vacuously green
-//              (decision 83bb625c's class) — so the checker REFUSES instead.
+//              (decision foreign_83bb625c's class) — so the checker REFUSES instead.
 //              check-totality guards only schemas + mcp-server, and
 //              direct-merge invokes this checker standalone, so the guard
 //              lives here too.
@@ -123,7 +123,7 @@ for (const pkgDir of guardPkgs) {
   // 1s epsilon, same as check-totality — mtime granularity on some mounts
   if (src !== null && dist !== null && src > dist + 1000) {
     console.error(
-      `bundle freshness REFUSED: ${pkgDir}/src is newer than ${pkgDir}/dist — a fresh temp build would vendor the same stale dist as the shipped bundle and compare vacuously green (decision 83bb625c). Run npm run build first.`
+      `bundle freshness REFUSED: ${pkgDir}/src is newer than ${pkgDir}/dist — a fresh temp build would vendor the same stale dist as the shipped bundle and compare vacuously green. Run npm run build first.`
     );
     process.exit(1);
   }

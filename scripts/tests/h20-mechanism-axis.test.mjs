@@ -86,7 +86,7 @@ function makeProject() {
 }
 
 function dispatch(dir, prompt, subagent_type = 'coder') {
-  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, cwd: dir };
+  return { hook_event_name: 'PreToolUse', tool_name: 'Task', tool_input: { subagent_type, prompt }, session_id: 's1', cwd: dir };
 }
 
 /** The AskUserQuestion surface — note it has NO prompt field at all. */
@@ -95,6 +95,7 @@ function askQuestion(dir, question, options = [], header = 'Choice') {
     hook_event_name: 'PreToolUse',
     tool_name: 'AskUserQuestion',
     tool_input: { questions: [{ question, header, multiSelect: false, options }] },
+    session_id: 's1',
     cwd: dir,
   };
 }
@@ -141,13 +142,13 @@ test('H20: delivers a decision whose subject appears in NO file — a ruling abo
     const r = runHook(dispatch(dir, 'Add a breach countdown widget so the player can see the seconds until the next breach arrives.'), dir);
     assert.equal(r.code, 0);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
-    // A decision pointer renders its STATEMENT, not its title (decision ca23c811,
+    // A decision pointer renders its STATEMENT, not its title (decision foreign_ca23c811,
     // the shared H19 renderer) — so assert on what is actually delivered. The
     // title is where half the match came from and never appears in the payload;
     // the header's "matched on:" list is what keeps that legible, and it is
     // asserted below rather than left implicit.
     assert.match(ctx, /No surface may display when the next breach arrives/, 'the ruling reaches the conductor before the brief goes out');
-    assert.match(ctx, /ALREADY REJECTED: a numeric countdown in the HUD/, 'and carries its rejected alternatives (decision 6a3b1a46)');
+    assert.match(ctx, /ALREADY REJECTED: a numeric countdown in the HUD/, 'and carries its rejected alternatives (decision 6a3b1a46)'); // not-a-citation: fixture id
     assert.match(ctx, /matched on:[^\n]*countdown/, 'the matched term is named, so a title-only match is still legible');
   } finally {
     cleanup();
@@ -263,7 +264,7 @@ test('H20: reads the AskUserQuestion surface, which has NO prompt field — the 
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.match(ctx, /No surface may display when the next breach arrives/, 'the ruling reaches the conductor (post-answer — the audit framing owns the timing)');
     assert.match(ctx, /put a CHOICE TO THE USER/, 'the header names the surface — a user answer becomes authoritative');
-    assert.match(ctx, /POST-ANSWER AUDIT, NOT A GATE/, 'the header owns its timing honestly — it cannot arrive before the ask (research_finding 63a9646d)');
+    assert.match(ctx, /POST-ANSWER AUDIT, NOT A GATE/, 'the header owns its timing honestly — it cannot arrive before the ask (research_finding 63a9646d)'); // not-a-citation: fixture id
     assert.doesNotMatch(ctx, /BEFORE ASKING/, 'the unachievable pre-ask framing is gone');
     assert.doesNotMatch(ctx, /about to dispatch/, 'and does NOT use the dispatch wording');
   } finally {
@@ -357,7 +358,7 @@ test('extractAxisTerms: drops dispatch boilerplate and short words, so they cann
   }
 });
 
-// --- the generic-term floor (board 648bb497, research_finding bf74c65f) ----
+// --- the generic-term floor (board 648bb497, research_finding foreign_bf74c65f) ----
 //
 // FROZEN over the REAL matched-term sets captured 2026-08-03/04 in this
 // repo's own session transcripts (the 'matched on:' list H20 prints in every
@@ -377,7 +378,7 @@ test('extractAxisTerms: drops dispatch boilerplate and short words, so they cann
 // even one of those domain words STILL FIRES. Only a set that is generic
 // start-to-finish goes silent.
 test('hasDiscriminatingHit: a real matched-term set mixing generic and Sterling-domain vocabulary STILL FIRES', () => {
-  // Verbatim from a captured H20 payload header (research_finding bf74c65f).
+  // Verbatim from a captured H20 payload header (research_finding foreign_bf74c65f).
   // 'board', 'decision', 'triage', 'user', 'recommendation', 'dependencies',
   // 'open', 'full', 'anything', 'itself' are NOT in GENERIC_DEV_TERMS (they are
   // Sterling-domain, not universal-coding), so this set clears the floor.
@@ -452,7 +453,7 @@ test('H20: end-to-end STILL FIRES when a domain-discriminating term rides alongs
       dir
     );
     assert.equal(r.code, 0);
-    // Decision pointers render the STATEMENT, not the title (ca23c811) — assert
+    // Decision pointers render the STATEMENT, not the title (foreign_ca23c811) — assert
     // on what is actually delivered.
     assert.match(
       JSON.parse(r.stdout).hookSpecificOutput.additionalContext,

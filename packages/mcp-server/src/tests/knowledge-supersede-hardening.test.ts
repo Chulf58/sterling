@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Hardening spec for the ALREADY-IMPLEMENTED MCP tool `knowledge_supersede`
-// (decision e17794ea-e9bd-4aad-a518-df3cc4adde76, board
+// (decision foreign_e17794ea, board
 // 0b33c27b-f36c-4d66-b92d-83885dbb1725). The frozen spec file
 // `knowledge-supersede.test.ts` (AC1–AC11) pins the tool's headline
 // contract — id-ladder resolution, complete-body validation, allowed
@@ -23,7 +23,7 @@
 //   F3-citations a fields value that cites a record id which resolves to
 //                nothing still succeeds, but returns a citation warning on
 //                the existing warnings[] channel (the append/oversize
-//                precedent, decisions 8ed62c1b / 6c79a617); the key is
+//                precedent, decisions foreign_8ed62c1b / foreign_6c79a617); the key is
 //                always present, empty when nothing was cited
 //   F4-slugless  superseding a record that has literally no slug (the
 //                de1a7329 "legacy records round-trip unchanged — no
@@ -111,7 +111,7 @@ function mkAntiPattern(tools: SterlingTools, title: string, overrides: Loose = {
 // Mimics a pre-slug legacy record: built directly through the store, the
 // same way seedPrefixTwin (knowledge-supersede.test.ts) bypasses the public
 // create tool to reach a shape the tool surface itself cannot produce.
-// Decision de1a7329 states slug is OPTIONAL and "legacy records round-trip
+// Decision foreign_de1a7329 states slug is OPTIONAL and "legacy records round-trip
 // unchanged — no migration", i.e. exactly this shape is expected to exist.
 function mkSluglessDecision(store: SterlingStore, tools: SterlingTools, title: string, statement: string): Loose {
   const donor = mkDecision(tools, `${title} (slug donor, discarded)`, statement);

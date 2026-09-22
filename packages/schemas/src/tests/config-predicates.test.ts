@@ -131,7 +131,7 @@ test('run_commands stays a plain Record<string,string> — a {command, predicate
           }),
         ],
       }),
-    'run_commands values must stay plain strings — an object value (even one carrying a predicate) is refused, not accepted as a richer shape (decision 98549344 rejected this alternative: it breaks H14\'s Object.values flatMap over run_commands as plain strings)'
+    'run_commands values must stay plain strings — an object value (even one carrying a predicate) is refused, not accepted as a richer shape (decision 98549344 rejected this alternative: it breaks H14\'s Object.values flatMap over run_commands as plain strings)' // not-a-citation: fixture id
   );
 });
 

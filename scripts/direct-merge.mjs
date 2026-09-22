@@ -1,12 +1,10 @@
-// Direct merge [S] (spec §8.2): the conductor-direct counterpart to the §8.1
-// merge gate (merge-gate.mjs). The human invoking it IS the merge-to-main
-// decision — Sterling's second gate — so run it only once the change is
-// committed and reconciled. It merges the current conductor-direct branch
-// --no-ff into the base, then gives direct mode the branch hygiene runs already
-// get from mergeRun: deletes the merged branch and sweeps every other
-// fully-merged branch (git branch -d — refuses unmerged, never loses work).
-// Refuses during an active run (a run merges through merge-gate.mjs, which keeps
-// the disposal/promotion gate), on a dirty tree, or when already on the base.
+// Direct merge [S] (spec §8.2): the merge-to-main gate for conductor-direct
+// work — the human invoking it IS the merge-to-main decision, so run it only
+// once the change is committed and reconciled. It merges the current
+// conductor-direct branch --no-ff into the base, then deletes the merged
+// branch and sweeps every other fully-merged branch (git branch -d — refuses
+// unmerged, never loses work).
+// Refuses on a dirty tree, or when already on the base.
 //   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -16,26 +14,17 @@ import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBr
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
-import { matchesGlob } from '@sterling/schemas';
 import { SterlingStore } from '@sterling/store';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
-// a-refusing-gate, 1f069af4 v2) — the SAME read-only inspector commit-reviewed
-// and merge-gate use; see the block above the merge action.
+// a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
+// block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
-import { isRosterTrailerValue, verifyCommitReceiptBinding, readCommitTrailers } from './lib/review-trailers.mjs';
-import { readLedger } from './hooks/lib/review-ledger-entry.mjs';
-
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
-// A run owns the working tree and merges through the §8.1 gate, which runs
-// disposal + promotion first — never route a run merge through here (P5).
-const { store, config } = openProject(target);
-const active = store.getRun();
-store.close();
-if (active) {
-  fail(`direct-merge: run '${active.id}' is active (${active.machine_state}) — a run merges through merge-gate.mjs, not direct-merge`);
-}
+// Pre-merge preflight: openProject fails loud on a missing store or malformed
+// config BEFORE anything lands (see the post-merge note below).
+openProject(target).store.close();
 
 const into = arg('--into') ?? defaultBranch(target);
 const branch = arg('--branch') ?? currentBranch(target);
@@ -94,9 +83,9 @@ if (dirtyLines.length > 0) {
 
 // Gate precondition (merge.md): every affected article reconciled. Open
 // reconcile_needed debt on files this branch changed refuses the merge — the
-// §8.2 mirror of dispose-run's article_unreconciled refusal (decision 9df61181).
+// direct-merge reconciliation requirement (decision foreign_9df61181).
 // -c core.quotePath=false (r-review F3, applied here too for consistency): without
-// it, non-ASCII filenames arrive C-quoted and defeat matchesGlob's plain-string glob
+// it, non-ASCII filenames arrive C-quoted and defeat the plain-string path
 // comparisons further down.
 // SHA RESOLUTION (decision h7-co-owner-trap-verification-discharge-and-version-only-exception):
 // resolve intoTip / branchTip / mergeBase ONCE here, fail closed (fail()) on any
@@ -300,7 +289,7 @@ try {
     // per ARTICLE, not per branch) — evaluating liveness over the FULL item
     // would let that unrelated path's drift refuse THIS merge. Scope the live
     // check to item.file_keys ∩ this branch's changed files (the merge gate's
-    // own scope, decision 9df61181) by passing a view of the item carrying
+    // own scope, decision foreign_9df61181) by passing a view of the item carrying
     // only the intersecting keys — always non-empty here, since the .some()
     // above already guarantees at least one overlapping key.
     //
@@ -467,7 +456,7 @@ if (debt.length > 0) {
   // rule every time, not conditionally.
   const remedy = [
     '',
-    'Two sanctioned discharges — close each item with ONE of these (never a bare knowledge_update; drain requires an explicit `resolves` claim, decision 68988832):',
+    'Two sanctioned discharges — close each item with ONE of these (never a bare knowledge_update; drain requires an explicit `resolves` claim):',
     '  (a) BEHAVIOR CHANGED: reconcile the article with a real write carrying resolves:[<full item id>].',
     '  (b) VERIFIED UNAFFECTED: append a verification-history entry — `resolves` deletes the WHOLE item and the write',
     '      re-baselines EVERY file the owning article owns, so verify EVERY file_key on the item (and rule out any',
@@ -490,186 +479,7 @@ if (debt.length > 0) {
   fail(`direct-merge: ${headline} cover files this branch changed — reconcile before merging:\n` + grouped + '\n' + remedy.join('\n'));
 }
 
-// REVIEW-RECEIPT MERGE GATE (board d3752b2e): the §8.2 mirror of the reconcile
-// refusal just above (decision 9df61181) — a second pre-merge debt check, same
-// battery slot. A CODE-TOUCHING commit (its diff hits >=1 path matching the
-// project's registered toolchain path_globs, read from .sterling/config.json —
-// never hardcoded, so a project without a `**/*.ts`-style adapter never gates
-// on paths it never declared) must carry a `Reviewed-By-Agent` git trailer; a
-// docs-only commit is exempt. Missing receipts refuse the merge before any
-// merge action, naming each offending commit and both remedies. --waive-reviews
-// "<reason>" lets the merge proceed but must never do so silently (P5) — every
-// waived commit is named, with the reason, in the output.
-const commitsRaw = spawnSync('git', ['log', '--format=%H', `${into}..${branch}`], { cwd: target, encoding: 'utf8', timeout: 60_000 });
-if (commitsRaw.status !== 0) fail(`direct-merge: git log ${into}..${branch} failed: ${(commitsRaw.stderr || '').trim()}`);
-const branchCommits = commitsRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-const pathGlobs = (config.toolchains ?? []).flatMap((t) => t.path_globs ?? []);
-// ROSTER-PATTERN TRAILER VALIDATION (decision 57984926 §5, campaign slice
-// S2b-4). The gate used to accept ANY non-empty Reviewed-By-Agent value, so
-// `Reviewed-By-Agent: yes` — a receipt naming nobody — satisfied the ONLY
-// mechanism standing between an unreviewed diff and main. A value now counts
-// only if it NAMES A ROSTER REVIEWER.
-//
-// THE MATCH IS ON THE LEADING IDENTITY TOKEN, NOT THE WHOLE VALUE, and that is
-// the adjudicated shape rather than an accident: commit-reviewed stamps a bare
-// `reviewer-<class>`, while hand-written and post-hoc receipts carry a decorated
-// value like `reviewer-correctness (opus) — findings adjudicated`. Anchoring the
-// pattern with `$` would reject every decorated receipt in the repo's own
-// history — an over-anchored gate refusing real reviews is a worse failure than
-// the loose one it replaces, because it trains --waive-reviews. So: the value
-// must BEGIN with a roster identity token, and that token must END at a
-// whitespace boundary or at the end of the value (`reviewer bob` and
-// `reviewer-` therefore fail, `reviewer-security` and `reviewer-security (opus)`
-// pass).
-//
-// AT LEAST ONE MATCHING VALUE SATISFIES THE GATE (§5's words). A commit may
-// legitimately carry a roster receipt AND a hand-written note under the same
-// key; requiring EVERY value to match would block the very commits this gate
-// exists to require. Unmatched values are DISCLOSED, never fatal and never
-// silently ignored — a junk receipt nobody meant as one otherwise keeps living
-// in commit messages unremarked.
-// ROSTER_TRAILER_VALUE lives in scripts/lib/review-trailers.mjs (the ONE
-// trailer owner, R1 rebuild) — imported as isRosterTrailerValue rather than a
-// second copy of the regex here.
-const unreviewed = [];
-// Commits that PASS on a valid value while also carrying value(s) that do not
-// match — reported after the loop, never fatal.
-const decoratedButUnmatched = [];
-for (const sha of branchCommits) {
-  // Multi-parent (merge) commits emit NOTHING from a plain `diff-tree --name-only`
-  // (r-review F1) — the default diff-tree suppresses merge diffs entirely, so a
-  // merge commit whose conflict resolution touched code classified as docs-only.
-  // Detect the parent count and, for a merge, diff with `--cc` (condensed combined
-  // diff): it lists exactly the paths that differ from EVERY parent, i.e. the
-  // hand-written resolution content — a clean auto-merge (identical to at least
-  // one parent's side) stays exempt, which is correct: no new content was written.
-  const parentsRaw = spawnSync('git', ['rev-parse', `${sha}^@`], { cwd: target, encoding: 'utf8', timeout: 30_000 });
-  if (parentsRaw.status !== 0) fail(`direct-merge: git rev-parse ${sha}^@ failed: ${(parentsRaw.stderr || '').trim()}`);
-  const isMerge = parentsRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean).length > 1;
-  const diffTreeArgs = isMerge
-    ? ['-c', 'core.quotePath=false', 'diff-tree', '--cc', '--no-commit-id', '--name-only', '-r', sha]
-    : ['-c', 'core.quotePath=false', 'diff-tree', '--no-commit-id', '--name-only', '-r', sha];
-  const filesRaw = spawnSync('git', diffTreeArgs, { cwd: target, encoding: 'utf8', timeout: 30_000 });
-  if (filesRaw.status !== 0) fail(`direct-merge: git diff-tree ${sha} failed: ${(filesRaw.stderr || '').trim()}`);
-  const files = filesRaw.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
-  const codeTouching = files.some((f) => pathGlobs.some((g) => matchesGlob(f, g)));
-  if (!codeTouching) continue;
-  // M2: the trailer read goes through the ONE trailer owner
-  // (scripts/lib/review-trailers.mjs readCommitTrailers) — no hand-rolled
-  // `git log --format=%(trailers…)` here. A trailer with an EMPTY value is
-  // treated as ABSENT, deliberately (r-review F2, adjudicated by the
-  // conductor): a receipt naming nobody is not a receipt. An empty/
-  // whitespace-only value is dropped here and falls through to the
-  // unreviewed list below, exactly as before — the roster-pattern check is a
-  // NARROWING of what counts, never a widening.
-  // The read stays KEYED to `Reviewed-By-Agent` (§4: external provenance uses a
-  // DISTINCT `External-Review:` trailer, "never Reviewed-By-Agent"), so an
-  // External-Review line is invisible here and can never satisfy this gate.
-  const trailerValues = readCommitTrailers(target, sha).roster.filter((l) => l.trim() !== '');
-  const matched = trailerValues.filter((v) => isRosterTrailerValue(v));
-  const unmatched = trailerValues.filter((v) => !isRosterTrailerValue(v));
-  const short = () => spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
-  const subject = () => spawnSync('git', ['log', '-1', '--format=%s', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
-  if (matched.length > 0) {
-    if (unmatched.length > 0) decoratedButUnmatched.push({ short: short(), subject: subject(), unmatched });
-    continue; // receipt present
-  }
-  // NO matching value: the commit is treated EXACTLY as trailer-less — same
-  // list, same refusal, same remedies — with the rejected value(s) carried so the
-  // refusal can NAME what it rejected. A gate that refuses a trailered commit
-  // without showing WHICH value failed sends the conductor to `git log` to guess.
-  unreviewed.push({ sha, short: short(), subject: subject(), unmatched });
-}
-if (decoratedButUnmatched.length > 0) {
-  console.error(
-    `direct-merge: ${decoratedButUnmatched.length} code-touching commit(s) carry a valid roster receipt ALONGSIDE Reviewed-By-Agent value(s) that do not ` +
-      `match the roster reviewer pattern (^reviewer-<class>) — the gate passed on the valid value; the unmatched value(s) are DISCLOSED, never counted:\n` +
-      decoratedButUnmatched.map((c) => `  - ${c.short}  ${c.subject}  — ignored value(s): ${c.unmatched.map((v) => JSON.stringify(v)).join(', ')}`).join('\n')
-  );
-}
-// ONE RENDERER FOR BOTH OUTCOMES (review LOW-2). The refusal and the waiver
-// describe the SAME commits and must describe them the same way: a value that is
-// present-but-not-a-roster-reviewer is exactly what the operator needs shown, and
-// needing it MORE on the waiver path, not less — a waiver is the branch that lets
-// the commit through, so "what did the gate reject here" is the one question its
-// output has to answer. Rendered once rather than twice because the two copies had
-// already drifted (the waiver branch dropped `unmatched` while the comment above
-// promised it was carried so the output could NAME what it rejected).
-const renderUnreviewed = (c) =>
-  `  - ${c.short}  ${c.subject}` +
-  (c.unmatched && c.unmatched.length
-    ? `\n      REJECTED value(s) — present but not a roster reviewer (^reviewer-<class>): ${c.unmatched.map((v) => JSON.stringify(v)).join(', ')}`
-    : '');
-if (unreviewed.length > 0) {
-  const waivePresent = process.argv.includes('--waive-reviews');
-  const waiveReason = arg('--waive-reviews');
-  if (waivePresent) {
-    // r-review F2: a present-but-empty reason is refused with an explicit message,
-    // never the generic missing-receipt refusal below — the flag was invoked, so
-    // the operator gets told what is actually wrong with the invocation.
-    if (!waiveReason || !waiveReason.trim()) {
-      fail(`direct-merge: --waive-reviews requires a non-empty reason`);
-    }
-    console.error(
-      `direct-merge: --waive-reviews WAIVED the review-receipt gate for ${unreviewed.length} code-touching commit(s) — reason: ${waiveReason}\n` +
-        unreviewed.map(renderUnreviewed).join('\n')
-    );
-  } else {
-    fail(
-      `direct-merge: ${unreviewed.length} code-touching commit(s) on this branch are missing a 'Reviewed-By-Agent' review-receipt trailer naming a roster ` +
-        `reviewer — reconcile before merging:\n` +
-        unreviewed.map(renderUnreviewed).join('\n') +
-        `\nRemedy: amend the commit(s) to record a 'Reviewed-By-Agent: <reviewer>' trailer, then rerun.\n` +
-        `Or, to proceed anyway: rerun with --waive-reviews "<reason>" (never silent — the waiver is echoed at merge time).`
-    );
-  }
-}
-
-// ADDITIVE Review-Receipt BINDING GATE (contract sheet §3.3; decision
-// review-receipt-rebuild-invariant-three-owner-modules-tri-state-liveness-
-// receipt-bound-supersession). The roster-pattern rule above only checks a
-// Reviewed-By-Agent VALUE; a `Review-Receipt: <id>` trailer is a SPECIFIC
-// evidence claim, and the gate now checks that claim too — using the SAME
-// verifier review-ledger's superseded commit form uses (imported, never
-// copied), so a post-commit ledger failure is caught here rather than merged
-// as an unbound attestation. A commit with no Review-Receipt trailer at all
-// (pre-rebuild history) is judged by the roster rule alone — this rule is
-// purely ADDITIVE.
-//
-// R1-C92 FAILS CLOSED on an unreadable ledger: a claim the gate CANNOT CHECK
-// is not a claim it has checked. Skipping the check whenever readLedger's
-// availability !== 'ok' would make deleting .sterling/review-ledger.json the
-// cheapest way past the binding rule — the opposite of the property this gate
-// exists to hold. So the ledger is read ONCE per commit-with-a-trailer: if any
-// commit in range carries a Review-Receipt trailer and the ledger cannot be
-// read, the merge refuses naming the ledger state; a range with NO
-// Review-Receipt trailer anywhere is simply not this rule's business, and an
-// absent ledger there still merges by the roster rule alone.
-const receiptLedger = readLedger(target);
-{
-  const bindingFailures = [];
-  for (const sha of branchCommits) {
-    const receiptTrailers = readCommitTrailers(target, sha).receipt;
-    if (receiptTrailers.length === 0) continue;
-    if (receiptLedger.availability !== 'ok') {
-      bindingFailures.push({ sha, code: receiptLedger.availability === 'absent' ? 'ledger_absent' : 'ledger_corrupt', entry_id: receiptTrailers[0], facts: { entry_id: receiptTrailers[0] } });
-      continue;
-    }
-    const binding = verifyCommitReceiptBinding({ cwd: target, sha, ledgerEntries: receiptLedger.entries });
-    for (const r of binding.results) {
-      if (!r.ok) bindingFailures.push({ sha, code: r.code, facts: r.facts, entry_id: r.entry_id });
-    }
-  }
-  if (bindingFailures.length > 0) {
-    const short = (sha) => spawnSync('git', ['rev-parse', '--short', sha], { cwd: target, encoding: 'utf8', timeout: 30_000 }).stdout.trim();
-    fail(
-      `direct-merge: ${bindingFailures.length} Review-Receipt trailer(s) on this branch do not bind to their commit — an attestation that does not bind must not reach main:\n` +
-        bindingFailures.map((f) => `  - ${short(f.sha)}  [${f.code}] Review-Receipt: ${f.entry_id} — ${JSON.stringify(f.facts)}`).join('\n')
-    );
-  }
-}
-
-// VERSION MOVES WITH THE MERGE (decision be9168e8 + user directive 2026-08-05
+// VERSION MOVES WITH THE MERGE (decision foreign_be9168e8 + user directive 2026-08-05
 // "bump the version when you push"). The plugin version is the clone-currency
 // signal consumers read, and be9168e8 deferred automating the bump "until the
 // rule is observed to fail" — it failed on 2026-08-05 (a feature merge shipped
@@ -698,13 +508,13 @@ if (existsSync(join(target, pluginManifestRel))) {
     if (branchPkg !== null && branchPlugin !== branchPkg) {
       fail(
         `direct-merge: version fields DIVERGED — ${pluginManifestRel} is ${branchPlugin}, package.json is ${branchPkg}. ` +
-          `They move together in the same commit (decision be9168e8). Align them, commit, rerun.`
+          `They move together in the same commit. Align them, commit, rerun.`
       );
     }
     if (basePlugin !== null && branchPlugin === basePlugin) {
       fail(
         `direct-merge: the plugin version (${branchPlugin}) did not move, but this branch changes ${substantive.length} file(s) beyond the generated projections.\n` +
-          `The version is the clone-currency signal consumers read (decision be9168e8): bump BOTH ${pluginManifestRel} and package.json\n` +
+          `The version is the clone-currency signal consumers read: bump BOTH ${pluginManifestRel} and package.json\n` +
           `(0.x rule: breaking → MINOR, additive → PATCH), commit, rerun. If this merge genuinely deserves no bump, rerun with --allow-same-version.`
       );
     }
@@ -742,7 +552,7 @@ if (hasCheck) {
 //
 // WHY THIS SURFACE EXISTS AT ALL, given the ruling was about COMMIT time: the
 // design's first sparring round found commit-only delivery FATAL as a complete
-// shape. Commit stderr reaches the CONDUCTOR, while decision a7dbac2f reserves
+// shape. Commit stderr reaches the CONDUCTOR, while decision foreign_a7dbac2f reserves
 // inspection judgment for the HUMAN — and the human stands HERE, at the merge
 // gate. So the same one computation runs at both moments; this is an amendment
 // to the user-ruled commit-time disclosure, never a replacement for it.
@@ -799,7 +609,7 @@ try {
 } catch (e) {
   fail(`direct-merge: ${e?.message ?? e}`);
 }
-// The disclosure rides the machine-readable report too (decision 1f069af4 v2
+// The disclosure rides the machine-readable report too (decision foreign_1f069af4 v2
 // §6), not only stderr: everything below prints `{ ...merged, … }` from one of
 // five exit points, so attaching it to `merged` once is what makes every one of
 // them carry it — including the sweep-failure and stale-bundle paths, which exit

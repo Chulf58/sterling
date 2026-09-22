@@ -1,13 +1,13 @@
 // H19 — dispatch staging (AC5, board 7b01f139-7341-4d3c-9991-6c1c27ceafc7).
 // SubagentStart hook: resolves THIS spawn's own dispatch prompt (there is no
-// prompt field on stdin — research_finding 35a89a0f) and stages the same
+// prompt field on stdin — research_finding foreign_35a89a0f) and stages the same
 // governed-territory payload h19-knowledge-delivery.mjs computes for a file
 // touch. AC7 precedent holds here too: never a gate, exit 0/1 only.
 //
-// SUPERSEDED SOURCE OF THE PROMPT (decision 7c515e52, board 5445066b): the
+// SUPERSEDED SOURCE OF THE PROMPT (decision foreign_7c515e52, board 5445066b): the
 // prompt used to be recovered from the PARENT TRANSCRIPT's last dispatching
 // message. That read lagged 3.4-5.5 s behind the spawn and delivered the wrong
-// territory to 4 of 6 measured spawns (finding 51506eec), so it is DELETED and
+// territory to 4 of 6 measured spawns (finding foreign_51506eec), so it is DELETED and
 // replaced by the per-dispatch state record (PreToolUse slot -> PostToolUse
 // binding -> locked Start resolution). See the fixture note below.
 import { test } from 'node:test';
@@ -18,6 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { recordRevision } from '../hooks/lib/delivery.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -102,7 +103,7 @@ function makeProject(configOverride = {}) {
 // `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
 // knowledge_get 7c515e52 — opened, not paraphrased). H19 no longer recovers
 // the dispatch prompt from the PARENT TRANSCRIPT: the transcript tail is the
-// MEASURED defect (finding 51506eec — 3.4-5.5 s of lag, 4 of 6 spawns saw an
+// MEASURED defect (finding foreign_51506eec — 3.4-5.5 s of lag, 4 of 6 spawns saw an
 // older unrelated block), so lastDispatchPrompts is DELETED and a Start
 // resolves its own dispatch from the per-dispatch STATE RECORD written at
 // PreToolUse (and bound by PostToolUse's tool_response.agentId).
@@ -155,11 +156,11 @@ const subagentStart = (dir, transcriptPath, extra = {}) => ({
 });
 
 const guardOf = (dir, agentId) => {
-  const p = join(dir, '.sterling', 'transient', 'delivery', `guard-agent-${agentId}.json`);
+  const p = join(dir, '.sterling', 'transient', 'delivery', 's1', `guard-agent-${agentId}.json`);
   return existsSync(p) ? JSON.parse(readFileSync(p, 'utf8')) : null;
 };
 
-// POST-FOLD (decision 04982f45): H28's contract injection was unconditional
+// POST-FOLD (decision foreign_04982f45): H28's contract injection was unconditional
 // for every non-exempt agent_type, with zero dependency on transcript
 // content, project state, or the staging guard — "byte-preserved, only
 // relocated". So a dispatch with nothing to STAGE is no longer silent: it is
@@ -185,7 +186,7 @@ test('no dispatch state at all (no-slot): contract-only, exit 0 (nothing to stag
     assert.doesNotMatch(ctx, /alpha does the alpha thing/, 'no article content leaks in when there is nothing to stage');
     assert.equal(guardOf(dir, 'agent-1'), null, 'no staging guard written — nothing was staged, only the contract fired');
 
-    // SHAPE PIN (decision d6acfc54): the emit stays exactly
+    // SHAPE PIN (decision foreign_d6acfc54): the emit stays exactly
     // {hookSpecificOutput:{hookEventName, additionalContext}} — nothing else
     // at top level, nothing else inside hookSpecificOutput. The fold must not
     // widen this (e.g. a separate contract field, or permissionDecision —
@@ -247,13 +248,21 @@ test('prompt names a governed file: payload contains the article, the guard is w
 
     const guard = guardOf(dir, 'agent-1');
     assert.ok(guard, 'guard file written for the spawned agent');
-    const alphaId = store.query({ types: ['feature_article'], rank_terms: ['alpha'], cap: 5 }).find((a) => a.slug === 'alpha').id;
-    assert.ok(guard.records.includes(alphaId));
+    const alpha = store.query({ types: ['feature_article'], rank_terms: ['alpha'], cap: 5 }).find((a) => a.slug === 'alpha');
+    // Guard schema v2 (decision 92088a62): an owner renders as SUBSTANCE (the
+    // full article body), so it lands in `guard.substance`, not a flat
+    // `guard.records` array — keyed on the FULL (id, revision) pair, not id
+    // alone (fix-round test-integrity requirement: asserting on id alone
+    // pins the OLD flat-array shape rather than the actual v2 contract).
+    assert.ok(
+      guard.substance.some((e) => e.id === alpha.id && e.revision === recordRevision(alpha)),
+      'the delivered article earns a substance mark at its exact revision'
+    );
 
     // Re-running the same dispatch: the STAGING guard suppresses re-delivery of
     // the knowledge payload (nothing fresh to stage) — but the contract
     // injection carries NO such guard (h28's own behavior was unconditional,
-    // byte-preserved per decision 04982f45), so the second call is
+    // byte-preserved per decision foreign_04982f45), so the second call is
     // contract-only, not silent.
     const again = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript), dir);
     assert.equal(again.code, 0, again.stderr);
@@ -303,7 +312,7 @@ test('parallel two-dispatch message: each Start stages EXACTLY its own dispatch\
 // distinguishable.
 
 // ===========================================================================
-// RETIRED HERE — three TRANSCRIPT-shape pins, by decision 7c515e52.
+// RETIRED HERE — three TRANSCRIPT-shape pins, by decision foreign_7c515e52.
 //
 // RETIRED: 'malformed transcript (corrupt JSONL): contract-only ...'
 // RETIRED: 'missing transcript_path / nonexistent file: contract-only ...'
@@ -319,7 +328,7 @@ test('parallel two-dispatch message: each Start stages EXACTLY its own dispatch\
 // contract pin in this file already passes a nonexistent transcript path, so
 // the never-a-throw property stays exercised throughout.
 // The third pinned message RECENCY as the disambiguator; recency is exactly
-// what the 3.4-5.5 s transcript lag made wrong (finding 51506eec), and it is
+// what the 3.4-5.5 s transcript lag made wrong (finding foreign_51506eec), and it is
 // replaced by the tool_use_id-keyed state record. Its replacement is the
 // isolation pin above plus DSH-1.
 // ===========================================================================
@@ -344,7 +353,7 @@ test('not a Sterling project (no store): contract-only — the absorbed injectio
 // — the STERLING DEFAULT RETURN CONTRACT match above goes red.
 
 // ===========================================================================
-// H28 ABSORPTION (decision 04982f45 / s7-small-hook-absorption-measured-two-
+// H28 ABSORPTION (decision foreign_04982f45 / s7-small-hook-absorption-measured-two-
 // fold-two-keep): the STERLING DEFAULT RETURN CONTRACT injection formerly
 // lived in its own SubagentStart hook (h28-return-contract.mjs, deleted —
 // 68 lines, ~15 of substance) and now fires from THIS hook on the SAME
@@ -600,24 +609,24 @@ test('H28 exemption suppresses ONLY the contract, not staging: exempt agent_type
 // objective dome-farmer-issues-2026-09-05). SPEC-ONLY, blind to the coder's
 // parallel implementation.
 //
-// Governing knowledge: decision 752caf98 (tdd-and-mutation-toggles-in-
-// system-tab); decision 466ac94f (H25 is warn-only — the same
+// Governing knowledge: decision foreign_752caf98 (tdd-and-mutation-toggles-in-
+// system-tab); decision foreign_466ac94f (H25 is warn-only — the same
 // never-a-gate posture the toggle checks extend, though this hook is H19,
 // not H25). Board 7e7279c4's fix shape item (3): H19's combinedContext()
 // pushes the SAME one-line posture (see scripts/tests/h1-tdd-posture-line.
-// test.mjs for the exact string) into `coder` and `test-writer` dispatch
+// test.mjs for the exact string) into `implementor` dispatch
 // context, so the SPAWNED agent reads live config rather than a template
 // copy. This is independent of the STAGING half (governed-file delivery) —
 // it is keyed off the SPAWNED agent's OWN `agent_type` field on stdin, not
 // off anything found in the parent transcript, so a transcript with no
 // Task/Agent block (contract-only) still carries the posture line for a
-// coder/test-writer spawn.
+// implementor spawn (roster renamed 2026-09-19: coder/test-writer -> implementor).
 //
 // CURRENT STATE: h19-dispatch-staging.mjs now reads config.tdd /
-// config.mutation_verification and injects the posture line for coder/
-// test-writer dispatches; the tests below are green at HEAD and prove the
+// config.mutation_verification and injects the posture line for implementor
+// dispatches; the tests below are green at HEAD and prove the
 // gating (not merely that the string once failed to appear). The ABSENCE
-// test (reviewer-correctness) is a genuine negative pin: the posture line is
+// test (researcher) is a genuine negative pin: the posture line is
 // scoped away from that dispatch class, not silent because nothing exists.
 // ===========================================================================
 
@@ -628,42 +637,42 @@ function postureLine(tddOn, mutOn) {
   return `TDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} · mutation verification ${mutOn ? 'ON' : 'OFF'} ${POSTURE_SUFFIX}`;
 }
 
-test('posture line (OFF/OFF) is injected into a CODER dispatch context, contract-only transcript', () => {
+test('posture line (OFF/OFF) is injected into an IMPLEMENTOR dispatch context, contract-only transcript', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
   try {
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
-      subagentStart(dir, transcript, { agent_type: 'coder' }),
+      subagentStart(dir, transcript, { agent_type: 'implementor' }),
       dir
     );
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.ok(
       ctx.includes(postureLine(false, false)),
-      `expected the OFF/OFF posture line verbatim in a coder dispatch's context; got: ${ctx}`
+      `expected the OFF/OFF posture line verbatim in an implementor dispatch's context; got: ${ctx}`
     );
   } finally {
     cleanup();
   }
 });
-// Sabotage: drop 'coder' from the set of agent_types that receive the
-// posture line (leave only 'test-writer') — this test goes red.
+// Sabotage: drop 'implementor' from the set of agent_types that receive the
+// posture line — this test goes red.
 
-test('posture line (ON/ON, config-driven not hardcoded) is injected into a TEST-WRITER dispatch context', () => {
+test('posture line (ON/ON, config-driven not hardcoded) is injected into an IMPLEMENTOR dispatch context', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: true }, mutation_verification: { enabled: true } });
   try {
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
-      subagentStart(dir, transcript, { agent_type: 'test-writer' }),
+      subagentStart(dir, transcript, { agent_type: 'implementor' }),
       dir
     );
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.ok(
       ctx.includes(postureLine(true, true)),
-      `expected the ON/ON posture line verbatim in a test-writer dispatch's context; got: ${ctx}`
+      `expected the ON/ON posture line verbatim in an implementor dispatch's context; got: ${ctx}`
     );
     assert.ok(
       !ctx.includes(postureLine(false, false)),
@@ -677,13 +686,13 @@ test('posture line (ON/ON, config-driven not hardcoded) is injected into a TEST-
 // pasted literal instead of a live config read) — the first assert.ok goes
 // red (the ON/ON line is never found).
 
-test('posture line ABSENT for a dispatch class where it does not apply (reviewer-correctness)', () => {
+test('posture line ABSENT for a dispatch class where it does not apply (researcher)', () => {
   const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
   try {
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
-      subagentStart(dir, transcript, { agent_type: 'reviewer-correctness' }),
+      subagentStart(dir, transcript, { agent_type: 'researcher' }),
       dir
     );
     assert.equal(r.code, 0, r.stderr);
@@ -693,14 +702,14 @@ test('posture line ABSENT for a dispatch class where it does not apply (reviewer
     assert.doesNotMatch(
       ctx,
       /TDD posture:/,
-      'the posture line is scoped to coder/test-writer dispatches only, never a reviewer'
+      'the posture line is scoped to implementor dispatches only, never a researcher'
     );
   } finally {
     cleanup();
   }
 });
 // Sabotage: widen the posture-line injection to fire for every non-exempt
-// agent_type (instead of only 'coder'/'test-writer') — the doesNotMatch
+// agent_type (instead of only 'implementor') — the doesNotMatch
 // assertion above goes red.
 
 // ===========================================================================
@@ -718,7 +727,7 @@ test('GAP: config has NO tdd key at all (mutation_verification explicit false) -
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
-      subagentStart(dir, transcript, { agent_type: 'coder' }),
+      subagentStart(dir, transcript, { agent_type: 'implementor' }),
       dir
     );
     assert.equal(r.code, 0, r.stderr);
@@ -742,7 +751,7 @@ test('GAP: config has NO mutation_verification key at all (tdd explicit false) -
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     const r = runHook(
       'h19-dispatch-staging.mjs',
-      subagentStart(dir, transcript, { agent_type: 'test-writer' }),
+      subagentStart(dir, transcript, { agent_type: 'implementor' }),
       dir
     );
     assert.equal(r.code, 0, r.stderr);
@@ -764,18 +773,18 @@ test('GAP: config has NO mutation_verification key at all (tdd explicit false) -
 // ===========================================================================
 // COVERAGE GAP (external review, same battery as scripts/tests/
 // h1-tdd-posture-line.test.mjs GAP 5/6): H19 renders the SAME one-line TDD/
-// mutation posture into a coder/test-writer dispatch context that H1 renders
+// mutation posture into an implementor dispatch context that H1 renders
 // at SessionStart for an unreadable or JSON-legal-but-non-object config —
 // H1's own suite pins that case must render "TDD posture: UNKNOWN" and never
 // a confident ON/OFF, because in THIS repo both toggles are actually OFF, so
 // a fallback ON/ON would state the exact opposite of the truth. H19 had
 // ZERO arms for this case. The one corrupt-config arm already in this file
 // (the H19+H28 shared-fate test above) spawns with
-// agent_type: 'reviewer-correctness' — precisely the dispatch class that
+// agent_type: 'researcher' — precisely the dispatch class that
 // receives NO posture line at all — so it proves nothing about this axis.
 //
 // Both currently-reachable wrong outcomes are bad: H19 could render a
-// confident "tests-first ON · mutation verification ON" to a spawned coder
+// confident "tests-first ON · mutation verification ON" to a spawned implementor
 // while H1's own banner says UNKNOWN for the identical corrupt config (a
 // false posture, and a DIVERGENT one between the conductor and its own
 // subagent reading the same project) — or H19 could drop the line silently
@@ -794,19 +803,19 @@ test('GAP: config has NO mutation_verification key at all (tdd explicit false) -
 // guessing.
 // ===========================================================================
 
-test('GAP: config UNPARSEABLE for a CODER dispatch -> no confident tests-first ON/OFF text (the anti-defect, pinned first)', () => {
+test('GAP: config UNPARSEABLE for an IMPLEMENTOR dispatch -> no confident tests-first ON/OFF text (the anti-defect, pinned first)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.doesNotMatch(
       ctx,
       /tests-first (ON|OFF)/,
-      'an unreadable config must never render a confident ON/OFF posture to a spawned coder — in THIS repo both toggles are actually OFF, so a fallback ON/ON would state the exact opposite of the truth'
+      'an unreadable config must never render a confident ON/OFF posture to a spawned implementor — in THIS repo both toggles are actually OFF, so a fallback ON/ON would state the exact opposite of the truth'
     );
   } finally {
     cleanup();
@@ -817,13 +826,13 @@ test('GAP: config UNPARSEABLE for a CODER dispatch -> no confident tests-first O
 // for a genuinely absent file) — a confident "tests-first ON · mutation
 // verification ON" appears and this test goes red.
 
-test('GAP: config JSON-legal but NOT AN OBJECT ([]) for a CODER dispatch -> no confident tests-first ON/OFF text (the anti-defect, pinned first)', () => {
+test('GAP: config JSON-legal but NOT AN OBJECT ([]) for an IMPLEMENTOR dispatch -> no confident tests-first ON/OFF text (the anti-defect, pinned first)', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '[]');
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.doesNotMatch(
@@ -848,13 +857,13 @@ test('GAP: config JSON-legal but NOT AN OBJECT ([]) for a CODER dispatch -> no c
 const UNKNOWN_POSTURE_LINE =
   'TDD posture: UNKNOWN — the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.';
 
-test('GAP (positive half, TIGHTENED): an UNPARSEABLE config for a CODER dispatch renders the TDD posture: UNKNOWN line H1 uses', () => {
+test('GAP (positive half, TIGHTENED): an UNPARSEABLE config for an IMPLEMENTOR dispatch renders the TDD posture: UNKNOWN line H1 uses', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not valid json');
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.ok(
@@ -869,13 +878,13 @@ test('GAP (positive half, TIGHTENED): an UNPARSEABLE config for a CODER dispatch
 // entirely, render any confident ON/OFF, or render a truncated/reworded
 // UNKNOWN line missing the remedy clause — this test goes red.
 
-test('GAP (positive half, TIGHTENED): a NON-OBJECT ([]) config for a CODER dispatch renders the TDD posture: UNKNOWN line H1 uses', () => {
+test('GAP (positive half, TIGHTENED): a NON-OBJECT ([]) config for an IMPLEMENTOR dispatch renders the TDD posture: UNKNOWN line H1 uses', () => {
   const { dir, store, cleanup } = makeProject();
   try {
     store.create(article('alpha', ['src/a.mjs']));
     const transcript = noTranscript(dir); // no dispatch staged: the posture line is keyed off stdin.agent_type alone
     writeFileSync(join(dir, '.sterling', 'config.json'), '[]');
-    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'coder' }), dir);
+    const r = runHook('h19-dispatch-staging.mjs', subagentStart(dir, transcript, { agent_type: 'implementor' }), dir);
     assert.equal(r.code, 0, r.stderr);
     const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
     assert.ok(

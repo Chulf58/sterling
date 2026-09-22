@@ -65,7 +65,7 @@ const argOf = (name) => {
 };
 
 // CLONE-CURRENCY CAVEAT (board 4ccf0644): reuses H1's existing passive
-// throttled-fetch signal (decision 558895a9) — this launcher never fetches
+// throttled-fetch signal — this launcher never fetches
 // on its own, it only reads whatever ref state H1's own cadence has already
 // established via scripts/lib/clone-currency.mjs. Informational only: never
 // fails or blocks the checks below, even when the probe itself errors.

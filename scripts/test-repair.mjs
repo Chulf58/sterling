@@ -3,8 +3,7 @@
 // 7a4c3fb6-dc23-4c2f-9369-d2592132f408; board a06e4a1c).
 //
 // The conductor stays sanctioned to hand-repair a demonstrably buggy frozen
-// test (H5 rides coder/debugger frontmatter only; the conductor is exempt by
-// construction) but the repair must stop being invisible: it records a
+// test but the repair must stop being invisible: it records a
 // test_repair session event — the repaired test path + the evidence for why
 // the TEST, not the code, was wrong — mirroring scripts/no-capture.mjs's
 // writer-script shape (a CLI, not a hook, appending to the same
@@ -67,8 +66,7 @@ if (!evidence || !evidence.trim()) {
       : 'test-repair: --evidence "<why the TEST was wrong>" is required'
   );
 }
-// FLAG-SHAPED EVIDENCE (mirrors commit-reviewed.mjs's --waive-bytes reason
-// guard). `arg()` takes the NEXT argv entry, so `--evidence --append` silently
+// FLAG-SHAPED EVIDENCE: `arg()` takes the NEXT argv entry, so `--evidence --append` silently
 // records the evidence "--append" and ALSO leaves --append matched by
 // process.argv.includes — toggling append mode while bypassing the evidence
 // requirement entirely (Codex MEDIUM finding). Refuse anything starting with

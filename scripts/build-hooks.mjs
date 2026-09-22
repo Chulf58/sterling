@@ -10,11 +10,11 @@
 // 3e569411).
 // --src-dir READS from somewhere other than the live scripts/hooks/ sources —
 // the containment prerequisite of the hollow-test mutation arm (decision
-// 1dab2a9f, anti_pattern 37b3cb0a severity BLOCK). Without it a build always
+// 1dab2a9f, anti_pattern foreign_37b3cb0a severity BLOCK). Without it a build always
 // compiles the LIVE sources, so mutating a clean-room copy changes nothing and
 // every mutant reports SURVIVED against unmutated source. The clean room lives
 // in the OS tmpdir (mkdtemp; the git-worktree alternative is REJECTED by
-// anti_pattern e2a1fee8), which is outside ordinary node resolution — see
+// anti_pattern foreign_e2a1fee8), which is outside ordinary node resolution — see
 // nodePaths below.
 // THIN CLI: the esbuild options live ONCE in scripts/lib/bundled-artifacts.mjs
 // (the bundled-artifact graph, board 16783088) — this file owns only the
@@ -71,7 +71,7 @@ for (let i = 0; i < args.length; i++) {
 }
 
 // Wave-settle disclosure (board 54c451b4): a mid-wave bundle rebuild can race a
-// coder's in-flight source edit (the 6ef262fc shape). Advisory only — never a gate.
+// agent's in-flight source edit (the 6ef262fc shape). Advisory only — never a gate.
 const advisory = inFlightAdvisory(root, 'a bundle rebuilt now may race an in-flight edit of scripts/hooks sources.');
 if (advisory) console.log(`build-hooks: ${advisory}`);
 

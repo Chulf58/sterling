@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { parseConfig } from '@sterling/schemas';
 import { SterlingStore, MountedStores } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
@@ -34,7 +33,7 @@ function harness() {
     store.close();
     rmSync(dir, { recursive: true, force: true });
   };
-  return { dir, dbPath, store, tools, cleanup };
+  return { dir, store, tools, cleanup };
 }
 
 function domainHarness() {
@@ -50,78 +49,10 @@ function domainHarness() {
   return { dir, store, tools, cleanup };
 }
 
-function startRun(store: SterlingStore, phases = ['p1', 'p2']) {
-  return store.createRun({
-    id: 'r-0001',
-    brief_ref: randomUUID(),
-    branch: 'sterling/run-r-0001',
-    machine_state: 'running',
-    phases: phases.map((id, i) => ({ id, status: i === 0 ? 'in_progress' : 'pending', signals: [], commits: [] })),
-    dispatch_counts: {},
-    escalations: [],
-    started_at: NOW,
-  });
-}
-
-function validHandoffBody(overrides: Record<string, unknown> = {}) {
-  return {
-    phase_id: 'p1',
-    agent_role: 'coder',
-    what_changed: [{ path: 'src/a.ts', change_role: 'implemented' }],
-    wired: [],
-    deferred: [],
-    decisions_made: [],
-    tests_produced: [],
-    exit_signal: 'complete',
-    unresolved: [],
-    ...overrides,
-  };
-}
-
-// AMBIGUITY RESOLVED (documented, not guessed-and-hidden): the handoffs table
-// is transient run-scoped store state with no public schema surface (unlike
-// durable knowledge types, which knowledge_schema projects) and H4 forbids
-// reading packages/store/src/index.ts to learn its column layout. Rather than
-// hardcode a column name I cannot verify, this seeds ONE valid handoff through
-// the real tool surface, then discovers the write target AT RUNTIME by
-// introspecting the live table (PRAGMA table_info + content-sniffing which
-// column actually carries 'what_changed') and corrupts exactly that value —
-// robust to either a dedicated what_changed column or a single JSON body blob.
-function corruptSoleHandoffWhatChanged(dbPath: string) {
-  const raw = new DatabaseSync(dbPath);
-  try {
-    const cols = (raw.prepare('PRAGMA table_info(handoffs)').all() as { name: string }[]).map((c) => c.name);
-    const rows = raw.prepare('SELECT rowid AS __rowid, * FROM handoffs').all() as Record<string, unknown>[];
-    assert.equal(rows.length, 1, 'precondition: exactly one handoff row seeded before corruption');
-    const row = rows[0];
-    const rowid = row.__rowid;
-
-    // Case A: what_changed is its own column.
-    if (cols.includes('what_changed')) {
-      raw.prepare('UPDATE handoffs SET what_changed = ? WHERE rowid = ?').run(JSON.stringify('not-an-array'), rowid as number);
-      return;
-    }
-
-    // Case B: the whole body lives in one JSON blob column — find it by
-    // content-sniffing (never by a guessed column name).
-    const bodyCol = cols.find((name) => {
-      const v = row[name];
-      if (typeof v !== 'string') return false;
-      try {
-        const parsed = JSON.parse(v);
-        return !!parsed && typeof parsed === 'object' && 'what_changed' in (parsed as Record<string, unknown>);
-      } catch {
-        return false;
-      }
-    });
-    assert.ok(bodyCol, `could not locate the handoffs JSON body column by content-sniffing; columns were: ${cols.join(', ')}`);
-    const parsed = JSON.parse(row[bodyCol!] as string) as Record<string, unknown>;
-    parsed.what_changed = 'not-an-array';
-    raw.prepare(`UPDATE handoffs SET ${bodyCol} = ? WHERE rowid = ?`).run(JSON.stringify(parsed), rowid as number);
-  } finally {
-    raw.close();
-  }
-}
+// startRun / validHandoffBody / corruptSoleHandoffWhatChanged (fixtures for
+// the deleted PIN 1/2/3/6b handoff tests) were removed with the
+// staged-pipeline run/handoff protocol (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1).
 
 function assertNoRawZodLeak(message: string, label: string) {
   assert.ok(!message.includes('"issues"'), `${label}: no raw zod issues-array key leaks`);
@@ -131,100 +62,11 @@ function assertNoRawZodLeak(message: string, label: string) {
   assert.ok(!message.includes('ZodError'), `${label}: no ZodError class name leak`);
 }
 
-// ---------------------------------------------------------------------------
-// PIN 1 — handoff_write, a required field missing.
-//
-// EXPECTED FAILURE SHAPE (red, pre-fix / on the named sabotage): the thrown
-// message is either the bare zod default ("Invalid input") or a raw
-// serialized issues array, so /handoff_write: 'handoff' failed validation/
-// fails to match, and/or 'phase_id' is absent from the message.
-//
-// SABOTAGE: remove the try/catch around store.writeHandoff in handoffWrite →
-// this test goes red (the shaped message disappears, replaced by whatever
-// store.writeHandoff throws raw).
-// ---------------------------------------------------------------------------
-test('PIN 1: handoff_write with a handoff missing a required field (no phase_id) is refused naming the field, never a raw zod issues array', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    const badHandoff: Record<string, unknown> = validHandoffBody();
-    delete badHandoff.phase_id;
-
-    assert.throws(
-      () => tools.handoffWrite({ handoff: badHandoff }),
-      (err: Error) => {
-        assert.match(err.message, /handoff_write: 'handoff' failed validation/, `op+schema-name prefix; got: ${err.message}`);
-        assert.match(err.message, /phase_id/, `names the offending field path; got: ${err.message}`);
-        assertNoRawZodLeak(err.message, 'PIN1');
-        return true;
-      }
-    );
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 0, 'the refused write persisted nothing');
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// PIN 2 — handoff_read, a stored row that fails handoffSchema.
-//
-// EXPECTED FAILURE SHAPE (red, pre-fix / on the named sabotage): handoff_read
-// throws (or the ZodError propagates) with the raw zod shape instead of the
-// caller-facing 'handoff_read: ...' message, so the regex/field assertions
-// fail exactly as in PIN 1.
-//
-// SABOTAGE: remove the try/catch around the store read in handoffRead → this
-// test goes red.
-// ---------------------------------------------------------------------------
-test('PIN 2: handoff_read over a stored row whose body fails handoffSchema (what_changed not an array) is refused with the same shaped message, op handoff_read', () => {
-  const { dir, dbPath, store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    tools.handoffWrite({ handoff: validHandoffBody() });
-    corruptSoleHandoffWhatChanged(dbPath);
-
-    assert.throws(
-      () => tools.handoffRead({ phase_id: 'p1' }),
-      (err: Error) => {
-        assert.match(err.message, /handoff_read: 'handoff' failed validation/, `op+schema-name prefix; got: ${err.message}`);
-        assert.match(err.message, /what_changed/, `names the offending field; got: ${err.message}`);
-        assertNoRawZodLeak(err.message, 'PIN2');
-        return true;
-      }
-    );
-  } finally {
-    cleanup();
-    void dir;
-  }
-});
-
-// ---------------------------------------------------------------------------
-// PIN 3 — CONTROL for PIN 1/2: a fully valid handoff_write must be entirely
-// unaffected by the new narrow catch — it still writes and returns
-// {written:true, phase_id} exactly as before.
-//
-// SABOTAGE, RESTATED (review finding, both roster + Codex): "invert the
-// instanceof check" cannot flip this test — a successful call never THROWS,
-// so it never enters the catch block at all, narrow or blanket. This is a
-// PURE REGRESSION CONTROL, not a mutation-sensitive pin: it must keep passing
-// for the SAME reason it always did (the happy path is untouched by a change
-// scoped to error handling), and its job is to prove PIN 1's refusal is not
-// bought by breaking the success path (e.g. a broad rewrite that wraps the
-// whole function body and alters the SUCCESS return shape, not just the
-// catch, would flip this red while leaving PIN 1 green).
-// ---------------------------------------------------------------------------
-test('PIN 3 CONTROL: handoff_write with a valid handoff still writes and returns {written:true, phase_id} unchanged', () => {
-  const { store, tools, cleanup } = harness();
-  try {
-    startRun(store);
-    const result = tools.handoffWrite({ handoff: validHandoffBody() }) as unknown as { written: boolean; phase_id: string };
-    assert.equal(result.written, true, 'the valid write is reported as written');
-    assert.equal(result.phase_id, 'p1', 'the receipt still names the phase');
-    assert.equal(tools.handoffRead({ phase_id: 'p1' }).length, 1, 'the valid write actually landed');
-  } finally {
-    cleanup();
-  }
-});
+// PIN 1/2/3 (handoff_write/handoff_read validation shaping + the valid-write
+// control) were removed with the staged-pipeline run/handoff protocol
+// (decision sterling-claude-code-scale-down-boundary, 2ad87dd1) —
+// handoffWrite/handoffRead no longer exist. PIN 4/5/6a (knowledge_promote)
+// below are unaffected and stay.
 
 // ---------------------------------------------------------------------------
 // PIN 4 — knowledge_promote, an invalid domain string.
@@ -388,20 +230,6 @@ test('PIN 6a: knowledge_promote to a valid-format but UNMOUNTED domain surfaces 
   }
 });
 
-test('PIN 6b: handoff_write with no active run surfaces the pre-existing conductor-direct guidance verbatim — never shaped as a validation failure', () => {
-  const { tools, cleanup } = harness();
-  try {
-    // deliberately no startRun(store) — no active run exists.
-    assert.throws(
-      () => tools.handoffWrite({ handoff: validHandoffBody() }),
-      (err: Error) => {
-        assert.doesNotMatch(err.message, /failed validation/, `the no-active-run guidance must never carry the shaped validation-failure wording; got: ${err.message}`);
-        assert.doesNotMatch(err.message, /^handoff_write: '/, `must not carry the shaped op-prefix either; got: ${err.message}`);
-        assert.match(err.message, /no run is active/i, `the pre-existing conductor-direct guidance must surface untouched; got: ${err.message}`);
-        return true;
-      }
-    );
-  } finally {
-    cleanup();
-  }
-});
+// PIN 6b (handoff_write with no active run) was removed with the
+// staged-pipeline run/handoff protocol (decision
+// sterling-claude-code-scale-down-boundary, 2ad87dd1).

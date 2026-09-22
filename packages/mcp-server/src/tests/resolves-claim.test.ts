@@ -9,12 +9,12 @@ import { SterlingStore } from '@sterling/store';
 import { SterlingTools } from '../tools.js';
 
 // reconcile_needed closes on an EXPLICIT resolves claim, never on "a write
-// happened" (decision 68988832-2ef5-4ff3-b693-4f0f0ea8dae1; board 68fe8373).
+// happened" (decision foreign_68988832; board 68fe8373).
 //
 // Background this file pins: knowledgeUpdate (and the append/edit paths that
 // share its versioned-update core) used to IMPLICITLY auto-drain every open
 // reconcile_needed/refresh_reference item whose feature_link was in the
-// updated record's supersede chain (decision 8ecd435f — pinned, until now, by
+// updated record's supersede chain (decision foreign_8ecd435f — pinned, until now, by
 // two tools.test.ts assertions amended alongside this file). That implicit
 // drain is REMOVED. knowledge_update / knowledge_append / knowledge_edit gain
 // an optional trailing `resolves: string[]` naming maintenance-queue item ids
@@ -126,6 +126,33 @@ test('AC1: knowledge_update with a valid resolves id removes exactly that item, 
   }
 });
 
+// NO EXISTING TEST exercised resolved_items at all before this (board b0bb9d96
+// fix-round review finding) — this is the plain single-process case: an
+// ordinary resolves close reports what it closed.
+test("resolved_items (board b0bb9d96 / I-29): a resolves close reports the drained item's id, system_reason and file_keys", () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'thing', 'src/thing.ts');
+    const { record: item } = tools.maintenanceEnqueue({
+      reason: 'reconcile_needed',
+      text: `reconcile 'thing'`,
+      file_keys: ['src/thing.ts'],
+      feature_link: article.id,
+    });
+
+    const result = tools.knowledgeUpdate(article.id, { what_it_does: 'reconciled' }, [item.id]) as unknown as {
+      resolved_items?: { id: string; system_reason?: string; file_keys?: string[] }[];
+    };
+
+    assert.equal(result.resolved_items?.length, 1, 'one entry for the one claimed item');
+    assert.equal(result.resolved_items?.[0].id, item.id);
+    assert.equal(result.resolved_items?.[0].system_reason, 'reconcile_needed');
+    assert.deepEqual(result.resolved_items?.[0].file_keys, ['src/thing.ts']);
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC2 (central regression pin): knowledge_update with NO resolves leaves a chain-linked open reconcile_needed item OPEN — the old implicit drain is dead — and the receipt warns naming it', () => {
   const { tools, cleanup } = harness();
   try {
@@ -137,7 +164,7 @@ test('AC2 (central regression pin): knowledge_update with NO resolves leaves a c
       feature_link: v1.id,
     });
 
-    // OLD CONTRACT (decision 8ecd435f): this write alone used to drain the
+    // OLD CONTRACT (decision foreign_8ecd435f): this write alone used to drain the
     // item with zero claim. NEW CONTRACT: a write is not a claim.
     const result = widen(tools).knowledgeUpdateResult(v1.id, { what_it_does: 'reconciled, unclaimed' });
 

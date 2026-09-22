@@ -25,7 +25,7 @@
 //
 // This file authors tests from THAT SPEC alone. Fixture/harness idiom
 // (mkdtempSync in os scratch + git init, a flattening oneLine() helper per
-// anti-pattern ee89c3fd for any child-process stream that might land in a
+// anti-pattern foreign_ee89c3fd for any child-process stream that might land in a
 // failing assertion message) cribbed from the conventions in sibling suites
 // such as scripts/tests/direct-merge-board-nudge.test.mjs, which was read
 // ONLY for harness conventions, never for behavior.
@@ -54,7 +54,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { deletedBetween, parkedItemResolved } from '../lib/parked-close.mjs';
 
 /** Flatten any child-process stream before it goes into an assertion message
- * that might fail — anti-pattern ee89c3fd. */
+ * that might fail — anti-pattern foreign_ee89c3fd. */
 function oneLine(s) {
   return String(s ?? '').replace(/\s+/g, ' ').trim();
 }
@@ -268,7 +268,7 @@ test('15 [deletedSet null, one absent -> false]: with deletion evidence unavaila
 //
 // HARNESS: the git-project-with-.sterling-dir fixture (makeGitProjectForMerge
 // / runDirectMerge / openStore), the envelope()/store-record-shape idiom, and
-// the oneLine() stderr-flattening discipline (anti-pattern ee89c3fd) are
+// the oneLine() stderr-flattening discipline (anti-pattern foreign_ee89c3fd) are
 // cribbed verbatim from scripts/tests/direct-merge-cleared-report.test.mjs,
 // which was read ONLY for this harness convention, never for behavior —
 // duplicated locally per that file's own stated convention, since test files

@@ -8,7 +8,7 @@
 // large", persisted to a file the reader could not quote from) — delivery
 // degrades exactly at the surface it exists to serve.
 //
-// THE FIX (delivery-not-gate lineage, decision 9950dfff — must NOT deny a tool
+// THE FIX (delivery-not-gate lineage, decision foreign_9950dfff — must NOT deny a tool
 // call): past a size floor, the delivery DIGESTS/CAPS the substance and emits a
 // POINTER (knowledge_get <id> / windowed-read guidance) instead of the full
 // body; below the floor, delivery is unchanged.
@@ -24,7 +24,7 @@
 //            threshold observed this session. This is the load-bearing guard.
 //
 // Determinism: no timing, no network. Fixture store + tmp dir removed in finally.
-// Child stderr flattened with oneLine (anti-pattern ee89c3fd).
+// Child stderr flattened with oneLine (anti-pattern foreign_ee89c3fd).
 import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -107,6 +107,7 @@ const postRead = (dir, file, extra = {}) => ({
   hook_event_name: 'PostToolUse',
   tool_name: 'Read',
   tool_input: { file_path: join(dir, file) },
+  session_id: 's1',
   cwd: dir,
   ...extra,
 });

@@ -6,10 +6,8 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync6, readFileSync as readFileSync4, statSync as statSync4, mkdirSync as mkdirSync3 } from "node:fs";
-import { join as join4 } from "node:path";
-import { spawnSync as spawnSync2 } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync } from "node:fs";
@@ -4211,6 +4209,11 @@ var baselineAttestationsSchema = external_exports.record(external_exports.string
   head_commit: external_exports.string().min(1),
   sha256: external_exports.string().min(1)
 })).optional();
+var absenceAttestationsSchema = external_exports.record(external_exports.string(), external_exports.object({
+  attested_at: external_exports.string().min(1),
+  item_id: external_exports.string().min(1),
+  head_commit: external_exports.string().min(1)
+}).strict()).optional();
 var featureArticleSchema = base.extend({
   type: external_exports.literal("feature_article"),
   slug: external_exports.string().min(1),
@@ -4230,12 +4233,13 @@ var featureArticleSchema = base.extend({
   // SERVER-SIDE at create/reconcile — never author-supplied. The read-time
   // drift check confirms a content change against this before flagging, so a
   // git merge/checkout that only resets mtimes no longer raises false
-  // reconcile_needed items (decision 65222971 → its baseline successor).
+  // reconcile_needed items (decision foreign_65222971 → its baseline successor).
   file_baselines: external_exports.record(external_exports.string(), external_exports.string()).optional(),
   // R9 ATTESTATION PROVENANCE (board 8c8b6d78) — see baselineAttestationsSchema
   // above, which reference_material shares so the shape is defined once.
   baseline_attestations: baselineAttestationsSchema,
-  // Board a9280db7 (decision c48380bf): article_kind is the queryable kind
+  absence_attestations: absenceAttestationsSchema,
+  // Board a9280db7 (decision foreign_c48380bf): article_kind is the queryable kind
   // axis, subsuming concept_family's role there — concept_family itself is
   // untouched, kept for compatibility (see below).
   article_kind: external_exports.enum(["feature", "probe", "tool", "concept"]).default("feature"),
@@ -4245,7 +4249,7 @@ var featureArticleSchema = base.extend({
   // superRefine below, since "which kind" is a whole-record fact a single
   // field's shape cannot express alone.
   current_ac: external_exports.union([external_exports.array(currentAcItemSchema), notApplicableExemptionSchema]),
-  // Concept-article marker (domain decision 7208729b, concept-article-layer
+  // Concept-article marker (domain decision foreign_7208729b, concept-article-layer
   // standard): set ONLY on concept articles — one per recurring domain concept
   // FAMILY (items, weapons, …). Enables class/family enumeration without
   // overloading stack_tags (the domain-mount manifest) and lets prep reserve
@@ -4259,7 +4263,7 @@ var featureArticleSchema = base.extend({
   // ownership) resolve per record or abstain LOUD on an unmapped name.
   working_tree: external_exports.string().min(1).optional(),
   // relies_on/relied_by name other articles by SLUG — slugs survive version
-  // supersession, record ids do not (decision 474b1c71).
+  // supersession, record ids do not (decision foreign_474b1c71).
   dependencies: external_exports.object({ relies_on: external_exports.array(external_exports.string()), relied_by: external_exports.array(external_exports.string()) }),
   steps_runbook: external_exports.string().optional(),
   state: external_exports.enum(["planned", "built", "wired_in", "active", "dormant", "deprecated"]),
@@ -4338,7 +4342,7 @@ var researchFindingSchema = base.extend({
   source_date: isoDate,
   capture_date: isoDate,
   volatility_hint: external_exports.enum(["fast", "medium", "stable"]).optional(),
-  // Optional (decision 8dbbc85d): findings about specific files (a probe of a
+  // Optional (decision foreign_8dbbc85d): findings about specific files (a probe of a
   // seam, a library's behavior in one adapter) join the file-key economy the
   // same way decision/anti_pattern/todo do; many findings are fileless
   // (platform behavior, pricing) so this stays optional, never required.
@@ -4379,6 +4383,7 @@ var referenceMaterialSchema = base.extend({
   // naked baseline whose provenance lied about which write produced it. Shape
   // shared with featureArticleSchema, never re-declared.
   baseline_attestations: baselineAttestationsSchema,
+  absence_attestations: absenceAttestationsSchema,
   // run r-ea9e, AC7: optional typed catalog field — legacy records round-trip
   // unchanged (field_baselines optional-field precedent); a catalog-bearing record
   // carries a validated modelsCatalogSchema payload.
@@ -4480,7 +4485,7 @@ var SYSTEM_REASONS = [
   "research_owed",
   // §6 H16: conductor has research_owed work pending (session-event register, run r-0501)
   "concept_article_missing",
-  // §6 H10: a concept_designed session event ended the session without its concept article (decision 7208729b)
+  // §6 H10: a concept_designed session event ended the session without its concept article (decision foreign_7208729b)
   // An owned file is absent from the working tree but ALIVE on another git ref
   // — parked on an unmerged branch, not deleted. INFORMATIONAL: it demands no
   // reconcile, because no write can change the fact and the article is already
@@ -4539,7 +4544,7 @@ var todoSchema = base.extend({
   feature_link: external_exports.string().uuid().optional(),
   priority: external_exports.enum(["low", "normal", "high"]).optional(),
   system_reason: external_exports.enum(SYSTEM_REASONS).optional(),
-  // Board grouping key (decision a8d2ce6c): slices of one larger objective
+  // Board grouping key (decision foreign_a8d2ce6c): slices of one larger objective
   // share this label and the TUI groups them under it. A grouping FIELD, not
   // a parent record — absent means standalone. The 'standalone' sentinel is
   // normalized to absent at the TOOL layer; the schema stores what it gets.
@@ -4615,104 +4620,14 @@ var briefSchema = base.extend({
   }
 });
 var AGENT_MODEL_KEY = {
-  "test-writer": "test_writer",
-  coder: "coder",
-  "reviewer-correctness": "reviewers",
-  "reviewer-security": "reviewers",
-  "reviewer-skeptic": "reviewers",
-  "reviewer-performance": "reviewers",
-  "implementation-architect": "implementation_architect",
+  implementor: "implementor",
   researcher: "researcher",
-  explorer: "explorer",
-  librarian: "librarian",
-  debugger: "debugger"
+  scout: "scout",
+  librarian: "librarian"
 };
 var REVIEWER_ROLES = new Set(Object.keys(AGENT_MODEL_KEY).filter((k) => AGENT_MODEL_KEY[k] === "reviewers"));
-var AGENT_CLASS = {
-  "test-writer": "pipeline",
-  coder: "pipeline",
-  "reviewer-correctness": "pipeline",
-  "reviewer-security": "pipeline",
-  "reviewer-skeptic": "pipeline",
-  "reviewer-performance": "pipeline",
-  "implementation-architect": "pipeline",
-  researcher: "pipeline",
-  explorer: "pipeline",
-  librarian: "conductor_direct",
-  debugger: "conductor_direct"
-};
-var PIPELINE_AGENT_TYPES = new Set(Object.keys(AGENT_CLASS).filter((k) => AGENT_CLASS[k] === "pipeline"));
 
 // packages/schemas/dist/transient.js
-var SIGNALS = [
-  "complete",
-  "research-needed",
-  "review-unresolved",
-  "blocked",
-  "tests-invalid",
-  "contract-violated",
-  "bug-found",
-  "phase-overflow",
-  "agent-died"
-];
-var signalSchema = external_exports.enum(SIGNALS);
-var SIGNAL_PAYLOADS = {
-  complete: external_exports.object({ handoff_ref: external_exports.string().min(1) }),
-  "research-needed": external_exports.object({ question: external_exports.string().min(1), context: external_exports.string(), blocking: external_exports.boolean() }),
-  "review-unresolved": external_exports.object({
-    objections: external_exports.array(external_exports.unknown()),
-    reviewer_agreement: external_exports.enum(["agreed_broken", "disagreed"])
-  }),
-  blocked: external_exports.object({ reason: external_exports.string().min(1) }),
-  "tests-invalid": external_exports.object({ evidence: external_exports.string().min(1) }),
-  "contract-violated": external_exports.object({ path: repoPath, rule: external_exports.string().min(1) }),
-  "bug-found": external_exports.object({
-    description: external_exports.string().min(1),
-    location: external_exports.string().min(1),
-    depends_on_current_work: external_exports.boolean(),
-    workaround_built: external_exports.boolean()
-  }),
-  "phase-overflow": external_exports.object({ agent: external_exports.string().min(1), fill_pct: external_exports.number() }),
-  "agent-died": external_exports.object({
-    agent: external_exports.string().min(1),
-    phase_id: external_exports.string().optional(),
-    observed: external_exports.enum(["crash", "empty_output", "malformed_exit"]),
-    raw_excerpt: external_exports.string()
-  })
-};
-var dispositionItemSchema = external_exports.object({
-  record_id: external_exports.string().min(1),
-  disposition: external_exports.enum(["addressed", "not_applicable_because"]),
-  reason: external_exports.string().optional()
-}).superRefine((item, ctx) => {
-  if (item.disposition === "not_applicable_because" && (!item.reason || item.reason.length === 0)) {
-    ctx.addIssue({
-      code: external_exports.ZodIssueCode.custom,
-      message: "disposition 'not_applicable_because' requires a non-empty reason"
-    });
-  }
-});
-var handoffSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  agent_role: external_exports.string().min(1),
-  what_changed: external_exports.array(external_exports.object({ path: repoPath, change_role: external_exports.string().min(1) })),
-  wired: external_exports.array(external_exports.string()),
-  deferred: external_exports.array(external_exports.string()),
-  decisions_made: external_exports.array(external_exports.string()),
-  tests_produced: external_exports.array(repoPath),
-  // §17 completeness decision order, structure-first half: per-subtask
-  // evidence citations (subtask → diff files + tests). The completeness
-  // script verifies cited evidence exists and passes; the honesty classifier
-  // is deferred until real runs show dishonest citations slipping by.
-  subtask_evidence: external_exports.array(external_exports.object({ subtask: external_exports.string().min(1), files: external_exports.array(repoPath), tests: external_exports.array(repoPath) })).optional(),
-  // Reviewer disposition of per-phase mandatory items (AC1, run r-d630, phase 1).
-  // Optional — non-reviewer handoffs omit it; legacy handoffs round-trip unchanged.
-  dispositions: external_exports.array(dispositionItemSchema).optional(),
-  exit_signal: signalSchema,
-  unresolved: external_exports.array(external_exports.string())
-});
-var MACHINE_STATES = ["running", "completing", "awaiting_merge_gate", "merged", "rejected", "halted"];
-var machineState = external_exports.enum(MACHINE_STATES);
 var NO_CAPTURE_LANES = ["research", "capture", "all"];
 var noCaptureLaneSchema = external_exports.enum(NO_CAPTURE_LANES);
 var sessionEventSchema = external_exports.object({
@@ -4729,79 +4644,6 @@ var sessionEventSchema = external_exports.object({
   detail: external_exports.string().min(1),
   at: external_exports.string().min(1),
   lane: noCaptureLaneSchema.optional()
-});
-var reviewMandatoryItemSchema = external_exports.object({
-  phase_id: external_exports.string().min(1),
-  record_id: external_exports.string().min(1),
-  reason: external_exports.string().min(1)
-});
-var runRecordSchema = external_exports.object({
-  id: external_exports.string().min(1),
-  brief_ref: external_exports.string().uuid(),
-  branch: external_exports.string().min(1),
-  machine_state: machineState,
-  phases: external_exports.array(external_exports.object({
-    id: external_exports.string().min(1),
-    status: external_exports.string(),
-    signals: external_exports.array(external_exports.unknown()),
-    commits: external_exports.array(external_exports.string())
-  })),
-  dispatch_counts: external_exports.record(external_exports.string(), external_exports.number().int().nonnegative()),
-  escalations: external_exports.array(external_exports.unknown()),
-  started_at: external_exports.string().datetime(),
-  // H7 (§6): articles whose files were touched mid-run — reconciliation due at
-  // completion; dispose-run verifies the union of this and the brief's list.
-  reconcile_needed: external_exports.array(external_exports.string()).optional(),
-  // Mid-run scope amendment (brief mid-run-scope-amendment, decision 8e6f9491):
-  // the conductor's human-gated "amend and continue" on a blast-radius omission.
-  // Exact repo-relative paths only; run-scoped, dies with the run (P4). scopeCheck
-  // unions these into the allowed set AFTER the out_of_scope loop, so an amendment
-  // can never open an out_of_scope path.
-  scope_amendments: external_exports.array(external_exports.object({ path: repoPath, reason: external_exports.string().min(1), at: external_exports.string().min(1) })).optional(),
-  // Per-phase reviewer mandatory set (decision 628c4b7f, run r-d630, phase 1 — AC1):
-  // stamped by prep via setRunReviewMandatory; readable at handoffWrite (phase 2),
-  // dispose-run, and merge-gate. Replace-by-phase — see SterlingStore.setRunReviewMandatory.
-  // Optional; legacy runs round-trip unchanged.
-  review_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-  // §8.1 branch model: the branch the run started from — the merge gate's
-  // target; recorded by the branch manager at run-branch creation.
-  base_branch: external_exports.string().optional(),
-  // Written once by dispose-run (§3.7, §16.1 Slice 5): only summary facts
-  // survive disposal — the packs and check_skipped rows themselves are
-  // run-scoped and die with the run. Shown at the merge gate.
-  summaries: external_exports.object({
-    check_skipped: external_exports.array(external_exports.object({ check_name: external_exports.string(), reason: external_exports.string(), count: external_exports.number().int().positive() })),
-    knowledge_packs: external_exports.array(external_exports.object({
-      phase_id: external_exports.string(),
-      consumer_role: external_exports.string(),
-      returned: external_exports.number().int().nonnegative(),
-      cap_omissions: external_exports.number().int().nonnegative(),
-      mandatory: external_exports.array(external_exports.object({ record_id: external_exports.string(), reason: external_exports.string() }))
-    })),
-    // Disposal backstop (decision 628c4b7f (c)): the per-phase reviewer
-    // mandatory ids left undispositioned across the run's reviewer handoffs,
-    // folded in by dispose-run BEFORE transients are deleted (P4) and printed
-    // at the merge gate (P5) — the wire can be fooled, the gate cannot. Reuses
-    // the shared mandatory tuple (invariant 1). Optional so legacy summaries
-    // round-trip unchanged.
-    undispositioned_mandatory: external_exports.array(reviewMandatoryItemSchema).optional(),
-    // Per-agent CONTEXT-FILL fold (board 6b2dd7b0, decision 378e09ed #5):
-    // peak/median fill_pct per agent_type from the run's h6-fills.jsonl,
-    // folded by dispose-run BEFORE runs/<id>/ is deleted — the only per-agent
-    // telemetry a run produces was previously deleted unread at the exact
-    // moment this summary was assembled (a standing P4 violation). The values
-    // are fractions of the model WINDOW, deliberately not tokens or dollars
-    // (true token totals need subagent-transcript usage reads — a separate,
-    // probe-first slice; the transcript path has moved once already).
-    // Optional so legacy summaries round-trip unchanged.
-    agent_fill: external_exports.array(external_exports.object({
-      agent_type: external_exports.string(),
-      samples: external_exports.number().int().positive(),
-      peak_fill_pct: external_exports.number(),
-      median_fill_pct: external_exports.number()
-    })).optional(),
-    snapshot_path: external_exports.string()
-  }).optional()
 });
 
 // packages/schemas/dist/config.js
@@ -4871,7 +4713,7 @@ var configSchema = external_exports.object({
   // commit and at both merge surfaces. DECLARATION ONLY — nothing keyed on this
   // field can ever refuse an operation; the refusing form of this feature was
   // DECLINED, because a gate the conductor must pass turns the conductor into
-  // the de-facto attestation trigger, reversing decision a7dbac2f (an
+  // the de-facto attestation trigger, reversing decision foreign_a7dbac2f (an
   // attestation records a HUMAN inspection). EMPTY IS THE DEFAULT AND MEANS
   // FULLY DORMANT: no store is opened, no diff is taken, nothing is printed.
   // Sterling's own config declares none — the feature exists for consuming
@@ -4901,57 +4743,31 @@ var configSchema = external_exports.object({
   project_name: external_exports.string().optional(),
   // §11 launcher split ratio
   tui_split_ratio: external_exports.number().positive().max(1).default(0.35),
-  prep_cap: external_exports.number().int().positive().default(20),
-  // Concept-article slice (decision 7208729b, brief concept-article-layer-wiring):
-  // prep reserves up to this many of prep_cap's slots for concept articles
-  // (feature_article with concept_family) so the two classes never silently
-  // displace each other under the shared cap. A sub-cap, never additive.
-  prep_concept_cap: external_exports.number().int().positive().default(5),
-  // §5.1: caps that convert loops into signals
-  caps: external_exports.object({
-    inner_loop_n: external_exports.number().int().positive().default(3),
-    outer_loop_m: external_exports.number().int().positive().default(2),
-    research_resume_per_phase: external_exports.number().int().positive().default(2),
-    dispatch_per_agent_type: external_exports.number().int().positive().default(25),
-    phase_death_cap: external_exports.number().int().positive().default(1)
-  }).default({}),
-  // §6 H6 / §14
+  // §6 H6/H10 conductor-session pressure gauge. warn_pct/block_pct/mode were
+  // H6-only (agent-scoped context enforcement) and DELETED with H6 under
+  // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
+  // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
+  // denominator and the direct-mode pressure thresholds).
   context_watch: external_exports.object({
-    warn_pct: external_exports.number().positive().default(60),
-    block_pct: external_exports.number().positive().default(95),
-    mode: external_exports.enum(["observe", "enforce"]).default("observe"),
     windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
-    // delegation remedy. Deliberately NOT warn_pct/block_pct — those are agent-scoped with
-    // different consequences (run escalation / dispatch deny in enforce mode).
+    // delegation remedy.
     conductor: external_exports.object({
       soft_pct: external_exports.number().positive().default(35),
       hard_pct: external_exports.number().positive().default(50)
     }).default({})
   }).default({}),
-  // Delegation watch (H10 Stop seam, decision 8b00e77a — mechanical half of 677f1639):
-  // fire the once-per-session advisory when (distinct Read files + Grep/Glob calls)
-  // >= min_hand_work AND (Task/Agent dispatches) <= max_dispatches. Defaults
-  // calibrated on the measured 2026-08-10 incident (~23 hand-reads, 0 dispatches).
-  delegation_watch: external_exports.object({
-    min_hand_work: external_exports.number().int().positive().default(15),
-    max_dispatches: external_exports.number().int().nonnegative().default(0),
-    // H21 hand-work-streak advisory (decision 9042abeb): distinct read
-    // paths + searches since the last Task/Agent dispatch crossing this
-    // threshold injects ONE moment-3 advisory per streak episode.
-    streak_threshold: external_exports.number().int().positive().default(10)
-  }).default({}),
-  // In-flight dispatch register (decision ec9eacaa, H22): how long an entry may
+  // In-flight dispatch register (decision foreign_ec9eacaa, H22): how long an entry may
   // sit in .sterling/transient/dispatch-register.json before H10 stops deferring
   // duties for the files it owns. SubagentStop on a killed/aborted subagent was
-  // never probed (research_finding 20b44518), so this TTL is what converts that
+  // never probed (research_finding foreign_20b44518), so this TTL is what converts that
   // unknown into a bounded, disclosed degradation instead of a duty deferred
   // forever (P5).
   dispatch_register: external_exports.object({
     stale_minutes: external_exports.number().int().positive().default(60)
   }).default({}),
-  // Concurrent-subagent ceiling (decision d7a0289f, board 18a22b56): every
+  // Concurrent-subagent ceiling (decision foreign_d7a0289f, board 18a22b56): every
   // surface that states the "N concurrent subagents" ceiling (H1's banner
   // prose, H8's dispatch cap, CLAUDE.md) reads it from here rather than a
   // hardcoded literal, so a ruling that changes it takes effect everywhere
@@ -4962,41 +4778,24 @@ var configSchema = external_exports.object({
     max_concurrent: external_exports.number().int().positive().default(5)
   }).default({}),
   // §7.2 model + effort defaults (tunable config, not architecture).
-  // Hard rule encoded here as data: no xhigh/max for subagents except
-  // small-scoped hard phases (coder hard override); max never appears.
+  // Hard rule encoded here as data: no xhigh/max for subagents; max never
+  // appears. Slice 5/8 (decision sterling-claude-code-scale-down-boundary,
+  // 2ad87dd1, change 3) renamed these keys to match the roster directly —
+  // 'coder' -> 'implementor', 'explorer' -> 'scout' — so AGENT_MODEL_KEY no
+  // longer needs an indirection layer between an agent's name and its config
+  // key.
   models: external_exports.object({
-    test_writer: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    reviewers: modelEffort.default({ model: "claude-opus-5", effort: "low" }),
-    implementation_architect: modelEffort.default({ model: "claude-opus-5", effort: "high" }),
-    coder: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
-    coder_hard: modelEffort.default({ model: "claude-opus-5", effort: "xhigh" }),
+    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
-    explorer: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
+    scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
     // Conductor-direct agents (no agent_exit/handoff_write; final text is the
     // deliverable). librarian is mechanical clerking — cheap model, low effort
-    // (P8); debugger is root-cause judgment — high effort.
+    // (P8); debugger is root-cause judgment — high effort. No debugger.md
+    // template is registered yet (agent-templates/registry.json) — this key
+    // stays config-only until one is.
     librarian: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     debugger: modelEffort.default({ model: "claude-sonnet-5", effort: "high" })
-  }).default({}),
-  // §7.1 reviewer dispatch signal sets — start over-inclusive, tune down on
-  // run data, never the reverse. Patterns are JS regex source strings.
-  reviewer_selection: external_exports.object({
-    security_path_patterns: external_exports.array(external_exports.string()).default(["(^|/)auth/", "token", "secret", "credential"]),
-    security_content_patterns: external_exports.array(external_exports.string()).default(["SELECT .*\\+", "exec\\(", "spawn\\(", "process\\.env", "(^|\\W)eval\\(", "router\\.(get|post|put|delete)"]),
-    perf_path_patterns: external_exports.array(external_exports.string()).default([]),
-    perf_content_patterns: external_exports.array(external_exports.string()).default(["for\\s*\\(.*\\bawait\\b", "\\.map\\(.*await", "SELECT \\*"]),
-    dependency_manifests: external_exports.array(external_exports.string()).default(["package.json", "requirements.txt", "pom.xml", "*.csproj"]),
-    skeptic_diff_size_threshold: external_exports.number().int().positive().default(400),
-    skeptic_new_export_threshold: external_exports.number().int().positive().default(5)
-  }).default({}),
-  // §4 difficulty rubric — mechanical inputs. split_interface_threshold is the
-  // SPLIT (bigness) threshold: a phase whose interface count strictly exceeds
-  // it is over-wide and gets flagged for decomposition (P7) — it is NOT a
-  // hardness input (hardness ownership is the planner's, per decision a48c74cf).
-  difficulty: external_exports.object({
-    split_interface_threshold: external_exports.number().int().positive().default(3),
-    thin_knowledge_retrieval_threshold: external_exports.number().int().nonnegative().default(2)
   }).default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
@@ -5024,7 +4823,7 @@ var configSchema = external_exports.object({
   // enqueues one deduped article_oversize maintenance item. Tunable per
   // machine, not architecture.
   article_oversize_chars: external_exports.number().int().positive().default(6e4),
-  // Decision 881baf13 (supersedes d547d3b0): per-article accepted-oversize
+  // Decision foreign_881baf13 (supersedes foreign_d547d3b0): per-article accepted-oversize
   // exemption register, article slug -> justifying decision id. Consulted at
   // the article_oversize minting site (articleOversizeWarnings,
   // packages/mcp-server/src/tools.ts) BEFORE it mints/dedup-refreshes the
@@ -5081,7 +4880,7 @@ var configSchema = external_exports.object({
   // authority is per-store' (cited by title, not id, deliberately — citing its id
   // here would itself dangle on every store but the one that minted it).
   store_authority: external_exports.enum(["primary", "secondary"]).default("primary"),
-  // Machine-local role marker (todo cabbc10f, decision a9b98b7d) — DELIBERATELY
+  // Machine-local role marker (todo cabbc10f, decision foreign_a9b98b7d) — DELIBERATELY
   // OPTIONAL with NO DEFAULT: absence is a meaningful state ('undeclared'), not
   // a value to infer. 'authoring' is declared once, by hand, on the machine
   // where Sterling work lands and merges; a successful /sterling:update stamps
@@ -5091,39 +4890,6 @@ var configSchema = external_exports.object({
   // default would mislabel every consumer that never opted in (the rejected
   // alternative in a9b98b7d) — and reports it only on a Sterling clone itself.
   machine_role: external_exports.enum(["authoring", "consumer"]).optional(),
-  // §6 H15 store write-path guard: shell commands referencing the store are
-  // denied unless they invoke one of these sanctioned scripts/launchers —
-  // tunable, grows incident-by-incident (the reviewer-selection precedent)
-  //
-  // EVERY ENTRY IS A CLONE-RELATIVE PATH FROM THE ACTIVE PLUGIN ROOT (decision
-  // 5b82e94f — identical on an authoring machine, where the clone and the
-  // project are one tree, and divergent in a consumer, where Sterling's scripts
-  // live in the clone and never in <project>/scripts/). That is exactly what
-  // H15 compares against: the fragment's executable argument is realpath'd,
-  // required to be a regular file inside the canonicalized plugin root, and its
-  // clone-relative POSIX path is compared by EXACT, case-sensitive EQUALITY
-  // (anti_pattern caecf8a6 — a suffix/substring match would let any writable
-  // directory ending in the sanctioned name unlock the store; and there is no
-  // bare-name fallback, because the fallback IS the bypass). A BARE BASENAME
-  // therefore sanctions nothing unless the command is literally run from the
-  // script's own directory, which H14's repo-root confinement never produces.
-  // 'sterling-tui.mjs' was such a bare basename: it worked only while the
-  // exemption was an unanchored substring test, and became a silent false DENY
-  // the moment caecf8a6 was fixed (measured 2026-08-27, hooks-full.test.mjs's
-  // 'TUI launcher passes' assertion). Its real repo-relative path is spelled
-  // out below. Keep this list basename-free.
-  //
-  // MIRRORED, DELIBERATELY: scripts/lib/store-remediation.mjs's SANCTIONED_SCRIPTS
-  // must stay element-identical to this default — it is what reaches this list
-  // into a consumer config that already carries an EXPLICIT allow_scripts array
-  // (a zod .default() applies only when the field is ABSENT, so a frozen config
-  // never gains a grown default; board 52c1d504). That module is dependency-free
-  // by contract and this package's tsconfig pins rootDir to src, so neither can
-  // import the other; a drift pin in scripts/tests/store-remediation.test.mjs
-  // fails the moment the two literals diverge. Edit BOTH, in the same order.
-  store_guard: external_exports.object({
-    allow_scripts: external_exports.array(external_exports.string()).default(["scripts/dispose-run.mjs", "scripts/init.mjs", "scripts/consume-exit.mjs", "scripts/architecture-projection.mjs", "scripts/domain-doctor.mjs", "scripts/commit-reviewed.mjs", "scripts/migration-preflight.mjs", "scripts/migrate-stores.mjs", "packages/tui/bundle/sterling-tui.mjs", "scripts/review-ledger.mjs", "scripts/rotation-note.mjs", "scripts/no-capture.mjs", "scripts/test-repair.mjs", "scripts/delivery-oracle.mjs", "scripts/plan-lock.mjs"])
-  }).default({}),
   // §6 H16 session-event register (run r-0501): which agent types are considered
   // research agents for the research_owed lane (phase 2 filtering). Default list
   // is over-inclusive (§7.1 precedent) — tune down on run data.
@@ -5146,7 +4912,7 @@ var configSchema = external_exports.object({
   models_catalog: external_exports.object({
     staleness_days: external_exports.number().int().positive().default(45)
   }).default({}),
-  // H19 knowledge delivery (decision 6dfbe675). injection_rung is PROBE-SET
+  // H19 knowledge delivery (decision foreign_6dfbe675). injection_rung is PROBE-SET
   // per machine/CC version (verify-at-build 0956a464): 'prompt' (default,
   // platform-proven — enqueue at file-touch, inject at next UserPromptSubmit),
   // 'read' (PostToolUse injects directly at the touch), 'edit' (only
@@ -5167,33 +4933,25 @@ var configSchema = external_exports.object({
   // config.json carrying an unmodeled delivery key never bricks anything
   // that merely READS the file.
   delivery: external_exports.object({
-    injection_rung: external_exports.enum(["prompt", "read", "edit"]).default("prompt"),
+    // `prompt` and `edit` are accepted only to migrate existing project
+    // configs. Parsed configuration exposes only the surviving read rung.
+    injection_rung: external_exports.enum(["prompt", "edit", "read"]).default("read").transform(() => "read"),
     payload_char_cap: external_exports.number().int().positive().default(2400),
-    // SubagentStart "porch" budget (H19 front-porch, decision
-    // h19-subagentstart-front-porch-byte-budget-hazards-first-owner-pointers-no-overrun,
-    // knowledge_get 0050a536): how many UTF-8 BYTES of the front of the COMPLETE
-    // additionalContext (plan line + payload) are budgeted so the harness's
-    // inline preview never truncates mid-hazard. 0 DISABLES the porch. The
-    // shipped default, 1800, is the MEASURED inline preview on Claude Code
-    // 2.1.263 (research_finding 518b7d21) — a platform fact, re-probe on
-    // upgrade. An ABSENT or INVALID VALUE for this key specifically (absent,
-    // non-integer, negative, or non-numeric) falls back to this same default
-    // at the hook — see h19-dispatch-staging.mjs's resolvePorchBudget, which
-    // mirrors the config-derived-posture-line three-state guard (anti_pattern
-    // e0d280ee) even though this is an internal rendering budget, never a
-    // claim rendered to the reader. A CORRUPT config.json (unparseable JSON)
-    // is a DIFFERENT case and never reaches this fallback at all: it
-    // suppresses the whole staging payload before this key is ever read, per
-    // the pre-existing shared-fate ruling pinned in
-    // scripts/tests/h19-dispatch-staging.test.mjs ("H19+H28 shared-fate").
-    preview_budget_bytes: external_exports.number().int().nonnegative().default(1800)
+    // Per-delivery total cap in UTF-8 bytes (H19 delivery family, Slice 3's
+    // "H19 gets a per-delivery total cap and cross-entry dedup across the
+    // turn"): scripts/hooks/lib/delivery.mjs reads this at
+    // DELIVERY_TOTAL_CAP_DEFAULT's fallback site. 0 disables the cap. An
+    // absent/invalid value falls back to the same default there, same
+    // three-state guard used for other config-derived delivery values.
+    total_cap_bytes: external_exports.number().int().nonnegative().default(3e3)
   }).default({}),
   // Sparring partner (decision sparring-partner-partnership-shape, board a0714d0b):
   // whether the automatic consult moments (design/review/gate second opinions via
   // the official `codex mcp-server`) are ACTIVE for this project. Mirrors the
-  // additive advisory-block pattern of delegation_watch — a project without the
+  // additive advisory-block pattern (every field has a default; an absent
+  // block still parses) — a project without the
   // Codex CLI installed still parses and defaults to true; the TUI System tab
-  // flips it per project (decision 98064d77's config-is-authoritative pattern).
+  // flips it per project (decision foreign_98064d77's config-is-authoritative pattern).
   // A machine missing Codex is a DISTINCT, louder state (init's probe skip report)
   // — this field never stands in for that absence, only for a deliberate OFF.
   sparring_partner: external_exports.object({
@@ -5205,7 +4963,7 @@ var configSchema = external_exports.object({
     // side allowlist would only drift from what the CLI actually accepts.
     model: external_exports.string().optional()
   }).default({}),
-  // TDD-by-default posture toggle (decision 752caf98,
+  // TDD-by-default posture toggle (decision foreign_752caf98,
   // tdd-and-mutation-toggles-in-system-tab): whether the standing "tests first
   // for new behavior" posture (user-affirmed 2026-08-09) fires automatically.
   // Mirrors sparring_partner's additive-optional shape exactly — an absent
@@ -5217,32 +4975,14 @@ var configSchema = external_exports.object({
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
   }).default({}),
-  // Mutation-verification posture toggle (decision 752caf98), independent of
+  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
   // tdd above: whether "verify a ruling change by mutation, not by a green
   // suite alone" (measured 2026-08-22) fires automatically. Same additive-
   // optional, default-true shape as tdd — the two toggles are deliberately
   // separate fields, not one combined toggle (rejected in 752caf98).
   mutation_verification: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Review-ledger tunables (config_set decision config-writes-get-a-config-
-  // set-mcp-tool-with-positive-key-allowlist-raw-edit-denial-stays item 4).
-  // Previously UNMODELED here even though scripts/commit-reviewed.mjs and
-  // scripts/hooks/lib/review-ledger-entry.mjs already read
-  // config.review_ledger.stale_days / .code_globs directly off the raw
-  // parsed JSON (optional-chained, tolerant of absence) — the merge gate's
-  // receipt-EXPIRY horizon and the reviewer-territory glob override. Because
-  // config_set's own allowlist already grants `review_ledger.stale_days`
-  // (decision 1dc3f9aa), that value went through NO schema check at all
-  // before this: a config_set write of a string or a negative number would
-  // have landed on disk unrefused. `stale_days` is the only leaf modeled;
-  // `.passthrough()` keeps `code_globs` and any future key byte-preserved
-  // and unvalidated — this field is `.optional()` with NO `.default({})` so
-  // an absent block still parses to `undefined`, exactly as before this
-  // field existed (no new key is manufactured on an untouched config.json).
-  review_ledger: external_exports.object({
-    stale_days: external_exports.number().int().positive().max(3650).optional()
-  }).passthrough().optional()
+  }).default({})
 });
 
 // packages/schemas/dist/registry.js
@@ -5281,7 +5021,25 @@ import { DatabaseSync } from "node:sqlite";
 
 // packages/store/dist/index.js
 var MAX_RANK_TERMS = 16;
-var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).max(MAX_RANK_TERMS);
+function rankTermDedupeKey(term) {
+  const isPrefix = term.endsWith("*") && term.length > 1;
+  const base2 = isPrefix ? term.slice(0, -1) : term;
+  const folded = base2.toLowerCase().replace(/[\p{P}\p{Z}]+/gu, " ").trim();
+  const key = folded.length > 0 ? folded : base2;
+  return isPrefix ? `${key}*` : key;
+}
+var rankTerms = external_exports.array(external_exports.string().regex(/^\S{1,64}$/, "rank_terms must be single keywords (no whitespace, \u226464 chars)")).transform((terms) => {
+  const seen = /* @__PURE__ */ new Set();
+  const deduped = [];
+  for (const term of terms) {
+    const key = rankTermDedupeKey(term);
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(term);
+  }
+  return deduped;
+}).pipe(external_exports.array(external_exports.string()).max(MAX_RANK_TERMS, `rank_terms accepts at most ${MAX_RANK_TERMS} distinct terms`));
 
 // scripts/hooks/lib/common.mjs
 function projectRoot(from) {
@@ -5426,32 +5184,6 @@ var PATH_CANDIDATE_RE = /(?:[\w-]+\/)+[\w.-]+\.[A-Za-z0-9]{1,10}/g;
 function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
-}
-var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
-var GLOB_METACHAR_RE = /[*?[\]]/;
-function isRepoRelativePosixShape(p) {
-  if (typeof p !== "string" || p === "") return false;
-  if (GLOB_METACHAR_RE.test(p)) return false;
-  try {
-    return normalizeRepoPath(p) === p;
-  } catch {
-    return false;
-  }
-}
-function parseReviewTerritory(text) {
-  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
-  if (!match) return { present: false };
-  const raw = match[0];
-  let parsed;
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch {
-    return { present: true, valid: false, raw };
-  }
-  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
-    return { present: true, valid: false, raw };
-  }
-  return { present: true, valid: true, files: parsed };
 }
 
 // scripts/hooks/lib/dispatch-advisory.mjs
@@ -5619,51 +5351,10 @@ function claimedResources(promptText, configuredNames) {
   return claimed;
 }
 
-// scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync2, statSync, readdirSync } from "node:fs";
-function readFromStart(path, bytes) {
-  if (!existsSync2(path)) return null;
-  try {
-    const fd = openSync(path, "r");
-    try {
-      const stat = fstatSync(fd);
-      if (!stat.isFile()) return null;
-      const size = stat.size;
-      const want = Math.min(size, bytes);
-      const buf = Buffer.alloc(want);
-      let readTotal = 0;
-      while (readTotal < want) {
-        const n = readSync(fd, buf, readTotal, want - readTotal, readTotal);
-        if (n === 0) break;
-        readTotal += n;
-      }
-      return { text: buf.toString("utf8", 0, readTotal), complete: readTotal === size };
-    } finally {
-      closeSync(fd);
-    }
-  } catch {
-    return null;
-  }
-}
-var TAIL_BYTES = 1024 * 1024;
-function readTail(path, bytes = TAIL_BYTES) {
-  if (!existsSync2(path)) return null;
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const len = Math.min(size, bytes);
-    const buf = Buffer.alloc(len);
-    readSync(fd, buf, 0, len, size - len);
-    return buf.toString("utf8");
-  } finally {
-    closeSync(fd);
-  }
-}
-
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync as readdirSync2 } from "node:fs";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync2, statSync, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join as join2, basename, dirname as dirname2 } from "node:path";
+import { join as join2, dirname as dirname2 } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -5672,7 +5363,7 @@ var CODES = /* @__PURE__ */ new Set([
   "ledger_corrupt",
   "ledger_absent",
   "ledger_digest_mismatch",
-  "ledger_lock_held",
+  "compatibility_lock_held",
   "entry_not_found",
   "entry_selector_ambiguous",
   "entry_not_active",
@@ -5697,7 +5388,7 @@ var CODES = /* @__PURE__ */ new Set([
   "reconcile_unresolved",
   "record_external_duplicate",
   "argument_invalid",
-  // §1.4 commit-reviewed
+  // commit operation
   "nothing_staged",
   "message_missing",
   "no_spendable_receipt",
@@ -5788,9 +5479,6 @@ function registerPath(root) {
 function registerLockDir(root) {
   return join2(root, ".sterling", "transient", "dispatch-register.lock");
 }
-function ledgerLockDir(root) {
-  return join2(root, ".sterling", "review-ledger.lock");
-}
 function parseRegisterEntry(raw) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     return { ok: false, code: "register_entry_malformed", facts: { reason: "not-an-object" } };
@@ -5811,7 +5499,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync3(p)) return { availability: "absent", arr: [] };
+  if (!existsSync2(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync2(p, "utf8");
@@ -5847,12 +5535,8 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_CODE_BY_BASENAME = {
-  "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "ledger_lock_held"
-};
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename(lockDir)] ?? "register_lock_held";
+function lockCodeFor() {
+  return "register_lock_held";
 }
 function isPidAlive(pid) {
   try {
@@ -5874,7 +5558,7 @@ function looksDeadOwner(o) {
 }
 function statIno(p) {
   try {
-    return statSync2(p).ino;
+    return statSync(p).ino;
   } catch {
     return null;
   }
@@ -5921,7 +5605,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 `
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
@@ -5932,7 +5616,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -5955,9 +5639,6 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 }
 function withRegisterLock(root, fn, opts = {}) {
   return withOwnerMkdirLock(registerLockDir(root), fn, opts);
-}
-function withLedgerLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(ledgerLockDir(root), fn, opts);
 }
 function registerStartLocked(root, entry) {
   const { availability, arr } = readRawArray(root);
@@ -6132,7 +5813,7 @@ function readDispatchState(root) {
   if (containment.availability === "absent") return { availability: "absent", records: [], poisoned: [] };
   let names;
   try {
-    names = readdirSync2(dir);
+    names = readdirSync(dir);
   } catch {
     return { availability: "unavailable", records: [], poisoned: [] };
   }
@@ -6583,382 +6264,6 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
   });
 }
 
-// scripts/hooks/lib/review-ledger-entry.mjs
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, renameSync as renameSync2 } from "node:fs";
-import { join as join3, extname } from "node:path";
-import { createHash as createHash2, randomBytes as randomBytes2 } from "node:crypto";
-function isEvidenceObject(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function normalizeReceiptPath(p) {
-  const s = String(p).replace(/\\/g, "/").replace(/^\.\//, "");
-  if (/^[A-Za-z]:/.test(s)) return null;
-  if (s.startsWith("/")) return null;
-  if (s.split("/").includes("..")) return null;
-  return s;
-}
-function isUsableBlobSha(v) {
-  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
-}
-function parseDisposition(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.class !== "string" || raw.class === "") return { ok: false };
-  if (typeof raw.reason !== "string" || raw.reason === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (typeof raw.head_sha !== "string" || raw.head_sha === "") return { ok: false };
-  if (typeof raw.classifier_version !== "number") return { ok: false };
-  const facts = isEvidenceObject(raw.facts) ? raw.facts : {};
-  return {
-    ok: true,
-    value: { class: raw.class, reason: raw.reason, at: raw.at, head_sha: raw.head_sha, classifier_version: raw.classifier_version, facts }
-  };
-}
-function parseReservation(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  if (typeof raw.at !== "string" || raw.at === "") return { ok: false };
-  if (!isEvidenceObject(raw.index_blobs)) return { ok: false };
-  if (typeof raw.operation !== "string" || raw.operation === "") return { ok: false };
-  const value = { nonce: raw.nonce, at: raw.at, index_blobs: { ...raw.index_blobs }, operation: raw.operation };
-  if (raw.waived !== void 0) {
-    if (typeof raw.waived !== "boolean") return { ok: false };
-    value.waived = raw.waived;
-  }
-  return { ok: true, value };
-}
-function parseConsumption(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (!isUsableBlobSha(raw.commit_sha)) return { ok: false };
-  if (typeof raw.consumed_at !== "string" || raw.consumed_at === "") return { ok: false };
-  if (typeof raw.nonce !== "string" || raw.nonce === "") return { ok: false };
-  const value = { commit_sha: raw.commit_sha, consumed_at: raw.consumed_at, nonce: raw.nonce };
-  if (raw.paths !== void 0) {
-    if (!Array.isArray(raw.paths) || !raw.paths.every((p) => typeof p === "string")) return { ok: false };
-    value.paths = raw.paths.slice();
-  }
-  return { ok: true, value };
-}
-function parseContentEvidence(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false };
-  if (raw.status !== "complete" && raw.status !== "partial" && raw.status !== "unavailable") return { ok: false };
-  const basis = typeof raw.basis === "string" && raw.basis ? raw.basis : "stop-time-worktree-snapshot";
-  let blobs;
-  if (raw.blobs === void 0) {
-    blobs = {};
-  } else if (isEvidenceObject(raw.blobs)) {
-    blobs = { ...raw.blobs };
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.blobs" } };
-  }
-  let absentPaths;
-  if (raw.absent_paths === void 0) {
-    absentPaths = [];
-  } else if (Array.isArray(raw.absent_paths)) {
-    absentPaths = raw.absent_paths.filter((p) => typeof p === "string");
-  } else {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.absent_paths" } };
-  }
-  const value = { basis, status: raw.status, blobs, absent_paths: absentPaths };
-  if (raw.index_blobs !== void 0) {
-    if (!isEvidenceObject(raw.index_blobs)) {
-      return { ok: false, code: "ledger_entry_malformed", facts: { field: "content_evidence.index_blobs" } };
-    }
-    value.index_blobs = { ...raw.index_blobs };
-  }
-  if (raw.truncated === true) value.truncated = true;
-  if (Number.isInteger(raw.truncated_of)) value.truncated_of = raw.truncated_of;
-  if (typeof raw.failure_reason === "string" && raw.failure_reason) value.failure_reason = raw.failure_reason;
-  return { ok: true, value };
-}
-function parseObservedEvidence(raw) {
-  const value = {};
-  if (Array.isArray(raw?.observed_files)) value.observed_files = raw.observed_files.filter((p) => typeof p === "string");
-  if (Array.isArray(raw?.observed_reads)) value.observed_reads = raw.observed_reads.filter((p) => typeof p === "string");
-  if (typeof raw?.observed_source === "string" && raw.observed_source) value.observed_source = raw.observed_source;
-  if (raw?.observed_truncated === true) value.observed_truncated = true;
-  return { ok: true, value };
-}
-var RECEIPT_STATUSES = /* @__PURE__ */ new Set(["active", "reserved", "consumed", "discharged"]);
-var UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var AGENT_TYPE_PATTERN = /^[A-Za-z0-9_-]+$/;
-var TERRITORY_SOURCES = /* @__PURE__ */ new Set(["review-territory", "free-prose-fallback", "unattributable"]);
-function parseReceipt(raw) {
-  if (!isEvidenceObject(raw)) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.schema_version !== 2) return { ok: false, code: "ledger_entry_malformed" };
-  if (raw.kind !== void 0 && raw.kind !== "roster_receipt") return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.entry_id !== "string" || !UUID_PATTERN.test(raw.entry_id)) return { ok: false, code: "ledger_entry_malformed" };
-  if (!RECEIPT_STATUSES.has(raw.status)) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.started_at !== "string" || !raw.started_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (typeof raw.finished_at !== "string" || !raw.finished_at) return { ok: false, code: "ledger_entry_malformed" };
-  if (!isEvidenceObject(raw.reviewer)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer" } };
-  if (typeof raw.reviewer.agent_type !== "string" || !AGENT_TYPE_PATTERN.test(raw.reviewer.agent_type)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reviewer.agent_type" } };
-  }
-  if (!isEvidenceObject(raw.identity)) return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity" } };
-  if (typeof raw.identity.agent_id !== "string" || !raw.identity.agent_id) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "identity.agent_id" } };
-  }
-  if (!isEvidenceObject(raw.territory) || !Array.isArray(raw.territory.files)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory" } };
-  }
-  if (!TERRITORY_SOURCES.has(raw.territory.source)) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.source" } };
-  }
-  if (raw.territory.attribution !== "block" && raw.territory.attribution !== "none" && raw.territory.attribution !== "union") {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "territory.attribution" } };
-  }
-  const contentParsed = parseContentEvidence(raw.content_evidence);
-  if (!contentParsed.ok) {
-    return { ok: false, code: "ledger_entry_malformed", facts: contentParsed.facts ?? { field: "content_evidence" } };
-  }
-  let reservation;
-  let consumption;
-  let disposition = null;
-  if (raw.status === "reserved") {
-    const r = parseReservation(raw.reservation);
-    if (!r.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-    reservation = r.value;
-  } else if (raw.reservation !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "reservation" } };
-  }
-  if (raw.status === "consumed") {
-    const c = parseConsumption(raw.consumption);
-    if (!c.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-    if (Array.isArray(c.value.paths) && c.value.paths.length > 0) {
-      const partialReceipt = {
-        territory: { files: raw.territory.files.filter((f) => typeof f === "string") },
-        content_evidence: contentParsed.value
-      };
-      const covered = new Set(receiptCoveredPaths(partialReceipt));
-      const seen = /* @__PURE__ */ new Set();
-      for (const p of c.value.paths) {
-        const n = normalizeReceiptPath(p);
-        if (n === null || !covered.has(n) || seen.has(n)) {
-          return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption.paths", entry_id: raw.entry_id } };
-        }
-        seen.add(n);
-      }
-    }
-    consumption = c.value;
-  } else if (raw.consumption !== void 0) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "consumption" } };
-  }
-  if (raw.status === "discharged") {
-    const d = parseDisposition(raw.disposition);
-    if (!d.ok) return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-    disposition = d.value;
-  } else if (raw.disposition !== void 0 && raw.disposition !== null) {
-    return { ok: false, code: "ledger_entry_malformed", facts: { field: "disposition" } };
-  }
-  const identity = {
-    session_id: typeof raw.identity.session_id === "string" ? raw.identity.session_id : null,
-    branch: typeof raw.identity.branch === "string" ? raw.identity.branch : null,
-    base_sha: typeof raw.identity.base_sha === "string" ? raw.identity.base_sha : null,
-    agent_id: raw.identity.agent_id
-  };
-  const observed = parseObservedEvidence(raw).value;
-  const receipt = {
-    schema_version: 2,
-    entry_id: raw.entry_id,
-    kind: "roster_receipt",
-    status: raw.status,
-    started_at: raw.started_at,
-    finished_at: raw.finished_at,
-    reviewer: {
-      agent_type: raw.reviewer.agent_type,
-      model: raw.reviewer.model ?? null,
-      model_family: raw.reviewer.model_family ?? null,
-      model_source: raw.reviewer.model_source ?? null
-    },
-    identity,
-    territory: {
-      files: raw.territory.files.filter((f) => typeof f === "string"),
-      source: raw.territory.source,
-      attribution: raw.territory.attribution,
-      ...typeof raw.territory.attribution_case === "string" ? { attribution_case: raw.territory.attribution_case } : {}
-    },
-    content_evidence: contentParsed.value,
-    disposition,
-    ...observed
-  };
-  if (reservation) receipt.reservation = reservation;
-  if (consumption) receipt.consumption = consumption;
-  return { ok: true, receipt };
-}
-function legacyFingerprint(raw) {
-  const files = Array.isArray(raw?.files) ? raw.files.filter((f) => typeof f === "string").map(normalizeReceiptPath).sort() : [];
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? raw.reviewed_state.blobs : {};
-  const blobs = Object.entries(blobsObj).map(([p, s]) => [normalizeReceiptPath(p), s]).sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
-  let canonical;
-  try {
-    canonical = JSON.stringify([raw?.agent_type ?? null, raw?.at ?? null, files, blobs]);
-    if (typeof canonical !== "string") canonical = "<unserializable>";
-  } catch {
-    canonical = "<unserializable>";
-  }
-  return createHash2("sha256").update(canonical).digest("hex").slice(0, 32);
-}
-function legacyReceiptHandle(raw) {
-  return `receipt-${legacyFingerprint(raw)}`;
-}
-function adaptLegacyEntry(raw) {
-  const blobsObj = isEvidenceObject(raw?.reviewed_state) && isEvidenceObject(raw.reviewed_state.blobs) ? { ...raw.reviewed_state.blobs } : {};
-  return {
-    kind: "legacy",
-    handle: legacyReceiptHandle(raw),
-    agent_type: typeof raw?.agent_type === "string" ? raw.agent_type : null,
-    files: Array.isArray(raw?.files) ? raw.files.slice() : [],
-    at: typeof raw?.at === "string" ? raw.at : null,
-    session_id: typeof raw?.session_id === "string" ? raw.session_id : null,
-    branch: typeof raw?.branch === "string" ? raw.branch : null,
-    base_sha: typeof raw?.base_sha === "string" ? raw.base_sha : null,
-    blobs: blobsObj,
-    status: raw?.status === "discharged" ? "discharged" : "active"
-  };
-}
-function looksLikeLegacyV1(raw) {
-  return typeof raw?.agent_type === "string" && raw.agent_type !== "" && Array.isArray(raw?.files) && typeof raw?.at === "string" && raw.at !== "";
-}
-function classifyLedgerEntry(raw) {
-  if (!isEvidenceObject(raw)) {
-    return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "not-an-object" } };
-  }
-  if (raw.schema_version === 2) {
-    if (raw.kind === "external_review") {
-      if (typeof raw.entry_id !== "string" || !raw.entry_id || typeof raw.thread_id !== "string" || !Array.isArray(raw.files)) {
-        return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "external_review" } };
-      }
-      return { kind: "external_review", entry: raw };
-    }
-    const parsed = parseReceipt(raw);
-    if (!parsed.ok) return { kind: "malformed", code: "ledger_entry_malformed", facts: parsed.facts ?? { reason: "receipt" } };
-    return { kind: "receipt", receipt: parsed.receipt };
-  }
-  if (looksLikeLegacyV1(raw)) {
-    return { kind: "legacy", legacy: adaptLegacyEntry(raw) };
-  }
-  return { kind: "malformed", code: "ledger_entry_malformed", facts: { reason: "unrecognized" } };
-}
-function receiptCoveredPaths(receipt) {
-  const files = Array.isArray(receipt?.territory?.files) ? receipt.territory.files : [];
-  const blobs = isEvidenceObject(receipt?.content_evidence?.blobs) ? receipt.content_evidence.blobs : {};
-  const absentPaths = new Set(
-    (Array.isArray(receipt?.content_evidence?.absent_paths) ? receipt.content_evidence.absent_paths : []).filter((p) => typeof p === "string").map(normalizeReceiptPath).filter((n) => n !== null)
-  );
-  const covered = [];
-  for (const f of files) {
-    if (typeof f !== "string") continue;
-    const n = normalizeReceiptPath(f);
-    if (n === null) continue;
-    const sha = blobs[f] ?? blobs[n];
-    if (isUsableBlobSha(sha) || absentPaths.has(n)) covered.push(n);
-  }
-  return covered;
-}
-function ledgerPath(root) {
-  return join3(root, ".sterling", "review-ledger.json");
-}
-function readLedger(root) {
-  const p = ledgerPath(root);
-  if (!existsSync4(p)) return { availability: "absent", entries: [], rawEntries: [], raw: "" };
-  let raw;
-  try {
-    raw = readFileSync3(p, "utf8");
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  }
-  if (!Array.isArray(parsed)) return { availability: "corrupt", entries: [], rawEntries: [], raw: "" };
-  return {
-    availability: "ok",
-    entries: parsed.map((e, index) => ({ ...classifyLedgerEntry(e), index })),
-    rawEntries: parsed,
-    raw
-  };
-}
-function writeLedger(root, entries) {
-  const dir = join3(root, ".sterling");
-  mkdirSync2(dir, { recursive: true });
-  const p = ledgerPath(root);
-  const tmp = `${p}.tmp-${randomBytes2(4).toString("hex")}`;
-  writeFileSync2(tmp, JSON.stringify(entries));
-  renameSync2(tmp, p);
-}
-
-// scripts/hooks/lib/observed-territory.mjs
-import { existsSync as existsSync5, statSync as statSync3 } from "node:fs";
-var WRITE_TOOLS_FILE_PATH = /* @__PURE__ */ new Set(["Edit", "Write"]);
-var TAIL_BYTES2 = 1024 * 1024;
-function hasFileExtension(p) {
-  const idx = p.lastIndexOf("/");
-  const base2 = idx === -1 ? p : p.slice(idx + 1);
-  return base2.includes(".");
-}
-function observedToolPaths(transcriptPath, cwd) {
-  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  if (!existsSync5(transcriptPath)) return null;
-  let tail;
-  try {
-    tail = readTail(transcriptPath);
-  } catch {
-    return null;
-  }
-  if (tail === null || tail === "") return null;
-  let truncated = false;
-  try {
-    truncated = statSync3(transcriptPath).size > TAIL_BYTES2;
-  } catch {
-  }
-  const reads = /* @__PURE__ */ new Set();
-  const writes = /* @__PURE__ */ new Set();
-  const add = (set, rawPath) => {
-    if (typeof rawPath !== "string" || rawPath === "") return;
-    const rel = repoRel(rawPath, cwd);
-    if (!rel) return;
-    const lower = rel.toLowerCase();
-    if (lower === ".git" || lower.startsWith(".git/") || lower === ".sterling" || lower.startsWith(".sterling/")) return;
-    set.add(rel);
-  };
-  for (const line of tail.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    if (entry?.type !== "assistant") continue;
-    const content = entry.message?.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || block.type !== "tool_use") continue;
-      const name = block.name;
-      const input2 = block.input;
-      if (WRITE_TOOLS_FILE_PATH.has(name)) {
-        add(writes, input2?.file_path);
-      } else if (name === "NotebookEdit") {
-        add(writes, input2?.notebook_path);
-      } else if (name === "Read") {
-        add(reads, input2?.file_path);
-      } else if (name === "Grep") {
-        const p = input2?.path;
-        if (typeof p === "string" && p !== "" && hasFileExtension(p)) add(reads, p);
-      } else if (name === "Glob") {
-        add(reads, input2?.path);
-      }
-    }
-  }
-  const result = { reads: [...reads], writes: [...writes] };
-  if (truncated) result.truncated = true;
-  return result;
-}
-
 // scripts/hooks/h22-dispatch-register.mjs
 function loadExclusiveResourceNames(cwd) {
   try {
@@ -6968,143 +6273,6 @@ function loadExclusiveResourceNames(cwd) {
     return [];
   }
 }
-function configuredReviewerModel(cwd) {
-  try {
-    const model = loadConfig(cwd)?.models?.reviewers?.model;
-    return typeof model === "string" && model !== "" ? model : null;
-  } catch {
-    return null;
-  }
-}
-function normIdentity(v) {
-  if (typeof v === "string") return v.trim() === "" ? null : v.trim();
-  return null;
-}
-function gitReceiptIdentity(cwd) {
-  const git = (args) => {
-    try {
-      const r = spawnSync2("git", args, { cwd, encoding: "utf8", timeout: 5e3 });
-      return r.status === 0 ? normIdentity(r.stdout) : null;
-    } catch {
-      return null;
-    }
-  };
-  return { branch: git(["symbolic-ref", "--quiet", "--short", "HEAD"]), base_sha: git(["rev-parse", "HEAD"]) };
-}
-function familyFromModel(model) {
-  if (typeof model !== "string" || model === "") return "unknown";
-  if (/^claude-/.test(model)) return "anthropic";
-  if (/^gpt-/.test(model) || /^codex/.test(model)) return "openai";
-  return "unknown";
-}
-function observedModelFromTranscript(transcriptPath) {
-  if (typeof transcriptPath !== "string" || transcriptPath === "") return null;
-  let tail;
-  try {
-    tail = readFromStart(transcriptPath, 1024 * 1024);
-  } catch {
-    return null;
-  }
-  if (tail === null) return null;
-  const lines = tail.text.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
-    let parsed;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (parsed.type !== "assistant") continue;
-    const model = parsed.message?.model;
-    if (typeof model === "string" && model !== "") return model;
-  }
-  return null;
-}
-function resolveReviewerModel(departing, transcriptPath, agentTranscriptPath) {
-  const preferred = typeof agentTranscriptPath === "string" && agentTranscriptPath !== "" ? agentTranscriptPath : transcriptPath;
-  const observed = observedModelFromTranscript(preferred);
-  if (observed) return { model: observed, model_source: "observed" };
-  const configured = typeof departing?.configured_model === "string" && departing.configured_model !== "" ? departing.configured_model : null;
-  if (configured) return { model: configured, model_source: "configured" };
-  return { model: null, model_source: "unknown" };
-}
-var REVIEWED_BLOBS_CAP = 64;
-function buildContentEvidence(cwd, files) {
-  const uniqueFiles = Array.isArray(files) ? [...new Set(files.filter((f) => typeof f === "string" && f !== ""))] : [];
-  if (uniqueFiles.length === 0) return { basis: "stop-time-worktree-snapshot", status: "complete", blobs: {}, absent_paths: [] };
-  const truncated = uniqueFiles.length > REVIEWED_BLOBS_CAP;
-  const paths = uniqueFiles.slice(0, REVIEWED_BLOBS_CAP);
-  const present = [];
-  const absent = [];
-  for (const p of paths) {
-    try {
-      if (statSync4(`${cwd}/${p}`).isFile()) present.push(p);
-      else absent.push(p);
-    } catch {
-      absent.push(p);
-    }
-  }
-  let blobs = {};
-  let failureReason;
-  let presentUnhashed = [...present];
-  if (present.length > 0) {
-    try {
-      const r = spawnSync2("git", ["hash-object", "--", ...present], { cwd, encoding: "utf8", timeout: 1e4 });
-      if (r && !r.error && r.status === 0) {
-        const shas = (r.stdout ?? "").split("\n").map((l) => l.trim()).filter((l) => /^[0-9a-f]{40}$/i.test(l));
-        if (shas.length === present.length) {
-          present.forEach((p, i) => {
-            blobs[p] = shas[i];
-          });
-          presentUnhashed = [];
-        } else {
-          failureReason = "git hash-object output did not align 1:1 with the reviewed paths";
-        }
-      } else {
-        failureReason = "git hash-object failed or git is unavailable";
-      }
-    } catch {
-      failureReason = "git hash-object threw";
-    }
-  }
-  let indexBlobs;
-  if (Object.keys(blobs).length > 0) {
-    try {
-      const r = spawnSync2("git", ["ls-files", "-s", "--", ...Object.keys(blobs)], { cwd, encoding: "utf8", timeout: 1e4 });
-      if (r && !r.error && r.status === 0) {
-        for (const line of (r.stdout ?? "").split("\n")) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          const tab = trimmed.indexOf("	");
-          if (tab === -1) continue;
-          const meta = trimmed.slice(0, tab).split(/\s+/);
-          const path = trimmed.slice(tab + 1);
-          const sha = meta[1];
-          if (isUsableIndexSha(sha) && blobs[path] && blobs[path] !== sha) {
-            if (!indexBlobs) indexBlobs = {};
-            indexBlobs[path] = sha;
-          }
-        }
-      }
-    } catch {
-    }
-  }
-  const noEvidenceCount = absent.length + presentUnhashed.length;
-  const status = noEvidenceCount === 0 ? "complete" : noEvidenceCount === paths.length ? "unavailable" : "partial";
-  const result = { basis: "stop-time-worktree-snapshot", status, blobs, absent_paths: absent };
-  if (indexBlobs) result.index_blobs = indexBlobs;
-  if (truncated) {
-    result.truncated = true;
-    result.truncated_of = uniqueFiles.length;
-  }
-  if (failureReason) result.failure_reason = failureReason;
-  return result;
-}
-function isUsableIndexSha(v) {
-  return typeof v === "string" && /^[0-9a-f]{40}$/i.test(v);
-}
 function candidatesFromBlocks(blocks) {
   return [...new Set(blocks.flatMap((b) => extractPathCandidates(b.prompt)))];
 }
@@ -7113,223 +6281,24 @@ function normalizeRegisterPaths(cands, cwd) {
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
   );
 }
-function resolveTerritory(blocks) {
-  const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
-  const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
-  const malformed = parsed.filter((p) => p.decl.present && !p.decl.valid);
-  const anyPresent = parsed.some((p) => p.decl.present);
-  if (declared.length > 0) {
-    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: "review-territory", malformed, anyPresent };
-  }
-  return { candidates: candidatesFromBlocks(blocks), files_source: "free-prose-fallback", malformed, anyPresent };
-}
-function claimedFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap(
-        (b) => extractPathCandidates(b.prompt).filter((raw) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false }))
-      )
-    )
-  ];
-}
-function globPrefixesFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap(
-        (b) => extractGlobPrefixCandidates(b.prompt).filter((prefix) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false }))
-      )
-    )
-  ];
-}
-var CHILD_SCAN_BYTES = 64 * 1024 * 1024;
-var PARENT_SCAN_BYTES = 64 * 1024 * 1024;
-function childBriefFromTranscript(childPath) {
-  const read = readFromStart(childPath, CHILD_SCAN_BYTES);
-  if (read === null) return { ok: false, reason: "child-transcript-missing", detail: `no file at '${childPath}'` };
-  const nl = read.text.indexOf("\n");
-  if (nl === -1 && !read.complete) {
-    return { ok: false, reason: "child-first-record-truncated", detail: `the child transcript's first line exceeds the ${CHILD_SCAN_BYTES}-byte read window` };
-  }
-  const firstLine = (nl === -1 ? read.text : read.text.slice(0, nl)).trim();
-  if (firstLine === "") return { ok: false, reason: "child-transcript-empty", detail: `'${childPath}' has no first record` };
-  let record;
-  try {
-    record = JSON.parse(firstLine);
-  } catch {
-    return { ok: false, reason: "child-first-record-unparseable", detail: "the first line of the child transcript is not JSON" };
-  }
-  if (!record || record.type !== "user") {
-    return { ok: false, reason: "child-first-record-not-user", detail: `first record type is ${JSON.stringify(record?.type)}, not 'user'` };
-  }
-  const content = record.message?.content;
-  if (typeof content !== "string") {
-    return { ok: false, reason: "child-first-record-content-not-string", detail: `first record message.content is ${typeof content}` };
-  }
-  let userStringRecords = 0;
-  let unparseableLines = 0;
-  for (const line of read.text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      unparseableLines++;
-      continue;
-    }
-    if (entry?.type === "user" && typeof entry?.message?.content === "string") userStringRecords++;
-  }
-  return { ok: true, brief: content, agentId: record.agentId, userStringRecords, unparseableLines, complete: read.complete };
-}
 function sidecarForChildTranscript(childPath) {
-  if (!childPath.endsWith(".jsonl")) {
-    return { ok: false, reason: "sidecar-path-underivable", detail: `agent_transcript_path '${childPath}' does not end in .jsonl` };
-  }
+  if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync6(sidecarPath)) return { ok: false, reason: "sidecar-missing", detail: `no file at '${sidecarPath}'` };
+  if (!existsSync3(sidecarPath)) return { ok: false };
   let meta;
   try {
-    meta = JSON.parse(readFileSync4(sidecarPath, "utf8"));
+    meta = JSON.parse(readFileSync3(sidecarPath, "utf8"));
   } catch {
-    return { ok: false, reason: "sidecar-unparseable", detail: `'${sidecarPath}' is not readable JSON` };
+    return { ok: false };
   }
-  if (!meta || typeof meta !== "object" || Array.isArray(meta)) {
-    return { ok: false, reason: "sidecar-malformed", detail: `'${sidecarPath}' does not hold a JSON object` };
-  }
-  if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") {
-    return { ok: false, reason: "sidecar-tool-use-id-missing", detail: `sidecar toolUseId is ${JSON.stringify(meta.toolUseId)}` };
-  }
-  if (meta.spawnDepth !== 1) {
-    return { ok: false, reason: "sidecar-spawn-depth", detail: `sidecar spawnDepth is ${JSON.stringify(meta.spawnDepth)}, not 1` };
-  }
-  return { ok: true, meta, sidecarPath };
-}
-function findParentToolUseBlock(parentPath, toolUseId) {
-  if (typeof parentPath !== "string" || parentPath === "") {
-    return { ok: false, reason: "parent-transcript-path-absent", detail: "stdin carried no transcript_path" };
-  }
-  const read = readFromStart(parentPath, PARENT_SCAN_BYTES);
-  if (read === null) return { ok: false, reason: "parent-transcript-missing", detail: `no file at '${parentPath}'` };
-  for (const line of read.text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let entry;
-    try {
-      entry = JSON.parse(trimmed);
-    } catch {
-      continue;
-    }
-    const content = entry?.message?.content;
-    if (!Array.isArray(content)) continue;
-    const block = content.find((b) => b?.type === "tool_use" && b.id === toolUseId);
-    if (block) return { ok: true, block };
-  }
-  if (!read.complete) {
-    return { ok: false, reason: "parent-scan-truncated", detail: `the parent transcript exceeds the ${PARENT_SCAN_BYTES}-byte scan window` };
-  }
-  return { ok: false, reason: "tool-use-id-absent-from-parent", detail: `no tool_use block with id '${toolUseId}' anywhere in the parent transcript` };
-}
-function bindReviewerTerritoryAtStop(input2) {
-  const childPath = input2.agent_transcript_path;
-  const brief = childBriefFromTranscript(childPath);
-  if (!brief.ok) return { bound: false, reason: brief.reason, detail: brief.detail };
-  if (typeof input2.agent_id !== "string" || input2.agent_id === "" || typeof brief.agentId !== "string" || brief.agentId !== input2.agent_id) {
-    return {
-      bound: false,
-      reason: "child-transcript-agent-mismatch",
-      detail: `the child transcript's first record carries agentId ${JSON.stringify(brief.agentId)}, which is not the stopping agent's stdin agent_id ${JSON.stringify(input2.agent_id)}`
-    };
-  }
-  const sidecar = sidecarForChildTranscript(childPath);
-  if (!sidecar.ok) return { bound: false, reason: sidecar.reason, detail: sidecar.detail };
-  if (sidecar.meta.agentType !== input2.agent_type) {
-    return { bound: false, reason: "agent-type-mismatch", detail: `sidecar agentType ${JSON.stringify(sidecar.meta.agentType)} does not equal stdin agent_type ${JSON.stringify(input2.agent_type)}` };
-  }
-  const located = findParentToolUseBlock(input2.transcript_path, sidecar.meta.toolUseId);
-  if (!located.ok) return { bound: false, reason: located.reason, detail: located.detail };
-  if (located.block.input?.prompt !== brief.brief) {
-    return { bound: false, reason: "prompt-mismatch", detail: `the parent block '${sidecar.meta.toolUseId}' prompt is not byte-identical to the child's first record` };
-  }
-  const { candidates, files_source, malformed } = resolveTerritory([{ subagent_type: sidecar.meta.agentType, prompt: brief.brief }]);
-  return { bound: true, files: normalizeRegisterPaths(candidates, input2.cwd), files_source, malformed };
-}
-function promoteAtStop(departing, input2) {
-  const lines = [];
-  let territoryFiles = Array.isArray(departing.files) ? departing.files : [];
-  let territorySource = departing.files_source ?? "free-prose-fallback";
-  if (typeof input2.agent_transcript_path !== "string" || input2.agent_transcript_path === "") {
-    territorySource = "unattributable";
-  } else {
-    const bind = bindReviewerTerritoryAtStop(input2);
-    if (bind.bound) {
-      territoryFiles = bind.files;
-      territorySource = bind.files_source;
-    } else {
-      territorySource = "unattributable";
-      lines.push(
-        render(
-          disclosure(
-            "receipt_unattributable",
-            { reason: bind.reason },
-            `H22: reviewer-class Stop for '${input2.agent_id}' bound closed to unattributable (${bind.reason}): ${bind.detail}`
-          )
-        )
-      );
-    }
-  }
-  const contentEvidence = buildContentEvidence(input2.cwd, territoryFiles);
-  const observed = observedToolPaths(input2.agent_transcript_path, input2.cwd);
-  const { branch, base_sha } = gitReceiptIdentity(input2.cwd);
-  const { model, model_source } = resolveReviewerModel(departing, input2.transcript_path, input2.agent_transcript_path);
-  const AGENT_TYPE_PATTERN2 = /^[A-Za-z0-9_-]+$/;
-  const reviewerAgentType = departing.agent_type ?? input2.agent_type ?? null;
-  if (typeof reviewerAgentType !== "string" || !AGENT_TYPE_PATTERN2.test(reviewerAgentType)) {
-    return {
-      receipt: null,
-      lines: [
-        ...lines,
-        render(
-          disclosure(
-            "ledger_entry_malformed",
-            { field: "reviewer.agent_type", agent_id: input2.agent_id },
-            `H22: refused to promote a receipt for '${input2.agent_id}' \u2014 reviewer.agent_type is ${JSON.stringify(reviewerAgentType)}, not a trailer-safe token; the entry would parse as ledger_entry_malformed on the very next read`
-          )
-        )
-      ]
-    };
-  }
-  const receipt = {
-    schema_version: 2,
-    entry_id: randomUUID(),
-    kind: "roster_receipt",
-    status: "active",
-    started_at: typeof departing.at === "string" ? departing.at : (/* @__PURE__ */ new Date()).toISOString(),
-    finished_at: (/* @__PURE__ */ new Date()).toISOString(),
-    reviewer: { agent_type: reviewerAgentType, model, model_family: familyFromModel(model), model_source },
-    identity: { session_id: normIdentity(input2.session_id), branch, base_sha, agent_id: input2.agent_id },
-    // A legacy register entry with NO attribution key promotes to a receipt
-    // with NO attribution key either — the field is copied, never fabricated
-    // (scripts/tests/h22-review-territory.test.mjs T6a/T6b CONTROL pair).
-    territory: {
-      files: territoryFiles,
-      source: territorySource,
-      ...typeof departing.attribution === "string" ? { attribution: departing.attribution } : {}
-    },
-    content_evidence: contentEvidence,
-    disposition: null
-  };
-  if (observed) {
-    receipt.observed_files = [.../* @__PURE__ */ new Set([...observed.reads ?? [], ...observed.writes ?? []])];
-    receipt.observed_reads = observed.reads ?? [];
-    receipt.observed_source = "subagent-transcript";
-    if (observed.truncated) receipt.observed_truncated = true;
-  }
-  return { receipt, lines };
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return { ok: false };
+  if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") return { ok: false };
+  return { ok: true, meta };
 }
 var input = readStdin();
 try {
-  if (!existsSync6(`${input.cwd}/.sterling/config.json`)) allow();
-  mkdirSync3(join4(input.cwd, ".sterling", "transient"), { recursive: true });
+  if (!existsSync3(`${input.cwd}/.sterling/config.json`)) allow();
+  mkdirSync2(join3(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
   const KNOWN_EVENTS = /* @__PURE__ */ new Set(["PreToolUse", "PostToolUse", "PostToolUseFailure", "SubagentStart", "SubagentStop"]);
@@ -7355,41 +6324,25 @@ try {
     const reviewerStart = typeof input.agent_type === "string" && isReviewerClass(input.agent_type);
     const { entry: registeredEntry, refusal: startRefusal } = await resolveAndRegisterStart(input.cwd, input, (res) => {
       const matchedBlocks = typeof res.prompt === "string" ? [{ subagent_type: res.subagent_type, prompt: res.prompt }] : [];
-      const territory = resolveTerritory(matchedBlocks);
-      const territoryFilesSource = territory.files_source;
       const positionalSafe = res.source === "post" || res.source === "derived-type-unique";
-      for (const m of territory.malformed) {
-        lines.push(render(disclosure("territory_declaration_malformed", { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));
-      }
-      if (reviewerStart) {
-        if (territoryFilesSource !== "review-territory") {
-          lines.push(
-            render(disclosure("territory_declaration_missing", {}, `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s)`))
-          );
-        }
-        if (!positionalSafe) {
-          lines.push(
-            render(
-              disclosure(
-                "receipt_unattributable",
-                { case: res.case },
-                `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
-              )
+      if (reviewerStart && !positionalSafe) {
+        lines.push(
+          render(
+            disclosure(
+              "receipt_unattributable",
+              { case: res.case },
+              `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
             )
-          );
-        }
+          )
+        );
       }
-      let files, claimedFiles, claimedGlobPrefixes, attribution, filesSource;
+      let files, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
-        files = normalizeRegisterPaths(territory.candidates, input.cwd);
-        claimedFiles = normalizeRegisterPaths(claimedFromBlocks(matchedBlocks), input.cwd);
-        claimedGlobPrefixes = normalizeRegisterPaths(globPrefixesFromBlocks(matchedBlocks), input.cwd);
+        files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
         attribution = "block";
-        filesSource = territoryFilesSource;
+        filesSource = "free-prose-fallback";
       } else {
         files = [];
-        claimedFiles = [];
-        claimedGlobPrefixes = [];
         attribution = "none";
         filesSource = "unattributable";
       }
@@ -7410,14 +6363,11 @@ try {
         session_id: input.session_id,
         files,
         files_source: filesSource,
-        claimed_files: claimedFiles,
-        claimed_glob_prefixes: claimedGlobPrefixes,
         attribution,
         attribution_case: res.case,
         at: (/* @__PURE__ */ new Date()).toISOString()
       };
       if (claimed.length) entry.exclusive_resources = claimed;
-      if (reviewerStart) entry.configured_model = configuredReviewerModel(input.cwd);
       return entry;
     });
     if (startRefusal) {
@@ -7474,27 +6424,6 @@ try {
         const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
         if (!(probe.verified && dirty.length === 0)) {
           lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason }))));
-        }
-      }
-    }
-    if (departing && typeof departing.agent_type === "string" && isReviewerClass(departing.agent_type)) {
-      const { receipt, lines: promotionLines } = promoteAtStop(departing, input);
-      lines.push(...promotionLines);
-      if (receipt) {
-        try {
-          await withLedgerLock(input.cwd, () => {
-            const ledgerState = readLedger(input.cwd);
-            if (ledgerState.availability === "corrupt") {
-              lines.push(render(disclosure("ledger_corrupt", {}, "H22: a corrupt review ledger stops this promotion \u2014 no write, bytes left untouched")));
-              return;
-            }
-            const rawArr = ledgerState.rawEntries;
-            rawArr.push(receipt);
-            writeLedger(input.cwd, rawArr);
-          });
-        } catch (e) {
-          if (e?.code === "ledger_lock_held") lines.push(render(e));
-          else throw e;
         }
       }
     }

@@ -1,5 +1,5 @@
-// Shared plumbing for conductor-invoked [S] scripts (prep, checks, dispose-run,
-// merge-gate): target-project resolution, config, store, args.
+// Shared plumbing for conductor-invoked [S] scripts: target-project resolution,
+// config, store, args.
 import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseConfig } from '@sterling/schemas';
@@ -15,7 +15,7 @@ import { resolveStoreWritePath } from './store-path.mjs';
 // reviewed.mjs's `-m`/`--message`). A name that ALREADY starts with '-' (one
 // dash or two) is used AS-IS and never re-prefixed — `'-m'.startsWith('--')`
 // is false, so the old two-dash-only check turned '-m' into '---m' and broke
-// every short-flag caller (measured live: commit-reviewed.mjs -m REGRESSED).
+// every short-flag caller.
 // Only a name with NO leading dash at all gets '--' prepended.
 function normalizeFlag(name) {
   return name.startsWith('-') ? name : `--${name}`;
@@ -40,8 +40,7 @@ function normalizeFlag(name) {
 //     followed by a letter — '-m'/'--lane' match (flag-shaped), a bare '--'
 //     or a negative number like '-5'/'-1.5' do NOT (no letter follows the
 //     dash(es)), so a legitimate negative-number value still parses. A bare
-//     '--' is left to the CALLER to refuse if it cares (as commit-reviewed.mjs
-//     already does for its own reason argument) — this parser only refuses
+//     '--' is left to the CALLER to refuse if it cares — this parser only refuses
 //     values that look like a NAMED flag, not merely dash-shaped ones.
 //   - DUPLICATE occurrences of the same flag, in ANY spelling combination
 //     (`--lane=a --lane b`) — never first-or-last-wins. There is no way for a
@@ -153,7 +152,7 @@ export function openProject(cwd = process.cwd()) {
 
 // Domain-aware store (§3.4/P6): the project store fanned across the mounted
 // domain stores (the config.stack_tags manifest, resolveDomainMounts — the same
-// resolver the MCP server and dispose-run use). For retrieval that must see
+// resolver the MCP server uses). For retrieval that must see
 // shared knowledge — prep's knowledge_pack. Run/board/transient writes still
 // land in the project store (MountedStores forwards them). Same return shape as
 // openProject, so callers swap one for the other.
@@ -162,22 +161,9 @@ export function openMounted(cwd = process.cwd()) {
   return { cwd, store: new MountedStores(dbPath, resolveDomainMounts(config)), config };
 }
 
-export function requireRun(store, runId) {
-  const run = store.getRun(runId);
-  if (!run) fail(runId ? `no run '${runId}'` : 'no active run');
-  return run;
-}
-
-export function requireBrief(store, run) {
-  const brief = store.get(run.brief_ref);
-  if (!brief || brief.type !== 'brief') fail(`brief '${run.brief_ref}' not found for run '${run.id}'`);
-  return brief;
-}
-
 // CONTAINMENT (decision sanctioned-script-store-writes-one-containment-
-// helper-one-arg-parser, R5): the shared run-directory path builder — used by
-// dispose-run.mjs (THE gate for deleting runs/<id>/, rmSync'd there) and
-// every other §10-adjacent script that reads/writes run-scoped files. cwd is
+// helper-one-arg-parser, R5): the shared run-directory path builder for
+// §10-adjacent scripts that read/write run-scoped files. cwd is
 // always an opened project root by the time callers reach here (openProject/
 // openMounted already ran), so this only throws on a genuinely malformed or
 // attacked runId/tree — a caller that does not wrap the call gets a loud

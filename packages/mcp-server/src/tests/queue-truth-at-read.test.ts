@@ -1,7 +1,7 @@
 // ---------------------------------------------------------------------------
 // SPEC-ONLY pins for build slice S2c — "queue truth at read" (boards
 // be0ea20a HIGH + ab5ef216, objective consumer-feedback-2026-08-28).
-// Governing spec: decision e0c36dc0-7eb3-4175-969e-3a6ec3d17744, slug
+// Governing spec: decision foreign_e0c36dc0, slug
 // queue-truth-at-read-annotation-design. Written BLIND to any implementation
 // — the feature does not exist yet. H4 forbids reading packages/mcp-server/
 // src/tools.ts while this slice lands; every fixture below uses ONLY tool
@@ -117,14 +117,16 @@ const enqueue = (t: SterlingTools, args: Loose): Loose =>
 const addRaw = (t: SterlingTools, args: Loose): Loose =>
   (t.boardAdd(args as unknown as Parameters<SterlingTools['boardAdd']>[0]) as unknown as { record: Loose }).record;
 
+// projection:'full' by default: these pins read the full annotation prose
+// composed onto `text`; tests passing their own projection override it.
 const boardSys = (t: SterlingTools, extra: Loose = {}): Loose =>
-  t.boardQueryResult({ source: 'system', ...extra } as unknown as Parameters<SterlingTools['boardQueryResult']>[0]) as unknown as Loose;
+  t.boardQueryResult({ source: 'system', projection: 'full', ...extra } as unknown as Parameters<SterlingTools['boardQueryResult']>[0]) as unknown as Loose;
 
 const boardUser = (t: SterlingTools, extra: Loose = {}): Loose =>
-  t.boardQueryResult({ source: 'user', ...extra } as unknown as Parameters<SterlingTools['boardQueryResult']>[0]) as unknown as Loose;
+  t.boardQueryResult({ source: 'user', projection: 'full', ...extra } as unknown as Parameters<SterlingTools['boardQueryResult']>[0]) as unknown as Loose;
 
 const maintRes = (t: SterlingTools, extra: Loose = {}): Loose =>
-  t.maintenanceQueryResult(extra as unknown as Parameters<SterlingTools['maintenanceQueryResult']>[0]) as unknown as Loose;
+  t.maintenanceQueryResult({ projection: 'full', ...extra } as unknown as Parameters<SterlingTools['maintenanceQueryResult']>[0]) as unknown as Loose;
 
 const findRec = (env: Loose, id: string): Loose | undefined => (env.records as Loose[] | undefined)?.find((r) => r.id === id);
 const blob = (rec: Loose | undefined | null): string => JSON.stringify(rec ?? null);
@@ -159,6 +161,25 @@ const rawSupersededArticle = (store: SterlingStore, slug: string, supersededBy: 
   } as never) as unknown as Loose;
 
 const RECONCILE_TEXT = (slug: string, path: string) => `reconcile '${slug}' — owned file ${path} changed on disk after the article's last update`;
+
+test('review M1: default board text stays within 240 characters with both provenance and reconcile annotations visible', () => {
+  const { dir, tools, git, cleanup } = gitFixture();
+  try {
+    mkdirSync(join(dir, 'src'), { recursive: true });
+    writeFileSync(join(dir, 'src', 'both.ts'), 'before\n');
+    git('add', 'src/both.ts'); git('commit', '-qm', 'baseline');
+    const item = enqueue(tools, { reason: 'reconcile_needed', text: 'long annotated row '.repeat(40), file_keys: ['src/both.ts'] });
+    writeFileSync(join(dir, 'src', 'both.ts'), 'after\n');
+    git('add', 'src/both.ts'); git('commit', '-qm', 'changed');
+    const full = findRec(tools.boardQueryResult({ source: 'system', projection: 'full' }) as unknown as Loose, item.id as string)!;
+    assert.match(full.text as string, /file_keys changed/);
+    assert.match(full.text as string, /no_feature_link/, 'control: reconcile annotation also exists');
+    const row = findRec(tools.boardQueryResult({ source: 'system' }) as unknown as Loose, item.id as string)!;
+    assert.ok((row.text as string).length <= 240, 'the final default text meets the documented bound');
+    assert.match(row.provenance_warning as string, /1 commits since measured/);
+    assert.match(row.reconcile_warning as string, /no_feature_link/);
+  } finally { cleanup(); }
+});
 
 // ===========================================================================
 // AC1 — REPRODUCE/STALE SPLIT. Control (still reproduces) placed first — it
