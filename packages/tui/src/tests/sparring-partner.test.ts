@@ -274,13 +274,16 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
     assert.equal(r.ui.cursor, numKeys + 1, 'DOWN again lands on the model row');
 
     // The model row is no longer the tab's last row: decision foreign_752caf98 added
-    // the tdd/mutation rows below it (traversal onto/through those rows is
-    // pinned by tdd-mutation-toggles.test.ts's 'toggles 3'). The true-bottom
-    // clamp is re-pinned here via a directly-placed cursor at the tab's real
-    // last row, rather than re-walking the intermediate tdd row that file
-    // already owns.
-    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 3 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 3, "DOWN clamps at the tab's true last row (the mutation row), not the model row");
+    // the tdd row below it (traversal onto/through that row is pinned by
+    // tdd-mutation-toggles.test.ts's 'toggles 3'). The true-bottom clamp is
+    // re-pinned here via a directly-placed cursor at the tab's real last
+    // row, rather than re-walking the intermediate tdd row that file
+    // already owns. The sibling mutation row that used to sit one further
+    // row down was REMOVED entirely (decision
+    // cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
+    // 2026-09-22), so the tdd row is now the true bottom.
+    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 2 }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(clamped.ui.cursor, numKeys + 2, "DOWN clamps at the tab's true last row (the tdd row), not the model row");
 
     let up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, numKeys, 'UP from the model row returns to the toggle row');

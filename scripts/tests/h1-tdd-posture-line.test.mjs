@@ -1,24 +1,28 @@
-// H1 SessionStart — TDD/mutation-verification POSTURE LINE (slice 3C, board
-// 7e7279c4, objective dome-farmer-issues-2026-09-05).
+// H1 SessionStart — TDD POSTURE LINE (slice 3C, board 7e7279c4, objective
+// dome-farmer-issues-2026-09-05).
 // SPEC-ONLY, blind to the coder's parallel implementation.
 //
 // Governing knowledge: decision foreign_752caf98 (tdd-and-mutation-toggles-in-
 // system-tab) — OFF silences the automatic default only, explicit asks
-// still work, both toggles independently default TRUE when absent from
-// config. Board 7e7279c4: the toggles were prose-only in CLAUDE.md, unread
-// by any hook; this line is the fix for H1's half of that gap.
+// still work, tdd defaults TRUE when absent from config. Board 7e7279c4: the
+// toggle was prose-only in CLAUDE.md, unread by any hook; this line is the
+// fix for H1's half of that gap. The sibling mutation_verification toggle
+// this line used to also report was REMOVED entirely (decision
+// cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
+// 2026-09-22): no live mechanism ever performed the check that half of the
+// line promised, and every test below that pinned it is rewritten to pin the
+// tdd-only line instead.
 //
-// THE SPEC (from the dispatch brief): H1 prints exactly one line, after the
-// existing MACHINE ROLE line, read live from loadConfig:
-//   "TDD posture: tests-first OFF · mutation verification OFF
-//    (config.tdd.enabled / config.mutation_verification.enabled — TUI
-//    System tab; explicit asks still work)"
-// with ON/OFF independently reflecting config.tdd.enabled and
-// config.mutation_verification.enabled.
+// THE SPEC (from the dispatch brief, as amended by the 2026-09-22 cleanup):
+// H1 prints exactly one line, after the existing MACHINE ROLE line, read
+// live from loadConfig:
+//   "TDD posture: tests-first OFF
+//    (config.tdd.enabled — TUI System tab; explicit asks still work)"
+// with ON/OFF reflecting config.tdd.enabled.
 //
 // Harness copied from scripts/tests/h1-accuracy.test.mjs (SterlingStore
 // import, BASE_CONFIG, h1()/additionalContext() helpers, STERLING_NO_BANNER/
-// STERLING_PLUGIN_ROOT env). CURRENT STATE: H1 now reads both config keys
+// STERLING_PLUGIN_ROOT env). CURRENT STATE: H1 now reads config.tdd.enabled
 // and renders the posture line described above; every test below is green
 // at HEAD and proves the live ON/OFF/UNKNOWN gating, not merely that the
 // string was once absent.
@@ -46,8 +50,8 @@ let SterlingStore;
 // never true. A bundle built into a marker-free temp dir (buildSeamHook)
 // makes the walk-up genuinely fail so the env seam is legitimately reached.
 // This is used by exactly one test below (the ordering pin, which needs the
-// MACHINE ROLE line to exist at all) — the other four posture-line tests
-// don't depend on it and keep using the plain HOOKS-sourced runHook.
+// MACHINE ROLE line to exist at all) — the other posture-line tests don't
+// depend on it and keep using the plain HOOKS-sourced runHook.
 let H1_SEAM;
 before(async () => {
   H1_SEAM = await buildSeamHook('h1-session-start.mjs');
@@ -118,87 +122,66 @@ function additionalContext(res) {
   return res.out && res.out.hookSpecificOutput ? res.out.hookSpecificOutput.additionalContext : undefined;
 }
 
-const POSTURE_SUFFIX =
-  '(config.tdd.enabled / config.mutation_verification.enabled — TUI System tab; explicit asks still work)';
+const POSTURE_SUFFIX = '(config.tdd.enabled — TUI System tab; explicit asks still work)';
 
-function postureLine(tddOn, mutOn) {
-  return `TDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} · mutation verification ${mutOn ? 'ON' : 'OFF'} ${POSTURE_SUFFIX}`;
+function postureLine(tddOn) {
+  return `TDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} ${POSTURE_SUFFIX}`;
 }
 
 // ---------------------------------------------------------------------------
-// CONTROL, placed first: both toggles explicitly ON. A hardcoded-OFF/OFF
-// posture line (e.g. left over from development against the OFF fixture)
-// fails this test even though it might pass an OFF/OFF-only suite — this is
-// the arm that must pass for the OPPOSITE reason from the OFF/OFF test below.
+// CONTROL, placed first: tdd explicitly ON. A hardcoded-OFF posture line
+// (e.g. left over from development against an OFF fixture) fails this test
+// even though it might pass an OFF-only suite — this is the arm that must
+// pass for the OPPOSITE reason from the OFF test below.
 // ---------------------------------------------------------------------------
-test('CONTROL: both toggles ON -> posture line reads ON / ON', () => {
-  const { dir, cleanup } = makeProject({ tdd: { enabled: true }, mutation_verification: { enabled: true } });
+test('CONTROL: tdd ON -> posture line reads ON', () => {
+  const { dir, cleanup } = makeProject({ tdd: { enabled: true } });
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r) ?? '';
-    assert.ok(ctx.includes(postureLine(true, true)), `expected the ON/ON posture line verbatim; got: ${ctx}`);
+    assert.ok(ctx.includes(postureLine(true)), `expected the ON posture line verbatim; got: ${ctx}`);
   } finally {
     cleanup();
   }
 });
-// Sabotage: hardcode the injected line to always read "tests-first OFF ·
-// mutation verification OFF" regardless of config — this test goes red (the
-// ON/ON line is never found).
+// Sabotage: hardcode the injected line to always read "tests-first OFF"
+// regardless of config — this test goes red (the ON line is never found).
 
-test('both toggles OFF -> posture line reads OFF / OFF', () => {
-  const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
+test('tdd OFF -> posture line reads OFF', () => {
+  const { dir, cleanup } = makeProject({ tdd: { enabled: false } });
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r) ?? '';
-    assert.ok(ctx.includes(postureLine(false, false)), `expected the OFF/OFF posture line verbatim; got: ${ctx}`);
+    assert.ok(ctx.includes(postureLine(false)), `expected the OFF posture line verbatim; got: ${ctx}`);
   } finally {
     cleanup();
   }
 });
-// Sabotage: hardcode the injected line to always read "tests-first ON ·
-// mutation verification ON" regardless of config — this test goes red.
+// Sabotage: hardcode the injected line to always read "tests-first ON"
+// regardless of config — this test goes red.
 
-test('MIXED: tdd ON, mutation_verification OFF -> posture line reads ON / OFF (catches a field swap the symmetric cases cannot)', () => {
-  const { dir, cleanup } = makeProject({ tdd: { enabled: true }, mutation_verification: { enabled: false } });
+test('DEFAULT: config carries no tdd key -> defaults to ON (decision foreign_752caf98)', () => {
+  const { dir, cleanup } = makeProject(); // no tdd block at all
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r) ?? '';
-    assert.ok(ctx.includes(postureLine(true, false)), `expected the ON/OFF posture line verbatim; got: ${ctx}`);
-    assert.ok(!ctx.includes(postureLine(false, true)), 'must not print the swapped OFF/ON line');
+    assert.ok(ctx.includes(postureLine(true)), `expected the default to read ON per decision 752caf98; got: ${ctx}`); // not-a-citation: fixture id
   } finally {
     cleanup();
   }
 });
-// Sabotage: swap which config key drives which half of the line (read
-// mutation_verification.enabled for the "tests-first" clause and vice versa)
-// — undetectable by the ON/ON and OFF/OFF tests alone (both halves would
-// still match their own symmetric value), but this test goes red because it
-// would print "tests-first OFF · mutation verification ON" instead.
-
-test('DEFAULT: config carries neither tdd nor mutation_verification keys -> both default to ON (decision foreign_752caf98)', () => {
-  const { dir, cleanup } = makeProject(); // no tdd / mutation_verification block at all
-  try {
-    const r = h1(dir, 'startup');
-    assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
-    assert.ok(r.out, 'H1 must emit parseable JSON');
-    const ctx = additionalContext(r) ?? '';
-    assert.ok(ctx.includes(postureLine(true, true)), `expected both defaults to read ON per decision 752caf98; got: ${ctx}`); // not-a-citation: fixture id
-  } finally {
-    cleanup();
-  }
-});
-// Sabotage: default an absent tdd/mutation_verification block to `false`
-// (opt-out by default) instead of the documented default TRUE — this test
-// goes red (finds the OFF/OFF line instead of ON/ON).
+// Sabotage: default an absent tdd block to `false` (opt-out by default)
+// instead of the documented default TRUE — this test goes red (finds the
+// OFF line instead of ON).
 
 test('the posture line appears strictly AFTER the MACHINE ROLE line', () => {
-  const { dir, cleanup } = makeProject({ tdd: { enabled: false }, mutation_verification: { enabled: false } });
+  const { dir, cleanup } = makeProject({ tdd: { enabled: false } });
   try {
     // The MACHINE ROLE line only renders when samePath(input.cwd, pluginRoot())
     // is true. Spawned from its real source location, H1's own walk-up always
@@ -225,7 +208,7 @@ test('the posture line appears strictly AFTER the MACHINE ROLE line', () => {
     assert.ok(out, 'H1 must emit parseable JSON');
     const ctx = out.hookSpecificOutput ? out.hookSpecificOutput.additionalContext : undefined;
     const roleIdx = (ctx ?? '').indexOf('MACHINE ROLE');
-    const postureIdx = (ctx ?? '').indexOf(postureLine(false, false));
+    const postureIdx = (ctx ?? '').indexOf(postureLine(false));
     assert.notEqual(roleIdx, -1, 'the existing MACHINE ROLE line must be present on the self-hosted seam (pre-existing H1 behavior) -- if this is -1, the fixture failed to reach the role line at all, not a mis-ordering');
     assert.notEqual(postureIdx, -1, 'the posture line must be present');
     assert.ok(postureIdx > roleIdx, `posture line (index ${postureIdx}) must come after MACHINE ROLE (index ${roleIdx})`);
@@ -242,11 +225,11 @@ test('the posture line appears strictly AFTER the MACHINE ROLE line', () => {
 // assertion is genuinely exercised rather than vacuously true against -1.
 
 // ===========================================================================
-// COVERAGE GAPS closed per external review (5 named sabotages predicted
-// GREEN against the suite as it stood; each gets its own pin below).
+// COVERAGE GAPS closed per external review (named sabotages predicted GREEN
+// against the suite as it stood; each gets its own pin below).
 // ===========================================================================
 
-// GAP 4: malformed-but-PARSEABLE value shapes for the flags — only a real
+// GAP 4: malformed-but-PARSEABLE value shapes for the flag — only a real
 // boolean `false` is OFF; every other JSON-legal value (including falsy
 // non-boolean values, and values loose-equal to `false`) must still render
 // ON. `0` specifically catches a `== false` loose-equality bug (`0 == false`
@@ -255,16 +238,16 @@ test('the posture line appears strictly AFTER the MACHINE ROLE line', () => {
 const MALFORMED_BUT_PARSEABLE_VALUES = ['', 'false', null, 0, {}];
 
 for (const value of MALFORMED_BUT_PARSEABLE_VALUES) {
-  test(`GAP 4: config value ${JSON.stringify(value)} for both flags -> renders ON/ON (only a real boolean false is OFF)`, () => {
-    const { dir, cleanup } = makeProject({ tdd: { enabled: value }, mutation_verification: { enabled: value } });
+  test(`GAP 4: config value ${JSON.stringify(value)} for tdd.enabled -> renders ON (only a real boolean false is OFF)`, () => {
+    const { dir, cleanup } = makeProject({ tdd: { enabled: value } });
     try {
       const r = h1(dir, 'startup');
       assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
       assert.ok(r.out, 'H1 must emit parseable JSON');
       const ctx = additionalContext(r) ?? '';
       assert.ok(
-        ctx.includes(postureLine(true, true)),
-        `value ${JSON.stringify(value)} is not the boolean false — must still render ON/ON under strict-false semantics; got: ${ctx}`
+        ctx.includes(postureLine(true)),
+        `value ${JSON.stringify(value)} is not the boolean false — must still render ON under strict-false semantics; got: ${ctx}`
       );
     } finally {
       cleanup();
@@ -280,22 +263,21 @@ for (const value of MALFORMED_BUT_PARSEABLE_VALUES) {
 
 // ===========================================================================
 // GAP 5 — NEW BEHAVIOUR (genuine spec change, not a coverage gap in the old
-// spec): h1-session-start.mjs now distinguishes an ABSENT config from an
+// spec): h1-session-start.mjs distinguishes an ABSENT config from an
 // UNREADABLE one. loadConfig returns null when the file is absent (still
-// renders the documented default ON/ON), and THROWS when the file exists
-// but is malformed JSON — that case now renders, instead of any ON/OFF
-// reading, the literal line:
+// renders the documented default ON), and THROWS when the file exists but
+// is malformed JSON — that case now renders, instead of any ON/OFF reading,
+// the literal line:
 //   "TDD posture: UNKNOWN — the project config could not be read, so
-//    neither config.tdd.enabled nor config.mutation_verification.enabled
-//    could be determined. This is NOT the default posture: repair the
-//    config, or state your posture explicitly."
-// The defect this closes: a corrupt config used to print a confident
-// "ON / ON" — in THIS repo, where both toggles are actually OFF, that
-// stated the exact opposite of the truth.
+//    config.tdd.enabled could not be determined. This is NOT the default
+//    posture: repair the config, or state your posture explicitly."
+// The defect this closes: a corrupt config used to print a confident "ON"
+// — in THIS repo, where the toggle is actually OFF, that stated the exact
+// opposite of the truth.
 // ===========================================================================
 
 const UNKNOWN_POSTURE_LINE =
-  'TDD posture: UNKNOWN — the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.';
+  'TDD posture: UNKNOWN — the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.';
 
 // A project directory with a store but deliberately NO .sterling/config.json
 // file at all — the ABSENT case (loadConfig returns null, not an exception).
@@ -310,14 +292,14 @@ function makeProjectNoConfigFile() {
   return { dir, store, cleanup };
 }
 
-test('GAP 5a: config file ABSENT entirely (no .sterling/config.json) -> still renders the documented default ON/ON, never UNKNOWN', () => {
+test('GAP 5a: config file ABSENT entirely (no .sterling/config.json) -> still renders the documented default ON, never UNKNOWN', () => {
   const { dir, cleanup } = makeProjectNoConfigFile();
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r) ?? '';
-    assert.ok(ctx.includes(postureLine(true, true)), `an absent config file must still render the ON/ON default; got: ${ctx}`);
+    assert.ok(ctx.includes(postureLine(true)), `an absent config file must still render the ON default; got: ${ctx}`);
     assert.doesNotMatch(ctx, /TDD posture: UNKNOWN/, 'an absent file is NOT the same case as a malformed one — must not render UNKNOWN');
   } finally {
     cleanup();
@@ -325,8 +307,8 @@ test('GAP 5a: config file ABSENT entirely (no .sterling/config.json) -> still re
 });
 // Named sabotage: collapse the absent/malformed distinction by treating a
 // null loadConfig result (absent) the same as a caught parse exception
-// (malformed) — this test goes red (UNKNOWN appears, or ON/ON is missing,
-// for a project that never had a config file at all).
+// (malformed) — this test goes red (UNKNOWN appears, or ON is missing, for
+// a project that never had a config file at all).
 
 test('GAP 5b: config file present but MALFORMED (unparseable) -> renders the exact UNKNOWN line, and NO tests-first ON/OFF text at all', () => {
   const { dir, cleanup } = makeProjectNoConfigFile();
@@ -340,17 +322,17 @@ test('GAP 5b: config file present but MALFORMED (unparseable) -> renders the exa
     assert.doesNotMatch(
       ctx,
       /tests-first (ON|OFF)/,
-      'a malformed config must render NO confident ON/OFF reading — the old behavior (a false "ON/ON") stated the exact opposite of the truth in this repo'
+      'a malformed config must render NO confident ON/OFF reading — the old behavior (a false "ON") stated the exact opposite of the truth in this repo'
     );
   } finally {
     cleanup();
   }
 });
 // Named sabotage: on a config parse failure, fall back to the same
-// default-ON/ON path used for an absent file (i.e. treat the thrown
-// exception as if loadConfig had returned null) instead of rendering the
-// UNKNOWN line — this test goes red (either the UNKNOWN line is missing, or
-// the forbidden "tests-first ON" text appears).
+// default-ON path used for an absent file (i.e. treat the thrown exception
+// as if loadConfig had returned null) instead of rendering the UNKNOWN line
+// — this test goes red (either the UNKNOWN line is missing, or the
+// forbidden "tests-first ON" text appears).
 
 // ===========================================================================
 // GAP 6 — a hole one level up from GAP 4: GAP 4 pins the shape of the VALUE
@@ -360,12 +342,12 @@ test('GAP 5b: config file present but MALFORMED (unparseable) -> renders the exa
 // without throwing, so a naive implementation never takes the
 // UNREADABLE path (GAP 5b) — every `config?.tdd?.enabled` read
 // optional-chains straight through a non-object to `undefined`, and the `??
-// true` default renders a confident "ON/ON". That is the exact false-posture
+// true` default renders a confident "ON". That is the exact false-posture
 // defect the UNKNOWN branch exists to eliminate, reached through a
 // JSON-legal corruption instead of a syntax error. Per this spec, the fix
 // treats a parseable-but-non-object config the SAME as an unreadable one:
-// it renders UNKNOWN, not ON/ON. Kept as its own GAP (not folded into 5a/5b)
-// so all three cases stay independently diagnosable: ABSENT file -> ON/ON;
+// it renders UNKNOWN, not ON. Kept as its own GAP (not folded into 5a/5b)
+// so all three cases stay independently diagnosable: ABSENT file -> ON;
 // UNPARSEABLE file -> UNKNOWN (5b); PARSEABLE-but-not-an-object -> UNKNOWN
 // (6, here) -- EXCEPT literal `null`, which is its own carved-out case
 // immediately below (an accepted limitation, not a defect: see that block).
@@ -385,13 +367,13 @@ const NON_OBJECT_JSON_SHAPES = [
   // (`if (config && ...)`) would leave the four arms above AND the
   // null-trap arm all green (none of [], true, "x", 5, or null are falsy
   // in a way that check mishandles) while these three silently regress to
-  // a confident ON/ON, since `false`, `0`, and `""` are all falsy.
+  // a confident ON, since `false`, `0`, and `""` are all falsy.
   // MEASURED, not assumed (coordinator applied both mutations and ran the
   // suite): `config != null` is an INERT CONTROL here, not a discriminating
   // sabotage — `!=` and `!==` against null differ only for `undefined`,
   // and loadConfig can only ever return a JSON.parse() result or the
   // literal `null` (JSON.parse cannot yield `undefined` — "undefined" is
-  // not valid JSON), so that swap changes nothing and all 20 arms stayed
+  // not valid JSON), so that swap changes nothing and all arms stayed
   // green under it. Without these three arms, the truthiness regression is
   // invisible to the suite.
   { label: 'boolean false', raw: 'false' },
@@ -425,10 +407,9 @@ for (const { label, raw } of NON_OBJECT_JSON_SHAPES) {
 // Named sabotage (general, all seven arms): drop the whole-config shape
 // check (no `typeof config === 'object' && config !== null &&
 // !Array.isArray(config)` guard, or equivalent) before reading
-// config.tdd/config.mutation_verification, so a non-object config falls
-// through every `?.` read to `undefined` and hits the `?? true` default —
-// every arm above goes red (UNKNOWN disappears, replaced by "tests-first ON
-// · mutation verification ON").
+// config.tdd, so a non-object config falls through every `?.` read to
+// `undefined` and hits the `?? true` default — every arm above goes red
+// (UNKNOWN disappears, replaced by "tests-first ON").
 //
 // Named sabotage (the one this round exists to catch, discriminating):
 // weaken the guard's STRICT `config !== null` exclusion to a TRUTHINESS
@@ -437,7 +418,7 @@ for (const { label, raw } of NON_OBJECT_JSON_SHAPES) {
 // 5) and the null-trap arm all stay GREEN, while the three FALSY arms just
 // added (`false`, `0`, `""`) go RED: a truthiness-based null-exclusion
 // treats these three the same as an absent-like `null`, rendering a
-// confident ON/ON instead of the correct UNKNOWN. That is exactly the
+// confident ON instead of the correct UNKNOWN. That is exactly the
 // discrimination the four pre-existing arms (plus the null-trap arm) cannot
 // provide on their own — this is why they are their own arms rather than
 // being folded into an existing one.
@@ -447,7 +428,7 @@ for (const { label, raw } of NON_OBJECT_JSON_SHAPES) {
 // `!==` against `null` differ only for `undefined`, and loadConfig can only
 // ever return a JSON.parse() result or the literal `null` (JSON.parse
 // cannot yield `undefined`), so `undefined` is unreachable here — this swap
-// is behaviourally inert and the coordinator confirmed all 20 arms in this
+// is behaviourally inert and the coordinator confirmed all arms in this
 // file stay green under it. Recorded so a future maintainer who tries this
 // mutation first, sees green, and is tempted to conclude these three arms
 // pin nothing does not draw that inverted conclusion — the discriminating
@@ -463,7 +444,7 @@ for (const { label, raw } of NON_OBJECT_JSON_SHAPES) {
 // path, with no existence signal surviving past that point. The two cases
 // are therefore INDISTINGUISHABLE to every downstream reader, including
 // this hook, and a config file containing literal `null` renders the same
-// documented default (ON/ON) as an absent file — NOT UNKNOWN. This is a
+// documented default (ON) as an absent file — NOT UNKNOWN. This is a
 // KNOWN AND ACCEPTED LIMITATION (a degenerate config file whose entire
 // content is the word "null" reads as if it were never there), not a
 // defect: loadConfig is a shared helper every hook imports, and adding an
@@ -472,7 +453,7 @@ for (const { label, raw } of NON_OBJECT_JSON_SHAPES) {
 // This arm pins the ACCEPTED behavior so a future change cannot silently
 // regress it in either direction without a test noticing.
 // ---------------------------------------------------------------------------
-test('GAP 6 (null trap, ACCEPTED LIMITATION): a file containing literal `null` is INDISTINGUISHABLE from an absent file (loadConfig returns null for both) -> renders the documented ON/ON default, not UNKNOWN', () => {
+test('GAP 6 (null trap, ACCEPTED LIMITATION): a file containing literal `null` is INDISTINGUISHABLE from an absent file (loadConfig returns null for both) -> renders the documented ON default, not UNKNOWN', () => {
   const { dir, cleanup } = makeProjectNoConfigFile();
   try {
     writeFileSync(join(dir, '.sterling', 'config.json'), 'null');
@@ -481,8 +462,8 @@ test('GAP 6 (null trap, ACCEPTED LIMITATION): a file containing literal `null` i
     assert.ok(r.out, 'H1 must emit parseable JSON even when the project config file contains null');
     const ctx = additionalContext(r) ?? '';
     assert.ok(
-      ctx.includes(postureLine(true, true)),
-      `a config file whose CONTENT is the literal null is indistinguishable from an absent file (loadConfig returns null for both) and must render the documented ON/ON default; got: ${ctx}`
+      ctx.includes(postureLine(true)),
+      `a config file whose CONTENT is the literal null is indistinguishable from an absent file (loadConfig returns null for both) and must render the documented ON default; got: ${ctx}`
     );
     assert.doesNotMatch(
       ctx,
@@ -494,9 +475,9 @@ test('GAP 6 (null trap, ACCEPTED LIMITATION): a file containing literal `null` i
   }
 });
 // Named sabotage: add an existence check (or a distinct absent-vs-null
-// sentinel) so a null-content file is treated as UNKNOWN instead of ON/ON —
-// this test goes red (the ON/ON line disappears, or UNKNOWN wrongly
-// appears). This is the DELIBERATE INVERSE of what was pinned in the
-// previous round: that arm asserted UNKNOWN for this exact fixture and was
-// itself the wrong pin (an instruction based on a misreading of the real
-// loadConfig contract) — this test replaces it, not supplements it.
+// sentinel) so a null-content file is treated as UNKNOWN instead of ON —
+// this test goes red (the ON line disappears, or UNKNOWN wrongly appears).
+// This is the DELIBERATE INVERSE of what was pinned in an earlier round:
+// that arm asserted UNKNOWN for this exact fixture and was itself the wrong
+// pin (an instruction based on a misreading of the real loadConfig
+// contract) — this test replaces it, not supplements it.

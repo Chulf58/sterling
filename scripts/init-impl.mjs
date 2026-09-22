@@ -519,7 +519,8 @@ if (winNode) {
   // The WSL domain-snapshot bridge that used to be rendered here is GONE in BOTH modes
   // (board 3873d33b): homedir()-derived domain roots make it a no-op for a Windows-only
   // user, and the ruling's "a Windows installation invokes WSL nowhere" is unconditional.
-  // scripts/snapshot-domains-for-windows.mjs stays on disk as a hand-run legacy tool.
+  // The former hand-run bridge script for a mixed host has since been deleted entirely
+  // (cleanup run, decision cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key).
   const mcpArgs = nativeMcpNeedsWinConfig
     ? ` --mcp-config "${winPluginDir}\\.claude-plugin\\sterling-mcp-win.json" --strict-mcp-config`
     : '';

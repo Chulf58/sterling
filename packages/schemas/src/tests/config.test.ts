@@ -212,27 +212,24 @@ test('templates/default-config.json still parses with sparring_partner.model omi
   assert.equal(shipped.sparring_partner?.enabled, true, 'the shipped enabled default is untouched by the new sibling field');
 });
 
-// ------------------- tdd / mutation_verification config toggles (decision foreign_752caf98,
-// tdd-and-mutation-toggles-in-system-tab) -------------------
+// ------------------- tdd config toggle (decision foreign_752caf98,
+// tdd-and-mutation-toggles-in-system-tab; mutation_verification removed by
+// decision cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
+// 2026-09-22 — no live mechanism performed the check the posture promised) -------------------
 //
-// tdd and mutation_verification are TWO NEW, INDEPENDENT top-level config
-// blocks — additive-optional exactly like sparring_partner above: an absent
-// block still parses with defaults ({enabled: true}), preserving the standing
-// TDD-by-default (user-affirmed 2026-08-09) and verify-by-mutation-on-ruling-
-// change (measured 2026-08-22) posture until a user explicitly turns either
-// off. Like `sparring_partner`/`difficulty` above, both blocks are NON-STRICT
-// configSchema objects — decision foreign_752caf98 says only that the two blocks
-// mirror sparring_partner's shape; it makes no strictness claim at all.
-// Unknown keys inside either block are silently STRIPPED on parse, the same
-// forward-compat posture the `difficulty` section above documents (an older
-// clone must tolerate a newer clone's config without throwing). Accessed
-// through casts so referencing them here does not require the fields to
-// exist at compile time — the
-// assertions below fail cleanly (not the package build) until parseConfig
-// grows the blocks.
+// tdd is a top-level config block — additive-optional exactly like
+// sparring_partner above: an absent block still parses with defaults
+// ({enabled: true}), preserving the standing TDD-by-default (user-affirmed
+// 2026-08-09) posture until a user explicitly turns it off. Like
+// `sparring_partner`/`difficulty` above, the block is a NON-STRICT
+// configSchema object. Unknown keys inside the block are silently STRIPPED on
+// parse, the same forward-compat posture the `difficulty` section above
+// documents (an older clone must tolerate a newer clone's config without
+// throwing). Accessed through a cast so referencing it here does not require
+// the field to exist at compile time — the assertions below fail cleanly
+// (not the package build) until parseConfig grows the block.
 type CfgWithTddMutation = {
   tdd?: { enabled?: boolean };
-  mutation_verification?: { enabled?: boolean };
 };
 
 test('tdd: absent block defaults to {enabled: true} (TDD-by-default stays the standing posture, decision foreign_752caf98)', () => {
@@ -262,61 +259,10 @@ test('tdd: an unknown field inside the block is silently stripped — the block 
   assert.equal(stripped.tdd?.bogus_field, undefined, 'the unknown key is stripped from the parsed output, not thrown on');
 });
 
-test('mutation_verification: absent block defaults to {enabled: true} (verify-by-mutation stays the standing posture, decision foreign_752caf98)', () => {
-  const empty = parseConfig({}) as unknown as CfgWithTddMutation;
-  assert.ok(empty.mutation_verification, 'parseConfig defaults must add a mutation_verification block even when absent from input');
-  assert.equal(empty.mutation_verification?.enabled, true, 'mutation_verification.enabled defaults to true when the block is absent');
-});
-
-test('mutation_verification: an explicit {enabled: false} round-trips', () => {
-  const off = parseConfig({ mutation_verification: { enabled: false } }) as unknown as CfgWithTddMutation;
-  assert.equal(off.mutation_verification?.enabled, false, 'an explicit mutation_verification.enabled:false overrides the true default and survives parsing');
-});
-
-test('mutation_verification: a junk (non-boolean) enabled value is refused loud', () => {
-  assert.throws(
-    () => parseConfig({ mutation_verification: { enabled: 'yes' } }),
-    /invalid/i,
-    'mutation_verification.enabled must be a boolean — a non-boolean value fails loud',
-  );
-});
-
-test('mutation_verification: an unknown field inside the block is silently stripped — non-strict, mirroring sparring_partner/difficulty\'s forward-compat posture', () => {
-  const stripped = parseConfig({ mutation_verification: { enabled: false, bogus_field: 1 } }) as unknown as CfgWithTddMutation & {
-    mutation_verification?: { bogus_field?: number };
-  };
-  assert.equal(stripped.mutation_verification?.enabled, false, 'enabled retains its explicit value alongside the unknown sibling key');
-  assert.equal(
-    stripped.mutation_verification?.bogus_field,
-    undefined,
-    'the unknown key is stripped from the parsed output, not thrown on',
-  );
-});
-
-test('tdd and mutation_verification are independent — setting one does not move the other from its own default/explicit value', () => {
-  const onlyTddOff = parseConfig({ tdd: { enabled: false } }) as unknown as CfgWithTddMutation;
-  assert.equal(onlyTddOff.tdd?.enabled, false, 'tdd.enabled honors the explicit false');
-  assert.equal(
-    onlyTddOff.mutation_verification?.enabled,
-    true,
-    'mutation_verification.enabled stays at its own default true, untouched by the tdd override',
-  );
-
-  const onlyMutationOff = parseConfig({ mutation_verification: { enabled: false } }) as unknown as CfgWithTddMutation;
-  assert.equal(onlyMutationOff.mutation_verification?.enabled, false, 'mutation_verification.enabled honors the explicit false');
-  assert.equal(
-    onlyMutationOff.tdd?.enabled,
-    true,
-    'tdd.enabled stays at its own default true, untouched by the mutation_verification override',
-  );
-});
-
-test('templates/default-config.json still parses and carries tdd.enabled true and mutation_verification.enabled true', () => {
+test('templates/default-config.json still parses and carries tdd.enabled true', () => {
   const shipped = parseConfig(
     JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')),
   ) as unknown as CfgWithTddMutation;
   assert.ok(shipped.tdd, 'the shipped default-config carries a tdd block');
   assert.equal(shipped.tdd?.enabled, true, 'the shipped tdd.enabled is true');
-  assert.ok(shipped.mutation_verification, 'the shipped default-config carries a mutation_verification block');
-  assert.equal(shipped.mutation_verification?.enabled, true, 'the shipped mutation_verification.enabled is true');
 });

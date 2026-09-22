@@ -1,5 +1,9 @@
-// Config write-back for the System-tab sparring/TDD/mutation-verification
-// toggles (decision foreign_752caf98, tdd-and-mutation-toggles-in-system-tab) —
+// Config write-back for the System-tab sparring/TDD toggles (decision
+// foreign_752caf98, tdd-and-mutation-toggles-in-system-tab; the sibling
+// mutation-verification toggle this module used to also write back was
+// REMOVED entirely — decision
+// cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
+// 2026-09-22, no live mechanism ever performed the check it promised) —
 // EXTRACTED from main.ts (Codex review finding) so the frozen pins in
 // tests/config-writeback.test.ts can import this module directly without
 // pulling in main.ts's argv-parsing/terminal-kit side effects on import.
@@ -23,7 +27,7 @@
 // — board 09f05fca half 2, review fix.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SparringToggleEffect, TddToggleEffect, MutationToggleEffect } from './state.js';
+import type { SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -63,23 +67,6 @@ export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => vo
     return true;
   } catch (err) {
     onError?.(`tdd toggle failed — ${(err as Error).message}`);
-    return false;
-  }
-}
-
-/** Execute a mutation_toggle effect: config.mutation_verification.enabled
- *  write only (decision foreign_752caf98) — mirrors applySparringToggle exactly.
- *  Optional trailing `path` overrides the cwd-derived default (see
- *  applySparringToggle). */
-export function applyMutationToggle(e: MutationToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
-  try {
-    const target = configPath(path);
-    const raw = JSON.parse(readFileSync(target, 'utf8')) as { mutation_verification?: { enabled?: boolean } };
-    raw.mutation_verification = { ...raw.mutation_verification, enabled: e.enabled };
-    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
-    return true;
-  } catch (err) {
-    onError?.(`mutation verification toggle failed — ${(err as Error).message}`);
     return false;
   }
 }

@@ -8,8 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
-import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type MutationToggleEffect } from './state.js';
-import { applySparringToggle, applyTddToggle, applyMutationToggle } from './config-writeback.js';
+import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect } from './state.js';
+import { applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
@@ -137,12 +137,10 @@ function loadRoster(): AgentRosterSnapshot {
     models_catalog?: { staleness_days?: number };
     sparring_partner?: { enabled?: boolean; model?: string };
     tdd?: { enabled?: boolean };
-    mutation_verification?: { enabled?: boolean };
   };
   const configModels = cfg.models ?? {};
   const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
   const tdd = { enabled: cfg.tdd?.enabled ?? true };
-  const mutationVerification = { enabled: cfg.mutation_verification?.enabled ?? true };
   const codexWired = probeCodexWired();
   const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
     .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
@@ -169,7 +167,7 @@ function loadRoster(): AgentRosterSnapshot {
     // (audit finding 41/43) — surface it as a visible System-tab notice instead.
     ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
   }
-  return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mutationVerification };
+  return { agents, configModels, catalog, sparringPartner, codexWired, tdd };
 }
 
 /** Execute a sparring_model effect: config.sparring_partner.model write. An
@@ -284,20 +282,18 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   const notice = (msg: string) => { ui = { ...ui, notice: msg }; };
   const sparringModels = result.effects.filter((e): e is SparringModelEffect => e.type === 'sparring_model');
   for (const e of sparringModels) applySparringModel(e);
-  // sparring/tdd/mutation_verification toggle writes (board a0714d0b, decision
-  // 752caf98): run all three appliers, then compose ONE notice from their
-  // {ok} outcomes — a failure wins over a success (review fix, board
-  // 09f05fca half 2), so a later success in this same batch can never
-  // clobber an earlier failure via last-write-wins on the shared notice sink.
+  // sparring/tdd toggle writes (board a0714d0b, decision foreign_752caf98): run both
+  // appliers, then compose ONE notice from their {ok} outcomes — a failure
+  // wins over a success (review fix, board 09f05fca half 2), so a later
+  // success in this same batch can never clobber an earlier failure via
+  // last-write-wins on the shared notice sink.
   const sparringToggles = result.effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
   const tddToggles = result.effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
-  const mutationToggles = result.effects.filter((e): e is MutationToggleEffect => e.type === 'mutation_toggle');
   let toggleWrote = false;
   let toggleFailure: string | undefined;
   const collectFailure = (msg: string) => { toggleFailure = msg; };
   for (const e of sparringToggles) { if (applySparringToggle(e, collectFailure, configPath)) toggleWrote = true; }
   for (const e of tddToggles) { if (applyTddToggle(e, collectFailure, configPath)) toggleWrote = true; }
-  for (const e of mutationToggles) { if (applyMutationToggle(e, collectFailure, configPath)) toggleWrote = true; }
   if (toggleFailure !== undefined) {
     notice(toggleFailure);
   } else if (toggleWrote) {
@@ -310,7 +306,7 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
     // pick the new value up there.
     notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
   }
-  if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || mutationToggles.length) roster = loadRoster();
+  if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
     restoreTerminal();
     process.exit(0);

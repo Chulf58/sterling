@@ -5108,14 +5108,6 @@ var configSchema = external_exports.object({
   // gate or hook arm keys on this toggle.
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({}),
-  // Mutation-verification posture toggle (decision foreign_752caf98), independent of
-  // tdd above: whether "verify a ruling change by mutation, not by a green
-  // suite alone" (measured 2026-08-22) fires automatically. Same additive-
-  // optional, default-true shape as tdd — the two toggles are deliberately
-  // separate fields, not one combined toggle (rejected in 752caf98).
-  mutation_verification: external_exports.object({
-    enabled: external_exports.boolean().default(true)
   }).default({})
 });
 
@@ -8942,11 +8934,10 @@ try {
       cfgUnusable = true;
     }
     if (cfgUnusable) {
-      tddPostureLine = "TDD posture: UNKNOWN \u2014 the project config could not be read, so neither config.tdd.enabled nor config.mutation_verification.enabled could be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
+      tddPostureLine = "TDD posture: UNKNOWN \u2014 the project config could not be read, so config.tdd.enabled could not be determined. This is NOT the default posture: repair the config, or state your posture explicitly.";
     } else {
       const tddOn = cfg?.tdd?.enabled !== false;
-      const mutationOn = cfg?.mutation_verification?.enabled !== false;
-      tddPostureLine = `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} \xB7 mutation verification ${mutationOn ? "ON" : "OFF"} (config.tdd.enabled / config.mutation_verification.enabled \u2014 TUI System tab; explicit asks still work)`;
+      tddPostureLine = `TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI System tab; explicit asks still work)`;
     }
   }
 } catch {

@@ -92,7 +92,6 @@ function seedDoc(): Record<string, unknown> {
   try {
     built = parseConfig({
       tdd: { enabled: true },
-      mutation_verification: { enabled: true },
       sparring_partner: { enabled: true, model: '' },
       delegation: { max_concurrent: 5 },
       maintenance_queue: { deep_threshold: 20 },
@@ -113,7 +112,6 @@ function seedDoc(): Record<string, unknown> {
   // aimed at a key the schema does not define and needs repointing.
   const required: [string, string][] = [
     ['tdd', 'enabled'],
-    ['mutation_verification', 'enabled'],
     ['sparring_partner', 'model'],
     ['delegation', 'max_concurrent'],
     ['maintenance_queue', 'deep_threshold'],
@@ -465,7 +463,7 @@ test('CS-8 CONTROL: a MATCHING expected_digest succeeds, and the receipt returns
     const call = handler(h.tools);
     const expected = sha256(readFileSync(h.configPath));
 
-    const receipt = call({ path: 'mutation_verification.enabled', value: false, expected_digest: expected });
+    const receipt = call({ path: 'tdd.enabled', value: false, expected_digest: expected });
 
     assert.equal(receipt.previous_value, true, 'the receipt reports what was replaced');
     assert.equal(receipt.value, false, 'and what replaced it');
@@ -476,7 +474,7 @@ test('CS-8 CONTROL: a MATCHING expected_digest succeeds, and the receipt returns
     );
     assert.equal(receipt.digest, sha256(readFileSync(h.configPath)), 'and it matches the bytes now on disk');
     assert.equal(
-      (JSON.parse(h.read()) as { mutation_verification: { enabled: unknown } }).mutation_verification.enabled,
+      (JSON.parse(h.read()) as { tdd: { enabled: unknown } }).tdd.enabled,
       false,
       'the write landed'
     );

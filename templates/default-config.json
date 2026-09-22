@@ -51,8 +51,5 @@
   },
   "tdd": {
     "enabled": true
-  },
-  "mutation_verification": {
-    "enabled": true
   }
 }
