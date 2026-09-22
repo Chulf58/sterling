@@ -138,8 +138,10 @@ test('citation lint: fails on nothing, passes on a TOMBSTONE, flags an ambiguous
 
 // -- record-id citation CURRENCY (board 9d0fb893) ---------------------------
 
-test('isPointerSurface: scoped to CLAUDE.md, templates/target-claude-md.md, skills/**, commands/** only', () => {
+test('isPointerSurface: scoped to AGENTS.md, CLAUDE.md, templates/target-agents-md.md, templates/target-claude-md.md, skills/**, commands/** only', () => {
+  assert.equal(isPointerSurface('AGENTS.md'), true);
   assert.equal(isPointerSurface('CLAUDE.md'), true);
+  assert.equal(isPointerSurface('templates/target-agents-md.md'), true);
   assert.equal(isPointerSurface('templates/target-claude-md.md'), true);
   assert.equal(isPointerSurface('skills/drain/SKILL.md'), true);
   assert.equal(isPointerSurface('commands/merge.md'), true);

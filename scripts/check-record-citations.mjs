@@ -112,9 +112,9 @@ const files = tracked.stdout
   .filter((f) => !excludedFiles.has(f));
 
 const violations = [];
-// Currency (board 9d0fb893): WARN-only, scoped to pointer surfaces (CLAUDE.md,
-// templates/target-claude-md.md, skills/**, commands/**) — see lib/checks.mjs
-// for the full rationale. Never affects the exit code below.
+// Currency (board 9d0fb893): WARN-only, scoped to pointer surfaces (AGENTS.md, CLAUDE.md,
+// templates/target-agents-md.md, templates/target-claude-md.md, skills/**, commands/**) —
+// see lib/checks.mjs for the full rationale. Never affects the exit code below.
 const currencyWarnings = [];
 let citations = 0;
 let optOuts = 0;

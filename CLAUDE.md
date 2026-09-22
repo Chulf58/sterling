@@ -1,19 +1,11 @@
-# CLAUDE.md — Sterling
+@AGENTS.md
+<!-- Sterling layer: the tool-agnostic rules are in AGENTS.md (read by Codex and OpenCode too); this file adds what needs Sterling. Edit each rule in the file it lives in. -->
 
-Durable conventions and repo facts. The **knowledge base is the authority**, not this file. The conductor's working posture is not here: it is `agent-templates/conductor.md`, installed to every project's `.claude/agents/conductor.md` by install-agents/sync-agents and activated as the main-session agent through `"agent": "conductor"` in that project's `.claude/settings.json` (decision `conductor-instructions-via-main-session-agent-route-a`). Each rule lives in exactly one of the two.
+# CLAUDE.md — Sterling (Sterling layer)
+
+Durable conventions and repo facts. The **knowledge base is the authority**, not this file. The conductor's working posture is not here: it is `agent-templates/conductor.md`, installed to this project's `.claude/agents/conductor.md` by install-agents/sync-agents and activated as the main-session agent through `"agent": "conductor"` in `.claude/settings.json`. Each rule lives in exactly one of the two.
 
 Scope (decision `sterling-claude-code-scale-down-boundary`, user-ruled 2026-09-19, verbatim: *"All the rules and locks is friction, so I want to scale it down ALOT!"*): Sterling on Claude Code is the **knowledge loop plus the task board**. No staged pipeline, no frozen-test wall, no read wall, no shell allowlist, no review ledger, no merge gate, no config key allowlist. Do not reintroduce one because a single incident argues for it.
-
-## Core principles (P1-P8, cited by number)
-
-- **P1 — Attention-first.** Human attention is the scarcest resource; a gate, pause or escalation that does not change an outcome is ceremony and must be removed.
-- **P2 — The knowledge base is the product.** Every unit of work consumes accumulated knowledge and produces it. The test for a feature: does it improve what we capture, or how well we retrieve it?
-- **P3 — Scripts over agents.** Deterministic code unless the work provably needs judgment; code cannot drift or forget.
-- **P4 — Lifecycle-bound state.** Transient state is removed by the event that ends its life; durable value is promoted before disposal, never by a remembered step.
-- **P5 — Fail loud, never silent.** Unknown signals halt. Missing inputs block. A degraded path announces that it is degraded.
-- **P6 — Maximal *relevant* context.** Every agent operates with all knowledge bearing on its task, retrieved filter-first and capped; starving and flooding are both failures.
-- **P7 — Prevention over recovery.** Over-scoping is a decomposition failure: re-scope and redo rather than build resume machinery.
-- **P8 — Match mechanism to work.** Judgment gets strong models; mechanical work gets cheap models or scripts; conversation belongs to the conductor.
 
 ## Authority (the knowledge base is the source of truth)
 
@@ -34,54 +26,25 @@ Scope (decision `sterling-claude-code-scale-down-boundary`, user-ruled 2026-09-1
 - **Fix a wrong record FORWARD** with `knowledge_update` — the correction supersedes the error. **Retirement is narrow:** `knowledge_retire(id, in_favor_of)` is for a genuine DUPLICATE, never for a record that is merely wrong, and never by creating a replacement beside the original. **Ask the schema, don't guess it** (`knowledge_schema`), and take the refusal as the authority over the projection. An 8-char prefix resolves when reading and updating; every destroying path demands the full id.
 - **When an article QUOTES a ruling, the quote carries its justification clause.** A ruling stripped of its *why* reproduces the gap it was written to close.
 
-## Repo layout (fixed)
+## Conduct rules (Sterling layer)
 
-```
-packages/schemas      zod schemas + path normalization (shared; nothing defines a schema twice)
-packages/store        SQLite access layer (WAL, FTS5) — the one write code path
-packages/mcp-server   tool surface
-packages/tui          terminal-kit app
-scripts/              hooks, toolchain adapters, fs helpers
-agent-templates/      agent templates — NOT named agents/, which the platform auto-serves with hooks stripped
-skills/               SOP skills
-templates/            shipped templates, incl. target-claude-md.md (what init generates)
-```
-
-npm workspaces monorepo; TypeScript everywhere except `scripts/` (standalone `.mjs`).
-
-## Invariants (architectural, hold from line one)
-
-1. **Shared schemas:** every record/signal/handoff shape is defined once in `packages/schemas` and imported. A schema defined anywhere else fails review.
-2. **POSIX paths:** every path is stored and compared repo-relative with forward slashes, normalized in `packages/schemas`. No raw path enters the store.
-3. **Registries first:** for every extensible set (record types, agents, hooks, tools, toolchain adapters) the registry and its consistency check exist before the first member.
-4. **Hooks are dependency-light and bundled:** small standalone `.mjs`, esbuild-bundled, no workspace imports at runtime. Every hook resolves `.sterling/` through `readStdin`'s project-root normalization, never the raw shell cwd.
-5. **The store DB is sealed:** nothing but the MCP server writes `.sterling/sterling.db` (H15's one rule) — a data-integrity boundary, not a conductor lock. Every other file under `.sterling/`, `config.json` included, is editable by any tool, and `config_set` has no key allowlist (user-stated 2026-09-19: *"You need to fix that you can change the config yourself."*).
-
-## Conduct rules
-
-- **Minimal change:** smallest safe implementation; one concern per change; no speculative abstractions, no drive-by refactors; prefer existing patterns. Read before edit; grep callers before changing a signature. **Does not override** consolidating a mechanism you are ALREADY modifying — on a third-or-later change to it, consolidating is the smallest total change, and boarding it is the drive-by.
-- **Rebuild over patch.** A fix growing out of proportion to its defect stops and rebuilds from blank: *is the fix removing the cause, or adding handlers for its effects?* Freeze the pins (existing plus the new findings — their union is the spec), state the invariant in one paragraph including what it does NOT guarantee, rebuild against those pins, read the old file only afterwards to check nothing was dropped. **Does not override** minimal-change for a first defect.
 - **A new incident may add a regression test or a policy record. It may NOT add a new enforcement program** (hook, gate, scanner) — the stable unit of growth is policy data. The presumption for a mechanism is REMOVE unless it has a measured catch no record or test can replace; the burden of proof is on keeping. **Does not override** P5 for a destructive action.
-- **Anti-speculation:** never invent an API, field, flag or behavior; cite tool-call evidence from this turn, or say "I don't know, checking" and check. No "appears to / likely / seems". **No false action claims:** never imply something was saved, run or changed unless it was performed this turn, with evidence.
-- **An index or summary is a lookup, never a source.** A digest line or a quotation inside another record LOCATES the source; it never replaces it. A cited `file:line` is an instruction to open the file — the binding constraint often lives in the prose around that line. Never present a question a decision already settles as open: whichever option the user picks becomes a false ruling.
+- **A settled ruling is not a fresh choice.** Never present a question a decision already settles as open: whichever option the user picks becomes a false ruling.
 - **Cite rulings by SLUG in durable pointers** (commit messages, briefs, article prose): a slug names the concept and survives supersession; ids version-pin. Where space allows print both — `[slug] (knowledge_get <id>)`. Bare ids stay correct on mechanically-resolved surfaces and in history entries pinned to what was live then. **Never put a bare id in front of a HUMAN** — an identifier shown to a person carries its name beside it, `name (id8)`, name first: names clip, ids never do. Asked to rule on "board 17204d1e" the reader cannot know what they are ruling on, and an unanswerable question still manufactures a ruling.
-- **Source attribution:** user-stated content and conductor proposals stay structurally distinct in every artifact; an unanswered recommendation is not an accepted one. Intent capture is **verbatim** — a paraphrase substitutes your model of the intent for theirs, and every artifact downstream inherits your version.
-- **Ask, don't guess — one question at a time, through the AskUserQuestion tool**, with options and a recommendation; never batch. A prose question reads as rhetorical and gets missed (user-stated 2026-08-11) — not asked. **A ruling exists only if it came through the form:** user-stated 2026-09-22, verbatim: *"I only rule using question forms. So if there wasnt one i cant rule"* — an answer given in prose, a form answered with a question, or an interrupted form is not a ruling; put the form again. Run `knowledge_preflight` on the subject first (see Authority). Safe-default-and-proceed only for a reversible choice needing no authorization, never for a gate.
-- **Surface smells, don't fix them** — an out-of-scope issue is reported as a separate item, never fixed inline and never left unsaid; tracking it is the user's call. **Solve, don't board** inside the current task's scope: fix it in-session, board only what cannot be done now and say why (user-stated 2026-07-27). Neither gets silently parked.
+- **Ask, don't guess — through the AskUserQuestion tool.** **A ruling exists only if it came through the form:** user-stated 2026-09-22, verbatim: *"I only rule using question forms. So if there wasnt one i cant rule"* — an answer given in prose, a form answered with a question, or an interrupted form is not a ruling; put the form again. Run `knowledge_preflight` on the subject first (see Authority). Safe-default-and-proceed only for a reversible choice needing no authorization, never for a gate.
+- **Solve, don't board** inside the current task's scope: fix it in-session, board only what cannot be done now and say why (user-stated 2026-07-27). Neither gets silently parked.
 - **Close-on-commit:** a commit that fulfils a board item pays it — `board_remove` in the same breath, citing the commit. **A board item states its EVIDENCE, not its conclusion:** quote the deciding `file:line` or the measured number; "the facing is broken" cannot be re-checked and rots invisibly. Re-verify an item against HEAD before dispatching at it — refreshing its BLOCKER is not re-checking its DEFECT. A partly-done item is rewritten, never removed.
-- **Disclose limitations, don't bury them.** A known limitation that weakens what the work is *for* is raised as a keep-or-solve decision **before** you build. "It opens but can't do X" is unfit-for-purpose, not done-with-a-note.
-- **Propose a better way** when an approach materially beats the one asked for — bounded by P1: only when it changes an outcome (irreversible work, data loss, a security hole, broad rework), never for a prettier abstraction. Give the path, the risk it protects and the tradeoff, then proceed as asked unless told otherwise.
-- **Canonical naming:** one name per concept, from the registries; no dead terms ("Forge", "wave").
-- **No hand-maintained architecture or design documents.** Generated projections only, clearly marked: a document duplicating the store drifts from it, and the copy is always the one that lies.
 - **When the platform disagrees with the design** — Claude Code's hook and frontmatter mechanics move between versions — stop, report the discrepancy with its doc reference and a proposed degraded-loud fallback, and wait for approval. Never silently adapt.
-- **Mechanism inventories do not live in THIS file — the store is the census.** Never copy in what a self-describing surface answers: record shapes (`knowledge_schema`), the hook roster (`hooks.json`), the anti-pattern set (`knowledge_query`). A summary of the store is a second copy that rots. This file carries durable conventions and their justifying incidents; repo layout and invariants are the deliberate exceptions.
+- **Mechanism inventories do not live in THIS file — the store is the census.** Never copy in what a self-describing surface answers: record shapes (`knowledge_schema`), the hook roster (`hooks.json`), the anti-pattern set (`knowledge_query`). A summary of the store is a second copy that rots. This file carries durable conventions and their justifying incidents; repo layout and the tool-agnostic invariants are in AGENTS.md; no-hand-maintained-docs is there too (one copy only).
 
-- **Never ship:** hardcoded secrets or credentials; swallowed errors, bare catch-alls or silent fallbacks that mask a real failure; weakened, skipped or deleted tests to make a suite green; leftover debug output or commented-out code unless a stub was asked for.
+## Invariants (Sterling-bound)
+
+- **Hooks are dependency-light and bundled:** small standalone `.mjs`, esbuild-bundled, no workspace imports at runtime. Every hook resolves `.sterling/` through `readStdin`'s project-root normalization, never the raw shell cwd.
+- **Store writes go through the MCP tool surface** — never shell scripts against `.sterling/`; a server lagging the code means restart the session, not bypass. (Enforced: H15 — one rule: nothing but the MCP server writes `.sterling/sterling.db`; every other file under `.sterling/`, `config.json` included, is editable by any tool, and `config_set` has no key allowlist.)
 
 ## Sterling in this repo (self-hosted)
 
-- **Stack tags** (= domain mount manifest): node, typescript, sterling. **Toolchains:** node (`**/*.mjs`, `**/*.ts`). **Domain stores:** `~/.sterling/domains/{node,typescript,sterling}/`, created lazily. **Backup path:** `.sterling/config.json` → `backup_path` (machine-local, not restated here).
-- **Local only.** SQLite in `.sterling/sterling.db`; no cloud database (user-stated 2026-09-19: *"There is no more other engineers, from now on it is just us, so we dont need the cloud data base at all, everything can run locally"*).
-- **WSL2 everywhere.** Claude Code, this clone, Codex and every project run under WSL2 (Ubuntu-24.04); the Windows `.bat` launchers open the project inside WSL2 (user-stated 2026-09-19: *"everything going forward should run through WSL2. change the bat files so they open the project in WSL2 instead of windows"*).
+Project facts (stack tags, domain stores, backup path, local-only database, WSL2) are in AGENTS.md — one copy only.
+
 - **Codex runs through the MCP tool, never the shell.** Every consult, review and lane uses the `codex` MCP tool, with the lane's shape set explicitly at the call site: `model` (`gpt-6-astra` to spar, `gpt-5.6-sol` to review, `gpt-5.6-terra` to implement), `sandbox` (`read-only` for advisory and review lanes — an enforced filesystem boundary, not a prose instruction — `workspace-write` only to implement), `approval-policy: never`, and `config: {model_reasoning_effort: "high"}`. User-ruled 2026-09-20, verbatim: *"Add that to all instruction files, that we use the codex mcp over whatever you were doing"*. A call still running after 120s backgrounds itself and returns its result as a notification — normal, not a hang. Decision `codex-lane-operating-practice-profiles-json-and-worker-instructions`; the two shelled-`codex exec` hazards (`codex-exec-resume-drops-session-model`, and the stdin trap that hangs forever) no longer have a trigger surface here.
 - **This machine authors; every other machine consumes.** Sterling ships as a git clone — no npm package, no marketplace entry. Work lands here, merges to `main`, and reaches other machines via `/sterling:update` (fast-forward-or-refuse). Within a machine there is no fan-out: every project launches with `--plugin-dir` at this one clone, so updating it moves the hook surface for all siblings at their next session start; only per-project copies need syncing (`sync-agents`, `stamp-contract`). Machine-local truth is H1's MACHINE ROLE line (`machine_role` in `.sterling/config.json`) — on a CONSUMER or UNDECLARED clone the authoring language does not apply.

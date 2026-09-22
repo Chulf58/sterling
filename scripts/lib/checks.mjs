@@ -361,10 +361,10 @@ export function lintRecordCitations(content, label, resolve) {
 // supersedes 0956a464 AND fe543519; the existence check passed every run
 // because superseded records are retained by design, rule 3 above).
 //
-// Scoped to POINTER SURFACES ONLY: CLAUDE.md, templates/target-claude-md.md,
-// skills/**, commands/** — places a citation SENDS the reader somewhere, so a
-// stale destination actually misleads. Article history entries and code
-// comments are deliberately untouched: citing a superseded id there is often
+// Scoped to POINTER SURFACES ONLY: AGENTS.md, CLAUDE.md, templates/target-agents-md.md,
+// templates/target-claude-md.md, skills/**, commands/** — places a citation SENDS the
+// reader somewhere, so a stale destination actually misleads. Article history entries and
+// code comments are deliberately untouched: citing a superseded id there is often
 // CORRECT (pinned history — "the decision that justified this design AT THE
 // TIME"), so currency is not even evaluated outside pointer surfaces.
 //
@@ -376,7 +376,7 @@ export function lintRecordCitations(content, label, resolve) {
 // free: on a secondary store, citations to ids this store did not mint mostly
 // fail to resolve at all (reported, not failed), so `hit` here is already
 // falsy and no currency warning is produced — no extra gating needed.
-export const POINTER_SURFACE_FILES = ['CLAUDE.md', 'templates/target-claude-md.md'];
+export const POINTER_SURFACE_FILES = ['AGENTS.md', 'CLAUDE.md', 'templates/target-agents-md.md', 'templates/target-claude-md.md'];
 export const POINTER_SURFACE_PREFIXES = ['skills/', 'commands/'];
 
 export function isPointerSurface(file) {

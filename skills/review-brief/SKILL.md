@@ -27,7 +27,7 @@ Objective:       What this change is FOR — the outcome, one sentence.
 Diff:             The actual diff or the file paths + `git diff` command to run.
 Acceptance:       The frozen acceptance criteria this change must meet, verbatim
                   — never paraphrased or loosened for the review.
-Project rules:    Pointers to the governing CLAUDE.md conduct rules or decision
+Project rules:    Pointers to the governing AGENTS.md/CLAUDE.md conduct rules or decision
                   records this diff must not violate (cite by slug).
 Context:          What the reviewer cannot infer — prior findings, why this
                   shape was chosen over an alternative, what's explicitly out
@@ -39,7 +39,7 @@ Changed tests:    Every test file the diff touched or removed assertions from �
 ## Review order — ACs first, then project rules, then correctness
 
 1. **Acceptance criteria** — does the diff actually satisfy what was asked, verbatim? A criterion silently loosened or reinterpreted is a finding on its own, independent of code quality.
-2. **Project rules** — CLAUDE.md conduct rules, cited decisions and anti-patterns, existing conventions. A diff that is locally correct but violates a governing rule (e.g., a hand-rolled schema duplicating `packages/schemas`) is still a defect.
+2. **Project rules** — AGENTS.md/CLAUDE.md conduct rules, cited decisions and anti-patterns, existing conventions. A diff that is locally correct but violates a governing rule (e.g., a hand-rolled schema duplicating `packages/schemas`) is still a defect.
 3. **General correctness** — logic, state, error handling, security, performance where the diff touches a hot path.
 
 ## The non-negotiable: inspect every changed test in full

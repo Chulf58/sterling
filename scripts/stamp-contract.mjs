@@ -27,7 +27,14 @@ for (let i = 2; i < process.argv.length; i++) {
 }
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
-const TEMPLATE_REL = 'templates/target-claude-md.md';
+// AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
+// 161e2972): each TARGET_LEADS bullet lives in whichever template currently contains it, and
+// propagates into the SAME layer file in a sibling. TEMPLATE_RELS is searched in this order to
+// find a lead's home; historical ancestry is searched across BOTH files (a bullet may have moved
+// from target-claude-md.md to target-agents-md.md at the split commit and keeps its ancestry).
+const AGENTS_TEMPLATE_REL = 'templates/target-agents-md.md';
+const CLAUDE_TEMPLATE_REL = 'templates/target-claude-md.md';
+const TEMPLATE_RELS = [AGENTS_TEMPLATE_REL, CLAUDE_TEMPLATE_REL];
 
 // The propagated bullets, identified by their bold lead at line start.
 const TARGET_LEADS = [
@@ -73,6 +80,13 @@ const RENAMED_LEADS = new Map([
   ['- **Knowledge is born structured.**', ["- **Notes are the user's surface.**"]],
 ]);
 
+// CRLF handling (Sol review fix round, finding 6): comparisons run on a CR-stripped copy so a
+// CRLF sibling is never spuriously treated as hand-tuned (the recorded stamp-contract CRLF
+// hazard); a write converts back to the sibling's OWN original EOL, never forcing LF onto it.
+const normalizeEol = (text) => text.replace(/\r\n/g, '\n');
+const detectEol = (text) => (text.includes('\r\n') ? '\r\n' : '\n');
+const withEol = (lfText, eol) => (eol === '\r\n' ? lfText.replace(/\n/g, '\r\n') : lfText);
+
 // A block = the bullet line plus continuation lines until the next top-level
 // bullet, heading, or blank line (template bullets are single long lines today;
 // the continuation rule keeps this robust if they ever wrap).
@@ -85,32 +99,39 @@ function extractBlock(text, lead) {
   return { start, end, block: lines.slice(start, end).join('\n') };
 }
 
-// Every historical variant of each target bullet, from the template's git log —
-// the "clean template-descended" set a sibling block must match to be replaced.
+// Every historical variant of each target bullet, from BOTH templates' git log — the "clean
+// template-descended" set a sibling block must match to be replaced. Searched across both files
+// (not just the lead's current home) so a bullet that moved at the AGENTS.md/CLAUDE.md split
+// commit keeps its pre-split ancestry.
 function historicalVariants() {
-  const log = spawnSync('git', ['log', '--format=%H', '--', TEMPLATE_REL], { cwd: repoRoot, encoding: 'utf8' });
-  if (log.status !== 0) throw new Error(`stamp-contract: git log failed in ${repoRoot}: ${log.stderr}`);
   const allLeads = [...TARGET_LEADS, ...[...RENAMED_LEADS.values()].flat()];
   const variants = new Map(allLeads.map((l) => [l, new Set()]));
-  for (const sha of log.stdout.split('\n').filter(Boolean)) {
-    const show = spawnSync('git', ['show', `${sha}:${TEMPLATE_REL}`], { cwd: repoRoot, encoding: 'utf8' });
-    if (show.status !== 0) continue;
-    for (const lead of allLeads) {
-      const found = extractBlock(show.stdout, lead);
-      if (found) variants.get(lead).add(found.block);
+  for (const rel of TEMPLATE_RELS) {
+    const log = spawnSync('git', ['log', '--format=%H', '--', rel], { cwd: repoRoot, encoding: 'utf8' });
+    if (log.status !== 0) throw new Error(`stamp-contract: git log failed in ${repoRoot}: ${log.stderr}`);
+    for (const sha of log.stdout.split('\n').filter(Boolean)) {
+      const show = spawnSync('git', ['show', `${sha}:${rel}`], { cwd: repoRoot, encoding: 'utf8' });
+      if (show.status !== 0) continue;
+      for (const lead of allLeads) {
+        const found = extractBlock(show.stdout, lead);
+        if (found) variants.get(lead).add(found.block);
+      }
     }
   }
   return variants;
 }
 
-const template = readFileSync(join(repoRoot, TEMPLATE_REL), 'utf8');
+const templates = new Map(TEMPLATE_RELS.map((rel) => [rel, readFileSync(join(repoRoot, rel), 'utf8')]));
 const current = new Map();
+const leadLayer = new Map(); // lead -> template rel it currently lives in (= the sibling file it propagates to)
 for (const lead of TARGET_LEADS) {
-  const found = extractBlock(template, lead);
-  if (!found) throw new Error(`stamp-contract: template lost target bullet '${lead}' — refusing (P5)`);
-  current.set(lead, found.block);
+  const home = TEMPLATE_RELS.find((rel) => extractBlock(templates.get(rel), lead));
+  if (!home) throw new Error(`stamp-contract: no template carries target bullet '${lead}' — refusing (P5)`);
+  leadLayer.set(lead, home);
+  current.set(lead, extractBlock(templates.get(home), lead).block);
 }
 const variants = historicalVariants();
+const layerFileName = (rel) => (rel === AGENTS_TEMPLATE_REL ? 'AGENTS.md' : 'CLAUDE.md');
 
 const registry = new ProjectRegistry(registryPath());
 let projects;
@@ -131,32 +152,59 @@ for (const p of projects) {
     results.push({ project: p.name, status: 'missing_path', detail: repo });
     continue;
   }
-  if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own CLAUDE.md is hand-maintained in sync with the template
+  if (realpathSync(repo) === selfPath) continue; // the Sterling repo's own contract files are hand-maintained in sync with the templates
+  const agentsMd = join(repo, 'AGENTS.md');
   const claudeMd = join(repo, 'CLAUDE.md');
+  if (!existsSync(agentsMd)) {
+    results.push({ project: p.name, status: 'not_migrated', detail: `no AGENTS.md — run: node scripts/init.mjs --target ${repo}` });
+    drift++;
+    continue;
+  }
   if (!existsSync(claudeMd)) {
     results.push({ project: p.name, status: 'no_claude_md', detail: claudeMd });
     drift++;
     continue;
   }
 
-  let text = readFileSync(claudeMd, 'utf8');
+  const loadSibling = (path) => {
+    const raw = readFileSync(path, 'utf8');
+    return { path, eol: detectEol(raw), text: normalizeEol(raw) };
+  };
+  const siblingFiles = new Map([[AGENTS_TEMPLATE_REL, loadSibling(agentsMd)], [CLAUDE_TEMPLATE_REL, loadSibling(claudeMd)]]);
   const actions = [];
   for (const lead of TARGET_LEADS) {
+    const home = leadLayer.get(lead);
+    const other = TEMPLATE_RELS.find((rel) => rel !== home);
     const want = current.get(lead);
-    const found = extractBlock(text, lead);
+    const target = siblingFiles.get(home);
+    const foundInOther = extractBlock(siblingFiles.get(other).text, lead);
+    if (foundInOther) {
+      // A bullet present in the WRONG layer must never gain a second copy in the home file —
+      // checked BEFORE any replace/rename/insert path, whether or not it is ALSO present (a true
+      // duplicate) in the home layer (Sol review fix round, finding 6).
+      const foundHome = extractBlock(target.text, lead);
+      if (foundHome) {
+        actions.push({ lead, action: 'DUPLICATE_REFUSED', file: layerFileName(home), have: foundHome.block });
+      } else {
+        actions.push({ lead, action: 'WRONG_LAYER_REFUSED', file: layerFileName(other), have: foundInOther.block });
+      }
+      drift++;
+      continue;
+    }
+    const found = extractBlock(target.text, lead);
     if (found) {
       if (found.block === want) {
-        actions.push({ lead, action: 'matches' });
+        actions.push({ lead, action: 'matches', file: layerFileName(home) });
         continue;
       }
       if (variants.get(lead).has(found.block)) {
         // clean template-descended block → replace
-        const lines = text.split('\n');
+        const lines = target.text.split('\n');
         lines.splice(found.start, found.end - found.start, ...want.split('\n'));
-        text = lines.join('\n');
-        actions.push({ lead, action: APPLY ? 'updated' : 'would_update' });
+        target.text = lines.join('\n');
+        actions.push({ lead, action: APPLY ? 'updated' : 'would_update', file: layerFileName(home) });
       } else {
-        actions.push({ lead, action: 'HAND_TUNED_REFUSED', have: found.block });
+        actions.push({ lead, action: 'HAND_TUNED_REFUSED', file: layerFileName(home), have: found.block });
         drift++;
       }
       continue;
@@ -166,16 +214,16 @@ for (const p of projects) {
     // block is refused (P5), same as the normal replace path.
     let renamed = false;
     for (const oldLead of RENAMED_LEADS.get(lead) ?? []) {
-      const oldFound = extractBlock(text, oldLead);
+      const oldFound = extractBlock(target.text, oldLead);
       if (!oldFound) continue;
       renamed = true;
       if (variants.get(oldLead).has(oldFound.block)) {
-        const lines = text.split('\n');
+        const lines = target.text.split('\n');
         lines.splice(oldFound.start, oldFound.end - oldFound.start, ...want.split('\n'));
-        text = lines.join('\n');
-        actions.push({ lead, action: APPLY ? 'renamed' : 'would_rename' });
+        target.text = lines.join('\n');
+        actions.push({ lead, action: APPLY ? 'renamed' : 'would_rename', file: layerFileName(home) });
       } else {
-        actions.push({ lead, action: 'HAND_TUNED_REFUSED', have: oldFound.block });
+        actions.push({ lead, action: 'HAND_TUNED_REFUSED', file: layerFileName(home), have: oldFound.block });
         drift++;
       }
       break;
@@ -184,22 +232,24 @@ for (const p of projects) {
     // The Concept bullet is NEW — insert it after the sibling's
     // Reconcile bullet when that anchor is clean; everything else missing = drift.
     if (lead === TARGET_LEADS[1]) {
-      const anchor = extractBlock(text, TARGET_LEADS[0]);
+      const anchor = extractBlock(target.text, TARGET_LEADS[0]);
       if (anchor) {
-        const lines = text.split('\n');
+        const lines = target.text.split('\n');
         lines.splice(anchor.end, 0, ...want.split('\n'));
-        text = lines.join('\n');
-        actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert' });
+        target.text = lines.join('\n');
+        actions.push({ lead, action: APPLY ? 'inserted' : 'would_insert', file: layerFileName(home) });
         continue;
       }
     }
-    actions.push({ lead, action: 'ANCHOR_MISSING_REFUSED' });
+    actions.push({ lead, action: 'ANCHOR_MISSING_REFUSED', file: layerFileName(home) });
     drift++;
   }
 
   const dirty = actions.some((a) => ['updated', 'inserted', 'renamed'].includes(a.action));
-  if (APPLY && dirty) writeFileSync(claudeMd, text);
-  results.push({ project: p.name, status: 'processed', file: claudeMd, actions });
+  if (APPLY && dirty) {
+    for (const { path, text, eol } of siblingFiles.values()) writeFileSync(path, withEol(text, eol));
+  }
+  results.push({ project: p.name, status: 'processed', file: `${agentsMd} + ${claudeMd}`, actions });
 }
 
 // QUIET ON CLEAN, LOUD ON DRIFT (P1). A fully in-sync project prints nothing —

@@ -706,9 +706,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // Registry coverage — the SAME call the already-current path makes above.
   await reportCoverage(projectList);
 
-  // Read-only: reports CLAUDE.md contract drift in sibling projects without
+  // Read-only: reports AGENTS.md/CLAUDE.md contract drift in sibling projects without
   // touching them (--apply stays a deliberate act — it rewrites seven repos).
-  // TOLERATED because a sibling's CLAUDE.md must never abort THIS clone's update —
+  // TOLERATED because a sibling's AGENTS.md/CLAUDE.md must never abort THIS clone's update —
   // but tolerated is not the same as unseen: the step's own block sits between
   // build/test/check output, so its verdict is repeated in the closing summary
   // where it cannot scroll past (P1/P5). stamp-contract exits 2 on refusal.

@@ -1,5 +1,5 @@
 ---
-description: Initialize Sterling in this project (§12) — store, config, CLAUDE.md, agents, launcher, MCP wiring. Asks before assuming.
+description: Initialize Sterling in this project (§12) — store, config, AGENTS.md, CLAUDE.md, agents, launcher, MCP wiring. Asks before assuming.
 ---
 
 Run the §12 setup questions, ONE question at a time (ask, don't guess; recommend where you can):
@@ -14,6 +14,6 @@ Then execute the manifest:
 node "${CLAUDE_PLUGIN_ROOT}/scripts/init.mjs" --target "<project dir>" --project-name "<name>" --stack-tags <a,b> --toolchain <adapter>:<glob,glob> (--backup-path <p> | --backup-opt-out)
 ```
 
-Init is an ENSURE operation (§12): re-running it is safe and needs no flags — declarations are read back from `.sterling/config.json`. Per item it creates what is absent, skips what matches, and leaves-and-reports anything hand-edited (a pre-existing CLAUDE.md is never clobbered — relay the report's merge instruction). Skip the setup questions when the project already has a recorded config; only ask for what a fresh config needs.
+Init is an ENSURE operation (§12): re-running it is safe and needs no flags — declarations are read back from `.sterling/config.json`. Per item it creates what is absent, skips what matches, and leaves-and-reports anything hand-edited (a pre-existing AGENTS.md or CLAUDE.md is never clobbered — relay the report's merge instruction). A legacy pre-split CLAUDE.md is migrated automatically when its marker line is recognized; otherwise the report says `manual` and relay the preview diff path. Skip the setup questions when the project already has a recorded config; only ask for what a fresh config needs.
 
 Relay the per-item report table and the RESTART instruction prominently — a newly installed or synced agent is not visible to a session that was already running, so dispatch nothing until the session restarts (verify with `node scripts/check-agents-visible.mjs --target <dir> --session-started <iso>` if unsure).
