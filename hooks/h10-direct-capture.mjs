@@ -8714,15 +8714,23 @@ try {
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync6(join6(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
+  const endedResearchReturnAts = (classified.availability === "ok" ? classified.entries : []).filter((r) => r.status === "inactive-confirmed" && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at)).map((r) => r.entry.ended.at);
+  const latestResearchReturnAt = endedResearchReturnAts.length ? endedResearchReturnAts.sort().at(-1) : null;
+  const dischargedOnResearchLaneForDispatch = (e) => {
+    if (e.kind !== "agent_dispatch") return dischargedOnResearchLane(e.at);
+    if (researchDispatchLive) return false;
+    const anchor = latestResearchReturnAt && (!isValidAt(e.at) || latestResearchReturnAt > e.at) ? latestResearchReturnAt : e.at;
+    return dischargedOnResearchLane(anchor);
+  };
   const activeResearchEvents = researchEvents.filter((e) => {
     if (e.kind === "agent_dispatch" && researchDispatchLive) return false;
-    return !dischargedOnResearchLane(e.at);
+    return !dischargedOnResearchLaneForDispatch(e);
   });
   const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === "agent_dispatch");
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents ? store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }) : [];
   const individuallyResearchSatisfied = (at) => isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
   const outstandingDeferredResearchEvents = researchEvents.filter(
-    (e) => e.kind === "agent_dispatch" && researchDispatchLive && !dischargedOnResearchLane(e.at) && !individuallyResearchSatisfied(e.at)
+    (e) => e.kind === "agent_dispatch" && researchDispatchLive && !dischargedOnResearchLaneForDispatch(e) && !individuallyResearchSatisfied(e.at)
   );
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);

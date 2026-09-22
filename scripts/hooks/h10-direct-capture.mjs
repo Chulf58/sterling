@@ -1219,12 +1219,47 @@ try {
   // the latest `--lane research`/`--lane all` declaration is discharged; one
   // arriving AFTER it, one whose `at` is missing or malformed (never trusted as
   // comparable), or one facing only a capture-lane declaration keeps the duty armed.
+  // RETURN-ANCHORED DISCHARGE FOR agent_dispatch EVENTS (review fix, HIGH found
+  // on commit 4b75112). `dischargedOnResearchLane` alone compares a declaration
+  // against the event's own `at` — for an agent_dispatch event that `at` is the
+  // DISPATCH time, always strictly earlier than the dispatch's actual
+  // completion. A no_capture declared between dispatch and return therefore
+  // always looked "at or before the cutoff" and discharged the event even
+  // though its result did not exist yet at declaration time — and once
+  // discharged, the event is gone (never resurrected once the dispatch really
+  // returns): P5 silent loss, the same failure shape as the stale-satisfaction
+  // fix above, this time for no_capture rather than a finding.
+  //   - CURRENTLY live (`researchDispatchLive` true): no return timestamp
+  //     exists yet, so NO declaration can be "at or after return" — never
+  //     discharge here; the event leaves this Stop only via
+  //     `individuallyResearchSatisfied` below (a REAL finding), never via a
+  //     declaration made while the dispatch was still running.
+  //   - NOT currently live: join to the register's OWN `ended.at` when one
+  //     exists — the LATEST ended timestamp among this session's research-type
+  //     entries, lane-wide (no per-event join key exists — same accepted
+  //     coarseness `researchDispatchLive` itself already carries). The
+  //     discharge anchor is whichever is LATER, the event's own `at` or that
+  //     return timestamp, so a dispatch this session never tracked (no
+  //     register entry at all, or one with no valid `ended.at`) falls back to
+  //     the event's own `at` — the pre-existing, unaffected behavior.
+  // `research_tool` events are NEVER touched by this — they are synchronous,
+  // already complete at their own `at` by construction.
+  const endedResearchReturnAts = (classified.availability === 'ok' ? classified.entries : [])
+    .filter((r) => r.status === 'inactive-confirmed' && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at))
+    .map((r) => r.entry.ended.at);
+  const latestResearchReturnAt = endedResearchReturnAts.length ? endedResearchReturnAts.sort().at(-1) : null;
+  const dischargedOnResearchLaneForDispatch = (e) => {
+    if (e.kind !== 'agent_dispatch') return dischargedOnResearchLane(e.at);
+    if (researchDispatchLive) return false;
+    const anchor = latestResearchReturnAt && (!isValidAt(e.at) || latestResearchReturnAt > e.at) ? latestResearchReturnAt : e.at;
+    return dischargedOnResearchLane(anchor);
+  };
   const activeResearchEvents = researchEvents.filter((e) => {
     // RESEARCH RETURN GATE (see the `researchDispatchLive` comment above): a
     // dispatched research agent's own event waits for its return before it can
     // arm the duty at all; a research_tool event is never gated.
     if (e.kind === 'agent_dispatch' && researchDispatchLive) return false;
-    return !dischargedOnResearchLane(e.at);
+    return !dischargedOnResearchLaneForDispatch(e);
   });
 
   // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
@@ -1258,7 +1293,7 @@ try {
     (e) =>
       e.kind === 'agent_dispatch' &&
       researchDispatchLive &&
-      !dischargedOnResearchLane(e.at) &&
+      !dischargedOnResearchLaneForDispatch(e) &&
       !individuallyResearchSatisfied(e.at)
   );
 

@@ -129,9 +129,13 @@ const liveEntry = (agentId, agentType, sessionId = 's1') => ({
   files: [],
   at: agoISO(0),
 });
-const endedEntry = (agentId, agentType, sessionId = 's1') => ({
+// endedAt defaults to real-now (agoISO(0)) — fine for every test that never
+// compares it against a fictional no_capture declaration timestamp. A test
+// that DOES (the return-anchored discharge fixture below) passes an explicit
+// fictional endedAt so the two timelines line up.
+const endedEntry = (agentId, agentType, sessionId = 's1', endedAt = agoISO(0)) => ({
   ...liveEntry(agentId, agentType, sessionId),
-  ended: { at: agoISO(0), event: 'subagent-stop' }, // A1: H22 marks ended, never deletes
+  ended: { at: endedAt, event: 'subagent-stop' }, // A1: H22 marks ended, never deletes
 });
 
 const aEvent = (detail, at = R_EVENT_AT) => ({ kind: 'agent_dispatch', detail, at });
@@ -230,15 +234,76 @@ test('(c) a returned dispatch followed by a research_finding satisfies the duty 
 test('(d) a returned dispatch discharged by a no_capture --lane research declaration is satisfied — no nag, registers clear', () => {
   const { dir, store, cleanup } = makeProject();
   try {
-    const noCaptureAt = '2026-06-10T11:30:00.000Z'; // after the event, so it discharges it
+    const returnedAt = '2026-06-10T11:15:00.000Z'; // the dispatch returned BEFORE the declaration
+    const noCaptureAt = '2026-06-10T11:30:00.000Z'; // declared after the event AND after the return, so it legitimately discharges it
     writeSessionEvents(dir, [aEvent('researcher'), { kind: 'no_capture', detail: 'nothing durable from this scout', lane: 'research', at: noCaptureAt }]);
-    writeRegisterRaw(dir, [endedEntry('sub-researcher-1', 'researcher')]);
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-1', 'researcher', 's1', returnedAt)]);
 
     const r = stopOnce(dir);
     assert.equal(r.code, 0, 'a no_capture --lane research declaration discharges the returned dispatch\'s research event');
     assert.doesNotMatch(r.stderr, /research duty|nothing was researched/i, 'no research nag when discharged');
     assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared once the discharge is terminal');
     assert.equal(owed(store, 'research_owed').length, 0, 'nothing owed when the duty is discharged');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// RETURN-ANCHORED DISCHARGE FIX (Sol review, HIGH found on commit 4b75112): a
+// no_capture declaration made WHILE a dispatch is still presumed-active cannot
+// honestly discharge that dispatch's event — its result does not exist yet,
+// however far in the fictional past the event's own dispatch-time `at` sits
+// relative to the declaration. `dischargedOnResearchLane` alone compares
+// against the event's dispatch-time `at`, which is always EARLIER than any
+// later declaration by construction, so it always looked "discharged" — and
+// once dropped by clearRegisters(), the event never re-arms even after the
+// dispatch genuinely returns with nothing captured (P5 silent loss).
+// ===========================================================================
+
+test('RETURN-ANCHORED DISCHARGE FIX: a no_capture declared WHILE the dispatch is still live must not discharge (and delete) its event — the duty still blocks once the dispatch returns with nothing captured', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const DISPATCH_AT = '2026-06-10T10:00:00.000Z';
+    const NO_CAPTURE_AT = '2026-06-10T10:05:00.000Z'; // declared WHILE still live — premature, before any result exists
+    writeSessionEvents(dir, [aEvent('researcher', DISPATCH_AT), { kind: 'no_capture', detail: 'nothing seen so far', lane: 'research', at: NO_CAPTURE_AT }]);
+    writeRegisterRaw(dir, [liveEntry('sub-researcher-live', 'researcher')]); // still live when the declaration was made
+
+    const deferred = stopOnce(dir);
+    assert.equal(deferred.code, 0, 'still live — the lane defers quietly');
+    assert.deepEqual(
+      readSessionEvents(dir),
+      [aEvent('researcher', DISPATCH_AT)],
+      'PREMATURE-DISCHARGE SHAPE if this is []: a no_capture declared before return must not discharge (and thereby delete) the still-live dispatch event — its result does not exist yet'
+    );
+
+    // The dispatch returns; nothing new was ever captured.
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-live', 'researcher', 's1', agoISO(0))]);
+    const nag = stopOnce(dir);
+    assert.equal(
+      nag.code,
+      2,
+      'NEVER-RE-ARMS SHAPE if this is 0: the premature no_capture declaration must not discharge an event whose dispatch had not returned at declaration time — it must still block once the dispatch returns with nothing captured'
+    );
+    assert.match(nag.stderr, /research/i, 'the nag is the research duty');
+  } finally {
+    cleanup();
+  }
+});
+
+test('RETURN-ANCHORED DISCHARGE: a no_capture declared AFTER the dispatch actually returns still legitimately discharges it — satisfied, no nag', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const DISPATCH_AT = '2026-06-10T10:00:00.000Z';
+    const RETURN_AT = '2026-06-10T10:10:00.000Z';
+    const NO_CAPTURE_AT = '2026-06-10T10:15:00.000Z'; // declared AFTER the dispatch returned — legitimate
+    writeSessionEvents(dir, [aEvent('researcher', DISPATCH_AT), { kind: 'no_capture', detail: 'nothing durable', lane: 'research', at: NO_CAPTURE_AT }]);
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-returned', 'researcher', 's1', RETURN_AT)]);
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 0, 'OVER-CORRECTION SHAPE if this is 2: the declaration came after the dispatch genuinely returned — it must still legitimately discharge the event');
+    assert.doesNotMatch(out(r), /research duty|nothing was researched/i, 'no research nag when discharged');
+    assert.equal(existsSync(eventsPath(dir)), false, 'session-events register cleared once the discharge is terminal');
   } finally {
     cleanup();
   }
