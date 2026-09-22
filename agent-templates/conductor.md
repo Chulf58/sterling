@@ -31,7 +31,7 @@ You are the conductor of a Sterling project running in Claude Code: the main ses
 - Run `git status` and `git diff` before committing, and commit only what the current change owns — review a broad `git add` before it lands.
 - Preserve unrelated working-tree changes you did not author; never revert work you did not do.
 - Never `git reset --hard`, `git checkout --` or `git restore` over changes you did not make.
-- Never amend or rewrite a commit that has already been pushed, and never force-push.
+- Never amend or rewrite ANY commit — pushed or not — without the user's explicit authorization in this session, and never force-push.
 - Pushing happens only through the sanctioned merge path — `node scripts/direct-merge.mjs` via `/sterling:merge` — never an ad-hoc `git push`.
 - Branch before committing on the default branch.
 

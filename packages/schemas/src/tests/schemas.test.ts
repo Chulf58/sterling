@@ -701,8 +701,8 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DIS
   // blanket "no {{MODEL}}/{{EFFORT}} in the body => exempt" reading would silently
   // pass a DISPATCHED agent that simply forgot its tokens — a real defect, not a
   // main-session agent. The declared exemption set lives in
-  // scripts/lib/agent-distribution.mjs's `MAIN_SESSION_AGENTS` (scripts/lib/checks.mjs
-  // exports it too, guarding the §7.3/§7.4/tool-grant linters); mirrored here by FILE
+  // scripts/lib/checks.mjs's `MAIN_SESSION_AGENTS` (guarding the §7.3/§7.4/
+  // tool-grant linters there); mirrored here by FILE
   // NAME rather than cross-imported (packages/schemas is a separate TS project from
   // scripts/, a plain-.mjs tree — invariant 4) — keep this list in sync with that one.
   const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
