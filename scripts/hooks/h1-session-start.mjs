@@ -386,7 +386,7 @@ try {
 //
 // THE COMPARISON MUST STAY A NULL TEST, NOT A TRUTHINESS TEST. Rewriting it as
 // `if (config && ...)` swallows `false`, `0` and `""` — three JSON-legal
-// non-object configs that would silently return to a confident ON/ON — and the
+// non-object configs that would silently return to a confident ON — and the
 // four truthy non-object arms (`[]`, `true`, `"x"`, `5`) plus the null-trap arm all
 // stay GREEN under that rewrite, which is why those three falsy shapes are
 // pinned explicitly. Measured, not assumed: the truthiness rewrite reddens
@@ -429,16 +429,16 @@ try {
   // fail-open — a malformed config or unresolved plugin root costs only this line
 }
 
-// TDD / MUTATION-VERIFICATION POSTURE (decision foreign_752caf98
+// TDD POSTURE (decision foreign_752caf98
 // tdd-and-mutation-toggles-in-system-tab, board 7e7279c4 slice 3C): mechanizes
 // the "check what this machine is set to" instruction CLAUDE.md states in
-// prose by reading the LIVE per-project toggles at every SessionStart, rather
+// prose by reading the LIVE per-project toggle at every SessionStart, rather
 // than leaving the conductor to consult a value it cannot see. loadConfig
 // (above) returns the raw parsed .sterling/config.json with NO zod defaults
 // applied (unlike the MCP server's parseConfig) — a project whose config
 // predates this toggle, or config === null on a malformed read, leaves
 // config?.tdd?.enabled undefined here. Undefined is treated as the
-// DOCUMENTED SCHEMA DEFAULT (both fields default true, decision foreign_752caf98)
+// DOCUMENTED SCHEMA DEFAULT (the field defaults true, decision foreign_752caf98)
 // rather than invented: only an explicit `false` reads as OFF. Positioned
 // immediately after roleContext in the output concatenation below. Guarded
 // like every other H1 read — H1 is soft, so a malformed config costs only
@@ -448,11 +448,11 @@ try {
 // 2026-09-06, Codex thread 01a075e9, which caught this where two roster
 // reviewers did not). ABSENT and UNREADABLE are different facts and this line
 // must not collapse them: an absent key genuinely IS the schema default, but a
-// config that could not be PARSED tells us nothing about either toggle, and
-// rendering that as "ON / ON" asserts a posture the hook never read. That is
+// config that could not be PARSED tells us nothing about the toggle, and
+// rendering that as "ON" asserts a posture the hook never read. That is
 // the worst failure available here — worse than printing nothing — because
 // this line exists precisely to stop the conductor assuming a posture, and in
-// a project where both toggles are OFF (this clone, today) a corrupt config
+// a project where the toggle is OFF (this clone, today) a corrupt config
 // would confidently state the exact opposite of the truth. loadConfig returns
 // null for an ABSENT file and THROWS on a malformed one, which is what makes
 // the two distinguishable at all.
@@ -460,15 +460,14 @@ let tddPostureContext = '';
 try {
   if (configUnreadable) {
     tddPostureContext =
-      '\n\nTDD posture: UNKNOWN — the project config could not be read, so neither ' +
-      'config.tdd.enabled nor config.mutation_verification.enabled could be determined. ' +
+      '\n\nTDD posture: UNKNOWN — the project config could not be read, so ' +
+      'config.tdd.enabled could not be determined. ' +
       'This is NOT the default posture: repair the config, or state your posture explicitly.';
   } else {
     const tddOn = config?.tdd?.enabled !== false;
-    const mutationOn = config?.mutation_verification?.enabled !== false;
     tddPostureContext =
-      `\n\nTDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} · mutation verification ${mutationOn ? 'ON' : 'OFF'} ` +
-      `(config.tdd.enabled / config.mutation_verification.enabled — TUI System tab; explicit asks still work)`;
+      `\n\nTDD posture: tests-first ${tddOn ? 'ON' : 'OFF'} ` +
+      `(config.tdd.enabled — TUI System tab; explicit asks still work)`;
   }
 } catch {
   // fail-open — a malformed config costs only this line

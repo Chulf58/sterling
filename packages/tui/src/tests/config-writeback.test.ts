@@ -9,31 +9,35 @@ import { join } from 'node:path';
 // system-tab; test-writer work order item 3) — SPEC-ONLY, written against the
 // brief without reading main.ts or state.ts.
 //
-// SPEC: packages/tui/src/config-writeback.ts is a module being EXTRACTED from
-// main.ts (it does not exist yet) exporting three functions:
-//   applyTddToggle(e), applyMutationToggle(e), applySparringToggle(e)
+// SPEC: packages/tui/src/config-writeback.ts is a module EXTRACTED from
+// main.ts exporting two functions: applyTddToggle(e), applySparringToggle(e)
 // Each takes the reducer's toggle effect verbatim (the effect already carries
-// the FLIPPED target value — { type: 'tdd_toggle', enabled: boolean } /
-// { type: 'mutation_toggle', enabled: boolean }, per the CONTRACT already
-// pinned in tdd-mutation-toggles.test.ts) and rewrites .sterling/config.json
-// under the process cwd so <block>.enabled equals the effect's `enabled`.
+// the FLIPPED target value — { type: 'tdd_toggle', enabled: boolean }, per
+// the CONTRACT already pinned in tdd-mutation-toggles.test.ts) and rewrites
+// .sterling/config.json under the process cwd so <block>.enabled equals the
+// effect's `enabled`.
 //
-// CONTRACT this oracle OWNS for the two NEW functions (applyTddToggle /
-// applyMutationToggle — applySparringToggle is existence-only here, its
-// behavior is out of this brief's scope):
+// The sibling applyMutationToggle function this oracle used to also pin was
+// REMOVED entirely, along with config.mutation_verification (decision
+// cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
+// 2026-09-22): no live mechanism ever performed the check it promised. Every
+// test below that exercised it is DROPPED rather than rewritten, since its
+// entire subject no longer exists.
+//
+// CONTRACT this oracle OWNS for applyTddToggle (applySparringToggle is
+// existence-only here, its behavior is out of this brief's scope):
 //   (a) unrelated TOP-LEVEL keys in config.json are byte-preserved;
-//   (b) unrelated SIBLING keys inside the same block (tdd / mutation_verification)
-//       are preserved;
+//   (b) unrelated SIBLING keys inside the tdd block are preserved;
 //   (c) a config missing the block entirely gains exactly {enabled: <effect
 //       value>} for that block, without disturbing anything else.
 //
 // CLEAN-RED discipline (mirrors tdd-mutation-toggles.test.ts / sparring-partner.
-// test.ts): the module does not exist yet, so it is loaded dynamically and
-// existence-asserted before any test uses it — a genuinely unimplemented
-// module fails on a clean AssertionError, never a MODULE_NOT_FOUND crash.
+// test.ts): the module is loaded dynamically and existence-asserted before
+// any test uses it — a genuinely unimplemented module fails on a clean
+// AssertionError, never a MODULE_NOT_FOUND crash.
 // ===========================================================================
 
-type ToggleEffect = { type: 'tdd_toggle' | 'mutation_toggle' | 'sparring_toggle'; enabled: boolean };
+type ToggleEffect = { type: 'tdd_toggle' | 'sparring_toggle'; enabled: boolean };
 // Widened (additive, backward-compatible) for the explicit-config-path pins below:
 // PINNED SIGNATURE (this oracle's own call, per the work order — no existing
 // test exercises the onError slot, so this states it explicitly): the new
@@ -43,7 +47,6 @@ type ToggleEffect = { type: 'tdd_toggle' | 'mutation_toggle' | 'sparring_toggle'
 // Omitting onError/configPath preserves every existing pin's 1-arg call untouched.
 type Writeback = {
   applyTddToggle?: (e: ToggleEffect, onError?: (err: unknown) => void, configPath?: string) => unknown;
-  applyMutationToggle?: (e: ToggleEffect, onError?: (err: unknown) => void, configPath?: string) => unknown;
   applySparringToggle?: (e: ToggleEffect, onError?: (err: unknown) => void, configPath?: string) => unknown;
 };
 
@@ -113,10 +116,9 @@ async function withCwdAndExplicitConfig<T>(
 // Existence
 // ===========================================================================
 
-test('config-writeback: applyTddToggle, applyMutationToggle, and applySparringToggle are all exported as functions (frozen extraction target)', async () => {
+test('config-writeback: applyTddToggle and applySparringToggle are both exported as functions (frozen extraction target)', async () => {
   const mod = await loadWriteback();
   assert.strictEqual(typeof mod.applyTddToggle, 'function', 'applyTddToggle must be exported from config-writeback.ts');
-  assert.strictEqual(typeof mod.applyMutationToggle, 'function', 'applyMutationToggle must be exported from config-writeback.ts');
   assert.strictEqual(typeof mod.applySparringToggle, 'function', 'applySparringToggle must be exported from config-writeback.ts');
 });
 
@@ -174,80 +176,16 @@ test('config-writeback: applyTddToggle on a config missing the tdd block entirel
 });
 
 // ===========================================================================
-// applyMutationToggle — same three properties, mirrored
-// ===========================================================================
-
-test('config-writeback: applyMutationToggle rewrites mutation_verification.enabled and byte-preserves unrelated top-level keys', async () => {
-  const mod = await loadWriteback();
-  assert.strictEqual(typeof mod.applyMutationToggle, 'function', 'applyMutationToggle must be exported');
-  const applyMutationToggle = mod.applyMutationToggle!;
-
-  await withTempConfig(
-    {
-      mutation_verification: { enabled: true },
-      sparring_partner: { enabled: true, model: 'gpt-5.6' },
-      caps: { inner_loop_n: 3 },
-    },
-    async (cfgPath) => {
-      await applyMutationToggle({ type: 'mutation_toggle', enabled: false });
-      const written = readConfigFile(cfgPath);
-      assert.equal(
-        (written.mutation_verification as { enabled: boolean }).enabled,
-        false,
-        'mutation_verification.enabled is rewritten to the effect value',
-      );
-      assert.deepEqual(
-        written.sparring_partner,
-        { enabled: true, model: 'gpt-5.6' },
-        'the unrelated top-level sparring_partner block is untouched',
-      );
-      assert.deepEqual(written.caps, { inner_loop_n: 3 }, 'the unrelated top-level caps block is untouched');
-    },
-  );
-});
-
-test('config-writeback: applyMutationToggle preserves unrelated sibling keys inside the mutation_verification block itself', async () => {
-  const mod = await loadWriteback();
-  assert.strictEqual(typeof mod.applyMutationToggle, 'function', 'applyMutationToggle must be exported');
-  const applyMutationToggle = mod.applyMutationToggle!;
-
-  await withTempConfig({ mutation_verification: { enabled: true, note: 'hand-added sibling key' } }, async (cfgPath) => {
-    await applyMutationToggle({ type: 'mutation_toggle', enabled: false });
-    const written = readConfigFile(cfgPath);
-    const mv = written.mutation_verification as { enabled: boolean; note?: string };
-    assert.equal(mv.enabled, false, 'enabled is rewritten to the effect value');
-    assert.equal(mv.note, 'hand-added sibling key', 'an unrelated sibling key inside the mutation_verification block survives the rewrite');
-  });
-});
-
-test('config-writeback: applyMutationToggle on a config missing the mutation_verification block entirely adds {enabled: <effect value>} without disturbing anything else', async () => {
-  const mod = await loadWriteback();
-  assert.strictEqual(typeof mod.applyMutationToggle, 'function', 'applyMutationToggle must be exported');
-  const applyMutationToggle = mod.applyMutationToggle!;
-
-  await withTempConfig({ caps: { inner_loop_n: 3 } }, async (cfgPath) => {
-    await applyMutationToggle({ type: 'mutation_toggle', enabled: false });
-    const written = readConfigFile(cfgPath);
-    assert.deepEqual(
-      written.mutation_verification,
-      { enabled: false },
-      'a config missing the mutation_verification block entirely gains exactly {enabled: <effect value>}',
-    );
-    assert.deepEqual(written.caps, { inner_loop_n: 3 }, 'the unrelated caps block is untouched');
-  });
-});
-
-// ===========================================================================
 // Explicit config-path argument (adjudicated from a MEDIUM review finding,
 // decision-foreign_752caf98 territory; test-writer regression pin) —
-// applyTddToggle / applyMutationToggle gain an OPTIONAL TRAILING explicit
-// config-path argument: when a caller passes an absolute path to a
-// config.json, the function reads and writes EXACTLY that file, regardless
-// of process.cwd(). Omitting it preserves the cwd-derived default already
-// pinned by the 7 tests above (untouched by this addition). This pin exists
-// so the production caller's argv-derived path can never silently regress to
-// cwd — e.g. a change that reads the third argument but still resolves the
-// WRITE target from cwd, or that ignores the argument entirely.
+// applyTddToggle gains an OPTIONAL TRAILING explicit config-path argument:
+// when a caller passes an absolute path to a config.json, the function
+// reads and writes EXACTLY that file, regardless of process.cwd(). Omitting
+// it preserves the cwd-derived default already pinned by the tests above
+// (untouched by this addition). This pin exists so the production caller's
+// argv-derived path can never silently regress to cwd — e.g. a change that
+// reads the third argument but still resolves the WRITE target from cwd, or
+// that ignores the argument entirely.
 // ===========================================================================
 
 test('config-writeback: applyTddToggle called with an explicit config path reads and writes exactly that file, ignoring a different process.cwd', async () => {
@@ -266,35 +204,6 @@ test('config-writeback: applyTddToggle called with an explicit config path reads
       const target = readConfigFile(targetCfgPath);
       assert.equal(
         (target.tdd as { enabled: boolean }).enabled,
-        false,
-        'the explicit target config.json is rewritten to the effect value even though it is not process.cwd()',
-      );
-      const decoyAfter = readFileSync(decoyCfgPath, 'utf8');
-      assert.equal(
-        decoyAfter,
-        decoyBefore,
-        'the cwd-resident decoy config.json is byte-unchanged — the explicit path argument must never fall back to cwd',
-      );
-    },
-  );
-});
-
-test('config-writeback: applyMutationToggle called with an explicit config path reads and writes exactly that file, ignoring a different process.cwd', async () => {
-  const mod = await loadWriteback();
-  assert.strictEqual(typeof mod.applyMutationToggle, 'function', 'applyMutationToggle must be exported');
-  const applyMutationToggle = mod.applyMutationToggle!;
-
-  await withCwdAndExplicitConfig(
-    { mutation_verification: { enabled: true } },
-    { mutation_verification: { enabled: true } },
-    async (targetCfgPath, decoyCfgPath) => {
-      const decoyBefore = readFileSync(decoyCfgPath, 'utf8');
-
-      await applyMutationToggle({ type: 'mutation_toggle', enabled: false }, undefined, targetCfgPath);
-
-      const target = readConfigFile(targetCfgPath);
-      assert.equal(
-        (target.mutation_verification as { enabled: boolean }).enabled,
         false,
         'the explicit target config.json is rewritten to the effect value even though it is not process.cwd()',
       );

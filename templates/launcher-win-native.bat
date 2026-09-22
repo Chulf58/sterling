@@ -38,6 +38,6 @@ rem root from homedir(), so a Windows-only user's native server and native TUI
 rem already open %USERPROFILE%\.sterling\domains directly, with no boundary to
 rem cross. The ruling that a Windows installation invokes no WSL anywhere is
 rem unconditional, so the step is gone in BOTH modes.
-rem scripts/snapshot-domains-for-windows.mjs stays on disk as a hand-run legacy tool
-rem for a mixed host; it is no longer on any launch path.
+rem The former hand-run bridge script for a mixed host has since been deleted entirely
+rem (cleanup run, decision cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key).
 "%LOCALAPPDATA%\Microsoft\WindowsApps\wt.exe" -d "%CD%" "%USERPROFILE%\.local\bin\claude.exe" --plugin-dir "{{WIN_PLUGIN_DIR}}"{{MCP_ARGS}} ; split-pane -V --size {{SPLIT_RATIO}} -d "%CD%" "{{WIN_NODE}}" "{{WIN_TUI_BUNDLE}}" --store "%CD%\.sterling\sterling.db" ; move-focus left
