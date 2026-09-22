@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, utimesSync } from 'node:fs';
 import { tmpdir, hostname } from 'node:os';
 import { join } from 'node:path';
 import * as REG from '../lib/dispatch-register.mjs';
@@ -622,6 +622,131 @@ test('R1-A36: two concurrent withOwnerMkdirLock calls never overlap their critic
       if (r.code !== undefined) assert.equal(r.code, 'register_lock_held', 'the only legitimate loss is a held-lock refusal');
     }
     assert.equal(existsSync(lockDir), false, 'the lock DIRECTORY is gone — a leftover dir with no owner.json still deadlocks the next writer');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// withOwnerMkdirLock — OWNERLESS reclaim + release-only-its-own (decision
+// `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`).
+// Measured incident: an EMPTY lock dir (a writer died between mkdir and the
+// owner.json write) jammed sterling-main's register for 3.5 days. Age is set
+// with utimesSync on the directory, never by sleeping.
+// ===========================================================================
+
+function ageDir(p, ageMs) {
+  const t = (Date.now() - ageMs) / 1000;
+  utimesSync(p, t, t);
+}
+
+async function captureStderr(fn) {
+  const orig = process.stderr.write;
+  let text = '';
+  process.stderr.write = (chunk, ...rest) => {
+    text += String(chunk);
+    const cb = rest.find((r) => typeof r === 'function');
+    if (cb) cb();
+    return true;
+  };
+  try {
+    const value = await fn();
+    return { value, text };
+  } finally {
+    process.stderr.write = orig;
+  }
+}
+
+test('LK-1: an OWNERLESS lock dir older than the bound (10 min) IS reclaimed, loudly — stderr names the dir and its age', async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    const lockDir = REG.registerLockDir(dir);
+    mkdirSync(lockDir, { recursive: true });
+    ageDir(lockDir, 10 * MIN);
+    let ran = false;
+    const { value, text } = await captureStderr(() =>
+      REG.withOwnerMkdirLock(lockDir, () => { ran = true; return 'reclaimed'; }, { retryMs: 10, timeoutMs: 500 })
+    );
+    assert.equal(ran, true, 'an ownerless 10-minute-old lock dir is a crashed writer, not a holder');
+    assert.equal(value, 'reclaimed');
+    assert.ok(text.includes(lockDir), `the reclaim line names the directory: ${JSON.stringify(text)}`);
+    assert.match(text, /ownerless/i, 'the reclaim line says WHY it was reclaimed');
+    assert.match(text, /\b(600|601)s\b/, `the reclaim line states the age: ${JSON.stringify(text)}`);
+    assert.equal(existsSync(lockDir), false, 'the reclaimer releases normally afterwards');
+  } finally {
+    cleanup();
+  }
+});
+
+test('LK-2: an old lock dir whose owner.json is UNREADABLE (a crash mid-write) is ownerless too — reclaimed', async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    const lockDir = REG.registerLockDir(dir);
+    mkdirSync(lockDir, { recursive: true });
+    writeFileSync(join(lockDir, 'owner.json'), '{"pid": 12');
+    ageDir(lockDir, 10 * MIN);
+    let ran = false;
+    const { text } = await captureStderr(() =>
+      REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 500 })
+    );
+    assert.equal(ran, true);
+    assert.ok(text.includes(lockDir));
+  } finally {
+    cleanup();
+  }
+});
+
+test('LK-3 CONTROL: an ownerless lock dir YOUNGER than the bound (5s) is still held — refusal register_lock_held, dir untouched, no reclaim line', async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    const lockDir = REG.registerLockDir(dir);
+    mkdirSync(lockDir, { recursive: true });
+    ageDir(lockDir, 5000);
+    let ran = false;
+    const { value: r, text } = await captureStderr(() =>
+      refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }))
+    );
+    assert.equal(r.code, 'register_lock_held', `a young ownerless dir may be a writer between mkdir and owner write: ${JSON.stringify(r)}`);
+    assert.equal(ran, false);
+    assert.equal(existsSync(lockDir), true, 'the young dir is left in place');
+    assert.doesNotMatch(text, /ownerless/i, 'no reclaim was announced');
+  } finally {
+    cleanup();
+  }
+});
+
+test('LK-4: a LIVE-pid owner is never reclaimed however old — dir mtime AND owner.at a day old still refuse', async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    const lockDir = REG.registerLockDir(dir);
+    forgeLock(lockDir, { pid: process.pid, host: hostname(), at: new Date(Date.now() - 24 * 60 * MIN).toISOString(), nonce: 'live-old' });
+    ageDir(lockDir, 24 * 60 * MIN);
+    let ran = false;
+    const r = await refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }));
+    assert.equal(r.code, 'register_lock_held');
+    assert.equal(ran, false);
+    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).nonce, 'live-old', 'the live holder is untouched');
+  } finally {
+    cleanup();
+  }
+});
+
+test("LK-5: a release after a successor reclaimed the lock does NOT delete the successor's lock — and says so", async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    const lockDir = REG.registerLockDir(dir);
+    const { value, text } = await captureStderr(() =>
+      REG.withOwnerMkdirLock(lockDir, () => {
+        // Simulate the successor: our lock dir was reclaimed and re-acquired.
+        rmSync(lockDir, { recursive: true, force: true });
+        forgeLock(lockDir, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'successor' });
+        return 'done';
+      }, { retryMs: 10, timeoutMs: 500 })
+    );
+    assert.equal(value, 'done');
+    assert.equal(existsSync(lockDir), true, "the successor's lock dir survives our release");
+    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).nonce, 'successor');
+    assert.ok(text.includes(lockDir), `the skipped release is disclosed: ${JSON.stringify(text)}`);
   } finally {
     cleanup();
   }

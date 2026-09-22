@@ -7984,6 +7984,19 @@ function readOwner(lockDir) {
 function looksDeadOwner(o) {
   return !!o && o.host === hostname() && !isPidAlive(o.pid);
 }
+var OWNERLESS_RECLAIM_MS = 6e4;
+function ownerlessAgeMs(lockDir) {
+  if (readOwner(lockDir) !== null) return null;
+  try {
+    return Date.now() - statSync2(lockDir).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+function isReclaimableOwnerless(lockDir) {
+  const age = ownerlessAgeMs(lockDir);
+  return age !== null && age >= OWNERLESS_RECLAIM_MS;
+}
 function statIno(p) {
   try {
     return statSync2(p).ino;
@@ -8006,7 +8019,8 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
     } catch (e) {
       if (e?.code !== "EEXIST") throw e;
       const owner = readOwner(lockDir);
-      if (looksDeadOwner(owner)) {
+      const ownerless = owner === null && isReclaimableOwnerless(lockDir);
+      if (looksDeadOwner(owner) || ownerless) {
         const examinedIno = statIno(lockDir);
         const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
         let renamed = false;
@@ -8017,8 +8031,16 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
         }
         if (renamed) {
           const tombstoneOwner = readOwner(tombstone);
-          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
-          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+          const sameIno = examinedIno !== null && statIno(tombstone) === examinedIno;
+          const reclaimAgeMs = ownerless ? ownerlessAgeMs(tombstone) : null;
+          const verified = ownerless ? sameIno && reclaimAgeMs !== null && reclaimAgeMs >= OWNERLESS_RECLAIM_MS : sameIno && tombstoneOwner?.nonce === owner.nonce && looksDeadOwner(tombstoneOwner);
+          if (verified) {
+            if (ownerless) {
+              process.stderr.write(
+                `dispatch-register: reclaimed an OWNERLESS lock at ${lockDir} \u2014 no readable owner.json, ${Math.round(reclaimAgeMs / 1e3)}s old (bound ${OWNERLESS_RECLAIM_MS / 1e3}s): a writer died between mkdir and its owner write
+`
+              );
+            }
             try {
               rmSync(tombstone, { recursive: true, force: true });
             } catch {
@@ -8052,16 +8074,24 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       await sleepAsync(retryMs);
     }
   }
+  const nonce = randomBytes(8).toString("hex");
   writeFileSync2(
     join6(lockDir, "owner.json"),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
+    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce })
   );
   try {
     return await fn();
   } finally {
-    try {
-      rmSync(lockDir, { recursive: true, force: true });
-    } catch {
+    if (readOwner(lockDir)?.nonce === nonce) {
+      try {
+        rmSync(lockDir, { recursive: true, force: true });
+      } catch {
+      }
+    } else {
+      process.stderr.write(
+        `dispatch-register: release skipped at ${lockDir} \u2014 this holder's owner token is no longer inside (the lock was reclaimed); leaving it to its current holder
+`
+      );
     }
   }
 }

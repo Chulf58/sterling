@@ -185,10 +185,20 @@ export function readRegister(root) {
 // ---------------------------------------------------------------------------
 // withOwnerMkdirLock — the ONE lock primitive, shared by the register and the
 // legacy compatibility lock. mkdir-exclusivity + an owner.json {pid, host, at, nonce}.
-// Takeover ONLY when owner.host === this host AND owner.pid is verified not
-// running (process.kill(pid, 0) -> ESRCH). NEVER by age. A lock whose owner
-// cannot be verified dead on this host refuses (coordination, not evidence);
-// the operator removes it by hand only after confirming no writer runs.
+// Takeover when owner.host === this host AND owner.pid is verified not
+// running (process.kill(pid, 0) -> ESRCH), OR when the lock dir is OWNERLESS
+// (no readable owner.json) and its mtime is older than OWNERLESS_RECLAIM_MS —
+// a writer that died between mkdir and the owner write (decision
+// `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`;
+// measured: an empty lock dir jammed a register for 3.5 days). A lock WITH a
+// live-looking owner is NEVER taken by age: elapsed time is not proof of
+// death. Such a lock refuses (coordination, not evidence); the operator
+// removes it by hand only after confirming no writer runs. Release removes
+// the lock dir only while this holder's own nonce is still inside, so a
+// delayed holder can never delete a successor's lock.
+// NOT GUARANTEED: that a holder paused longer than OWNERLESS_RECLAIM_MS
+// between mkdir and its owner write keeps the lock — age cannot tell that
+// pause from a crash (accepted residual risk).
 //
 // ASYNC ONLY: withOwnerMkdirLock always returns a promise — a held lock
 // REJECTS with the refusal object rather than throwing synchronously. Every
@@ -225,6 +235,26 @@ function looksDeadOwner(o) {
   return !!o && o.host === hostname() && !isPidAlive(o.pid);
 }
 
+// Real holds last milliseconds, and the ownerless window is the gap between
+// mkdir and the owner.json write, so a 60s-old ownerless dir is a crash.
+const OWNERLESS_RECLAIM_MS = 60_000;
+
+// Age of an OWNERLESS lock dir in ms, or null when the dir has a readable
+// owner or cannot be stat'ed (gone — a release raced us).
+function ownerlessAgeMs(lockDir) {
+  if (readOwner(lockDir) !== null) return null;
+  try {
+    return Date.now() - statSync(lockDir).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
+function isReclaimableOwnerless(lockDir) {
+  const age = ownerlessAgeMs(lockDir);
+  return age !== null && age >= OWNERLESS_RECLAIM_MS;
+}
+
 function statIno(p) {
   try {
     return statSync(p).ino;
@@ -252,7 +282,8 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
     } catch (e) {
       if (e?.code !== 'EEXIST') throw e;
       const owner = readOwner(lockDir);
-      if (looksDeadOwner(owner)) {
+      const ownerless = owner === null && isReclaimableOwnerless(lockDir);
+      if (looksDeadOwner(owner) || ownerless) {
         // ATOMIC TAKEOVER: rename the stale dir away under a private name —
         // rename is atomic, so exactly ONE contender wins the rename. That
         // alone does not prove we moved the INCARNATION we examined: A and B
@@ -268,7 +299,9 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
         // on stderr and REFUSE this call outright rather than proceed on
         // unverified state. NOT GUARANTEED: three contenders racing inside
         // this one syscall gap (rename-out, stat, rename-back) is a residual
-        // window this closes down to, not fully closes.
+        // window this closes down to, not fully closes. An OWNERLESS dir has
+        // no nonce, so its incarnation check is inode + STILL ownerless + STILL
+        // older than the bound (a reused inode of a fresh dir fails the age).
         const examinedIno = statIno(lockDir);
         const tombstone = `${lockDir}.stale-${randomBytes(8).toString('hex')}`;
         let renamed = false;
@@ -280,8 +313,17 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
         }
         if (renamed) {
           const tombstoneOwner = readOwner(tombstone);
-          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
-          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
+          const sameIno = examinedIno !== null && statIno(tombstone) === examinedIno;
+          const reclaimAgeMs = ownerless ? ownerlessAgeMs(tombstone) : null;
+          const verified = ownerless
+            ? sameIno && reclaimAgeMs !== null && reclaimAgeMs >= OWNERLESS_RECLAIM_MS
+            : sameIno && tombstoneOwner?.nonce === owner.nonce && looksDeadOwner(tombstoneOwner);
+          if (verified) {
+            if (ownerless) {
+              process.stderr.write(
+                `dispatch-register: reclaimed an OWNERLESS lock at ${lockDir} — no readable owner.json, ${Math.round(reclaimAgeMs / 1000)}s old (bound ${OWNERLESS_RECLAIM_MS / 1000}s): a writer died between mkdir and its owner write\n`
+              );
+            }
             try {
               rmSync(tombstone, { recursive: true, force: true });
             } catch {
@@ -317,18 +359,27 @@ export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
     }
   }
 
+  const nonce = randomBytes(8).toString('hex');
   writeFileSync(
     join(lockDir, 'owner.json'),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: randomBytes(8).toString('hex') })
+    JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce })
   );
 
   try {
     return await fn();
   } finally {
-    try {
-      rmSync(lockDir, { recursive: true, force: true });
-    } catch {
-      // best-effort; a failed release leaves a diagnosable lock, never a crash
+    // RELEASE ONLY OUR OWN: a lock reclaimed while we held it now belongs to
+    // a successor, and deleting it would let two writers in at once.
+    if (readOwner(lockDir)?.nonce === nonce) {
+      try {
+        rmSync(lockDir, { recursive: true, force: true });
+      } catch {
+        // best-effort; a failed release leaves a diagnosable lock, never a crash
+      }
+    } else {
+      process.stderr.write(
+        `dispatch-register: release skipped at ${lockDir} — this holder's owner token is no longer inside (the lock was reclaimed); leaving it to its current holder\n`
+      );
     }
   }
 }
