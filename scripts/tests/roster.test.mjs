@@ -36,9 +36,14 @@ const CFG = { config: { models: MODELS }, models: MODELS };
 // The scale-down cut (decision sterling-claude-code-scale-down-boundary,
 // 2ad87dd1) deleted 8 pipeline/debugger templates. Slice 5/8 (same decision,
 // change 3) then reshaped the survivors to OpenSterling's roster shape:
-// explorer -> scout, plus a new implementor. The roster is now
-// implementor/researcher/scout/librarian.
-const ROSTER = ['implementor', 'researcher', 'scout', 'librarian'];
+// explorer -> scout, plus a new implementor. Decision
+// conductor-instructions-via-main-session-agent-route-a (2026-09-22) then
+// added conductor: a MAIN-SESSION agent, never dispatched, so it is
+// registered like every other agent but exempt from the §7.3/§7.4/tool-grant
+// linters (MAIN_SESSION_AGENTS in ../lib/checks.mjs) — the loop below still
+// runs it through each linter and expects an empty (vacuous) result. The
+// roster is now implementor/researcher/scout/librarian/conductor.
+const ROSTER = ['implementor', 'researcher', 'scout', 'librarian', 'conductor'];
 
 test('the §7.1 roster is registered, linter-complete, and spawn-contracted', () => {
   const registry = loadRegistry(join(TPL, 'registry.json'));

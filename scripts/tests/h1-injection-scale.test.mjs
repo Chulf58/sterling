@@ -215,38 +215,39 @@ const WHOLE_QUEUE_INSTRUCTION = /before taking new work/i;
 // bounded ASK this spec is about.
 const BOUNDED_DRAIN_ASK = /drain slice/i;
 
-// --------------------------- SPEC 1 (board eeb8ee53; RETIRED/INVERTED 2026-09-19) ---------------------------
+// --------------------------- SPEC 1 (board eeb8ee53; RETIRED 2026-09-19, INVERTED then RETIRED AGAIN 2026-09-22) ---------------------------
 //
-// SPEC1 ORIGINALLY pinned: source=clear trims H1's hardcoded conventions block
-// (a ~70%-duplicate restatement of CLAUDE.md) because the platform reloads the
-// committed CLAUDE.md on /clear anyway. That mechanism and its rationale are
-// BOTH gone (slice 3, conductor context diet, board d0f3647a): H1 no longer
-// carries a hardcoded conventions block at all — it injects
-// docs/conductor-contract.md's bytes verbatim, read fresh from the clone. That
-// file is a SEPARATE file the platform never auto-loads, so trimming it on
-// clear would mean a freshly cleared session runs with no delegation/review/
-// capture posture until the next SessionStart. The two tests below are
-// REWRITTEN, not deleted, to pin the new (inverted) invariant: the contract
-// injects on EVERY source, clear included. The old markers ("Anti-
-// speculation", "Sterling conventions" — both strings from the deleted block)
-// are replaced with a phrase from docs/conductor-contract.md's own heading.
+// SPEC1 ORIGINALLY pinned: source=clear trims H1's hardcoded conventions block.
+// It was then INVERTED (slice 3, conductor context diet, board d0f3647a) to pin
+// that H1 injects docs/conductor-contract.md's bytes verbatim on every source,
+// clear included. Decision conductor-instructions-via-main-session-agent-route-a
+// (2026-09-22) retires that mechanism too: the conductor's posture now lives in
+// agent-templates/conductor.md, installed to .claude/agents/conductor.md and
+// activated as the MAIN-SESSION AGENT (the "agent" key in .claude/settings.json)
+// — it is the system prompt, never a SessionStart hook injection. H1 carries no
+// contract text of any kind any more, on any source. The two tests below are
+// REWRITTEN a second time to pin THAT invariant, plus the migration diagnostic
+// (CONDUCTOR NOT ACTIVE) that replaces it: H1 disclosing loudly, never silently,
+// when a project has not yet run install-agents/sync-agents since the move.
 
-test('SPEC1 control: source=startup injects the conductor-contract block in full ("You are the delegator" heading present)', () => {
+test('H1 startup no longer injects any conductor-contract text ("# Conductor contract" / "You are the delegator" both absent)', () => {
   const { dir, cleanup } = makeProject();
   try {
     const r = h1(dir, 'startup');
     assert.equal(r.code, 0, `H1 must exit 0 (soft hook): ${r.stderr}`);
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r);
-    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract block still appears on startup');
+    assert.doesNotMatch(ctx, /# Conductor contract/, 'the retired contract heading never appears');
+    assert.doesNotMatch(ctx, /You are the delegator, not the worker/, 'the retired contract body never appears — it now lives in agent-templates/conductor.md, the main-session agent file, not a hook injection');
   } finally {
     cleanup();
   }
 });
-// NAMED SABOTAGE: delete/comment out the line(s) that append conductorContractBlock()
-// to additionalContext — this test goes RED because the heading never appears.
+// NAMED SABOTAGE: reintroduce conductorContractBlock() (or any read of
+// docs/conductor-contract.md) into additionalContext — this test goes RED
+// because one of the two markers reappears.
 
-test('SPEC1 (INVERTED): source=clear consuming a staged rotation note STILL carries the conductor-contract block, alongside the note payload', () => {
+test('H1 clear consuming a staged rotation note carries the note payload but no conductor-contract text', () => {
   const { dir, cleanup } = gitProject();
   try {
     const staged = runRotationNote(dir, ['--next-slice', 'Finish Goblin animations', '--risks', 'shader cache flaky']);
@@ -258,21 +259,123 @@ test('SPEC1 (INVERTED): source=clear consuming a staged rotation note STILL carr
     assert.ok(r.out, 'H1 must emit parseable JSON');
     const ctx = additionalContext(r);
 
-    // the note payload is still there
+    // the note payload is still there — H1 still injects and consumes the rotation note
     assert.match(ctx, /ROTATION RESTORE/, 'the rotation-restore section still fires');
     assert.match(ctx, /Finish Goblin animations/, 'the staged next_slice text is still injected');
 
-    // the conductor-contract block — the ONLY way this content reaches context,
-    // since the platform never auto-loads docs/conductor-contract.md — must be
-    // present on clear exactly as on startup; trimming it here would leave a
-    // freshly cleared session with no delegation/review/capture posture at all.
-    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract block still appears when a rotation note is consumed on clear');
+    // but the retired contract text is gone, on clear exactly as on startup
+    assert.doesNotMatch(ctx, /# Conductor contract/, 'the retired contract heading never appears on clear either');
+    assert.doesNotMatch(ctx, /You are the delegator, not the worker/, 'the retired contract body never appears on clear either');
   } finally {
     cleanup();
   }
 });
-// NAMED SABOTAGE: reintroduce a source==='clear' special case that skips
-// conductorContractBlock() — this test goes RED because the heading match fails.
+// NAMED SABOTAGE: reintroduce conductorContractBlock() into the clear-path
+// additionalContext — this test goes RED because one of the two markers reappears.
+
+// --------------------------- CONDUCTOR ACTIVATION MIGRATION DIAGNOSTIC ---------------------------
+// Route A (decision conductor-instructions-via-main-session-agent-route-a): a
+// project that has not yet run install-agents/sync-agents since the migration
+// has neither .claude/settings.json's "agent" key nor .claude/agents/conductor.md
+// — H1 must say so loudly (P5), never leave the conductor silently running the
+// default harness prompt with no Sterling posture. Both present -> silence.
+
+function writeSettings(dir, obj) {
+  mkdirSync(join(dir, '.claude'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'settings.json'), typeof obj === 'string' ? obj : JSON.stringify(obj));
+}
+function writeConductorAgentFile(dir) {
+  mkdirSync(join(dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(join(dir, '.claude', 'agents', 'conductor.md'), '---\nname: conductor\ndescription: probe\n---\n\n# Conductor\n');
+}
+
+test('CONDUCTOR NOT ACTIVE: no .claude/settings.json at all', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    const ctx = additionalContext(h1(dir, 'startup'));
+    assert.match(ctx, /CONDUCTOR NOT ACTIVE: settings key missing/);
+    assert.match(ctx, /sync-agents\.mjs --target/);
+    assert.match(ctx, /EXIT AND RELAUNCH/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('CONDUCTOR NOT ACTIVE: settings.json present but no "agent" key', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSettings(dir, {});
+    writeConductorAgentFile(dir);
+    const ctx = additionalContext(h1(dir, 'startup'));
+    assert.match(ctx, /CONDUCTOR NOT ACTIVE: settings key missing/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('CONDUCTOR NOT ACTIVE: "agent" set to a different value', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSettings(dir, { agent: 'someone-else' });
+    writeConductorAgentFile(dir);
+    const ctx = additionalContext(h1(dir, 'startup'));
+    assert.match(ctx, /CONDUCTOR NOT ACTIVE: settings key is "someone-else"/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('CONDUCTOR NOT ACTIVE: "agent": "conductor" set but .claude/agents/conductor.md missing', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSettings(dir, { agent: 'conductor' });
+    const ctx = additionalContext(h1(dir, 'startup'));
+    assert.match(ctx, /CONDUCTOR NOT ACTIVE: \.claude\/agents\/conductor\.md missing/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('CONDUCTOR ACTIVE: settings "agent": "conductor" AND the installed file both present -> no CONDUCTOR NOT ACTIVE line', () => {
+  const { dir, cleanup } = makeProject();
+  try {
+    writeSettings(dir, { agent: 'conductor', other_key: 'preserved elsewhere, not H1\'s concern' });
+    writeConductorAgentFile(dir);
+    const ctx = additionalContext(h1(dir, 'startup'));
+    assert.doesNotMatch(ctx, /CONDUCTOR NOT ACTIVE/);
+  } finally {
+    cleanup();
+  }
+});
+
+// Sol review MEDIUM finding: a settings value or a path containing a space (or
+// worse, a quote/newline) must never split the diagnostic across lines or break
+// the recovery command's shell quoting. A project directory with a space in its
+// name is the realistic trigger (Windows/WSL project folders routinely have one).
+test('CONDUCTOR NOT ACTIVE: a project path containing a space renders as ONE line with both paths single-quoted (shell-safe, copy-paste-able)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'sterling-h1scale-'));
+  const dir = join(base, 'my project');
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(BASE_CONFIG));
+  const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  try {
+    const r = h1(dir, 'startup');
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = additionalContext(r);
+    const lines = ctx.split('\n').filter((l) => l.includes('CONDUCTOR NOT ACTIVE'));
+    assert.equal(lines.length, 1, 'exactly one line carries the diagnostic');
+    const line = lines[0];
+    assert.doesNotMatch(line, /\n/, 'the line itself carries no embedded newline');
+    assert.match(
+      line,
+      new RegExp(`^CONDUCTOR NOT ACTIVE: settings key missing — run \`node '.*'/scripts/sync-agents\\.mjs --target '${dir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'\` then EXIT AND RELAUNCH$`),
+      'the exact single-line, single-quoted recovery command'
+    );
+  } finally {
+    store.close();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
 
 // --------------------------- SPEC 2 (board 91fc3d6f) ---------------------------
 

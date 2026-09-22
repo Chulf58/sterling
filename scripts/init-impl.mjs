@@ -28,7 +28,7 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
-import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
+import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -657,6 +657,16 @@ for (const a of agentReport) {
 }
 const restartNeeded = agentChangesRequireRestart(agentReport);
 
+// Route A (decision conductor-instructions-via-main-session-agent-route-a): init installs
+// the conductor like every other agent above, then activates it the same way
+// install-agents/sync-agents do — a settings-only write also needs a restart.
+const conductorActivation = ensureConductorActivation(target, agentReport);
+items.push({
+  item: '.claude/settings.json (conductor activation)',
+  status: { written: 'created', already: 'matches', refused: 'refused', skipped: 'skipped' }[conductorActivation.activation],
+  detail: conductorActivation.reason ?? (conductorActivation.activation === 'written' ? `wrote "agent": "conductor" to ${conductorActivation.path}` : 'already "agent": "conductor"'),
+});
+
 // MCP packaging (decision foreign_097851ed, refined): the Sterling MCP server is declared
 // ONCE as the PLUGIN's server — but NOT via a root .mcp.json. A root .mcp.json is
 // BOTH auto-discovered by the plugin AND read as Sterling-self's project-scope config
@@ -1204,7 +1214,11 @@ try {
   console.log('\n' + renderUnavailable(`unexpected error: ${err?.message ?? err}`));
 }
 
-if (restartNeeded) {
+if (conductorActivation.activation === 'written') {
+  console.log(`\nEXIT AND RELAUNCH: conductor activation newly written in ${conductorActivation.path}`);
+}
+
+if (restartNeeded || conductorActivation.activation === 'written') {
   console.log('\n' + RESTART_INSTRUCTION);
 } else {
   console.log('\nno agent changes — no restart required');

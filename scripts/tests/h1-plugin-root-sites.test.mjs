@@ -150,12 +150,15 @@ function makePlantedMarkerRoot(base, name = 'planted-root') {
 // fixture content, which is exactly the property a liveness check needs.
 // CHANGED 2026-09-19 (slice 3, conductor context diet): the original marker
 // was the phrase "reading files by hand", part of H1's hardcoded delegation-
-// conventions block. That block is deleted — H1 now injects
-// docs/conductor-contract.md verbatim from the clone, so the old phrase is
-// gone from ordinary output. "TDD posture:" replaces it: it is produced by a
-// separate, unconditional H1 section (config.tdd.enabled / .mutation_
-// verification.enabled) untouched by this slice, so it stays a liveness
-// signal independent of the contract's own wording.
+// conventions block. That block is deleted, and so is what briefly replaced
+// it — H1 injected docs/conductor-contract.md verbatim for a time, then that
+// too was retired 2026-09-22 (decision
+// conductor-instructions-via-main-session-agent-route-a): the conductor's
+// posture now lives in agent-templates/conductor.md, the main-session agent's
+// system prompt, never a SessionStart injection. "TDD posture:" survives all
+// of it: it is produced by a separate, unconditional H1 section
+// (config.tdd.enabled / .mutation_verification.enabled), so it stays a
+// liveness signal independent of what H1 does or does not inject.
 // =============================================================================
 
 test('LIVENESS CONTROL (must be GREEN before any other pin in this file is trusted): H1 produces its ordinary banner in this file\'s base fixture shape (a project with a real store, no env overrides)', () => {

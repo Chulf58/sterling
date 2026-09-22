@@ -685,7 +685,7 @@ test('feature_article.concept_family: optional marker round-trips; legacy articl
 // packages/schemas/src/tests -> src -> schemas -> packages -> repo root
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 
-test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every registered agent maps to a config.models key (AC7, interface slice 2)', async () => {
+test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every DISPATCHED registered agent (registry minus the declared main-session set) is tokenized and maps to a config.models key (AC7, interface slice 2)', async () => {
   // dynamic import + cast: AGENT_MODEL_KEY does not exist until this phase ships, so a missing
   // export must fail an ASSERTION below — never a compile-time reference (a crash-red proves nothing).
   const mod = (await import('../index.js')) as unknown as Record<string, unknown>;
@@ -694,22 +694,50 @@ test('AGENT_MODEL_KEY: totality over agent-templates/registry.json — every reg
 
   // the totality oracle: read the registry the map must be total over
   const registry = JSON.parse(readFileSync(join(REPO_ROOT, 'agent-templates', 'registry.json'), 'utf8')) as {
-    agents: { name: string }[];
+    agents: { name: string; file: string }[];
   };
-  const registeredNames = registry.agents.map((a) => a.name).sort();
 
-  // DIRECTION (knowledge slice): totality is over REGISTERED AGENTS -> keys, not keys -> agents.
-  // Every registered agent has a non-blank mapping...
-  for (const name of registeredNames) {
-    assert.equal(typeof map![name], 'string', `registered agent '${name}' is missing an AGENT_MODEL_KEY entry`);
-    assert.ok(map![name].length > 0, `AGENT_MODEL_KEY['${name}'] must not be blank`);
+  // EXEMPTION IS THE DECLARED SET, NOT A TOKEN SNIFF (Sol review LOW finding): the
+  // blanket "no {{MODEL}}/{{EFFORT}} in the body => exempt" reading would silently
+  // pass a DISPATCHED agent that simply forgot its tokens — a real defect, not a
+  // main-session agent. The declared exemption set lives in
+  // scripts/lib/checks.mjs's `MAIN_SESSION_AGENTS` (guarding the §7.3/§7.4/
+  // tool-grant linters there); mirrored here by FILE
+  // NAME rather than cross-imported (packages/schemas is a separate TS project from
+  // scripts/, a plain-.mjs tree — invariant 4) — keep this list in sync with that one.
+  const MAIN_SESSION_AGENT_FILES = ['conductor.md'];
+
+  const exemptNames = registry.agents.filter((a) => MAIN_SESSION_AGENT_FILES.includes(a.file)).map((a) => a.name);
+  const dispatchedAgents = registry.agents.filter((a) => !MAIN_SESSION_AGENT_FILES.includes(a.file));
+
+  // Every DISPATCHED (non-exempt) registered agent must be BOTH tokenized (its
+  // template resolves {{MODEL}}/{{EFFORT}} at install time) AND mapped — a
+  // dispatched agent that lost either one is a real defect, never silently exempt.
+  const dispatchedNames = dispatchedAgents.map((a) => a.name).sort();
+  for (const a of dispatchedAgents) {
+    const content = readFileSync(join(REPO_ROOT, 'agent-templates', a.file), 'utf8');
+    assert.match(
+      content,
+      /\{\{MODEL\}\}|\{\{EFFORT\}\}/,
+      `dispatched agent '${a.name}' carries no {{MODEL}}/{{EFFORT}} token — either it is a main-session agent missing from MAIN_SESSION_AGENT_FILES, or its template lost the token`
+    );
+    assert.equal(typeof map![a.name], 'string', `dispatched agent '${a.name}' has no AGENT_MODEL_KEY entry`);
+    assert.ok(map![a.name].length > 0, `AGENT_MODEL_KEY['${a.name}'] must not be blank`);
   }
-  // ...and there are no orphan keys: the map's keys are EXACTLY the registered agents.
+  // ...and there are no orphan keys: the map's keys are EXACTLY the dispatched registered agents.
   assert.deepEqual(
     Object.keys(map!).sort(),
-    registeredNames,
-    'AGENT_MODEL_KEY keys are exactly the registered agents — none missing, none orphaned'
+    dispatchedNames,
+    'AGENT_MODEL_KEY keys are exactly the DISPATCHED registered agents (registry minus MAIN_SESSION_AGENT_FILES) — none missing, none orphaned'
   );
+
+  // A declared main-session agent (conductor) must NOT carry an AGENT_MODEL_KEY
+  // entry — its frontmatter has no model:/effort: line for one to resolve, by design
+  // (decision conductor-instructions-via-main-session-agent-route-a): a model: line
+  // there would override the model the user launched the session with.
+  for (const name of exemptNames) {
+    assert.ok(!(name in map!), `'${name}' is a declared main-session agent — must not appear in AGENT_MODEL_KEY`);
+  }
 
   // the exact expected mapping — Slice 5/8 (decision
   // sterling-claude-code-scale-down-boundary, 2ad87dd1, change 3): the roster

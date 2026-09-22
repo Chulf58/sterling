@@ -99,36 +99,6 @@ async function deleteRegisterUnderLock(cwd) {
   }
 }
 
-// CONDUCTOR CONTRACT INJECTION (slice 3, objective sterling-takeover-2026-09,
-// board d0f3647a). Replaces the ~11KB "Sterling conventions" block that
-// restated CLAUDE.md prose from a hardcoded array of strings (compare git
-// history above this line) — the conventions/posture text now lives ONCE, in
-// docs/conductor-contract.md, and H1 injects its bytes verbatim rather than a
-// second, drifting copy. Read from the CLONE (pluginRoot()), never from the
-// project cwd: the contract is Sterling's own working posture, ships with the
-// plugin, and must reach every project the same way CLAUDE.md's conduct rules
-// do — no per-project copy, no stamp-contract propagation.
-// FAILS LOUD, NEVER SILENTLY EMPTY (P5): a missing/unreadable/empty file
-// renders a one-line CONDUCTOR CONTRACT UNAVAILABLE notice instead of quietly
-// contributing nothing to the injection, which would look like "no posture to
-// state" rather than "the file could not be read".
-function conductorContractBlock() {
-  const root = pluginRoot();
-  if (!root) {
-    return 'CONDUCTOR CONTRACT UNAVAILABLE (H1): the Sterling plugin root could not be resolved, so docs/conductor-contract.md could not be read. The conductor has no posture contract this session.';
-  }
-  const contractPath = join(root, 'docs', 'conductor-contract.md');
-  try {
-    const text = readFileSync(contractPath, 'utf8');
-    if (!text.trim()) {
-      return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} exists but is empty. The conductor has no posture contract this session.`;
-    }
-    return text;
-  } catch (e) {
-    return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} could not be read (${e?.code ?? e?.message ?? e}). The conductor has no posture contract this session.`;
-  }
-}
-
 // swappable art slot (§6 H1): fixed-width ≤40 cols, fits the 35% split pane
 const BANNER_ROWS = [
   '▄▀▀ ▀█▀ █▀▀ █▀▄ █   ▀█▀ █▄ █ ▄▀▀▄',
@@ -1672,28 +1642,56 @@ if (process.env.STERLING_NO_BANNER !== '1') {
   process.stderr.write(`${paint(BANNER_ROWS)}\n${versionLine}`);
 }
 
-// CONDUCTOR CONTRACT ON EVERY SOURCE (supersedes the old PAYLOAD TRIM ON
-// /clear, board eeb8ee53): the retired conventions block was trimmed on
-// source==='clear' because it was a ~70%-duplicate restatement of the
-// committed CLAUDE.md, which the platform reloads on /clear anyway. That
-// rationale does not carry over — docs/conductor-contract.md is a SEPARATE
-// file the platform never auto-loads; H1's read of it here is the ONLY way
-// the conductor's posture reaches context, on every source (startup, resume,
-// clear, compact) alike. Trimming it on clear would mean a freshly cleared
-// session runs with no delegation/review/capture posture until the next
-// SessionStart — the opposite of "H1 injects it once per session" (CLAUDE.md
-// line 3). No config read is needed here any more: the retired block's only
-// config-driven line (the live max_concurrent ceiling) is dropped along with
-// it — the contract is a static file and cannot embed a per-machine live
-// value without going stale; the ceiling stays readable from
-// .sterling/config.json directly (delegation.max_concurrent) or the TUI.
-const conventionsBlock = conductorContractBlock();
+// CONDUCTOR ACTIVATION MIGRATION DIAGNOSTIC (route A, decision
+// conductor-instructions-via-main-session-agent-route-a): H1 no longer injects
+// the contract text — .claude/agents/conductor.md IS the conductor's system
+// prompt now, activated by the "agent" key in .claude/settings.json
+// (install-agents/sync-agents write both). A project that has not yet run
+// either since the migration has neither, so this checks both and says so
+// loudly (P5) rather than leaving the conductor silently running the default
+// harness prompt with no Sterling posture at all. Absent/malformed
+// settings.json is tolerated — that IS the finding, not a crash. Only the
+// outermost catch stays silent (same discipline as the machine-context block
+// above): a failed check here must never break SessionStart.
+let conductorActivationContext = '';
+try {
+  const settingsPath = join(input.cwd, '.claude', 'settings.json');
+  let settingsAgent; // stays undefined on: file absent, malformed JSON, non-object
+  if (existsSync(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) settingsAgent = parsed.agent;
+    } catch {
+      // malformed settings.json reads the same as an absent 'agent' key below
+    }
+  }
+  const conductorFileMissing = !existsSync(join(input.cwd, '.claude', 'agents', 'conductor.md'));
+  let reason = null;
+  if (settingsAgent !== 'conductor') {
+    // JSON.stringify, not manual quoting: an "agent" value containing a quote or a
+    // newline (however unlikely a hand-edited settings.json makes it) must never be
+    // able to break this diagnostic across lines (Sol review MEDIUM finding).
+    reason = settingsAgent === undefined ? 'settings key missing' : `settings key is ${JSON.stringify(settingsAgent)}`;
+  } else if (conductorFileMissing) {
+    reason = '.claude/agents/conductor.md missing';
+  }
+  if (reason !== null) {
+    const clone = pluginRoot() ?? '<clone>';
+    // POSIX single-quoted shell arguments (same idiom as scripts/lib/update.mjs's
+    // shellQuote / packages/store's shellQuoteSingle): a clone or project path
+    // containing a space must still paste as ONE argument, copy-paste safe.
+    const shq = (value) => `'${String(value).split("'").join(`'\\''`)}'`;
+    conductorActivationContext = `\n\nCONDUCTOR NOT ACTIVE: ${reason} — run \`node ${shq(clone)}/scripts/sync-agents.mjs --target ${shq(input.cwd)}\` then EXIT AND RELAUNCH`;
+  }
+} catch {
+  // fail-open (P1): this diagnostic must never break SessionStart
+}
 
 const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
-  // session may take on, so it is read before the conventions, not after them.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  // session may take on, so it is read before everything else.
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the
