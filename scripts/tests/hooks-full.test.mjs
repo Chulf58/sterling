@@ -2433,7 +2433,11 @@ test('H10 slice boundary: no git degrades LOUD and open — soft + non-repo neve
 
 // --------------------------- Rotation note + H1 restore (context-rotation slice 3) ---------------------------
 // scripts/rotation-note.mjs writes the single-slot transient note; H1 injects and
-// CONSUMES it on SessionStart source=clear only. Fail-open everywhere (H1 is soft).
+// CONSUMES it on SessionStart source=startup OR source=clear (startup added
+// 2026-09-22, Dome Farmer's issue log 2026-09-08: source=clear only meant the
+// EXIT AND RELAUNCH sequence rotation-note.mjs itself prescribes did not, on
+// its own, deliver the note). resume/compact do not consume it. Fail-open
+// everywhere (H1 is soft).
 
 const ROTATION_SCRIPT = join(root, 'scripts', 'rotation-note.mjs');
 
@@ -2512,11 +2516,38 @@ test('H1 rotation restore: source=clear injects the note into additionalContext 
   }
 });
 
-test('H1 rotation restore: source=startup/resume neither injects nor consumes', () => {
+// CHANGED 2026-09-22 (Dome Farmer's issue log 2026-09-08, "code-reload
+// rotation note only consumed on /clear, not startup"): this test used to
+// assert 'source=startup/resume neither injects nor consumes'. rotation-
+// note.mjs's own printed guidance tells the user to EXIT AND RELAUNCH when
+// hook/MCP code changed, and a relaunch fires SessionStart with
+// source=startup — so a startup-excluded gate meant the note was only
+// delivered if the user ALSO ran /clear afterward. H1 now consumes on
+// startup too (own test below); resume and compact still do not, because
+// resume continues the SAME logical session and compact is not a re-entry.
+test('H1 rotation restore: source=startup injects the note into additionalContext and CONSUMES it (single shot)', () => {
+  const { dir, cleanup } = gitProject();
+  try {
+    assert.equal(runRotationNote(dir, ['--next-slice', 'Finish Goblin animations', '--risks', 'shader cache flaky']).status, 0);
+    const r = h1(dir, { source: 'startup' });
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = r.out.hookSpecificOutput.additionalContext;
+    assert.match(ctx, /ROTATION RESTORE/);
+    assert.match(ctx, /Finish Goblin animations/);
+    assert.match(ctx, /shader cache flaky/);
+    assert.equal(readRotationNote(dir), null, 'note consumed by the injection');
+    const again = h1(dir, { source: 'startup' });
+    assert.doesNotMatch(again.out.hookSpecificOutput.additionalContext, /ROTATION RESTORE/, 'no re-injection');
+  } finally {
+    cleanup();
+  }
+});
+
+test('H1 rotation restore: source=resume/compact neither injects nor consumes', () => {
   const { dir, cleanup } = gitProject();
   try {
     assert.equal(runRotationNote(dir, ['--next-slice', 'Finish Goblin animations']).status, 0);
-    for (const source of ['startup', 'resume']) {
+    for (const source of ['resume', 'compact']) {
       const r = h1(dir, { source });
       assert.doesNotMatch(r.out.hookSpecificOutput.additionalContext, /ROTATION RESTORE/, `${source} does not inject`);
       assert.ok(readRotationNote(dir), `${source} does not consume`);

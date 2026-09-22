@@ -8996,7 +8996,7 @@ var NOTE_FIELD_MAX = {
 };
 var rotationContext = "";
 try {
-  if (input.source === "clear") {
+  if (input.source === "startup" || input.source === "clear") {
     const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
     if (existsSync6(notePath)) {
       const note = JSON.parse(readFileSync5(notePath, "utf8"));
@@ -9102,11 +9102,12 @@ ${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired,
 ${renderedUncertain}` + (omittedUncertain > 0 ? `
 \u2026 (+${omittedUncertain} more)` : "");
       }
+      const isClear = input.source === "clear";
       rotationContext = `
 
-ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
+ROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
 ${fields}${liveLine}${uncertainLine}
-Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.`);
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
     }
   }
 } catch {

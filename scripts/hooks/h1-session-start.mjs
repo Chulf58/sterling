@@ -722,15 +722,27 @@ function planLockSection(ctx) {
   return { context: blocks.length ? blocks.join('\n') + '\n\n' : '', lock: malformed ? null : lock, malformed };
 }
 
-// ROTATION RESTORE (context-rotation slice 3): a rotation note written by
-// scripts/rotation-note.mjs before a /clear is injected into the FRESH session
-// and CONSUMED by that injection — source=clear ONLY (startup/resume have their
-// own truths and must not eat a note prepared for a rotation that hasn't
-// happened). Single-shot by deletion-before-build (P4): even a later failure in
-// this block cannot leave a note that re-injects forever. Disclosures over
-// refusals: a moved HEAD or an old note still injects, loudly qualified — the
-// store/board stay the authorities; the note is only the non-reconstructable
-// residue. Fail-open like every H1 read.
+// ROTATION RESTORE (context-rotation slice 3; startup consumption added
+// 2026-09-22, Dome Farmer's issue log 2026-09-08 "code-reload rotation note
+// only consumed on /clear, not startup"): a rotation note written by
+// scripts/rotation-note.mjs before a /clear OR before an EXIT AND RELAUNCH is
+// injected into the FRESH session and CONSUMED by that injection —
+// source=startup OR source=clear (resume/compact have their own truths and
+// must not eat a note prepared for a rotation that hasn't happened: a resume
+// continues the SAME logical session, and a compact is not a re-entry at
+// all). rotation-note.mjs's own printed guidance tells the user to EXIT AND
+// RELAUNCH when hook/MCP code changed; a relaunch fires SessionStart with
+// source=startup, so consuming only on clear meant that path silently failed
+// to deliver the note until the user ALSO ran /clear. Single-shot by
+// deletion-before-build (P4): even a later failure in this block cannot leave
+// a note that re-injects forever. Disclosures over refusals: a moved HEAD, an
+// old note, or a note left by a session that never relaunched still injects,
+// loudly qualified (the `at`-based age caution below covers a stale note the
+// same way regardless of source — deliberately no separate startup-only age
+// bound: the store/board stay the authorities and a note too old to trust is
+// still disclosed, never silently dropped) — the store/board stay the
+// authorities; the note is only the non-reconstructable residue. Fail-open
+// like every H1 read.
 // Per-field render bounds for the note: prose fields carry the substance the
 // note exists for, path/sha-shaped ones can never legitimately be longer than a
 // path. Every one of them is rendered through planLockClean (the shared
@@ -753,7 +765,7 @@ const NOTE_FIELD_MAX = {
 };
 let rotationContext = '';
 try {
-  if (input.source === 'clear') {
+  if (input.source === 'startup' || input.source === 'clear') {
     const notePath = join(input.cwd, '.sterling', 'transient', 'rotation-note.json');
     if (existsSync(notePath)) {
       const note = JSON.parse(readFileSync(notePath, 'utf8'));
@@ -932,13 +944,25 @@ try {
           `\n${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired, not confirmed dead — never counted as live):\n${renderedUncertain}` +
           (omittedUncertain > 0 ? `\n… (+${omittedUncertain} more)` : '');
       }
+      // SOURCE-AWARE CLOSING PARAGRAPH: the `clear` wording below is UNCHANGED
+      // from before startup consumption was added (scripts/tests/rotation-
+      // code-reload.test.mjs PIN 1/2/4/4-CONTROL pin it verbatim) — only the
+      // `startup` arm is new. On a genuine startup the CLI process (and any
+      // MCP server it spawns) just (re)started, so the exit-and-relaunch a
+      // code-reload note asks for has, by construction, already happened;
+      // there is nothing to caution the reader to still go do.
+      const isClear = input.source === 'clear';
       rotationContext =
-        `\n\nROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` +
+        `\n\nROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? '/clear' : 'restart'}; this injection CONSUMES it (single-shot).` +
         (cautions.length ? ` CAUTION: ${cautions.join('; ')}.` : '') +
         `\n${fields}${liveLine}${uncertainLine}\nResume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions — the note carries only the residue they cannot hold. ` +
         (note.reason === 'code-reload'
-          ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.`
-          : `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear — a /clear alone never reloads code, so relaunch now if that didn't happen yet.`);
+          ? (isClear
+              ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) — the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.`
+              : `CODE RELOAD WAS REQUIRED (note reason: code-reload) — this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.`)
+          : (isClear
+              ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear — a /clear alone never reloads code, so relaunch now if that didn't happen yet.`
+              : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`));
     }
   }
 } catch {
