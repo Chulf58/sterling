@@ -257,7 +257,14 @@ const assertNoDeadTerms = (label, content) => {
 // 161e2972): AGENTS.md is the tool-agnostic layer (read natively by Codex/OpenCode); CLAUDE.md is
 // `@AGENTS.md` plus the Sterling-bound layer. Project facts/conventions placeholders now render into
 // AGENTS.md only — CLAUDE.md's template carries just {{PROJECT_NAME}}.
-const renderAgentsMd = (conventionsSection) => assertNoDeadTerms('AGENTS.md', readFileSync(join(pluginRoot, 'templates', 'target-agents-md.md'), 'utf8')
+//
+// Dead-term check is scoped to STERLING'S OWN TEMPLATE PROSE ONLY — never the conventions/tail
+// text spliced into it. That text can be a fresh-init project's own conventions or a migrated
+// legacy tail (real-world gap: Dome Farmer's tail says "enemy waves", which is project prose, not
+// Sterling's retired codename). Checked ONCE, up front, against the template with the
+// {{CONVENTIONS_SECTION}} placeholder cut OUT — not against any rendered conventions value —
+// so the lint judges only what Sterling ships, and `renderAgentsMd` itself never re-checks.
+const agentsMdTemplateRaw = readFileSync(join(pluginRoot, 'templates', 'target-agents-md.md'), 'utf8')
   .replaceAll('{{PROJECT_NAME}}', eff.projectName)
   .replaceAll('{{STACK_TAGS}}', eff.stackTags.join(', '))
   .replaceAll('{{TOOLCHAINS}}', baked.map((t) => `${t.adapter} (${t.path_globs.join(', ')})`).join('; '))
@@ -269,8 +276,15 @@ const renderAgentsMd = (conventionsSection) => assertNoDeadTerms('AGENTS.md', re
   // dirty tracked file before doing anything; config holds the value, this states the fact).
   .replaceAll('{{BACKUP_PATH}}', eff.backupPath
     ? 'configured — see `.sterling/config.json` → `backup_path` (machine-local, deliberately not restated here)'
-    : '(opted out — recorded)')
-  .replaceAll('{{CONVENTIONS_SECTION}}', conventionsSection));
+    : '(opted out — recorded)');
+const CONVENTIONS_TOKEN = '{{CONVENTIONS_SECTION}}';
+const agentsMdConventionsIdx = agentsMdTemplateRaw.indexOf(CONVENTIONS_TOKEN);
+if (agentsMdConventionsIdx === -1) fail('templates/target-agents-md.md lost its {{CONVENTIONS_SECTION}} placeholder — refusing (P5)', 1);
+assertNoDeadTerms(
+  'AGENTS.md (template)',
+  agentsMdTemplateRaw.slice(0, agentsMdConventionsIdx) + agentsMdTemplateRaw.slice(agentsMdConventionsIdx + CONVENTIONS_TOKEN.length),
+);
+const renderAgentsMd = (conventionsSection) => agentsMdTemplateRaw.replace(CONVENTIONS_TOKEN, conventionsSection);
 const DEFAULT_CONVENTIONS = '(grows only via architecture-altering decision records — nothing yet)';
 const expectedAgentsMd = renderAgentsMd(DEFAULT_CONVENTIONS);
 
@@ -285,16 +299,22 @@ const writeAtomic = (p, content) => {
   renameSync(tmp, p);
 };
 
-// Legacy pre-split projects carry a single CLAUDE.md whose project-owned tail begins at a
-// hand-added marker line. Migration must never guess: EXACTLY ONE line must equal the marker
-// rendered for THIS project (whole-line, CR-stripped equality — zero or 2+ candidates refuse),
-// and the head above it must match some HISTORICAL rendering of the pre-split monolithic
-// template AS A WHOLE (never a startsWith prefix match, never an empty prefix) — matched via a
-// placeholder-wildcard pattern so a legacy file rendered with OLDER project facts still matches
-// (Sol review fix round, findings 1/2). The tail is carried as the RAW substring (original line
-// endings intact); only a normalized copy is used for marker location and pattern matching
-// (finding 3) — the freshly-rendered head is converted to the legacy file's own EOL convention.
-const MARKER_PREFIX_LABEL = '⚠ EVERYTHING BELOW THIS LINE IS ABOUT';
+// Legacy pre-split projects carry a single CLAUDE.md whose project-owned tail begins wherever
+// the pre-split template's own head ends. NO MARKER EXISTS OR IS NEEDED (Sol re-spec, corrected
+// from an earlier marker-line design after Dome Farmer proved wrong: its "marker-looking" line
+// was a hand-written bold ruling, not a Sterling artefact — neither template ever emitted one).
+// Every pre-split revision of templates/target-claude-md.md ends its head with the literal
+// "## Conventions (lean — grows only via architecture-altering decision records)" heading, a
+// blank line, then {{CONVENTIONS_SECTION}} — whatever init rendered there, plus anything the
+// project appended, is the tail. Migration never guesses: the legacy CLAUDE.md is matched
+// against each HISTORICAL segment set (newest first; see headSegments below) — segment 0 must
+// match at offset 0, every following segment is found in order, and the LAST segment (also
+// non-empty) must match; its END is the boundary. Nothing after the boundary is inspected, so
+// the tail can be anything, including a hand-written bold ruling like Dome Farmer's. The match
+// runs on a CR-stripped copy but the boundary is mapped back to the RAW text (buildLineMap /
+// mapNormToRaw) so a CRLF file splits at the right byte; the tail is carried as the raw
+// substring, original line endings intact — only the freshly-rendered head is converted to the
+// legacy file's own EOL convention.
 const SENTINEL_VOCAB = [
   { re: /\bknowledge_\w+/, label: 'a knowledge_ tool name' },
   { re: /\bboard_\w+/, label: 'a board_ tool name' },
@@ -339,16 +359,59 @@ const spliceEol = (fullText, tailRaw, eol) => {
 // tested against a real multi-KB legacy head) once a pattern mixes enough lazy wildcards with an
 // input that long. A segment scan has the identical match semantics with none of that ceiling.
 const headSegments = (headText) => headText.split(/\{\{[A-Z_]+\}\}/);
-function segmentsMatchWhole(candidate, segments) {
-  if (segments.length === 1) return candidate === segments[0];
-  if (!candidate.startsWith(segments[0]) || !candidate.endsWith(segments[segments.length - 1])) return false;
+// Finds where `segments` (a historical head split at {{TOKEN}} boundaries) matches the START of
+// `text`: segment 0 anchors at offset 0, every following segment is found in order, and the LAST
+// segment (non-empty) — the literal text right before where {{CONVENTIONS_SECTION}} began — has
+// its match END returned as the boundary. Nothing after the boundary is inspected, so it makes
+// no difference what the project's own tail contains.
+function matchBoundary(text, segments) {
+  if (!segments.length || !segments[0].length) return null;
+  if (!text.startsWith(segments[0])) return null;
   let pos = segments[0].length;
-  for (let i = 1; i < segments.length - 1; i++) {
-    const idx = candidate.indexOf(segments[i], pos);
-    if (idx === -1) return false;
-    pos = idx + segments[i].length;
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i];
+    const isLast = i === segments.length - 1;
+    if (isLast && !seg.length) return null;
+    if (!seg.length) continue; // an empty MIDDLE segment (two placeholders back-to-back) matches trivially
+    // The gap between the previous segment's end and this one's start IS a placeholder's
+    // rendered value — every historical placeholder above {{CONVENTIONS_SECTION}} ({{PROJECT_NAME}},
+    // {{STACK_TAGS}}, {{TOOLCHAINS}}, {{DOMAINS}}, {{BACKUP_PATH}}, any other in older revisions)
+    // renders on ONE line. An unbounded `indexOf` would silently absorb a line a human inserted
+    // right after the placeholder as if it were that value — a multi-line gap is REJECTED, and
+    // the search keeps trying LATER occurrences of the same literal segment (Sol re-check).
+    let idx = text.indexOf(seg, pos);
+    while (idx !== -1 && text.slice(pos, idx).includes('\n')) {
+      idx = text.indexOf(seg, idx + 1);
+    }
+    if (idx === -1) return null;
+    pos = idx + seg.length;
   }
-  return pos <= candidate.length - segments[segments.length - 1].length;
+  return pos;
+}
+// Maps a RAW (possibly CRLF) text's normalized (LF-only, CR-stripped) offsets back to raw byte
+// offsets, so matchBoundary can run on a CR-stripped copy while the head/tail split happens on
+// the RAW bytes — a CRLF legacy file splits at the right byte, not one shifted by dropped \r's.
+function buildLineMap(rawLines) {
+  let normalizedText = '';
+  const lineBoundaries = [];
+  let normPos = 0;
+  let rawPos = 0;
+  for (const l of rawLines) {
+    const normStart = normPos;
+    const rawStart = rawPos;
+    const hasEol = l.eol !== '';
+    normalizedText += hasEol ? `${l.content}\n` : l.content;
+    normPos += l.content.length + (hasEol ? 1 : 0);
+    rawPos += l.content.length + l.eol.length;
+    lineBoundaries.push({ normStart, normEnd: normPos, rawStart, rawEnd: rawPos });
+  }
+  return { normalizedText, lineBoundaries };
+}
+function mapNormToRaw(lineBoundaries, normOffset) {
+  for (const lb of lineBoundaries) {
+    if (normOffset <= lb.normEnd) return normOffset === lb.normEnd ? lb.rawEnd : lb.rawStart + (normOffset - lb.normStart);
+  }
+  return null;
 }
 // Newest-first (git log's default order). A revision that predates or postdates the
 // {{CONVENTIONS_SECTION}}-placeholder shape contributes no pattern — it cannot anchor a match.
@@ -375,8 +438,8 @@ function historicalHeadSegmentSets() {
   return { segmentSets, unavailableReason: null };
 }
 
-// Shared by every `manual` outcome (finding 4) — a duplicate marker, a non-matching head, an
-// unverifiable head (git unavailable) and a marker-less file all leave the same preview behind.
+// Shared by every `manual` outcome — a non-matching head, an unverifiable head (git
+// unavailable), and a legacy file beside an existing AGENTS.md all leave the same preview behind.
 function writeMigrationPreview(rawClaudeText, tailForPreview) {
   mkdirSync(join(target, '.sterling'), { recursive: true });
   const previewRel = join('.sterling', 'agents-md-migration-preview.diff');
@@ -393,55 +456,78 @@ function writeMigrationPreview(rawClaudeText, tailForPreview) {
   return previewRel;
 }
 
+// Attempts the boundary match against every historical segment set (newest first) and, on a hit,
+// builds the would-be AGENTS.md/CLAUDE.md — used both to actually migrate and to detect an
+// interrupted-run continuation (AGENTS.md already holds exactly what this would produce).
+function computeMigration(rawText) {
+  const { segmentSets, unavailableReason } = historicalHeadSegmentSets();
+  if (unavailableReason) return { matched: false, reason: unavailableReason };
+  const { normalizedText, lineBoundaries } = buildLineMap(splitKeepingEol(rawText));
+  let boundaryNorm = null;
+  for (const segs of segmentSets) {
+    const b = matchBoundary(normalizedText, segs);
+    if (b !== null) { boundaryNorm = b; break; }
+  }
+  if (boundaryNorm === null) {
+    return { matched: false, reason: `head is not a pristine historical render of the Sterling template (checked ${segmentSets.length} revision(s))` };
+  }
+  const rawBoundary = mapNormToRaw(lineBoundaries, boundaryNorm);
+  const rawTail = rawText.slice(rawBoundary);
+  const eol = detectEol(rawText);
+  const flagged = [];
+  rawTail.split(/\r\n|\n/).forEach((line, i) => {
+    for (const { re, label } of SENTINEL_VOCAB) {
+      if (re.test(line)) { flagged.push(`tail line ${i + 1} mentions ${label} — Sterling-bound text now sits in the tool-agnostic file; move it to CLAUDE.md by hand if it is a rule`); break; }
+    }
+  });
+  return {
+    matched: true,
+    rawTail,
+    eol,
+    flagged,
+    agentsMd: spliceEol(renderAgentsMd(rawTail), rawTail, eol),
+    claudeMd: withEol(expectedClaudeMd, eol),
+  };
+}
+
 const agentsMdExists = existsSync(agentsMdPath);
 const claudeMdExists = existsSync(claudeMdPath);
 const claudeMdRaw = claudeMdExists ? readFileSync(claudeMdPath, 'utf8') : '';
-const rawLines = claudeMdExists ? splitKeepingEol(claudeMdRaw) : [];
-const expectedMarkerLine = `${MARKER_PREFIX_LABEL} ${eff.projectName}`;
-const exactMarkerIdx = rawLines.reduce((acc, l, i) => { if (l.content === expectedMarkerLine) acc.push(i); return acc; }, []);
+// A "stub" CLAUDE.md is the already-migrated Sterling-layer render: its first line is the
+// `@AGENTS.md` import. Real-world gap (Dome Farmer): a project can carry BOTH a legacy full
+// CLAUDE.md AND a pre-existing AGENTS.md that is NOT the product of a real migration — most
+// often a gitignored Codex-derived copy of the old CLAUDE.md. Silently treating that as an
+// interrupted-run continuation would hide an un-migrated project.
+const claudeMdIsStub = claudeMdExists && claudeMdRaw.split(/\r?\n/, 1)[0] === '@AGENTS.md';
 
-if (exactMarkerIdx.length >= 2) {
-  const previewRel = writeMigrationPreview(claudeMdRaw, null);
-  items.push({ item: 'AGENTS.md', status: 'manual', detail: `CLAUDE.md has ${exactMarkerIdx.length} lines that exactly equal the expected marker — ambiguous where the project-owned tail begins; nothing written; preview at ${previewRel}` });
-  items.push({ item: 'CLAUDE.md', status: 'manual', detail: 'left untouched — duplicate marker line, refusing to guess which one is real' });
-} else if (exactMarkerIdx.length === 1 && !agentsMdExists) {
-  const markerLineIdx = exactMarkerIdx[0];
-  const rawTail = rawLines.slice(markerLineIdx).map((l) => l.content + l.eol).join('');
-  const normalizedPrefix = markerLineIdx > 0 ? `${rawLines.slice(0, markerLineIdx).map((l) => l.content).join('\n')}\n` : '';
-  const { segmentSets, unavailableReason } = historicalHeadSegmentSets();
-  const matched = !unavailableReason && normalizedPrefix.trim().length > 0 && segmentSets.some((segs) => segmentsMatchWhole(normalizedPrefix, segs));
-  if (matched) {
-    const eol = detectEol(claudeMdRaw);
-    const flagged = [];
-    rawLines.slice(markerLineIdx).forEach((l, i) => {
-      for (const { re, label } of SENTINEL_VOCAB) {
-        if (re.test(l.content)) { flagged.push(`tail line ${i + 1} mentions ${label} — Sterling-bound text now sits in the tool-agnostic file; move it to CLAUDE.md by hand if it is a rule`); break; }
-      }
-    });
-    const migratedAgentsMd = spliceEol(renderAgentsMd(rawTail), rawTail, eol);
-    const migratedClaudeMd = withEol(expectedClaudeMd, eol);
-    writeAtomic(agentsMdPath, migratedAgentsMd);
-    writeAtomic(claudeMdPath, migratedClaudeMd);
-    items.push({ item: 'AGENTS.md', status: flagged.length ? `migrated (${flagged.length} flagged)` : 'migrated', detail: flagged.length ? flagged.join('; ') : 'legacy CLAUDE.md tail carried below the marker, original line endings preserved' });
+if (agentsMdExists && claudeMdExists && !claudeMdIsStub) {
+  const agentsMdRaw = readFileSync(agentsMdPath, 'utf8');
+  const result = computeMigration(claudeMdRaw);
+  if (result.matched && result.agentsMd === agentsMdRaw) {
+    // Interrupted-run continuation: the existing AGENTS.md is BYTE-IDENTICAL to what this
+    // migration would produce — not merely present, actually proven — so only CLAUDE.md needs
+    // rewriting (Sol re-check finding 4a).
+    writeAtomic(claudeMdPath, result.claudeMd);
+    items.push({ item: 'AGENTS.md', status: 'ok', detail: 'already present — byte-identical to what migration would write; treated as an interrupted run, resumed' });
+    items.push({ item: 'CLAUDE.md', status: 'migrated (resumed)', detail: 're-rendered as the Sterling layer (AGENTS.md migration already completed)' });
+  } else {
+    const previewRel = writeMigrationPreview(claudeMdRaw, result.matched ? result.rawTail : null);
+    const reason = `legacy CLAUDE.md beside an existing AGENTS.md — if AGENTS.md is a Codex-derived copy of CLAUDE.md (gitignored, header 'identical to CLAUDE.md'), delete it and rerun; if it is authored, merge by hand: ${previewRel}`;
+    items.push({ item: 'AGENTS.md', status: 'manual', detail: reason });
+    items.push({ item: 'CLAUDE.md', status: 'manual', detail: reason });
+  }
+} else if (!agentsMdExists && claudeMdExists) {
+  const result = computeMigration(claudeMdRaw);
+  if (result.matched) {
+    writeAtomic(agentsMdPath, result.agentsMd);
+    writeAtomic(claudeMdPath, result.claudeMd);
+    items.push({ item: 'AGENTS.md', status: result.flagged.length ? `migrated (${result.flagged.length} flagged)` : 'migrated', detail: result.flagged.length ? result.flagged.join('; ') : 'legacy CLAUDE.md tail carried below the historical boundary, original line endings preserved' });
     items.push({ item: 'CLAUDE.md', status: 'migrated', detail: 're-rendered as the Sterling layer; project-owned tail moved to AGENTS.md' });
   } else {
-    const reason = unavailableReason ?? "CLAUDE.md's head above the marker does not match any historical rendering of templates/target-claude-md.md";
-    const previewRel = writeMigrationPreview(claudeMdRaw, rawTail);
-    items.push({ item: 'AGENTS.md', status: 'manual', detail: `${reason} — nothing written; preview at ${previewRel}` });
+    const previewRel = writeMigrationPreview(claudeMdRaw, null);
+    items.push({ item: 'AGENTS.md', status: 'manual', detail: `${result.reason} — nothing written; preview at ${previewRel}` });
     items.push({ item: 'CLAUDE.md', status: 'manual', detail: 'left untouched pending AGENTS.md migration (see AGENTS.md row)' });
   }
-} else if (exactMarkerIdx.length === 1 && agentsMdExists) {
-  // Interrupted-run continuation: AGENTS.md already migrated, CLAUDE.md still legacy — trust the
-  // earlier migration and just re-render CLAUDE.md, preserving the legacy file's EOL convention.
-  writeAtomic(claudeMdPath, withEol(expectedClaudeMd, detectEol(claudeMdRaw)));
-  items.push({ item: 'AGENTS.md', status: 'ok', detail: 'already present — project-editable, never compared byte-for-byte' });
-  items.push({ item: 'CLAUDE.md', status: 'migrated', detail: 're-rendered as the Sterling layer (AGENTS.md migration already completed)' });
-} else if (!agentsMdExists && claudeMdExists) {
-  // exactMarkerIdx.length === 0: no line exactly equals the expected marker (absent, or present
-  // for a different project name) — never guess how to split it (P5).
-  const previewRel = writeMigrationPreview(claudeMdRaw, null);
-  items.push({ item: 'AGENTS.md', status: 'manual', detail: `CLAUDE.md exists but has no "${expectedMarkerLine}" marker line to split on; nothing written; preview at ${previewRel}` });
-  items.push({ item: 'CLAUDE.md', status: 'manual', detail: 'left untouched — no marker to split on; add the marker line above the project-owned tail and re-run, or merge AGENTS.md by hand' });
 } else {
   if (!agentsMdExists) {
     writeAtomic(agentsMdPath, expectedAgentsMd);
