@@ -132,7 +132,7 @@ const FRESH_FLAGS = ['--project-name', 'ensure-target', '--stack-tags', 'node', 
 // .mcp.json is NOT a per-project artifact: the plugin declares the sterling
 // server (bound per-project via ${CLAUDE_PROJECT_DIR}), so a consuming project
 // never gets one. Its absence is asserted directly below.
-const ARTIFACTS = ['.sterling/config.json', 'CLAUDE.md', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', 'sterling-update.bat', '.gitignore'];
+const ARTIFACTS = ['.sterling/config.json', 'AGENTS.md', 'CLAUDE.md', 'sterling.bat', 'sterling-windows.bat', 'tui.bat', 'sterling-launch.sh', 'sterling-update.bat', '.gitignore'];
 const snapshot = (dir) => Object.fromEntries(ARTIFACTS.map((a) => [a, readFileSync(join(dir, a), 'utf8')]));
 
 test('init records a Windows-drive --backup-path in WSL /mnt form (r-dd88 backup_path bug)', () => {
@@ -167,8 +167,19 @@ test('ensure outcome 1 — create absent: fresh init creates every manifest item
     // dual-role is gone (the plugin declares its server via plugin.json mcpServers, not a root
     // .mcp.json), so no enable-flag enforcement is needed — a consuming project keeps its own.
     assert.ok(!existsSync(join(dir, '.claude', 'settings.local.json')), 'consuming project: settings.local.json left to the user (init never writes it)');
+    assert.match(r.stdout, /^AGENTS\.md\s+created\b/m);
     assert.match(r.stdout, /^CLAUDE\.md\s+created\b/m);
     assert.match(r.stdout, /^\.sterling\/config\.json\s+created\b/m);
+    // AGENTS.md/CLAUDE.md split (decision agents-md-is-the-instructions-file-claude-md-is-a-one-line-import,
+    // 161e2972): CLAUDE.md is exactly the one-line import plus the Sterling layer; the
+    // tool-agnostic content (project facts, conventions) renders into AGENTS.md instead.
+    const agentsMd = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    const claudeMd = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    assert.match(claudeMd, /^@AGENTS\.md\n/, 'CLAUDE.md opens with the @AGENTS.md import');
+    assert.match(agentsMd, /^# AGENTS\.md — ensure-target\n/, 'AGENTS.md renders the project name');
+    assert.ok(agentsMd.includes('Stack tags (= domain mount manifest): node, sterling'), 'AGENTS.md carries the project facts');
+    assert.ok(!claudeMd.includes('{{'), 'no unresolved placeholder survives in CLAUDE.md');
+    assert.ok(!agentsMd.includes('{{'), 'no unresolved placeholder survives in AGENTS.md');
     assert.match(r.stdout, /RESTART REQUIRED/, 'agents installed → restart instruction');
     const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
     assert.equal(config.project_name, 'ensure-target', 'project name recorded for flagless re-runs');
@@ -398,7 +409,8 @@ test('ensure outcome 3 — leave-and-report: hand-edited config, CLAUDE.md, and 
     const rerun = init(dir);
     assert.equal(rerun.code, 0, rerun.stderr);
     assert.match(rerun.stdout, /^\.sterling\/config\.json\s+differs\s+left untouched/m);
-    assert.match(rerun.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
+    assert.match(rerun.stdout, /^AGENTS\.md\s+ok\s+present — project-editable, never compared byte-for-byte/m);
+    assert.match(rerun.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the Sterling layer by hand/m);
     assert.match(rerun.stdout, /^\.claude\/agents\/librarian\.md\s+differs\s+locally modified/m);
     assert.deepEqual(snapshot(dir), before, 'hand-edited files untouched');
     assert.equal(readFileSync(join(dir, '.claude', 'agents', 'librarian.md'), 'utf8'), agentBefore, 'modified agent untouched');
@@ -431,7 +443,7 @@ test('universal sterling domain: a config lacking it gains it on re-init (refres
   }
 });
 
-test('never-clobber: a pre-existing CLAUDE.md survives the FIRST init byte-for-byte; init completes around it', () => {
+test('never-clobber: a pre-existing marker-less CLAUDE.md survives the FIRST init byte-for-byte; AGENTS.md is reported manual, not guessed; init completes around both', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {
     const ownContract = '# My project\n\nHand-written build contract. Sacred.\n';
@@ -439,10 +451,188 @@ test('never-clobber: a pre-existing CLAUDE.md survives the FIRST init byte-for-b
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 0, `init completes around the existing CLAUDE.md, no refusal: ${r.stderr}`);
     assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), ownContract, 'NEVER clobbered');
-    assert.match(r.stdout, /^CLAUDE\.md\s+differs\s+left untouched — merge the conductor contract by hand/m);
+    assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'AGENTS.md never guessed into existence without a marker to split on');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\s+CLAUDE\.md exists but has no .* marker line to split on; nothing written/m);
+    assert.match(r.stdout, /^CLAUDE\.md\s+manual\s+left untouched — no marker to split on/m);
     for (const a of ['.sterling/config.json', '.sterling/sterling.db', 'sterling.bat', '.claude/agents/librarian.md']) {
       assert.ok(existsSync(join(dir, a)), `the rest of the manifest still created: ${a}`);
     }
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// A real legacy pre-split CLAUDE.md, as init generated it before this project committed the
+// AGENTS.md/CLAUDE.md split — rendered from a REAL historical (git-committed) revision of the
+// monolithic templates/target-claude-md.md, the same source historicalHeadSegmentSets() in
+// init-impl.mjs walks. NOT pinned to HEAD (Sol re-check finding 1): once the split lands, HEAD
+// IS the split template and carries no {{CONVENTIONS_SECTION}} at all, so `git show HEAD:...`
+// would silently stop testing anything. Instead walk `git log` NEWEST FIRST and take the first
+// blob that still contains the placeholder — exactly the selection historicalHeadSegmentSets()
+// makes for a real legacy project — and fail loudly if none exists.
+function pristineMonolithBlob() {
+  const log = spawnSync('git', ['log', '--format=%H', '--', 'templates/target-claude-md.md'], { cwd: root, encoding: 'utf8' });
+  assert.equal(log.status, 0, `git log -- templates/target-claude-md.md: ${log.stderr}`);
+  const shas = log.stdout.split('\n').filter(Boolean);
+  for (const sha of shas) {
+    const show = spawnSync('git', ['show', `${sha}:templates/target-claude-md.md`], { cwd: root, encoding: 'utf8' });
+    if (show.status !== 0) continue;
+    if (show.stdout.includes('{{CONVENTIONS_SECTION}}')) return { sha, text: show.stdout };
+  }
+  assert.fail('no historical revision of templates/target-claude-md.md contains {{CONVENTIONS_SECTION}} — the fixture has nothing pre-split to render from');
+}
+function legacyMonolithClaudeMd(projectName, tailAfterMarker, opts = {}) {
+  const { sha, text } = pristineMonolithBlob();
+  // PROOF this is picking a genuinely OLD blob, not silently falling back to the working tree
+  // (Sol re-check finding 1): post-split, the working-tree template carries no
+  // {{CONVENTIONS_SECTION}} at all, so the chosen historical blob MUST differ from it.
+  const workingTree = readFileSync(join(root, 'templates', 'target-claude-md.md'), 'utf8');
+  assert.notEqual(text, workingTree, `chosen historical blob (${sha}) must differ from the current working-tree template, which is the post-split one`);
+  const filled = text
+    .replaceAll('{{PROJECT_NAME}}', projectName)
+    .replaceAll('{{STACK_TAGS}}', opts.stackTags ?? 'node, sterling')
+    .replaceAll('{{TOOLCHAINS}}', opts.toolchains ?? 'node (**/*.mjs)')
+    .replaceAll('{{DOMAINS}}', opts.domains ?? '~/.sterling/domains/node/, ~/.sterling/domains/sterling/ — created lazily on first need (§2.3)')
+    .replaceAll('{{BACKUP_PATH}}', opts.backupPath ?? 'configured — see `.sterling/config.json` → `backup_path` (machine-local, deliberately not restated here)');
+  assert.ok(filled.includes('{{CONVENTIONS_SECTION}}'), 'fixture sanity: the conventions placeholder is still there to replace');
+  const markerLine = opts.markerLine ?? `⚠ EVERYTHING BELOW THIS LINE IS ABOUT ${projectName}`;
+  const eol = opts.eol ?? '\n';
+  const body = filled.replace('{{CONVENTIONS_SECTION}}', `${markerLine}\n\n${tailAfterMarker}`);
+  return eol === '\r\n' ? body.replace(/\n/g, '\r\n') : body;
+}
+
+test('legacy migration — a marker-bearing CLAUDE.md whose head matches a historical template render is split: AGENTS.md carries the tail, CLAUDE.md is re-rendered as the Sterling layer', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tail = '- Ship on Tuesdays only.\n- Uses `knowledge_query` before every design (mentions a Sterling tool on purpose, to prove the flag).\n';
+    writeFileSync(join(dir, 'CLAUDE.md'), legacyMonolithClaudeMd('ensure-target', tail));
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^AGENTS\.md\s+migrated \(1 flagged\)/m, 'the knowledge_query line is flagged, migration still proceeds');
+    assert.match(r.stdout, /^CLAUDE\.md\s+migrated\s+re-rendered as the Sterling layer/m);
+    const agentsMd = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    const claudeMd = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+    assert.ok(agentsMd.includes('⚠ EVERYTHING BELOW THIS LINE IS ABOUT ensure-target'), 'marker carried into AGENTS.md');
+    assert.ok(agentsMd.includes('Ship on Tuesdays only.'), 'project-owned tail carried verbatim');
+    assert.match(claudeMd, /^@AGENTS\.md\n/, 'CLAUDE.md re-rendered as the fresh Sterling-layer import');
+    assert.ok(!claudeMd.includes('Ship on Tuesdays only.'), 'the project-owned tail moved to AGENTS.md, not duplicated into CLAUDE.md');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('legacy migration — a marker-bearing CLAUDE.md whose head does NOT match any historical template render is refused (P5): nothing written, a preview diff is left for the human', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const handTuned = legacyMonolithClaudeMd('ensure-target', '- hand tuning\n').replace('Durable conventions and project facts.', 'Durable conventions and project facts (hand-edited preamble).');
+    writeFileSync(join(dir, 'CLAUDE.md'), handTuned);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'never guessed a split from an unrecognized head');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), handTuned, 'CLAUDE.md left untouched');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\s+CLAUDE\.md's head above the marker does not match any historical rendering/m);
+    assert.match(r.stdout, /^CLAUDE\.md\s+manual\s+left untouched pending AGENTS\.md migration/m);
+    const previewPath = join(dir, '.sterling', 'agents-md-migration-preview.diff');
+    assert.ok(existsSync(previewPath), 'a preview diff is left for the human to review');
+    const preview = readFileSync(previewPath, 'utf8');
+    assert.ok(preview.length > 0, 'preview diff is non-empty');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('legacy migration — an OLDER rendering scheme (placeholder values differing from what this project declares today) still migrates: the wildcard match is on prose structure, not on today\'s facts', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tail = '- an older project fact set.\n';
+    const legacy = legacyMonolithClaudeMd('ensure-target', tail, {
+      stackTags: 'python, sterling', // this project's OLD stack, before it moved to node
+      toolchains: 'python (**/*.py)',
+      domains: '~/.sterling/domains/python/, ~/.sterling/domains/sterling/ — created lazily on first need (§2.3)',
+      backupPath: '(opted out — recorded)',
+    });
+    writeFileSync(join(dir, 'CLAUDE.md'), legacy);
+    const r = init(dir, FRESH_FLAGS); // FRESH_FLAGS declares node/sterling today — deliberately different
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^AGENTS\.md\s+migrated\b/m, 'migrates despite the value mismatch — only the prose structure had to match');
+    assert.match(r.stdout, /^CLAUDE\.md\s+migrated\b/m);
+    const agentsMd = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    assert.ok(agentsMd.includes('an older project fact set.'), 'tail carried');
+    assert.ok(agentsMd.includes('node, sterling'), 'AGENTS.md renders TODAY\'S facts, not the legacy ones');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('legacy migration — CRLF: the tail bytes are unchanged (still CRLF) and the freshly-rendered head is converted to the legacy file\'s own EOL', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const tail = '- CRLF project convention.\r\n- second line.\r\n';
+    const legacy = legacyMonolithClaudeMd('ensure-target', tail.replace(/\r\n/g, '\n'), { eol: '\r\n' });
+    writeFileSync(join(dir, 'CLAUDE.md'), legacy);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^AGENTS\.md\s+migrated\b/m);
+    const agentsMdBytes = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+    assert.ok(agentsMdBytes.includes('⚠ EVERYTHING BELOW THIS LINE IS ABOUT ensure-target\r\n\r\n- CRLF project convention.\r\n- second line.\r\n'), 'tail carried with its ORIGINAL CRLF endings, byte-for-byte');
+    const headPortion = agentsMdBytes.slice(0, agentsMdBytes.indexOf('⚠ EVERYTHING BELOW'));
+    assert.ok(headPortion.includes('\r\n'), 'the freshly-rendered head was converted to the legacy file\'s own CRLF convention');
+    assert.ok(!/[^\r]\n/.test(headPortion), 'no bare LF survives in the head portion');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('legacy migration — a marker line for the WRONG project name is treated exactly like no marker at all (zero EXACT matches): manual, nothing written', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const legacy = legacyMonolithClaudeMd('ensure-target', '- tail\n', { markerLine: '⚠ EVERYTHING BELOW THIS LINE IS ABOUT some-other-project' });
+    writeFileSync(join(dir, 'CLAUDE.md'), legacy);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'nothing written — a wrong-project marker does not count as a match');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\s+CLAUDE\.md exists but has no "⚠ EVERYTHING BELOW THIS LINE IS ABOUT ensure-target" marker line to split on/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('legacy migration — a duplicate marker (two lines exactly equal the expected marker) refuses as ambiguous, distinct from the no-marker case: nothing written, preview left', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const marker = '⚠ EVERYTHING BELOW THIS LINE IS ABOUT ensure-target';
+    const legacy = legacyMonolithClaudeMd('ensure-target', `- first tail\n\n${marker}\n\n- second tail (duplicate marker)\n`);
+    writeFileSync(join(dir, 'CLAUDE.md'), legacy);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'nothing written on an ambiguous duplicate marker');
+    assert.equal(readFileSync(join(dir, 'CLAUDE.md'), 'utf8'), legacy, 'CLAUDE.md left untouched');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\s+CLAUDE\.md has 2 lines that exactly equal the expected marker — ambiguous/m);
+    assert.match(r.stdout, /^CLAUDE\.md\s+manual\s+left untouched — duplicate marker line/m);
+    assert.ok(existsSync(join(dir, '.sterling', 'agents-md-migration-preview.diff')), 'the duplicate-marker refusal also leaves a preview, same writer as the other manual outcomes');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('legacy migration — git unavailable (no history to verify against): reported manual naming the missing history, never migrated blind', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    mkdirSync(dir, { recursive: true });
+    const legacy = legacyMonolithClaudeMd('ensure-target', '- tail\n');
+    writeFileSync(join(dir, 'CLAUDE.md'), legacy);
+    // Hide `git` from the CHILD init process only — makes historicalHeadSegmentSets() fail to
+    // resolve any history, which must never be silently treated as "no match".
+    const r = init(dir, FRESH_FLAGS, { PATH: '/nonexistent-bin-dir-for-this-test-only' });
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(!existsSync(join(dir, 'AGENTS.md')), 'never migrated blind when history cannot be verified');
+    assert.match(r.stdout, /^AGENTS\.md\s+manual\s+git log failed for templates\/target-claude-md\.md/m, 'the missing-history reason is named, not folded into the generic non-matching-head message');
   } finally {
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }

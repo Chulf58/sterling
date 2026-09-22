@@ -7,7 +7,7 @@ description: Use before dispatching a subagent or choosing which agent should do
 
 ## The one thing to get right
 
-A subagent starts with a **fresh, empty context window**. It cannot see your conversation, the files you already read, the user's corrections, or the constraint you settled three turns ago. It gets its own system prompt, `CLAUDE.md`, and *your brief*. Nothing else.
+A subagent starts with a **fresh, empty context window**. It cannot see your conversation, the files you already read, the user's corrections, or the constraint you settled three turns ago. It gets its own system prompt, `AGENTS.md` and `CLAUDE.md`, and *your brief*. Nothing else.
 
 Under-specified briefs are the single largest source of wasted delegation. Agents duplicate each other, answer a subtly different question, or return something unusable — and you pay full price for it.
 

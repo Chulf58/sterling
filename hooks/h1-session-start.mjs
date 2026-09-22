@@ -8809,11 +8809,11 @@ try {
   if (root && samePath2(input.cwd, root)) {
     const role = config?.machine_role;
     if (role === "authoring") {
-      roleContext = "\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; CLAUDE.md's authoring contract applies.";
+      roleContext = "\n\nMACHINE ROLE: AUTHORING (declared in .sterling/config.json machine_role) \u2014 Sterling work lands and merges here; the Sterling layer in CLAUDE.md's authoring contract applies.";
     } else if (role === "consumer") {
       roleContext = `
 
-MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The committed CLAUDE.md's "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
+MACHINE ROLE: CONSUMER \u2014 this clone consumes via /sterling:update. The Sterling layer in CLAUDE.md's "this machine authors" language does NOT apply on this machine: never commit here, never hand-reconcile drift; a dirty generated file is discarded (git checkout -- <path>); currency comes only from /sterling:update.`;
     } else {
       roleContext = '\n\nMACHINE ROLE: UNDECLARED \u2014 treat as CONSUMER (the safe posture) until declared. The authoring machine declares machine_role:"authoring" in .sterling/config.json once; a successful /sterling:update stamps "consumer" automatically.';
     }
