@@ -94,7 +94,6 @@ test('R1-A01: scripts/lib/dispatch-register.mjs exports the whole owner surface'
     'readRegister',
     'withOwnerMkdirLock',
     'withRegisterLock',
-    'withLedgerLock',
     'registerStart',
     'registerEnd',
     'dispatchStatus',
@@ -111,8 +110,8 @@ test('R1-A01: scripts/lib/dispatch-register.mjs exports the whole owner surface'
 // can still import a second liveness notion has not been re-pointed, it has been
 // left beside the owner.
 test('R1-A02: the retired liveness/lock names are NOT exported — importing one is a defect, not a fallback', () => {
-  for (const name of ['liveDispatches', 'liveDispatchesOrUnknown', 'acquireLock', 'filterLive']) {
-    assert.equal(REG[name], undefined, `'${name}' must not survive the rebuild — every TTL predicate lives in dispatchStatus`);
+  for (const name of ['liveDispatches', 'liveDispatchesOrUnknown', 'acquireLock', 'filterLive', 'withLedgerLock', 'resolveSessionIdentity']) {
+    assert.equal(REG[name], undefined, `'${name}' must not survive the rebuild — every TTL predicate lives in dispatchStatus, and withLedgerLock/resolveSessionIdentity had no non-test caller (H22 slim-down)`);
   }
 });
 
@@ -628,34 +627,12 @@ test('R1-A36: two concurrent withOwnerMkdirLock calls never overlap their critic
   }
 });
 
-// A5: ONE primitive, TWO dirs. If the wrappers collided, a held register lock
-// would deadlock every ledger mutation.
-test('R1-A37: withRegisterLock and withLedgerLock are the same primitive over DIFFERENT dirs — holding one never blocks the other', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    forgeLock(REG.registerLockDir(dir), { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'forged' });
-
-    const blocked = await refusalOf(() => REG.withRegisterLock(dir, () => 'ran', { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(blocked.code, 'register_lock_held', 'the register wrapper contends on the forged register lock');
-
-    const ledger = await refusalOf(() => REG.withLedgerLock(dir, () => 'ledger-ran', { retryMs: 10, timeoutMs: 500 }));
-    assert.equal(ledger.code, undefined, `the ledger lock is a different directory: ${JSON.stringify(ledger)}`);
-    assert.equal(ledger.value, 'ledger-ran');
-  } finally {
-    cleanup();
-  }
-});
-
-test('R1-A38: the compatibility lock refusal carries its own code, not the register\'s', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    mkdirSync(join(dir, '.sterling'), { recursive: true });
-    const ledgerLock = join(dir, '.sterling', 'review-ledger.lock');
-    forgeLock(ledgerLock, { pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'forged' });
-    const r = await refusalOf(() => REG.withLedgerLock(dir, () => 'ran', { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(r.code, 'compatibility_lock_held', `expected compatibility_lock_held, got ${JSON.stringify(r)}`);
-    assert.equal(r.facts?.lock_dir, ledgerLock);
-  } finally {
-    cleanup();
-  }
-});
+// R1-A37 ("withRegisterLock and withLedgerLock are the same primitive over
+// DIFFERENT dirs") and R1-A38 ("the compatibility lock refusal carries its
+// own code") are DELETED — both pinned ONLY withLedgerLock / the legacy
+// 'review-ledger.lock' compatibility path, which is deleted (no caller
+// anywhere, grepped scripts/ packages/ hooks/ excluding tests and bundles).
+// withOwnerMkdirLock's own forged-lock-refusal behavior (what R1-A37's
+// register half exercised) stays covered by this file's other lock tests
+// (e.g. the concurrency arms above) and scripts/tests/h22-register-
+// concurrency.test.mjs.

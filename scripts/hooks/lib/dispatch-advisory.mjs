@@ -97,10 +97,11 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // yet; and ';' is a HARD split with the same result.
 //
 // WHY THE REACH IS NARROW, AND WHY THAT IS THE WHOLE DESIGN. Reaching backward
-// is dangerous in a way reaching forward is not: over-suppression drops
-// genuinely-claimed territory from claimed_files and SILENTLY REMOVES REAL
-// overlap warnings, which is strictly worse than the cosmetic false positive
-// being fixed (board 59c30a7f: "a naive fix is worse than the bug"). So the
+// is dangerous in a way reaching forward is not: over-suppression drops a
+// genuine claim (today: an exclusive-resource claim, dispatch-residue.mjs's
+// claimedResources) and SILENTLY REMOVES REAL overlap warnings, which is
+// strictly worse than the cosmetic false positive being fixed (board
+// 59c30a7f: "a naive fix is worse than the bug"). So the
 // backward reach fires ONLY for an ANAPHORIC TERRITORY PROHIBITION — a clause
 // that (a) carries a PROHIBITION marker (bare negators never reach backward:
 // "never"/"no"/"without" are the idiomatic class, and idioms are exactly what
@@ -162,11 +163,16 @@ const HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\
 // hasUnsuppressedMatch's existing any-occurrence semantics are unchanged).
 //
 // ONE SHARED DETECTOR, as the board requires: this lands in
-// hasUnsuppressedMatch, so h22's write side (claimed_files,
-// claimed_glob_prefixes), h26's read side and h25 all inherit it at once — a
-// second divergent heuristic on the read and write sides WAS the original
-// c56862a9 defect. h22's `files` is untouched (it is computed with the BARE
-// extractor and means territory EXAMINED — receipts, residue probes, H10
+// hasUnsuppressedMatch. H25/H26 (the read/capability sides that used to share
+// it) are deleted under the scale-down (sterling-claude-code-scale-down-
+// boundary, 2ad87dd1); H22's own claimed_files/claimed_glob_prefixes write
+// side is deleted too — no non-test reader ever consumed them (research_finding
+// h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026).
+// The SURVIVING caller is scripts/hooks/lib/dispatch-residue.mjs's
+// claimedResources (exclusive-resource claims), so this detector still earns
+// its keep as ONE shared mechanism rather than two divergent ones, even with a
+// single consumer today. H22's `files` is untouched (it is computed with the
+// BARE extractor and means territory EXAMINED — receipts, residue probes, H10
 // deferral — see research_finding foreign_289cd172).
 const TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
 const ANAPHOR_RE = String.raw`(?:those|these|them|it|that)`;
@@ -415,9 +421,10 @@ export function escapeRe(s) {
 // globbing dependency (hooks stay dependency-light, decision foreign_f5638a84's
 // constraint). A caller wanting the raw literal glob token back (e.g. to
 // build a suppression-check pattern against the original prompt text, the
-// same way h22/h26 already do for extractPathCandidates output) can always
-// recover it as `prefix + '**'` — GLOB_PREFIX_RE's match always ends in the
-// literal '**' it was matched on, so no second export is needed for that.
+// same way this module's own callers already do for extractPathCandidates
+// output) can always recover it as `prefix + '**'` — GLOB_PREFIX_RE's match
+// always ends in the literal '**' it was matched on, so no second export is
+// needed for that.
 //
 // MINIMUM TWO SEGMENTS (conductor-directed bound, board a63b226d follow-up
 // — the flood risk a prefix-aware overlap comparison introduces). A
@@ -437,18 +444,14 @@ export function escapeRe(s) {
 // under-warned, the accepted direction — P1), while "scripts/hooks/**" and
 // "packages/mcp-server/**" still are.
 //
-// WIRING: h22-dispatch-register.mjs's claimedFromBlocks-sibling
-// globPrefixesFromBlocks() writes the negation-checked output into its OWN
-// register field, `claimed_glob_prefixes` — deliberately NOT folded into
-// `claimed_files` (a flat FILE-path list every existing reader compares by
-// exact string equality; repoRel/normalizeRepoPath legitimately STRIPS a
-// trailing '/', so a trailing-slash marker could not even survive the same
-// toRegisterPaths() normalization every candidate already goes through).
-// H22 keeps `claimed_glob_prefixes` separate from exact `claimed_files`/`files`
-// so consumers can distinguish prefix claims from literal file claims.
-// hasUnsuppressedMatch applies the same clause-scoped negation analysis before
-// H22 records either kind of claim, including a prohibition marker before or
-// after the candidate token.
+// WIRING: h22-dispatch-register.mjs's claimed_glob_prefixes write side
+// (globPrefixesFromBlocks) that used to consume this extractor is DELETED —
+// no non-test reader ever consumed it (research_finding h22-dispatch-
+// register-consumer-map-which-parts-have-a-reader-september-2026). This
+// extractor stays exported as a pure function (scripts/tests/dispatch-
+// advisory-glob-prefix.test.mjs GROUP A) and is still used internally by
+// this module (isPathShapedMention / anaphoricProhibitionNumber, both part
+// of the shared hasUnsuppressedMatch detector dispatch-residue.mjs calls).
 const GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 
 // GATE (i)'s test — see the TRAILING PROHIBITION comment block above. Built

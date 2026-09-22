@@ -3,36 +3,28 @@
 // directions". AUTHORED BY coder, for a test-writer to land verbatim.
 // Suggested target: scripts/tests/dispatch-advisory-glob-prefix.test.mjs
 //
-// THREE FILES TOUCHED BY THIS CHANGE, THREE TEST GROUPS:
-//   A. scripts/hooks/lib/dispatch-advisory.mjs — extractGlobPrefixCandidates(),
-//      the extractor + its MINIMUM-TWO-SEGMENT bound (conductor-directed,
-//      flood-risk mitigation).
-//   B. scripts/hooks/h22-dispatch-register.mjs — globPrefixesFromBlocks(),
-//      writing the negation-checked prefix claims into `claimed_glob_prefixes`
-//      (its OWN field, `claimed_files` stays byte-identical).
-//   C. scripts/hooks/h26-dispatch-overlap.mjs — prefix-aware (startsWith)
-//      overlap comparison, applied ONLY to `claimed_glob_prefixes`; exact
-//      equality on `claimed_files`/`files` is completely unchanged.
+// GROUP B (h22-dispatch-register.mjs `claimed_glob_prefixes`, the register
+// write side) and GROUP C (h26-dispatch-overlap.mjs prefix-aware overlap
+// comparison) are DELETED WHOLE: `claimed_glob_prefixes` had no non-test
+// reader (research_finding h22-dispatch-register-consumer-map-which-parts-
+// have-a-reader-september-2026) and h26-dispatch-overlap.mjs is already
+// deleted under the scale-down decision (sterling-claude-code-scale-down-
+// boundary, 2ad87dd1). Only GROUP A survives — the pure-function extractor
+// (extractGlobPrefixCandidates) and its detector integration remain exported
+// from scripts/hooks/lib/dispatch-advisory.mjs (hasUnsuppressedMatch is still
+// live via scripts/hooks/lib/dispatch-residue.mjs), even though H22 no longer
+// calls extractGlobPrefixCandidates itself.
 //
-// Each group's CONTROL is placed first and passes for a DIFFERENT, simpler
-// reason than the positive cases that follow it — per group, not just once.
+// The surviving GROUP A's CONTROL is placed first and passes for a
+// DIFFERENT, simpler reason than the positive cases that follow it.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import {
   extractGlobPrefixCandidates,
   hasUnsuppressedMatch,
   escapeRe,
 } from '../hooks/lib/dispatch-advisory.mjs';
-
-const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const HOOKS = join(root, 'scripts', 'hooks');
-const H22_PATH = join(HOOKS, 'h22-dispatch-register.mjs');
 
 // ===========================================================================
 // GROUP A — pure-function tests, scripts/hooks/lib/dispatch-advisory.mjs
@@ -125,150 +117,3 @@ test('(A6) a TRAILING prohibition after a glob mention now suppresses it (board 
   const suppressed = !hasUnsuppressedMatch(prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false });
   assert.equal(suppressed, true);
 });
-
-// ===========================================================================
-// Shared hook-harness plumbing (mirrors scripts/tests/h22-claimed-territory.test.mjs)
-// ===========================================================================
-
-function runHook(hookPath, input, cwd) {
-  const r = spawnSync(process.execPath, [hookPath], {
-    input: JSON.stringify(input),
-    encoding: 'utf8',
-    cwd,
-    timeout: 60_000,
-    env: { ...process.env, STERLING_CURRENCY_DISABLE: '1' },
-  });
-  return { code: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
-}
-
-function makeProject() {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-globprefix-'));
-  mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ toolchains: [] }));
-  writeFileSync(join(dir, '.sterling', 'sterling.db'), '');
-  return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-// ===========================================================================
-// STATE-MACHINE RE-CUT (board 5445066b, decision
-// `dispatch-state-machine-pre-slot-post-binding-locked-start-resolution-replaces-transcript-attribution`,
-// knowledge_get 7c515e52 — opened, not paraphrased): SubagentStart no longer
-// reads the parent transcript; it resolves ONE prompt from the per-dispatch
-// state record written at PreToolUse. The FIXTURE KEEPS ITS NAME AND
-// SIGNATURE — one entry per [subagent_type, prompt] — so every call site and
-// every glob-prefix assertion in this file is byte-identical; each entry now
-// fires a REAL PreToolUse Task event through h22 instead of planting a
-// tool_use block. SubagentStart's transcript_path points at a file that does
-// NOT exist: correct under the new contract, and a pin in its own right (a
-// surviving transcript reader would extract no prefixes and (B1)/(C1) would go
-// red rather than pass by accident).
-// ===========================================================================
-let toolUseSeq = 0;
-function writeTranscript(dir, blocks) {
-  for (const [subagent_type, prompt] of blocks) {
-    const r = runHook(
-      H22_PATH,
-      {
-        hook_event_name: 'PreToolUse',
-        tool_name: 'Task',
-        tool_use_id: `toolu_gp_${(toolUseSeq += 1)}`,
-        tool_input: { subagent_type, prompt, description: 'a lane' },
-        session_id: 's1',
-        cwd: dir,
-        transcript_path: join(dir, 't', 'parent.jsonl'),
-        prompt_id: 'pr-1',
-      },
-      dir
-    );
-    assert.notEqual(r.code, 2, `PreToolUse must never deny a dispatch: ${r.stderr}`);
-  }
-}
-
-function subagentStart(dir, { agent_id = 'a1', agent_type = 'coder', session_id = 's1' } = {}) {
-  return runHook(
-    H22_PATH,
-    {
-      hook_event_name: 'SubagentStart',
-      session_id,
-      transcript_path: join(dir, 't', 'no-such-parent-transcript.jsonl'),
-      cwd: dir,
-      agent_id,
-      agent_type,
-    },
-    dir
-  );
-}
-
-function readRegister(dir) {
-  return JSON.parse(readFileSync(join(dir, '.sterling', 'transient', 'dispatch-register.json'), 'utf8'));
-}
-
-// ===========================================================================
-// GROUP B — h22-dispatch-register.mjs: `claimed_glob_prefixes`
-// ===========================================================================
-
-// ---------------------------------------------------------------------------
-// (B0) CONTROL, PLACED FIRST: a single-segment glob claim registers an EMPTY
-// claimed_glob_prefixes — the bound holding at the register-write boundary,
-// not "the wiring is broken". Reuses (A2)'s sabotage for consistency.
-// SABOTAGE: revert the bound (`{2,}` -> `+`) in dispatch-advisory.mjs —
-// flips to a non-empty claimed_glob_prefixes.
-// ---------------------------------------------------------------------------
-test('(B0) CONTROL: SubagentStart with "YOUR FILES: scripts/**" (single segment) registers claimed_glob_prefixes: []', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: scripts/** — own this for the lane.']]);
-    const r = subagentStart(dir);
-    assert.equal(r.code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_glob_prefixes, []);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (B1) two-segment glob claim registers the literal prefix.
-// SABOTAGE: remove the `claimed_glob_prefixes` key from newEntry in h22 —
-// the field disappears from the register entirely (undefined, not []).
-// ---------------------------------------------------------------------------
-test('(B1) SubagentStart with "YOUR FILES: scripts/hooks/**" registers claimed_glob_prefixes: ["scripts/hooks"]', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'YOUR FILES: scripts/hooks/** — own this directory.']]);
-    const r = subagentStart(dir);
-    assert.equal(r.code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_glob_prefixes, ['scripts/hooks']);
-  } finally {
-    cleanup();
-  }
-});
-
-// ---------------------------------------------------------------------------
-// (B2) a PROHIBITED glob never registers as claimed (shared suppression,
-// board a63b226d point 3 — one detector, not a second heuristic).
-// SABOTAGE: drop the `hasUnsuppressedMatch` filter from
-// globPrefixesFromBlocks in h22 — the prohibited prefix leaks into
-// claimed_glob_prefixes despite "DO NOT TOUCH".
-// ---------------------------------------------------------------------------
-test('(B2) "DO NOT TOUCH: scripts/hooks/** (another lane owns it)" registers claimed_glob_prefixes: []', () => {
-  const { dir, cleanup } = makeProject();
-  try {
-    writeTranscript(dir, [['coder', 'DO NOT TOUCH: scripts/hooks/** (another lane owns it). Fix the parser instead.']]);
-    const r = subagentStart(dir);
-    assert.equal(r.code, 0);
-    const [entry] = readRegister(dir);
-    assert.deepEqual(entry.claimed_glob_prefixes, []);
-  } finally {
-    cleanup();
-  }
-});
-
-
-// GROUP C (h26-dispatch-overlap.mjs: prefix-aware comparison, end-to-end)
-// deleted whole with H26 (scale-down decision
-// sterling-claude-code-scale-down-boundary, 2ad87dd1) — every test in it
-// spawned the now-deleted hooks/h26-dispatch-overlap.mjs directly. GROUP A
-// (pure dispatch-advisory.mjs functions) and GROUP B (h22-dispatch-register.mjs,
-// a KEEP hook) above are unaffected.

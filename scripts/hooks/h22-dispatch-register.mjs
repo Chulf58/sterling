@@ -15,12 +15,14 @@
 // that. SubagentStop closes the register round and the dispatch-state record
 // together via finishDispatchAndRegisterEnd (A1: marked, never deleted). This
 // hook provides minimal dispatch bookkeeping for child-agent knowledge staging:
-// the register and its Start-time territory declaration/attribution advisories.
+// the register and its Start-time attribution advisory.
 // Every refusal/disclosure this file renders is built through
 // scripts/lib/review-errors.mjs and carries a `[code]` token.
 // DOES NOT GUARANTEE: that an unattributed/unbound territory reflects
-// anything the agent actually touched (observed_reads is corroboration only);
-// that concurrent writers never lose a register append under a timed-out lock
+// anything the agent actually touched — `files` is EXAMINED territory (a
+// free-prose extraction over the attributed prompt), never a claim or a
+// record of what was touched; that concurrent writers never lose a register
+// append under a timed-out lock
 // (bounded — see the owner module's own contract); that a Pre-denied dispatch
 // (H8/H27) ever clears its orphaned pending dispatch-state record before the
 // session boundary. NEVER A GATE: this hook is advisory and must never call
@@ -28,12 +30,10 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
-import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
-import { hasUnsuppressedMatch, escapeRe, extractGlobPrefixCandidates, isReviewerClass } from './lib/dispatch-advisory.mjs';
+import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { isReviewerClass } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import {
-  registerStart,
-  registerEnd,
   readRegister,
   registerPath,
   recordDispatchPre,
@@ -64,6 +64,14 @@ function loadExclusiveResourceNames(cwd) {
 // DELETED — resolveAndRegisterStart's resolution is now the sole source of
 // "which prompt is mine" (decision dispatch-state-machine-pre-slot-post-
 // binding-locked-start-resolution-replaces-transcript-attribution).
+//
+// `files` is free-prose extraction ONLY — the REVIEW-TERRITORY structured
+// declaration override (parseReviewTerritory) and the claimed_files/
+// claimed_glob_prefixes write-side negation guard it fed are DELETED (no
+// non-test reader ever consumed them: research_finding
+// h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026).
+// This hook now writes `files` (territory EXAMINED — the field h10/h1 read)
+// and nothing else on the territory axis.
 // ---------------------------------------------------------------------------
 
 function candidatesFromBlocks(blocks) {
@@ -74,45 +82,6 @@ function normalizeRegisterPaths(cands, cwd) {
   return [...new Set(cands.map((c) => repoRel(c, cwd)).filter(Boolean))].filter(
     (r) => r !== '.git' && !r.startsWith('.git/') && !r.startsWith('.sterling/') && !r.startsWith('sterling/') && !r.startsWith('git/')
   );
-}
-
-// Aggregates declared-territory across the attributed blocks. `malformed`
-// carries every present-but-invalid declaration (for the Start-side advisory);
-// `anyPresent` says whether ANY block carried a REVIEW-TERRITORY line at all
-// (missing vs malformed are different codes, A11).
-function resolveTerritory(blocks) {
-  const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
-  const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
-  const malformed = parsed.filter((p) => p.decl.present && !p.decl.valid);
-  const anyPresent = parsed.some((p) => p.decl.present);
-  if (declared.length > 0) {
-    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: 'review-territory', malformed, anyPresent };
-  }
-  return { candidates: candidatesFromBlocks(blocks), files_source: 'free-prose-fallback', malformed, anyPresent };
-}
-
-// ---------------------------------------------------------------------------
-// Claimed territory (write-side negation guard; territory EXAMINED vs CLAIMED)
-// ---------------------------------------------------------------------------
-
-function claimedFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap((b) =>
-        extractPathCandidates(b.prompt).filter((raw) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false }))
-      )
-    ),
-  ];
-}
-
-function globPrefixesFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap((b) =>
-        extractGlobPrefixCandidates(b.prompt).filter((prefix) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false }))
-      )
-    ),
-  ];
 }
 
 // SubagentStop dispatch-state fallback lookup key: when the primary agent_id
@@ -193,8 +162,6 @@ try {
 
     const { entry: registeredEntry, refusal: startRefusal } = await resolveAndRegisterStart(input.cwd, input, (res) => {
       const matchedBlocks = typeof res.prompt === 'string' ? [{ subagent_type: res.subagent_type, prompt: res.prompt }] : [];
-      const territory = resolveTerritory(matchedBlocks);
-      const territoryFilesSource = territory.files_source;
       // positionalSafe mirrors the old positional.safe test one seam over:
       // 'post' and 'derived-type-unique' are the two sources the state
       // machine PROVES rather than guesses (§5); every other source
@@ -202,42 +169,25 @@ try {
       // walk-back/union fallbacks were.
       const positionalSafe = res.source === 'post' || res.source === 'derived-type-unique';
 
-      // A11: a PRESENT-but-unusable declaration is disclosed for EVERY class
-      // (decision foreign_8f137474 §5); only the NO-DECLARATION-AT-ALL absence
-      // warning below is reviewer-only (receipt risk, reviewer-class only).
-      for (const m of territory.malformed) {
-        lines.push(render(disclosure('territory_declaration_malformed', { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));
-      }
-      if (reviewerStart) {
-        if (territoryFilesSource !== 'review-territory') {
-          lines.push(
-            render(disclosure('territory_declaration_missing', {}, `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s)`))
-          );
-        }
-        if (!positionalSafe) {
-          lines.push(
-            render(
-              disclosure(
-                'receipt_unattributable',
-                { case: res.case },
-                `H22: UNATTRIBUTABLE TERRITORY — reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
-              )
+      if (reviewerStart && !positionalSafe) {
+        lines.push(
+          render(
+            disclosure(
+              'receipt_unattributable',
+              { case: res.case },
+              `H22: UNATTRIBUTABLE TERRITORY — reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
             )
-          );
-        }
+          )
+        );
       }
 
-      let files, claimedFiles, claimedGlobPrefixes, attribution, filesSource;
+      let files, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
-        files = normalizeRegisterPaths(territory.candidates, input.cwd);
-        claimedFiles = normalizeRegisterPaths(claimedFromBlocks(matchedBlocks), input.cwd);
-        claimedGlobPrefixes = normalizeRegisterPaths(globPrefixesFromBlocks(matchedBlocks), input.cwd);
+        files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
         attribution = 'block';
-        filesSource = territoryFilesSource;
+        filesSource = 'free-prose-fallback';
       } else {
         files = [];
-        claimedFiles = [];
-        claimedGlobPrefixes = [];
         attribution = 'none';
         filesSource = 'unattributable';
       }
@@ -266,8 +216,6 @@ try {
         session_id: input.session_id,
         files,
         files_source: filesSource,
-        claimed_files: claimedFiles,
-        claimed_glob_prefixes: claimedGlobPrefixes,
         attribution,
         attribution_case: res.case,
         at: new Date().toISOString(),

@@ -674,19 +674,23 @@ test('DSH-9: the DELETED transcript-tail readers survive NOWHERE — not in scri
 // the file that kept them. The bundle half is the load-bearing one: the
 // bundles are what the platform executes.
 
-test('DSH-10: extractPathCandidates and parseReviewTerritory SURVIVE in scripts/hooks/lib/dispatch-prompt.mjs — the parser authority is unchanged', async () => {
+test('DSH-10: extractPathCandidates SURVIVES in scripts/hooks/lib/dispatch-prompt.mjs; parseReviewTerritory is GONE (no non-test reader, H22 dispatch-register slim-down)', async () => {
   assert.equal(existsSync(DISPATCH_PROMPT_LIB), true, 'the prompt-parsing lib is kept, not deleted with the tail readers');
   const mod = await import(pathToFileURL(DISPATCH_PROMPT_LIB).href);
   assert.equal(typeof mod.extractPathCandidates, 'function', 'extractPathCandidates stays exported — the consumers parse the resolved prompt with it');
-  assert.equal(typeof mod.parseReviewTerritory, 'function', 'parseReviewTerritory stays exported (decision 8f137474)'); // not-a-citation: fixture id
-  for (const name of ['lastDispatchPrompts', 'lastDispatchBlocks', 'attributeBlocks']) {
+  // parseReviewTerritory (decision 8f137474) is DELETED // not-a-citation: fixture id
+  // — research_finding h22-dispatch-register-consumer-map-which-parts-have-a-
+  // reader-september-2026 found no non-test reader of the REVIEW-TERRITORY
+  // declared-territory override — h22's SubagentStart now writes `files` from
+  // free-prose extraction only.
+  for (const name of ['lastDispatchPrompts', 'lastDispatchBlocks', 'attributeBlocks', 'parseReviewTerritory']) {
     assert.equal(mod[name], undefined, `${name} must not survive as an export — an importable reader is a live fallback, not dead code`);
   }
 });
 // SABOTAGE: delete the whole lib along with the tail readers (over-deletion)
-// — the two typeof assertions go red, and the decision's "derive territory at
-// Pre instead" alternative (explicitly rejected: it splits parser authority)
-// would be the only way back.
+// — the extractPathCandidates typeof assertion goes red, and the decision's
+// "derive territory at Pre instead" alternative (explicitly rejected: it
+// splits parser authority) would be the only way back.
 
 // ===========================================================================
 // PIN H11 — PostToolUseFailure through the hook

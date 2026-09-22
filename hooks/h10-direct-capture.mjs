@@ -9,7 +9,7 @@ var __export = (target, all) => {
 import { randomUUID as randomUUID3, createHash as createHash3 } from "node:crypto";
 import { spawnSync as spawnSync5 } from "node:child_process";
 import { readFileSync as readFileSync5, writeFileSync as writeFileSync4, writeSync, rmSync as rmSync3, existsSync as existsSync6, mkdirSync as mkdirSync5, renameSync as renameSync4 } from "node:fs";
-import { join as join6, basename as basename3 } from "node:path";
+import { join as join6, basename as basename2 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
 import { readFileSync, existsSync as existsSync2 } from "node:fs";
@@ -7552,7 +7552,7 @@ function openStore(cwd) {
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join as join3, basename as basename2, dirname as dirname3 } from "node:path";
+import { join as join3, dirname as dirname3 } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -7725,12 +7725,8 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_CODE_BY_BASENAME = {
-  "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "compatibility_lock_held"
-};
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+function lockCodeFor() {
+  return "register_lock_held";
 }
 function isPidAlive(pid) {
   try {
@@ -7799,7 +7795,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 `
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
@@ -7810,7 +7806,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -8292,7 +8288,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
           }
           const transient = join6(cwd, ".sterling", "transient");
           mkdirSync5(transient, { recursive: true });
-          const tmpPath = join6(transient, `${basename3(registerPath2)}.tmp-${process.pid}`);
+          const tmpPath = join6(transient, `${basename2(registerPath2)}.tmp-${process.pid}`);
           writeFileSync4(tmpPath, JSON.stringify(fresh));
           renameSync4(tmpPath, registerPath2);
         },

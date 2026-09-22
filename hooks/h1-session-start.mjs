@@ -9,7 +9,7 @@ var __export = (target, all) => {
 import { randomUUID as randomUUID5 } from "node:crypto";
 import { readFileSync as readFileSync5, existsSync as existsSync6, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync5, statSync as statSync5, writeFileSync as writeFileSync5, rmSync as rmSync3 } from "node:fs";
 import { spawnSync as spawnSync4 } from "node:child_process";
-import { basename as basename3, dirname as dirname7, join as join8 } from "node:path";
+import { basename as basename2, dirname as dirname7, join as join8 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // scripts/hooks/lib/common.mjs
@@ -7793,7 +7793,7 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join as join6, basename as basename2, dirname as dirname5 } from "node:path";
+import { join as join6, dirname as dirname5 } from "node:path";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -7966,12 +7966,8 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_CODE_BY_BASENAME = {
-  "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "compatibility_lock_held"
-};
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename2(lockDir)] ?? "register_lock_held";
+function lockCodeFor() {
+  return "register_lock_held";
 }
 function isPidAlive(pid) {
   try {
@@ -8040,7 +8036,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 `
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
@@ -8051,7 +8047,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -8658,7 +8654,7 @@ async function deleteRegisterUnderLock(cwd) {
 `);
         }
         rmSync3(registerPath(cwd), { force: true });
-        const registerBasename = basename3(registerPath(cwd));
+        const registerBasename = basename2(registerPath(cwd));
         for (const f of readdirSync3(transientDir)) {
           if (f.startsWith(`${registerBasename}.tmp-`)) rmSync3(join8(transientDir, f), { force: true });
         }
@@ -9419,7 +9415,7 @@ try {
         );
         continue;
       }
-      if (templateFile !== basename3(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
+      if (templateFile !== basename2(templateFile) || templateFile.includes("/") || templateFile.includes("\\") || !templateFile.endsWith(".md")) {
         unknown.push(
           `- ${file} \u2014 currency UNKNOWN: its template '${templateFile}' does not name a plain .md file inside agent-templates/, so nothing outside that directory is allowed to certify it`
         );

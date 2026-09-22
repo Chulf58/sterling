@@ -5185,32 +5185,6 @@ function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
 }
-var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
-var GLOB_METACHAR_RE = /[*?[\]]/;
-function isRepoRelativePosixShape(p) {
-  if (typeof p !== "string" || p === "") return false;
-  if (GLOB_METACHAR_RE.test(p)) return false;
-  try {
-    return normalizeRepoPath(p) === p;
-  } catch {
-    return false;
-  }
-}
-function parseReviewTerritory(text) {
-  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
-  if (!match) return { present: false };
-  const raw = match[0];
-  let parsed;
-  try {
-    parsed = JSON.parse(match[1]);
-  } catch {
-    return { present: true, valid: false, raw };
-  }
-  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
-    return { present: true, valid: false, raw };
-  }
-  return { present: true, valid: true, files: parsed };
-}
 
 // scripts/hooks/lib/dispatch-advisory.mjs
 var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
@@ -5380,7 +5354,7 @@ function claimedResources(promptText, configuredNames) {
 // scripts/lib/dispatch-register.mjs
 import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync2, statSync, lstatSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { join as join2, basename, dirname as dirname2 } from "node:path";
+import { join as join2, dirname as dirname2 } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -5561,12 +5535,8 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-var LOCK_CODE_BY_BASENAME = {
-  "dispatch-register.lock": "register_lock_held",
-  "review-ledger.lock": "compatibility_lock_held"
-};
-function lockCodeFor(lockDir) {
-  return LOCK_CODE_BY_BASENAME[basename(lockDir)] ?? "register_lock_held";
+function lockCodeFor() {
+  return "register_lock_held";
 }
 function isPidAlive(pid) {
   try {
@@ -5635,7 +5605,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
 `
                 );
                 throw refusal(
-                  lockCodeFor(lockDir),
+                  lockCodeFor(),
                   { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
                   `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
                 );
@@ -5646,7 +5616,7 @@ async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
       }
       if (Date.now() - start >= timeoutMs) {
         throw refusal(
-          lockCodeFor(lockDir),
+          lockCodeFor(),
           { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
           `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
         );
@@ -6311,34 +6281,6 @@ function normalizeRegisterPaths(cands, cwd) {
     (r) => r !== ".git" && !r.startsWith(".git/") && !r.startsWith(".sterling/") && !r.startsWith("sterling/") && !r.startsWith("git/")
   );
 }
-function resolveTerritory(blocks) {
-  const parsed = blocks.map((b) => ({ block: b, decl: parseReviewTerritory(b.prompt) }));
-  const declared = parsed.filter((p) => p.decl.present && p.decl.valid);
-  const malformed = parsed.filter((p) => p.decl.present && !p.decl.valid);
-  const anyPresent = parsed.some((p) => p.decl.present);
-  if (declared.length > 0) {
-    return { candidates: [...new Set(declared.flatMap((p) => p.decl.files))], files_source: "review-territory", malformed, anyPresent };
-  }
-  return { candidates: candidatesFromBlocks(blocks), files_source: "free-prose-fallback", malformed, anyPresent };
-}
-function claimedFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap(
-        (b) => extractPathCandidates(b.prompt).filter((raw) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(raw)), { checkSubjectVerb: false }))
-      )
-    )
-  ];
-}
-function globPrefixesFromBlocks(blocks) {
-  return [
-    ...new Set(
-      blocks.flatMap(
-        (b) => extractGlobPrefixCandidates(b.prompt).filter((prefix) => hasUnsuppressedMatch(b.prompt, new RegExp(escapeRe(`${prefix}**`)), { checkSubjectVerb: false }))
-      )
-    )
-  ];
-}
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
@@ -6382,41 +6324,25 @@ try {
     const reviewerStart = typeof input.agent_type === "string" && isReviewerClass(input.agent_type);
     const { entry: registeredEntry, refusal: startRefusal } = await resolveAndRegisterStart(input.cwd, input, (res) => {
       const matchedBlocks = typeof res.prompt === "string" ? [{ subagent_type: res.subagent_type, prompt: res.prompt }] : [];
-      const territory = resolveTerritory(matchedBlocks);
-      const territoryFilesSource = territory.files_source;
       const positionalSafe = res.source === "post" || res.source === "derived-type-unique";
-      for (const m of territory.malformed) {
-        lines.push(render(disclosure("territory_declaration_malformed", { line: m.decl.raw }, `H22: malformed REVIEW-TERRITORY declaration ignored, falling back to free-prose: ${m.decl.raw}`)));
-      }
-      if (reviewerStart) {
-        if (territoryFilesSource !== "review-territory") {
-          lines.push(
-            render(disclosure("territory_declaration_missing", {}, `H22: reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) has no valid REVIEW-TERRITORY declaration in its attributed dispatch block(s)`))
-          );
-        }
-        if (!positionalSafe) {
-          lines.push(
-            render(
-              disclosure(
-                "receipt_unattributable",
-                { case: res.case },
-                `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
-              )
+      if (reviewerStart && !positionalSafe) {
+        lines.push(
+          render(
+            disclosure(
+              "receipt_unattributable",
+              { case: res.case },
+              `H22: UNATTRIBUTABLE TERRITORY \u2014 reviewer-class dispatch '${input.agent_id}' (${input.agent_type}) could not be bound to its own dispatch by the state-machine resolver [${res.case}]`
             )
-          );
-        }
+          )
+        );
       }
-      let files, claimedFiles, claimedGlobPrefixes, attribution, filesSource;
+      let files, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
-        files = normalizeRegisterPaths(territory.candidates, input.cwd);
-        claimedFiles = normalizeRegisterPaths(claimedFromBlocks(matchedBlocks), input.cwd);
-        claimedGlobPrefixes = normalizeRegisterPaths(globPrefixesFromBlocks(matchedBlocks), input.cwd);
+        files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
         attribution = "block";
-        filesSource = territoryFilesSource;
+        filesSource = "free-prose-fallback";
       } else {
         files = [];
-        claimedFiles = [];
-        claimedGlobPrefixes = [];
         attribution = "none";
         filesSource = "unattributable";
       }
@@ -6437,8 +6363,6 @@ try {
         session_id: input.session_id,
         files,
         files_source: filesSource,
-        claimed_files: claimedFiles,
-        claimed_glob_prefixes: claimedGlobPrefixes,
         attribution,
         attribution_case: res.case,
         at: (/* @__PURE__ */ new Date()).toISOString()
