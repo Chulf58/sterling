@@ -5169,7 +5169,7 @@ function skipQuoted(s, i) {
   return Math.min(j + 1, s.length);
 }
 var escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-function stripHeredocBodies(cmd) {
+function stripHeredocBodies(cmd, bodies) {
   let out = "", i = 0;
   const n = cmd.length;
   while (i < n) {
@@ -5209,7 +5209,9 @@ function stripHeredocBodies(cmd) {
           continue;
         }
         out += cmd.slice(i, j) + "\n";
-        const m = new RegExp("^\\t*" + escapeRe(tag) + "$", "m").exec(cmd.slice(lineEnd + 1));
+        const rest = cmd.slice(lineEnd + 1);
+        const m = new RegExp("^\\t*" + escapeRe(tag) + "$", "m").exec(rest);
+        if (bodies) bodies.push(m ? rest.slice(0, m.index) : rest);
         i = m ? lineEnd + 1 + m.index + m[0].length : n;
         continue;
       }
@@ -5536,7 +5538,47 @@ var DESTRUCTIVE_VERBS = /* @__PURE__ */ new Set([
   "clear-content",
   "new-item"
 ]);
-function isDestructiveFragment(tokens) {
+var SQLITE3_VALUE_OPTS = /* @__PURE__ */ new Map([
+  ["-cmd", 1],
+  ["-init", 1],
+  ["-maxsize", 1],
+  ["-mmap", 1],
+  ["-newline", 1],
+  ["-nullvalue", 1],
+  ["-separator", 1],
+  ["-vfs", 1],
+  ["-lookaside", 2],
+  ["-pagecache", 2]
+]);
+function sqlite3ReadonlyBefore(tokens, end) {
+  let i = 0;
+  while (i < end) {
+    const t = tokens[i];
+    if (t.type === "word" && t.value === "-readonly") return true;
+    if (t.type === "word" && SQLITE3_VALUE_OPTS.has(t.value)) {
+      i += 1 + SQLITE3_VALUE_OPTS.get(t.value);
+      continue;
+    }
+    i++;
+  }
+  return false;
+}
+function sqlite3DotCommandTargetsStore(words) {
+  const re = /\.(?:output|once|backup|save)\b\s*['"]?([^\s'";]+)/gi;
+  for (const w of words) {
+    re.lastIndex = 0;
+    let m;
+    while (m = re.exec(w)) {
+      if (/\.sterling[\\/]/i.test(m[1])) return true;
+    }
+  }
+  return false;
+}
+function sqlite3VacuumOrAttachTargetsStore(words, heredocBodies) {
+  const text = words.join(" ") + " " + heredocBodies.join(" ");
+  return /vacuum\s+into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
+}
+function isDestructiveFragment(tokens, heredocBodies = []) {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t.type === "op" && /^\d*(>>|>\||&>|>)$/.test(t.value)) {
@@ -5551,11 +5593,12 @@ function isDestructiveFragment(tokens) {
   const rest = tokens.slice(idx0 + 1);
   const restWords = rest.filter((t) => t.type === "word").map((t) => t.value);
   if (lv === "sqlite3") {
+    if (sqlite3DotCommandTargetsStore(restWords)) return true;
     const dbIdx = rest.findIndex((t) => t.type === "word" && isDbPath(t.value));
     if (dbIdx !== -1) {
-      const readonly = rest.slice(0, dbIdx).some((t) => t.type === "word" && t.value === "-readonly");
-      const dotCommandWrite = restWords.some((w) => /\.(output|once|backup)\b/i.test(w));
-      if (!readonly || dotCommandWrite) return true;
+      const readonly = sqlite3ReadonlyBefore(rest, dbIdx);
+      if (!readonly) return true;
+      if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
     }
   } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
   if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
@@ -5587,9 +5630,10 @@ if (tool === "Bash" || tool === "PowerShell") {
   if (rawCommand === void 0 || rawCommand === null) command = "";
   else if (typeof rawCommand === "string") command = rawCommand;
   else deny(`H15: this ${tool} call carries a non-string command (${typeof rawCommand}), which cannot be safely inspected for a destructive shape \u2014 re-issue with a string command.`);
-  const fragments = splitTopLevel(stripHeredocBodies(command));
+  const heredocBodies = [];
+  const fragments = splitTopLevel(stripHeredocBodies(command, heredocBodies));
   for (const fragment of fragments) {
-    if (isDestructiveFragment(tokenizeFragment(fragment))) {
+    if (isDestructiveFragment(tokenizeFragment(fragment), heredocBodies)) {
       deny(
         "H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes \u2014 write it with knowledge_create / knowledge_update / board_add and the other MCP tools. Reading or merely naming the path is fine, and every other file under .sterling/ (config.json, transient/*) may be read and written freely."
       );

@@ -137,13 +137,55 @@ test('Bash: sqlite3 -readonly chained with a writing sqlite3 fragment is denied 
   });
   assert.equal(r.code, 2, r.stderr);
 });
-test('Bash: sqlite3 -readonly with a .output/.once/.backup dot-command naming the db path is still denied', () => {
+// Sol cross-family review round on d2cb9f2: the TARGET of a .output/.once/.backup/.save dot-command
+// decides, independent of which db the sqlite3 invocation opened as its positional argument — writing
+// a store path is denied even when the opened db is some other, unprotected file, and a target that is
+// NOT a store path is allowed even when the opened db IS the protected one.
+test('Bash: sqlite3 -readonly with a .output/.once/.backup/.save dot-command TARGETING the db path is denied', () => {
   for (const command of [
     'sqlite3 -readonly .sterling/sterling.db ".output .sterling/sterling.db"',
+    'sqlite3 -readonly .sterling/sterling.db ".once .sterling/sterling.db"',
     'sqlite3 -readonly .sterling/sterling.db ".backup .sterling/sterling.db"',
+    'sqlite3 -readonly .sterling/sterling.db ".save .sterling/sterling.db"',
+    // the store path is the dot-command TARGET, not the positional db opened by sqlite3 — still denied
+    'sqlite3 -readonly source.db ".backup .sterling/sterling.db"',
   ]) {
     const r = run('Bash', { command });
     assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: sqlite3 -readonly with a dot-command TARGETING somewhere else is allowed, even against the protected db', () => {
+  const r = run('Bash', { command: 'sqlite3 -readonly .sterling/sterling.db ".output /tmp/report"' });
+  assert.equal(r.code, 0, r.stderr);
+});
+// VACUUM INTO creates a brand-new file rather than writing the opened db, so -readonly's OS-level
+// protection does not stop it; ATTACH opens a second db read-write by default regardless of -readonly
+// on the primary connection. Both are denied by raw text when their target names a .sterling/ path.
+test('Bash: sqlite3 -readonly with VACUUM INTO naming a .sterling/ path is denied', () => {
+  const r = run('Bash', {
+    command: `sqlite3 -readonly .sterling/sterling.db "VACUUM INTO '.sterling/sterling.db.snapshot'"`,
+  });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: sqlite3 -readonly with VACUUM INTO in a heredoc BODY naming a .sterling/ path is denied (the body is opaque to fragmenting, not to this scan)', () => {
+  const r = run('Bash', {
+    command: "sqlite3 -readonly .sterling/sterling.db <<'EOF'\nVACUUM INTO '.sterling/sterling.db.snapshot';\nEOF",
+  });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: sqlite3 -readonly with ATTACH naming a .sterling/ path is denied', () => {
+  const r = run('Bash', {
+    command: `sqlite3 -readonly .sterling/sterling.db "ATTACH '.sterling/sterling.db-wal' AS x"`,
+  });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: sqlite3 -readonly with a plain VACUUM (no INTO) or an ATTACH naming a non-store path is allowed', () => {
+  for (const command of [
+    'sqlite3 -readonly .sterling/sterling.db "VACUUM;"',
+    `sqlite3 -readonly .sterling/sterling.db "ATTACH '/tmp/other.db' AS x"`,
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 0, `${command}\n${r.stderr}`);
   }
 });
 test('Bash: sqlite3 -readonly on a same-named file outside the store is allowed (unaffected)', () => {
@@ -153,6 +195,22 @@ test('Bash: sqlite3 -readonly on a same-named file outside the store is allowed 
 test('Bash: a redirect into the database alongside a -readonly sqlite3 fragment stays denied', () => {
   const r = run('Bash', { command: 'sqlite3 -readonly .sterling/sterling.db "select 1" > .sterling/sterling.db' });
   assert.equal(r.code, 2, r.stderr);
+});
+// `-readonly` consumed as the VALUE of a preceding value-taking sqlite3 option is not the flag — the
+// db still opens writable. Value-taking options checked locally (no sqlite3 CLI installed on this
+// machine; list drawn from the sqlite3.c CLI docs, not invented): -cmd, -init, -maxsize, -mmap,
+// -newline, -nullvalue, -separator, -vfs (one value each); -lookaside, -pagecache (two values each).
+test('Bash: -readonly consumed as a value-taking option\'s VALUE does not count as the flag', () => {
+  const r = run('Bash', { command: 'sqlite3 -separator -readonly .sterling/sterling.db "select 1"' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: -readonly survives when a DIFFERENT value-taking option consumes its own value first', () => {
+  const r = run('Bash', { command: 'sqlite3 -separator , -readonly .sterling/sterling.db "select 1"' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: -readonly survives past a two-value option (-pagecache SIZE N)', () => {
+  const r = run('Bash', { command: 'sqlite3 -pagecache 1000 8 -readonly .sterling/sterling.db "select 1"' });
+  assert.equal(r.code, 0, r.stderr);
 });
 test('PowerShell: Remove-Item on sterling.db is denied', () => {
   const r = run('PowerShell', { command: 'Remove-Item .sterling\\sterling.db -Force' });
