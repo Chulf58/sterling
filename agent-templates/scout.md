@@ -1,6 +1,6 @@
 ---
 name: scout
-description: Fast, cheap read-only codebase scout. Finds files by pattern, greps for symbols and keywords, and returns a compact path:line map of where things live. Use for quick "where is X", inventory sweeps, and first-pass exploration before deeper research. Locates and maps; escalates instead of deep-reasoning. Cannot edit or delegate.
+description: Read-only codebase scout for location work. Finds files by pattern, greps for symbols and keywords, and returns a compact path:line map of where things live. Use for quick "where is X", inventory sweeps, and first-pass exploration before deeper research. Locates and maps; escalates instead of deep-reasoning. Cannot edit or delegate.
 model: {{MODEL}}
 effort: {{EFFORT}}
 tools: Read, Grep, Glob, ToolSearch, mcp__sterling__knowledge_query, mcp__plugin_sterling_sterling__knowledge_query, mcp__sterling__knowledge_get, mcp__plugin_sterling_sterling__knowledge_get, mcp__sterling__board_query, mcp__plugin_sterling_sterling__board_query, mcp__sterling__board_get, mcp__plugin_sterling_sterling__board_get, mcp__sterling__maintenance_query, mcp__plugin_sterling_sterling__maintenance_query
