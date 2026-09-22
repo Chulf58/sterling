@@ -663,9 +663,11 @@ try {
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
   // Research-event classification, hoisted here (ahead of clearRegisters()'s
-  // definition below, which consumes hasDeferredResearchEvents) so every
-  // reference to it executes after this `const` initializes — a call to
-  // clearRegisters() can fire before touch/debug classification below runs.
+  // definition below) so `researchDispatchLive` is available wherever it is
+  // needed; clearRegisters() itself takes its research survivors as an
+  // explicit PARAMETER (outstandingResearchEvents, computed later once
+  // dischargedOnResearchLane/isValidAt exist) rather than a closure, so no
+  // reference here needs to execute before this Stop's later duty code runs.
   const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
@@ -697,13 +699,6 @@ try {
   // 'unattributable') still lands in the register with a null agent_type, which
   // never matches `researchAgents.has(...)`, so it can never gate this lane.
   const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
-  // A gated agent_dispatch event's debt cannot evaporate (P5 / decision
-  // b2474b26 stop-consumes-settled-and-queued-work-never-live-declarations):
-  // session-events.json must survive a quiet Stop it deferred, exactly as
-  // touches.json survives one deferred by a live file-owning dispatch, or the
-  // event that would re-arm the duty on the agent's return is lost the moment
-  // this Stop clears the register. Consumed by clearRegisters() below.
-  const hasDeferredResearchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === 'agent_dispatch');
 
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
@@ -874,7 +869,7 @@ try {
   // pending Stop, destroying the grace bd594c03 deliberately built. Repeat nags
   // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
   // acceptable, silence is not.
-  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
+  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [] } = {}) => {
     // F3/F4/R4 (board c198866d fixer round): the touches claim is RELEASED
     // (see releaseTouchesClaim above) rather than discarded whenever a live
     // dispatch still owns work OR this Stop's own settlement attempt failed —
@@ -887,12 +882,7 @@ try {
     } else {
       discardTouchesClaim();
     }
-    // RESEARCH RETURN GATE EXTENSION: a live research-agent dispatch defers
-    // its OWN agent_dispatch event(s) the same way deferredPaths defers a
-    // touch — session-events.json must survive UNTOUCHED, not just reduced to
-    // any surviving capture_pending declaration, or the event that re-arms the
-    // research duty once the agent returns is destroyed by this very release.
-    if (!deferredPaths.length && !hasDeferredResearchEvents) {
+    if (!deferredPaths.length) {
       // A quiet Stop has consumed no capture work, so a capture_pending
       // declaration remains live for work that arrives later in this session.
       // Do not retain settled work evidence: research satisfaction anchors to
@@ -901,8 +891,22 @@ try {
       const pendingDeclarations = preservePendingDeclaration
         ? sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail)
         : [];
-      if (pendingDeclarations.length) {
-        writeFileSync(eventsPath, JSON.stringify(pendingDeclarations));
+      // RESEARCH RETURN GATE EXTENSION (review fix, commit 5306735's HIGH):
+      // `outstandingResearchEvents` is the caller's PRECISELY-COMPUTED set of
+      // still-live-dispatch, NOT-yet-individually-satisfied agent_dispatch
+      // research events (computed once, near `activeResearchEvents`, using a
+      // per-event satisfaction check — never the group's earliest-anchor
+      // check, which is what let an EARLIER dispatch's finding silently
+      // satisfy a LATER, still-outstanding one once whole-file preservation
+      // lifted the gate). Anything NOT in this set — an already-satisfied or
+      // already-discharged agent_dispatch event, or a synchronous research_tool
+      // event already converted to a queue item by the caller before reaching
+      // here — is consumed exactly as a non-deferring Stop would consume it;
+      // only the genuinely-still-outstanding ones survive to re-arm the duty
+      // once their dispatch returns (decision b2474b26).
+      const survivors = [...pendingDeclarations, ...outstandingResearchEvents];
+      if (survivors.length) {
+        writeFileSync(eventsPath, JSON.stringify(survivors));
       } else {
         rmSync(eventsPath, { force: true });
       }
@@ -1222,6 +1226,41 @@ try {
     if (e.kind === 'agent_dispatch' && researchDispatchLive) return false;
     return !dischargedOnResearchLane(e.at);
   });
+
+  // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
+  // on a deferring release (review fix, HIGH found on commit 5306735). Among
+  // the `agent_dispatch` events the gate above just excluded from
+  // activeResearchEvents, only the ones NOT already individually satisfied
+  // (a research_finding/decision/anti_pattern created/updated at or after
+  // THIS event's OWN `at`) and not already discharged by a `no_capture
+  // --lane research` declaration survive. This is deliberately a PER-EVENT
+  // check — never the group's earliest-active-event anchor
+  // (`researchSatisfied` below) — because the group anchor is exactly what
+  // let a stale, EARLIER dispatch's finding silently satisfy a LATER,
+  // still-outstanding one: whole-file preservation kept both events "active"
+  // together, so once the live dispatch returned and the gate lifted, the
+  // earliest of the two re-anchored the window below the later event's own
+  // dispatch time. An event that IS already individually satisfied or
+  // discharged is CONSUMED here exactly as a non-deferring Stop would consume
+  // it — never resurrected merely because an unrelated research dispatch
+  // happens to still be live (decision b2474b26's rejected alternative 1:
+  // "retaining settled evidence lets an old capture satisfy later research").
+  // Computed only when there is something to check (a live research dispatch
+  // AND at least one agent_dispatch research event) — an unconditional store
+  // query here would be wasted work on every ordinary Stop.
+  const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === 'agent_dispatch');
+  const researchSatisfyingRecords = hasLiveAgentDispatchEvents
+    ? store.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
+    : [];
+  const individuallyResearchSatisfied = (at) =>
+    isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
+  const outstandingDeferredResearchEvents = researchEvents.filter(
+    (e) =>
+      e.kind === 'agent_dispatch' &&
+      researchDispatchLive &&
+      !dischargedOnResearchLane(e.at) &&
+      !individuallyResearchSatisfied(e.at)
+  );
 
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
@@ -1722,7 +1761,7 @@ try {
     // no-capture declaration covered every touch/debug event). A pending
     // capture declaration has forward scope, so retain it for later work.
     runSettlement();
-    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail), outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
 
@@ -1843,7 +1882,7 @@ try {
     // forward scope while this independent duty settles.
     const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters({ preservePendingDeclaration });
+    clearRegisters({ preservePendingDeclaration, outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
 
@@ -1926,7 +1965,7 @@ try {
     // even though the capture duty itself is still outstanding, is the last
     // chance before clearRegisters() below discards the claim for good.
     runSettlement();
-    clearRegisters();
+    clearRegisters({ outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
 
@@ -2304,7 +2343,10 @@ try {
   runSettlement();
   // Queueing a non-capture duty does not spend a pending declaration's forward
   // scope; queueing capture work does, and `hasCaptureDuty` distinguishes them.
-  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
+  clearRegisters({
+    preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty,
+    outstandingResearchEvents: outstandingDeferredResearchEvents,
+  });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

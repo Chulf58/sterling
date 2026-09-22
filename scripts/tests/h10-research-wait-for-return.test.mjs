@@ -245,6 +245,85 @@ test('(d) a returned dispatch discharged by a no_capture --lane research declara
 });
 
 // ===========================================================================
+// STALE SATISFACTION FIX (Sol review, HIGH found on commit 5306735): a
+// research event that is already INDIVIDUALLY satisfied by an earlier finding
+// must be consumed on the deferring Stop that discovers it, exactly as a
+// non-deferring Stop would consume it — never carried alongside a genuinely
+// outstanding sibling event, or the group's earliest-active-event anchor gets
+// dragged back to the settled event's stale timestamp once the live dispatch
+// returns and the gate lifts, letting the earlier finding silently satisfy
+// the later, still-outstanding dispatch (decision b2474b26's rejected
+// alternative 1: "retaining settled evidence lets an old capture satisfy
+// later research").
+// ===========================================================================
+
+test('STALE SATISFACTION FIX: dispatch A already satisfied by an earlier finding must not let that finding silently satisfy dispatch B once B returns — the deferring Stop consumes A, preserves only B, and B is still blocked with nothing new captured', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const A_AT = '2026-06-10T11:00:00.000Z';
+    const FINDING_AT = '2026-06-10T12:00:00.000Z';
+    const B_AT = '2026-06-10T13:00:00.000Z';
+    writeSessionEvents(dir, [aEvent('researcher', A_AT), aEvent('researcher', B_AT)]);
+    researchFinding(store, FINDING_AT); // satisfies A (created after A, before B)
+    writeRegisterRaw(dir, [liveEntry('sub-researcher-b', 'researcher')]); // only B is still live
+
+    const r = stopOnce(dir);
+    assert.equal(r.code, 0, 'B is still live — the whole lane defers, no nag');
+    assert.doesNotMatch(out(r), /research/i, 'no research nag while B runs');
+    assert.deepEqual(
+      readSessionEvents(dir),
+      [aEvent('researcher', B_AT)],
+      'STALE-PRESERVATION SHAPE if A survives too: A is already individually satisfied by the 12:00 finding and must be CONSUMED on this deferring Stop — only the genuinely outstanding event (B) may be preserved'
+    );
+
+    // B returns; nothing new was captured after it.
+    writeRegisterRaw(dir, [endedEntry('sub-researcher-b', 'researcher')]);
+    const nag = stopOnce(dir);
+    assert.equal(
+      nag.code,
+      2,
+      'STALE SATISFACTION BUG if this is 0: the 12:00 finding satisfied A, not B — once B alone anchors the earliest-active-event window (13:00), the pre-existing finding (12:00) must not satisfy it'
+    );
+    assert.match(nag.stderr, /research/i, 'the nag is the research duty, now correctly unmet for B');
+  } finally {
+    cleanup();
+  }
+});
+
+test('ALREADY-QUEUED SYNCHRONOUS RESEARCH FIX: a research_tool event already converted to research_owed must not be re-nagged on a later Stop merely because an unrelated research dispatch is still live', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeSessionEvents(dir, [rEvent('genesys webhook signature validation'), aEvent('researcher')]);
+    writeRegisterRaw(dir, [liveEntry('sub-researcher-c', 'researcher')]); // live across every Stop below
+
+    const nag = stopOnce(dir);
+    assert.equal(nag.code, 2, 'the synchronous research_tool event is never gated — it nags on its own merit even while the dispatch stays live');
+    assert.match(nag.stderr, /genesys webhook signature validation/, 'cites the query');
+
+    const convert = stopOnce(dir);
+    assert.equal(convert.code, 0, 'second Stop converts the unmet duty to research_owed and releases');
+    assert.equal(owed(store, 'research_owed').length, 1, 'exactly one research_owed minted for the synchronous event');
+    assert.deepEqual(
+      readSessionEvents(dir),
+      [aEvent('researcher')],
+      'RE-NAG-BY-PRESERVATION SHAPE if the research_tool event survives too: it was just consumed by the conversion — only the still-live dispatch event may survive'
+    );
+
+    // A later, otherwise-quiet Stop with the SAME dispatch still live must not
+    // resurrect a nag for the already-queued synchronous event.
+    const later = stopOnce(dir);
+    assert.equal(
+      later.code,
+      0,
+      'RE-NAG SHAPE if this is 2: the synchronous event was already consumed on conversion — an unrelated still-live research dispatch must not resurrect it'
+    );
+    assert.equal(owed(store, 'research_owed').length, 1, 'still exactly one — no duplicate mint');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
 // (e) two dispatches, one returned and one still running -> chosen semantics:
 // the WHOLE research lane defers until every live research-type dispatch has
 // left presumed-active (no per-event join key exists to release the returned

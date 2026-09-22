@@ -8548,7 +8548,6 @@ try {
     (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
   );
   const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
-  const hasDeferredResearchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === "agent_dispatch");
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const deferredOwners = /* @__PURE__ */ new Map();
@@ -8633,16 +8632,17 @@ try {
       )
     );
   }
-  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
+  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [] } = {}) => {
     if (deferredPaths.length || settlementFailed) {
       releaseTouchesClaim();
     } else {
       discardTouchesClaim();
     }
-    if (!deferredPaths.length && !hasDeferredResearchEvents) {
+    if (!deferredPaths.length) {
       const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
-      if (pendingDeclarations.length) {
-        writeFileSync4(eventsPath, JSON.stringify(pendingDeclarations));
+      const survivors = [...pendingDeclarations, ...outstandingResearchEvents];
+      if (survivors.length) {
+        writeFileSync4(eventsPath, JSON.stringify(survivors));
       } else {
         rmSync3(eventsPath, { force: true });
       }
@@ -8718,6 +8718,12 @@ try {
     if (e.kind === "agent_dispatch" && researchDispatchLive) return false;
     return !dischargedOnResearchLane(e.at);
   });
+  const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === "agent_dispatch");
+  const researchSatisfyingRecords = hasLiveAgentDispatchEvents ? store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }) : [];
+  const individuallyResearchSatisfied = (at) => isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
+  const outstandingDeferredResearchEvents = researchEvents.filter(
+    (e) => e.kind === "agent_dispatch" && researchDispatchLive && !dischargedOnResearchLane(e.at) && !individuallyResearchSatisfied(e.at)
+  );
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
@@ -8861,7 +8867,7 @@ try {
   const imageBinaryOnly = paths.length > 0 && paths.every((p) => IMAGE_BINARY_EXT.test(p));
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     runSettlement();
-    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail), outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
@@ -8900,7 +8906,7 @@ try {
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters({ preservePendingDeclaration });
+    clearRegisters({ preservePendingDeclaration, outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
@@ -8933,7 +8939,7 @@ try {
       });
     }
     runSettlement();
-    clearRegisters();
+    clearRegisters({ outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
@@ -9144,7 +9150,10 @@ ${parts.join("\n\n")}`;
     }
   }
   runSettlement();
-  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
+  clearRegisters({
+    preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty,
+    outstandingResearchEvents: outstandingDeferredResearchEvents
+  });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {
