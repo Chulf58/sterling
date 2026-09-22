@@ -5550,7 +5550,14 @@ function isDestructiveFragment(tokens) {
   const lv = verb.value.toLowerCase();
   const rest = tokens.slice(idx0 + 1);
   const restWords = rest.filter((t) => t.type === "word").map((t) => t.value);
-  if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
+  if (lv === "sqlite3") {
+    const dbIdx = rest.findIndex((t) => t.type === "word" && isDbPath(t.value));
+    if (dbIdx !== -1) {
+      const readonly = rest.slice(0, dbIdx).some((t) => t.type === "word" && t.value === "-readonly");
+      const dotCommandWrite = restWords.some((w) => /\.(output|once|backup)\b/i.test(w));
+      if (!readonly || dotCommandWrite) return true;
+    }
+  } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
   if ((lv === "sed" || lv === "perl") && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
   if (lv === "rm") {
     const recursive = restWords.some((w) => w === "--recursive" || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(w));

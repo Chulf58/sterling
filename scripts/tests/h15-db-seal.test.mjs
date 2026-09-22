@@ -112,8 +112,46 @@ test('Bash: redirect into sterling.db is denied', () => {
   assert.equal(r.code, 2, r.stderr);
   assert.match(r.stderr, /sterling\.db/);
 });
-test('Bash: sqlite3 against sterling.db is denied even for a SELECT', () => {
+test('Bash: plain sqlite3 against sterling.db (no -readonly) is still denied, even for a SELECT', () => {
   const r = run('Bash', { command: 'sqlite3 .sterling/sterling.db "select count(*) from records"' });
+  assert.equal(r.code, 2, r.stderr);
+});
+// User-ruled 2026-09-22 ("Yes, allow reads", given through the question form): sqlite3 -readonly
+// against the store database is allowed — the flag decides, H15 does not parse SQL. Supersedes the
+// prior "sqlite3 is destructive even for a SELECT" accepted cost recorded in article store-database-seal-h15.
+test('Bash: sqlite3 -readonly against sterling.db is allowed', () => {
+  const r = run('Bash', { command: 'sqlite3 -readonly .sterling/sterling.db "select count(*) from records"' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: -readonly after the db path does not count (flag must precede the path)', () => {
+  const r = run('Bash', { command: 'sqlite3 .sterling/sterling.db -readonly "select 1"' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: --readonly (double dash) is not recognized — still denied', () => {
+  const r = run('Bash', { command: 'sqlite3 --readonly .sterling/sterling.db "select 1"' });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: sqlite3 -readonly chained with a writing sqlite3 fragment is denied on the second fragment', () => {
+  const r = run('Bash', {
+    command: 'sqlite3 -readonly .sterling/sterling.db "select 1" && sqlite3 .sterling/sterling.db "delete from records"',
+  });
+  assert.equal(r.code, 2, r.stderr);
+});
+test('Bash: sqlite3 -readonly with a .output/.once/.backup dot-command naming the db path is still denied', () => {
+  for (const command of [
+    'sqlite3 -readonly .sterling/sterling.db ".output .sterling/sterling.db"',
+    'sqlite3 -readonly .sterling/sterling.db ".backup .sterling/sterling.db"',
+  ]) {
+    const r = run('Bash', { command });
+    assert.equal(r.code, 2, `${command}\n${r.stderr}`);
+  }
+});
+test('Bash: sqlite3 -readonly on a same-named file outside the store is allowed (unaffected)', () => {
+  const r = run('Bash', { command: 'sqlite3 -readonly fixtures/sterling.db "select 1"' });
+  assert.equal(r.code, 0, r.stderr);
+});
+test('Bash: a redirect into the database alongside a -readonly sqlite3 fragment stays denied', () => {
+  const r = run('Bash', { command: 'sqlite3 -readonly .sterling/sterling.db "select 1" > .sterling/sterling.db' });
   assert.equal(r.code, 2, r.stderr);
 });
 test('PowerShell: Remove-Item on sterling.db is denied', () => {

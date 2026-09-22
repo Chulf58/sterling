@@ -50,9 +50,13 @@ function namesStoreComponent(absPath) {
 // (case-insensitive); `rmdir <..>/.sterling`; `find <..>.sterling ... -delete`/`-exec rm`; `git clean` with `x`/`X`
 // together with `d`/`f`; PowerShell Remove-Item/ri/rd with `-Recurse`/`-r`/`/s` on a `.sterling` path. A PROTECTED DB
 // PATH is a token whose path components include `.sterling` (case-insensitive) AND whose basename matches DB_FILE_RE —
-// a same-named file elsewhere (`fixtures/sterling.db`) is NOT protected. A non-string `command` is DENIED outright (it
-// cannot be inspected); a missing/empty one allows. Everything else allows: reads, mentions, unknown verbs, `node -e`/
-// `python -c` one-liners (accident guard, not a sandbox), Sterling scripts taking `--store <db>`.
+// a same-named file elsewhere (`fixtures/sterling.db`) is NOT protected. EXCEPTION to (b) for `sqlite3` only (user-ruled
+// 2026-09-22): a fragment is allowed when a bare `-readonly` token precedes the PROTECTED DB PATH argument — the flag
+// decides, not the SQL text; `--readonly` is not recognized (unverified on this machine, not invented); a dot-command
+// that writes at the client level (`.output`/`.once`/`.backup`) naming the db path still denies even with `-readonly`.
+// A non-string `command` is DENIED outright (it cannot be inspected); a missing/empty one allows. Everything else
+// allows: reads, mentions, unknown verbs, `node -e`/`python -c` one-liners (accident guard, not a sandbox), Sterling
+// scripts taking `--store <db>`.
 
 /** Index just past the quote run starting at s[i] (s[i] is `'` or `"`). */
 function skipQuoted(s, i) {
@@ -307,7 +311,20 @@ function isDestructiveFragment(tokens) {
   const rest = tokens.slice(idx0 + 1);
   const restWords = rest.filter((t) => t.type === 'word').map((t) => t.value);
 
-  if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
+  if (lv === 'sqlite3') {
+    // user-ruled 2026-09-22 ("Yes, allow reads"): `sqlite3 -readonly <db> ...` is allowed — the
+    // flag decides, H15 does not parse SQL. `-readonly` must appear before the db-path argument
+    // (sqlite3 reads flags left of its positional args); `--readonly` is not recognized because
+    // this rebuild does not invent CLI support that hasn't been checked against a real binary.
+    // The CLI's dot-commands (.output/.once/.backup) write files at the client level regardless
+    // of -readonly, so naming the db path alongside one still denies.
+    const dbIdx = rest.findIndex((t) => t.type === 'word' && isDbPath(t.value));
+    if (dbIdx !== -1) {
+      const readonly = rest.slice(0, dbIdx).some((t) => t.type === 'word' && t.value === '-readonly');
+      const dotCommandWrite = restWords.some((w) => /\.(output|once|backup)\b/i.test(w));
+      if (!readonly || dotCommandWrite) return true;
+    }
+  } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
   if ((lv === 'sed' || lv === 'perl') && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
   if (lv === 'rm') {
     const recursive = restWords.some((w) => w === '--recursive' || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(w));
