@@ -424,6 +424,50 @@ test('AC8 MIN-HITS-UNCHANGED: a one-hit, discriminating, centrality-passing reco
   }
 });
 
+// ===========================================================================
+// 9 — SCOPE BOUNDARY (this session): knowledge_preflight's `matches` list no
+// longer requires the record-centrality floor (B2G widening — see
+// knowledge-preflight.test.ts's AC-b/AC-h3/AC-i1/AC-i2). same_subject
+// (sameSubjectDigest, the write-time surface) is explicitly OUT of that
+// change's scope and must keep requiring centrality unchanged: a record
+// that would now LIST in knowledge_preflight purely on a discriminating,
+// non-central match must still never appear in same_subject.
+// ===========================================================================
+
+test('AC9 CENTRALITY-FLOOR-UNCHANGED (scope boundary): a record whose only shared vocabulary is discriminating, ' +
+  'passes the >=2-hit floor, but is PERIPHERAL (non-central) is NOT suggested by same_subject, even though the ' +
+  'B2G widening now lists this exact shape in knowledge_preflight', () => {
+  const { tools, cleanup } = harness();
+  try {
+    // recExisting's dominant narrow-text vocabulary (alpha/beta/gamma/delta/
+    // epsilon/zeta, freq 2 each) crowds 'wyvern'/'armature' (freq 1 each) out
+    // of its own top-6 narrow-central set — so a query sharing only
+    // wyvern/armature never clears hasRecordCentralityHit on this record.
+    const recExisting = mkDecision(
+      tools,
+      'Filler telemetry register',
+      'alpha alpha beta beta gamma gamma delta delta epsilon epsilon zeta zeta wyvern armature'
+    );
+
+    const created = createDecision(
+      tools,
+      'New chassis compatibility note',
+      'This chassis compatibility note discusses wyvern armature installation for unrelated system integration efforts.'
+    ) as Loose;
+    assert.equal((created.record as Loose).status, 'active');
+
+    const list = sameSubjectOf(created);
+    const ids = idsOf(list);
+    assert.ok(
+      !ids.includes(recExisting.id as string),
+      'wyvern+armature clears the >=2-hit floor and hasDiscriminatingHit, but never hasRecordCentralityHit — ' +
+        'same_subject must still exclude it after the preflight-only widening'
+    );
+  } finally {
+    cleanup();
+  }
+});
+
 test('AC7 CAP: same_subject caps its disclosure at no more than 5 entries even when 7+ active records share the subject', () => {
   const { tools, cleanup } = harness();
   try {

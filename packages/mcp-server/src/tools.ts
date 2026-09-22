@@ -4978,49 +4978,81 @@ export class SterlingTools {
    * surface below — measured relaxation (research findings on the
    * preflight-floor counterfactual and its validation): an explicit pull the
    * conductor asked for tolerates a weaker total-hit floor than unsolicited
-   * write-time advice nobody asked for. hasDiscriminatingHit and
-   * hasRecordCentralityHit stay mandatory for both callers, unchanged, and
-   * are INDEPENDENT record-level floors — NOT an intersection requirement.
-   * hasDiscriminatingHit only asks whether the matched hit(s) escape
-   * GENERIC_DEV_TERMS; hasRecordCentralityHit separately asks whether the
-   * OUTGOING TEXT's own words (every word >= AXIS_MIN_TERM_LEN, generic or
-   * not, via symmetric prefix matching — packages/store/src/axis.ts) cover
-   * the record's central terms. Nothing requires the discriminating hit
-   * ITSELF to be one of the covered central terms: a record can pass on a
-   * peripheral discriminating hit while an unrelated, even generic, outgoing
-   * word happens to prefix-cover its central vocabulary (cross-family review
+   * write-time advice nobody asked for. hasDiscriminatingHit only asks
+   * whether the matched hit(s) escape GENERIC_DEV_TERMS and stays mandatory
+   * for both callers, unchanged. hasRecordCentralityHit separately asks
+   * whether the OUTGOING TEXT's own words (every word >= AXIS_MIN_TERM_LEN,
+   * generic or not, via symmetric prefix matching —
+   * packages/store/src/axis.ts) cover the record's central terms — mandatory
+   * for same_subject (sameSubjectDigest, unchanged) but, since the B2G
+   * widening below (findings f6ada94d and
+   * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+   * september-2026), NO LONGER a listing floor here: it now gates only
+   * matched_total/answerability, computed separately from the LISTED
+   * `matches` window. Nothing requires the discriminating hit ITSELF to be
+   * one of the covered central terms: a record can pass on a peripheral
+   * discriminating hit while an unrelated, even generic, outgoing word
+   * happens to prefix-cover its central vocabulary (cross-family review
    * MEDIUM finding, fix round). The INPUT guard just below is separate: it
    * demands >=2 extractable terms IN THE QUESTION TEXT itself (a one-word
    * question is still insufficient) even though a candidate may now qualify
    * on a single MATCHED term. RESULT SIZE: the sorted match list is capped at
-   * PREFLIGHT_MATCH_CAP after sorting (see below) — `matched_total` always
-   * reports the pre-cap count of qualifying records AMONG THE CANDIDATES
-   * ACTUALLY EVALUATED (not a true/exact/full count: each type's own query is
-   * itself capped at 40 FTS candidates, so a qualifying record beyond a
-   * type's first 40 is never seen and never counted), `capped` is present
-   * (true) only when the cap bound, and answerability is decided from that
-   * same evaluated set, not the PREFLIGHT_MATCH_CAP window.
+   * PREFLIGHT_MATCH_CAP after sorting (see below) — the sort itself is now
+   * centrality-hit-count DESC, then raw-hits DESC, then the existing
+   * recency/id tie-break, so a central match always outranks a merely-hitting
+   * one regardless of which side has more raw hits. `matched_total` always
+   * reports the pre-cap count of CENTRALITY-PASSING records AMONG THE
+   * CANDIDATES ACTUALLY EVALUATED (not a true/exact/full count: each type's
+   * own query is itself capped at 40 FTS candidates, so a qualifying record
+   * beyond a type's first 40 is never seen and never counted), `capped` is
+   * present (true) only when the WIDENED list (centrality-passing plus
+   * non-central survivors) exceeds PREFLIGHT_MATCH_CAP, and answerability is
+   * decided from the centrality-passing set, not the PREFLIGHT_MATCH_CAP
+   * window.
    */
   knowledgePreflight(text: string): KnowledgePreflightResult {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) {
       return { answerability: 'insufficient', reason: 'too_little_vocabulary', terms, matched_total: 0, matches: [] };
     }
-    const allMatches = this.axisCandidateMatches(text, terms, SterlingTools.PREFLIGHT_MIN_HITS);
-    const matchedTotal = allMatches.length;
-    // Cap AFTER the sort (axisCandidateMatches already returns its sorted
-    // order) so one-hit candidates from the relaxed floor are removed BEFORE
-    // any higher-hit candidate — the lowest-ranked survivors are cut first.
-    // When more than PREFLIGHT_MATCH_CAP higher-hit candidates themselves
-    // qualify, some of those are cut too; the cap bounds the WINDOW, not the
-    // rank at which cutting starts. The per-survivor inbound-supersedes lookup below
-    // runs only for the records actually returned in this window, not the
-    // full candidate set: the relaxed one-hit floor makes that full set
-    // large enough (up to 6 types x 40 candidates) that computing it for
-    // every survivor before capping would be wasted work on records the
-    // caller never sees.
-    const windowed = allMatches.slice(0, SterlingTools.PREFLIGHT_MATCH_CAP);
-    const capped = matchedTotal > windowed.length;
+    // B2G widening (findings f6ada94d and
+    // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+    // september-2026): requireCentrality=false — the record-centrality floor
+    // no longer gates LISTING here, only matched_total/answerability below.
+    // sameSubjectDigest keeps passing true (unchanged, see that method).
+    const allMatches = this.axisCandidateMatches(text, terms, SterlingTools.PREFLIGHT_MIN_HITS, false);
+    // Re-derive centrality per survivor ONCE here (axisCandidateMatches no
+    // longer filters on it, so its own internal centrality computation is
+    // discarded before it returns) — matched_total/answerability stay
+    // computed from the centrality-PASSING subset exactly as before the
+    // widening; a request whose only survivors fail centrality still answers
+    // 'ungoverned' with matched_total 0, even though those survivors now
+    // appear in `matches` below.
+    const withCentrality = allMatches.map(({ record, hits }) => ({
+      record,
+      hits,
+      centralHits: recordCentralityHits(record, text).length,
+      passesCentrality: hasRecordCentralityHit(record, text),
+      at: Date.parse(record.updated_at),
+    }));
+    const matchedTotal = withCentrality.filter((c) => c.passesCentrality).length;
+    // Sort centrality-first (this session's B2G decision): centrality hit
+    // count desc, then raw hits desc, then the existing recency/id
+    // tie-break — a central match always outranks a merely-hitting one, over
+    // the WIDENED list (not just the centrality-passing subset above).
+    const sorted = [...withCentrality].sort(
+      (a, b) =>
+        b.centralHits - a.centralHits ||
+        b.hits.length - a.hits.length ||
+        b.at - a.at ||
+        (a.record.id < b.record.id ? -1 : a.record.id > b.record.id ? 1 : 0)
+    );
+    // Cap AFTER the sort, over the WIDENED list — `matched_total` above
+    // already reports the true centrality-passing count; `capped`/`matches`
+    // reflect the full (possibly non-central) survivor set, so a large
+    // widened list can cap even when matched_total itself is small.
+    const windowed = sorted.slice(0, SterlingTools.PREFLIGHT_MATCH_CAP);
+    const capped = sorted.length > windowed.length;
     const matches = windowed.map(({ record, hits }) => {
       // board c6e3561f disclosure-carry: a matched record carries the same
       // inbound-supersedes disclosure as knowledge_get / knowledge_query-full,
@@ -5074,16 +5106,26 @@ export class SterlingTools {
    * governing types, cap 40 each -> axisHits/hasDiscriminatingHit/
    * hasRecordCentralityHit), extracted so the floor logic is defined ONCE.
    * Callers differ only in what they do with the (record, hits) pairs, in
-   * which candidates they exclude, and — since PREFLIGHT_MIN_HITS above — in
-   * the MINIMUM MATCHED-HITS floor each passes explicitly: no default here,
-   * so a caller can never inherit a floor value silently. hasDiscriminatingHit
-   * and hasRecordCentralityHit stay mandatory for every caller and never vary
-   * by minHits.
+   * which candidates they exclude, in the MINIMUM MATCHED-HITS floor each
+   * passes explicitly (since PREFLIGHT_MIN_HITS above — no default here, so
+   * a caller can never inherit a floor value silently), and — since this
+   * session's B2G widening (findings f6ada94d and
+   * preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+   * september-2026) — in whether hasRecordCentralityHit gates LISTING at
+   * all, via the explicit `requireCentrality` flag (also no default).
+   * hasDiscriminatingHit stays mandatory for every caller, unchanged.
+   * knowledgePreflight passes requireCentrality=false: a candidate can now
+   * survive this method's filter without passing centrality, and
+   * knowledgePreflight itself re-derives centrality separately to decide
+   * matched_total/answerability and to sort. sameSubjectDigest passes
+   * requireCentrality=true, unchanged — the write-time surface keeps
+   * centrality as a listing floor.
    */
   private axisCandidateMatches(
     text: string,
     terms: string[],
-    minHits: number
+    minHits: number,
+    requireCentrality: boolean
   ): { record: DurableRecord; hits: string[] }[] {
     // rank_terms is schema-bound to <=64 chars (store's §3.4 QueryOptions
     // parse) — extractAxisTerms has no upper bound (only AXIS_MIN_TERM_LEN, a
@@ -5138,7 +5180,9 @@ export class SterlingTools {
       .map((record) => ({ record, hits: axisHits(record, terms) }))
       .filter(
         ({ record, hits }) =>
-          hits.length >= minHits && hasDiscriminatingHit(hits) && hasRecordCentralityHit(record, text)
+          hits.length >= minHits &&
+          hasDiscriminatingHit(hits) &&
+          (!requireCentrality || hasRecordCentralityHit(record, text))
       )
       .map((c) => ({
         ...c,
@@ -5186,7 +5230,7 @@ export class SterlingTools {
   private sameSubjectDigest(text: string, excludeIds: Set<string>): SameSubjectEntry[] {
     const terms = extractAxisTerms(text, MAX_RANK_TERMS);
     if (terms.length < AXIS_MIN_HITS) return [];
-    return this.axisCandidateMatches(text, terms, AXIS_MIN_HITS)
+    return this.axisCandidateMatches(text, terms, AXIS_MIN_HITS, true)
       .filter(({ record }) => !excludeIds.has(record.id))
       .slice(0, SterlingTools.SAME_SUBJECT_CAP)
       .map(({ record, hits }) => ({

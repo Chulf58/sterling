@@ -108,30 +108,43 @@ test('AC-a: knowledge_preflight — text repeating >=2 of a stored record\'s CEN
   }
 });
 
-test('AC-b: knowledge_preflight — text hitting only the record\'s PERIPHERAL words answers ready with empty matches (centrality floor)', () => {
-  const { tools, cleanup } = harness();
-  try {
-    seedCentralAntiPattern(tools);
-    // Shares every peripheral, freq-1 word (game/field/cell) — enough distinct,
-    // non-generic hits to satisfy the OLDER stage-2 floors on their own — but
-    // NONE of the six dominant modeling terms. Reconstructs the 2026-08-09
-    // Blender false positive at the preflight surface: without the centrality
-    // floor this record would wrongly surface as a match.
-    const result = preflight(
-      tools,
-      'Write tests for the game field cell logic: cover the game field cell grid, ' +
-        'the field cell adjacency rules, and the game field cell lifecycle events.'
-    );
-    assert.equal(
-      result.answerability,
-      'ungoverned',
-      "the record's central vocabulary never appears in this text — only its peripheral words do"
-    );
-    assert.deepEqual(result.matches, [], 'peripheral-only overlap must not surface the record as a target');
-  } finally {
-    cleanup();
+test(
+  'AC-b: knowledge_preflight — text hitting only the record\'s PERIPHERAL words answers ungoverned, but the ' +
+    'record now LISTS as a non-central match (B2G: centrality is no longer a listing floor, only an ' +
+    'answerability floor)',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      const record = seedCentralAntiPattern(tools);
+      // Shares every peripheral, freq-1 word (game/field/cell) — enough distinct,
+      // non-generic hits to satisfy the OLDER stage-2 floors on their own — but
+      // NONE of the six dominant modeling terms. Reconstructs the 2026-08-09
+      // Blender false positive at the preflight surface: hasRecordCentralityHit
+      // still fails on this text, so matched_total/answerability are unaffected
+      // by this record — but B2G (findings f6ada94d and
+      // preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+      // september-2026) widened the LIST itself to include a centrality-failing
+      // survivor as a disclosed, non-central candidate rather than hiding it.
+      const result = preflight(
+        tools,
+        'Write tests for the game field cell logic: cover the game field cell grid, ' +
+          'the field cell adjacency rules, and the game field cell lifecycle events.'
+      ) as unknown as { answerability: string; matched_total: number; matches: { id: string; central: string[] }[] };
+      assert.equal(
+        result.answerability,
+        'ungoverned',
+        "the record's central vocabulary never appears in this text — only its peripheral words do, so " +
+          'answerability still reads the store as not governing this subject'
+      );
+      assert.equal(result.matched_total, 0, 'matched_total is still computed from the centrality-passing subset — zero here');
+      assert.equal(result.matches.length, 1, 'the peripheral-only survivor now appears in the widened matches list');
+      assert.equal(result.matches[0].id, record.id);
+      assert.deepEqual(result.matches[0].central, [], "the listed record is explicitly non-central — its central field is empty");
+    } finally {
+      cleanup();
+    }
   }
-});
+);
 
 test('AC-c: knowledge_preflight — fewer than 2 extractable terms answers insufficient/too_little_vocabulary with no matches', () => {
   const { tools, cleanup } = harness();
@@ -585,7 +598,17 @@ test(
 );
 
 test(
-  'sort pin 3 (primary key unchanged): more raw hits still outranks fewer hits with higher centrality',
+  // REWRITTEN (B2G, decision quoted in this session's brief: "sort the list by
+  // centrality hit count DESC, then hits DESC"): knowledgePreflight's OWN
+  // sort key order flipped from hits-primary/centrality-secondary to
+  // centrality-primary/hits-secondary — the old title/assertion here
+  // ("primary key unchanged: more raw hits still outranks fewer hits with
+  // higher centrality") pinned exactly the contract this change reverses for
+  // knowledgePreflight. axisCandidateMatches' OWN internal sort (still used
+  // unchanged by sameSubjectDigest / same_subject) stays hits-primary — see
+  // same-subject-surfacing.test.ts, which this file's fixtures never touch.
+  'sort pin 3 (B2G: centrality is now the PRIMARY sort key for knowledge_preflight): fewer raw hits with ' +
+    'higher centrality now outranks more raw hits with lower centrality',
   () => {
     const { tools, cleanup } = harness();
     try {
@@ -602,20 +625,21 @@ test(
       }).record;
       // decision: only 3 raw hits (quaternion, manifold, topology) but ALL 3 are
       // central (small, undiluted narrow text).
-      tools.knowledgeCreate('decision', {
+      const moreCentral = tools.knowledgeCreate('decision', {
         title: 'quaternion manifold topology',
         statement: 'Rule applies always.',
         alternatives_rejected: [],
         rationale: 'rationale',
-      });
+      }).record;
       const result = preflight(tools, QUERY_TEXT);
       assert.equal(result.matches.length, 2);
       assert.equal(
         result.matches[0].id,
-        moreHits.id,
-        'raw hit count is still the PRIMARY sort key: 5 hits beats 3, even though the 3-hit record ' +
-          'has more of its hits marked central (3 vs 2)'
+        moreCentral.id,
+        'centrality hit count is now the PRIMARY sort key: the 3-hit decision, with MORE central hits ' +
+          '(3 vs 2), now sorts ahead of the 5-hit anti_pattern'
       );
+      assert.equal(result.matches[1].id, moreHits.id);
     } finally {
       cleanup();
     }
@@ -751,7 +775,8 @@ test(
 );
 
 test(
-  'AC-h3 (centrality floor still applies): a record whose only hit is a discriminating but PERIPHERAL term is NOT returned, even under the one-hit minimum',
+  'AC-h3 (centrality floor still applies to answerability; B2G widens the LIST): a record whose only hit is a ' +
+    'discriminating but PERIPHERAL term still answers ungoverned, but now lists as a non-central match',
   () => {
     const { tools, cleanup } = harness();
     try {
@@ -759,7 +784,7 @@ test(
       // evidence): 'gizmo' independently clears hasDiscriminatingHit (it is
       // not in GENERIC_DEV_TERMS) — only hasRecordCentralityHit rejects it,
       // since 'gizmo' never appears among the record's top-K central terms.
-      tools.knowledgeCreate('anti_pattern', {
+      const record = tools.knowledgeCreate('anti_pattern', {
         title: 'Boolean modifier mesh manifold topology solver',
         trigger:
           'boolean modifier boolean modifier mesh manifold mesh manifold topology solver topology solver gizmo',
@@ -767,14 +792,25 @@ test(
         wrong_way: 'wrong way',
         right_way: 'right way text',
         source_evidence: 'evidence',
-      });
-      const result = preflight(tools, 'Please check the gizmo compatibility with unrelated hardware today.');
+      }).record;
+      const result = preflight(tools, 'Please check the gizmo compatibility with unrelated hardware today.') as unknown as {
+        answerability: string;
+        matched_total: number;
+        matches: { id: string; central: string[] }[];
+      };
       assert.equal(
         result.answerability,
         'ungoverned',
-        "'gizmo' is discriminating but never central to the record's own dominant vocabulary — hasRecordCentralityHit still rejects it"
+        "'gizmo' is discriminating but never central to the record's own dominant vocabulary — hasRecordCentralityHit still rejects it for answerability"
       );
-      assert.deepEqual(result.matches, []);
+      assert.equal(result.matched_total, 0, 'matched_total is still decided from the centrality-passing subset');
+      assert.equal(
+        result.matches.length,
+        1,
+        'B2G: centrality is no longer required to LIST a candidate — this non-central survivor now appears'
+      );
+      assert.equal(result.matches[0].id, record.id);
+      assert.deepEqual(result.matches[0].central, [], 'the listed record is explicitly non-central');
     } finally {
       cleanup();
     }
@@ -940,3 +976,107 @@ test('AC-h7 (cap, negative control): a small qualifying set carries matched_tota
     cleanup();
   }
 });
+
+// --- B2G widening pins (this session): the record-centrality floor is no
+// longer required to LIST a candidate in knowledge_preflight's `matches` —
+// only to decide matched_total/answerability, exactly as before. See
+// findings f6ada94d and
+// preflight-verdict-false-governed-on-hard-negatives-and-b2g-measured-
+// september-2026. Test (a) (a non-central-only survivor, ungoverned with
+// matched_total 0 but matches.length 1) is already pinned above by the
+// rewritten AC-b and AC-h3. The two tests below cover (b) centrality-first
+// sort against a higher-hit non-central competitor, and (c) `capped`
+// reflecting the widened (not just centrality-passing) list length.
+
+test(
+  'AC-i1 (B2G sort): a central record with FEWER raw hits sorts ahead of a non-central record with MORE raw ' +
+    'hits — centrality is the primary key regardless of which side has more matched terms',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // CENTRAL: 2 hits (boolean, modifier), both central (covered >= min(2,6)).
+      const central = seedCentralAntiPattern(tools);
+      // NON-CENTRAL: 5 hits (alpha/beta/gamma/delta/epsilon), all peripheral —
+      // FILLER_TERMS' six words (freq 3 each) dominate this record's own
+      // top-6 narrow-central set, crowding every alpha/beta/gamma/delta/epsilon
+      // (freq 1 each) out of it entirely.
+      const nonCentral = tools.knowledgeCreate('decision', {
+        title: 'Filler decision baseline',
+        statement: `${FILLER_TERMS} alpha beta gamma delta epsilon`,
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      const result = preflight(
+        tools,
+        'Investigate boolean modifier alpha beta gamma delta epsilon issue for review.'
+      ) as unknown as { answerability: string; matched_total: number; matches: { id: string; central: string[] }[] };
+      assert.equal(result.answerability, 'verify_targets', 'the central record alone already governs this subject');
+      assert.equal(result.matched_total, 1, 'only the central record passes the centrality floor for matched_total');
+      assert.equal(result.matches.length, 2, 'both the central and the widened non-central survivor are listed');
+      assert.equal(
+        result.matches[0].id,
+        central.id,
+        'centrality is the PRIMARY sort key: 2 central hits outranks 5 non-central hits'
+      );
+      assert.equal(result.matches[1].id, nonCentral.id);
+      assert.deepEqual(result.matches[1].central, [], 'the lower-ranked survivor is explicitly non-central');
+    } finally {
+      cleanup();
+    }
+  }
+);
+
+test(
+  'AC-i2 (B2G cap): the widened list caps at 20 even when the centrality-passing subset (matched_total) is far ' +
+    'smaller — capped reflects the FULL widened list, not just the central survivors',
+  () => {
+    const { tools, cleanup } = harness();
+    try {
+      // The one centrality-passing record: a small, undiluted narrow text
+      // (title+statement) where every extractable term is automatically
+      // central (<=6 distinct terms total).
+      const central = tools.knowledgeCreate('decision', {
+        title: 'Kappa nexus register',
+        statement: 'Kappa nexus register control plane operation.',
+        alternatives_rejected: [],
+        rationale: 'rationale',
+      }).record;
+      // 20 non-central survivors: each shares exactly one peripheral,
+      // discriminating word ('omega') with the query, crowded out of its own
+      // top-6 narrow-central set by FILLER_TERMS' six higher-frequency words.
+      const fillers = [];
+      for (let i = 0; i < 20; i++) {
+        fillers.push(
+          tools.knowledgeCreate('decision', {
+            title: `Filler variant ${i}`,
+            statement: `${FILLER_TERMS} omega`,
+            alternatives_rejected: [],
+            rationale: 'rationale',
+          }).record
+        );
+      }
+      const result = preflight(tools, 'Kappa nexus omega review today.') as unknown as {
+        answerability: string;
+        matched_total: number;
+        capped?: boolean;
+        matches: { id: string }[];
+      };
+      assert.equal(result.matched_total, 1, 'matched_total counts only the one centrality-passing record');
+      assert.equal(
+        result.capped,
+        true,
+        'the widened list (1 central + 20 non-central = 21 survivors) exceeds the 20 cap even though matched_total is 1'
+      );
+      assert.equal(result.matches.length, 20, '`matches` is truncated to the cap over the WIDENED list');
+      assert.equal(result.matches[0].id, central.id, 'the sole central survivor still sorts first');
+      const expectedFillerWindow = fillers.map((r) => r.id as string).sort().slice(0, 19);
+      assert.deepEqual(
+        result.matches.slice(1).map((m) => m.id),
+        expectedFillerWindow,
+        'the remaining 19 slots hold the 19 smallest-id non-central fillers (tied on hits/centrality/updated_at)'
+      );
+    } finally {
+      cleanup();
+    }
+  }
+);
