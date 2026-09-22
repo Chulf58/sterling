@@ -6326,7 +6326,7 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
         if (hit.record.terminal) {
           record = hit.record;
         } else {
-          const updated = { ...hit.record, prompt: null, terminal: { at: (/* @__PURE__ */ new Date()).toISOString(), reason: "stop" } };
+          const updated = { ...hit.record, prompt: null, terminal: { at: (/* @__PURE__ */ new Date()).toISOString(), reason: event === "task-stop" ? "task-stop" : "stop" } };
           writeRecordAtomic(root, hit.key, updated);
           record = updated;
         }
@@ -6367,6 +6367,39 @@ function sidecarForChildTranscript(childPath) {
   if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") return { ok: false };
   return { ok: true, meta };
 }
+function residueLines(cwd, departing) {
+  const probe = probeDirtyPaths(cwd, departing.files);
+  const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+  if (probe.verified && dirty.length === 0) return [];
+  return [render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason })))];
+}
+async function endTaskStoppedDispatch(input2, lines) {
+  const resp = input2.tool_response;
+  if (!resp || typeof resp !== "object" || typeof resp.task_type !== "string") {
+    warnNonBlocking(`H22: TaskStop's tool_response has no readable task_type (${JSON.stringify(resp)?.slice(0, 200)}) \u2014 nothing was ended; a stopped dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  if (resp.task_type !== "local_agent") return;
+  if (typeof resp.task_id !== "string" || resp.task_id === "") {
+    warnNonBlocking(`H22: TaskStop stopped a local_agent task but tool_response.task_id is missing \u2014 nothing was ended; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  try {
+    const finished = await finishDispatchAndRegisterEnd(input2.cwd, { session_id: input2.session_id, agent_id: resp.task_id, event: "task-stop" });
+    if (finished.found) lines.push(...residueLines(input2.cwd, finished.entry));
+  } catch (e) {
+    if (e?.code !== "register_lock_held") throw e;
+    lines.push(
+      render(
+        disclosure(
+          "register_lock_held",
+          e.facts ?? {},
+          `H22: could not mark the TaskStop-killed round '${resp.task_id}' ended \u2014 the register lock is held at ${e.facts?.lock_dir ?? "(unknown)"}; the round stays presumed-active until its lease expires`
+        )
+      )
+    );
+  }
+}
 var input = readStdin();
 try {
   if (!existsSync3(`${input.cwd}/.sterling/config.json`)) allow();
@@ -6381,7 +6414,11 @@ try {
     warnNonBlocking(`H22: ${event} carried no agent_id (entries are keyed by agent_id) \u2014 ${consequence}`);
   }
   const lines = [];
-  if (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure") {
+  if (event === "PostToolUse" && input.tool_name === "TaskStop") {
+    await endTaskStoppedDispatch(input, lines);
+    if (lines.length) process.stderr.write(lines.join("\n") + "\n");
+    allow();
+  } else if (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure") {
     if (input.tool_name !== "Task" && input.tool_name !== "Agent") {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher \u2014 allowing, nothing tracked`);
     } else {
@@ -6491,13 +6528,7 @@ try {
     }
     if (departing) {
       const lastMsg = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
-      if (lastMsg === "") {
-        const probe = probeDirtyPaths(input.cwd, departing.files);
-        const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
-        if (!(probe.verified && dirty.length === 0)) {
-          lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason }))));
-        }
-      }
+      if (lastMsg === "") lines.push(...residueLines(input.cwd, departing));
     }
   }
   if (lines.length) process.stderr.write(lines.join("\n") + "\n");

@@ -629,17 +629,22 @@ function groupMentions(group, needle) {
   return JSON.stringify(group?.hooks ?? group ?? {}).includes(needle);
 }
 
-test('DSH-8: hooks/hooks.json registers h22-dispatch-register on PreToolUse, PostToolUse AND PostToolUseFailure, each with matcher exactly "Task|Agent"', () => {
+// CHANGED 2026-09-22 (decision `h22-observes-taskstop-to-end-a-killed-dispatch`,
+// user-ruled): PostToolUse now carries a SECOND h22 group with matcher exactly
+// "TaskStop", so the old "exactly one PostToolUse group" count could not hold.
+// Every prior pin is kept: each event still has exactly one "Task|Agent" h22
+// group, and the new group is pinned to the exact string "TaskStop".
+test('DSH-8: hooks/hooks.json registers h22-dispatch-register on PreToolUse, PostToolUse AND PostToolUseFailure, each with matcher exactly "Task|Agent" — plus exactly one PostToolUse "TaskStop" group', () => {
   assert.equal(existsSync(HOOKS_JSON), true, `hooks/hooks.json must exist at ${HOOKS_JSON}`);
   const json = JSON.parse(readFileSync(HOOKS_JSON, 'utf8'));
-  for (const event of ['PreToolUse', 'PostToolUse', 'PostToolUseFailure']) {
+  const expected = { PreToolUse: ['Task|Agent'], PostToolUse: ['Task|Agent', 'TaskStop'], PostToolUseFailure: ['Task|Agent'] };
+  for (const [event, matchers] of Object.entries(expected)) {
     const groups = hooksJsonEventGroups(json, event);
     const mine = groups.filter((g) => groupMentions(g, 'h22-dispatch-register'));
-    assert.equal(mine.length, 1, `exactly one ${event} registration for h22-dispatch-register, got ${mine.length}`);
-    assert.equal(
-      mine[0].matcher,
-      'Task|Agent',
-      `${event}'s matcher must be the normalized string "Task|Agent" (decision f99d527a) — got ${JSON.stringify(mine[0].matcher)}` // not-a-citation: fixture id
+    assert.deepEqual(
+      mine.map((g) => g.matcher).sort(),
+      [...matchers].sort(),
+      `${event}'s h22 groups must have exactly the matchers ${JSON.stringify(matchers)} (decision f99d527a normalized "Task|Agent") — got ${JSON.stringify(mine.map((g) => g.matcher))}` // not-a-citation: fixture id
     );
   }
 });
@@ -805,3 +810,107 @@ test('DSH-12: one SessionStart produces BOTH boundary effects — the pending re
 // of dispatch-state/ — the `assert.ok(rec)` line goes red first, which is the
 // round-2 FATAL case (a resumed pre-/clear agent then matches a fresh
 // same-type slot and consumes it).
+
+// ===========================================================================
+// TaskStop ends a killed dispatch (decision
+// `h22-observes-taskstop-to-end-a-killed-dispatch`). TaskStop is a TOOL, not a
+// hook event: h22 sees it on PostToolUse with matcher "TaskStop". The join key
+// is tool_response.task_id — the RESOLVED task id, which for a task_type
+// 'local_agent' is the agent's agentId (Claude Code 2.1.280: the task is
+// registered with id = agentId; TaskStop's call returns {message, task_id,
+// task_type, command}). tool_input.task_id may be a NAME, so it is never the
+// join key.
+// ===========================================================================
+
+const taskStopInput = (dir, { task_id, input_task_id = task_id, task_type = 'local_agent', session_id = 's1' }) => ({
+  hook_event_name: 'PostToolUse',
+  tool_name: 'TaskStop',
+  tool_use_id: 'toolu_taskstop',
+  tool_input: { task_id: input_task_id },
+  tool_response: { message: `Successfully stopped task: ${task_id} (a lane)`, task_id, task_type, command: 'a lane' },
+  session_id,
+  cwd: dir,
+  transcript_path: join(dir, 't', 'parent.jsonl'),
+});
+
+test('DSH-13: a PostToolUse TaskStop of a local_agent ENDS its register round (event "task-stop") and tombstones its state record — joined on tool_response.task_id even when tool_input named the agent', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('killed', ['src/killed.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_killed', file: 'src/killed.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-killed' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-killed', agent_type: d.type }), dir).code, 0);
+    assert.equal(entryFor(dir, 'agent-killed').ended, undefined, 'sanity: the round is open before the kill');
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-killed', input_task_id: 'my-named-lane' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.doesNotMatch(r.stderr, /unexpected .*tool_name/, 'TaskStop is a handled tool on this hook, not a matcher mismatch');
+
+    const entry = entryFor(dir, 'agent-killed');
+    assert.equal(entry.ended?.event, 'task-stop', 'the killed round is MARKED ended (inactive-confirmed), never deleted');
+    const rec = stateFor(dir, 'toolu_killed');
+    assert.equal(derivedState(rec), 'terminal');
+    assert.equal(rec.terminal.reason, 'task-stop');
+    assert.equal(rec.prompt, null);
+    assert.match(r.stderr, /\[dispatch_residue\]/, 'a killed dispatch gets the same kill-residue disclosure a message-less SubagentStop gets');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-14 CONTROL: a TaskStop of a NON-agent task (a background shell) changes nothing and says nothing', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('shell', ['src/shell.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_shell', file: 'src/shell.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-live' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-live', agent_type: d.type }), dir).code, 0);
+    const before = readFileSync(registerPath(dir), 'utf8');
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-live', task_type: 'local_bash' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(readFileSync(registerPath(dir), 'utf8'), before, 'a shell kill is not a dispatch kill — even when its id collides with an agent id');
+    assert.equal(r.stderr.trim(), '', `nothing to disclose: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-15: a TaskStop whose tool_response carries no task_type is an UNKNOWN shape — disclosed, nothing ended', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('odd', ['src/odd.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_odd', file: 'src/odd.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-odd' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-odd', agent_type: d.type }), dir).code, 0);
+
+    const input = taskStopInput(dir, { task_id: 'agent-odd' });
+    input.tool_response = 'Successfully stopped task: agent-odd';
+    const r = h22(input, dir);
+    assert.notEqual(r.code, 2, `never blocks — the disclosure rides the hook's non-blocking warning channel: ${r.stderr}`);
+    assert.match(r.stderr, /TaskStop/, `the unreadable shape is disclosed: ${r.stderr}`);
+    assert.equal(entryFor(dir, 'agent-odd').ended, undefined, 'no guess: the round stays open');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-16: a SubagentStop arriving AFTER a TaskStop already ended the round is a clean no-op — the "task-stop" mark stands', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('late', ['src/late.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_late', file: 'src/late.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-late' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-late', agent_type: d.type }), dir).code, 0);
+    assert.equal(h22(taskStopInput(dir, { task_id: 'agent-late' }), dir).code, 0);
+
+    const r = h22(stopInput(dir, { agent_id: 'agent-late', agent_type: d.type }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const rounds = readRegister(dir).filter((e) => e.agent_id === 'agent-late');
+    assert.equal(rounds.length, 1, 'no second round appears');
+    assert.equal(rounds[0].ended?.event, 'task-stop');
+    assert.equal(stateFor(dir, 'toolu_late').terminal.reason, 'task-stop');
+  } finally {
+    cleanup();
+  }
+});

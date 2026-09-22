@@ -25,8 +25,10 @@
 //
 // DOES NOT GUARANTEE: that an `unknown` register dispatch is still running (it
 // may be dead with no signal ever emitted for it); that a `presumed-active`
-// dispatch is still running (it may have died within the lease window); a
-// TaskStop terminal transition (not built in R1); correctness under
+// dispatch is still running (it may have died within the lease window) —
+// a TaskStop kill IS observed (H22's PostToolUse "TaskStop" matcher ends the
+// round with event 'task-stop'), but a kill through the task UI or any other
+// path that emits no hook still is not; correctness under
 // concurrent live sessions in one worktree (one live session per worktree is
 // the contract — H1's SessionStart wipe is global and transient/session.json
 // is single); that the owner-mkdir lock protects against anything but this
@@ -1417,7 +1419,7 @@ export async function finishDispatchAndRegisterEnd(root, { session_id, agent_id,
         if (hit.record.terminal) {
           record = hit.record;
         } else {
-          const updated = { ...hit.record, prompt: null, terminal: { at: new Date().toISOString(), reason: 'stop' } };
+          const updated = { ...hit.record, prompt: null, terminal: { at: new Date().toISOString(), reason: event === 'task-stop' ? 'task-stop' : 'stop' } };
           writeRecordAtomic(root, hit.key, updated);
           record = updated;
         }
