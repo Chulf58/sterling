@@ -4,6 +4,16 @@
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
+// Main-session agents (route A, decision
+// conductor-instructions-via-main-session-agent-route-a): installed to
+// .claude/agents/<name>.md and activated by the "agent" key in a project's
+// .claude/settings.json, NEVER dispatched by the conductor. The §7.3
+// prompt-contract sections, the §7.4 spawn contract and the tool-grant
+// linter's tools: requirement are all properties of a DISPATCHED role (a
+// brief, a required-inputs manifest, a restricted tool set) — none apply to
+// the one agent that IS the session. Currently just conductor.md.
+export const MAIN_SESSION_AGENTS = ['conductor.md'];
+
 // §7.3 agent-prompt contract: every agent definition contains, in order.
 // The linter enforces presence; missing = build failure.
 export const PROMPT_CONTRACT_SECTIONS = [
@@ -17,6 +27,7 @@ export const PROMPT_CONTRACT_SECTIONS = [
 ];
 
 export function lintAgentPrompt(content, label) {
+  if (MAIN_SESSION_AGENTS.includes(label)) return [];
   const violations = [];
   let lastIndex = -1;
   for (const section of PROMPT_CONTRACT_SECTIONS) {
@@ -74,6 +85,7 @@ export function lintAbsenceDiscipline(content, label) {
 
 // §7.4 spawn contracts: every agent role declares a required-inputs manifest.
 export function checkSpawnContract(content, label) {
+  if (MAIN_SESSION_AGENTS.includes(label)) return [];
   const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!fm) return [{ kind: 'missing_frontmatter', detail: label }];
   if (!/^required_inputs:/m.test(fm[1])) {
@@ -126,6 +138,7 @@ export function parseToolsLine(content) {
 }
 
 export function lintToolGrants(content, label, registeredTools) {
+  if (MAIN_SESSION_AGENTS.includes(label)) return [];
   const grants = parseToolsLine(content);
   if (grants === null) return [{ kind: 'missing_tools_line', detail: `${label}: no 'tools:' line in frontmatter` }];
 

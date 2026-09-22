@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,6 +20,7 @@ import {
   extractBakedCommandPaths,
   sha256,
   RESTART_INSTRUCTION,
+  ensureConductorActivation,
 } from '../lib/agent-distribution.mjs';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
@@ -824,3 +825,283 @@ test('THE LOAD-BEARING ARM: agent-b is STILL reported hook_node_unresolvable whe
 // distinguishes "reads are guarded per-file" from "not guarded" or "guarded
 // only globally" — the control above stays green under the identical mutation
 // because it has no unreadable file to trip it.
+
+// ---------------------------------------------------------------------------
+// ensureConductorActivation (route A, decision
+// conductor-instructions-via-main-session-agent-route-a): the settings-only
+// write that turns an installed .claude/agents/conductor.md into the
+// project's actual main-session agent.
+// ---------------------------------------------------------------------------
+
+function tmpdtemp() {
+  return mkdtempSync(join(tmpdir(), 'sterling-activation-'));
+}
+function settingsPath(dir) {
+  return join(dir, '.claude', 'settings.json');
+}
+function readSettings(dir) {
+  return JSON.parse(readFileSync(settingsPath(dir), 'utf8'));
+}
+
+// Sol review MEDIUM finding: feed ensureConductorActivation REAL installAgents/
+// syncAgents report objects (produced by actually running them against a fixture
+// registry) rather than hand-built {name, status} literals, so a report-shape
+// drift in the real functions cannot silently desync from what these tests exercise.
+const CONDUCTOR_TEMPLATE = `---
+name: conductor
+description: Fixture main-session agent for activation tests.
+---
+
+# Conductor
+
+Fixture body line one.
+`;
+
+// Builds a real templatesDir/registryPath/targetAgentsDir triple for a single
+// 'conductor' agent, all under one throwaway `dir` (the same dir doubles as the
+// ensureConductorActivation targetDir, since its .claude/agents and
+// .claude/settings.json are real siblings in production too).
+// Memoized per `dir`: the template is written ONCE (first call) so a test that
+// mutates templatesDir/conductor.md between two conductorSync() calls (to force
+// a real 'refreshed'/'header_repaired' status) is not clobbered back to the
+// original fixture content by a second makePluginSide() write.
+const conductorFixtureCache = new Map();
+function conductorFixture(dir) {
+  if (!conductorFixtureCache.has(dir)) {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'conductor.md': CONDUCTOR_TEMPLATE });
+    conductorFixtureCache.set(dir, { templatesDir, registryPath, targetAgentsDir: join(dir, '.claude', 'agents') });
+  }
+  return conductorFixtureCache.get(dir);
+}
+function conductorSync(dir, opts = {}) {
+  const { templatesDir, registryPath, targetAgentsDir } = conductorFixture(dir);
+  return syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...opts }).report;
+}
+
+test('ensureConductorActivation: no settings.json — creates it with {"agent":"conductor"} (real "installed" report)', () => {
+  const dir = tmpdtemp();
+  try {
+    const report = conductorSync(dir); // missing -> real status 'installed'
+    assert.deepEqual(report, [{ name: 'conductor', status: 'installed' }]);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'written');
+    assert.deepEqual(readSettings(dir), { agent: 'conductor' });
+    assert.match(readFileSync(settingsPath(dir), 'utf8'), /\n$/, 'the written file ends with a newline');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: "up_to_date" and "refreshed" (real reports) also activate', () => {
+  const dir = tmpdtemp();
+  try {
+    conductorSync(dir); // installed
+    let report = conductorSync(dir); // unchanged -> real 'up_to_date'
+    assert.deepEqual(report, [{ name: 'conductor', status: 'up_to_date' }]);
+    let result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'written', 'up_to_date activates on a first run (no settings.json yet)');
+
+    // template changes -> real 'refreshed'
+    const { templatesDir } = conductorFixture(dir);
+    writeFileSync(join(templatesDir, 'conductor.md'), CONDUCTOR_TEMPLATE.replace('line one', 'line one v2'));
+    report = conductorSync(dir, { pluginVersion: '0.2.0' });
+    assert.deepEqual(report, [{ name: 'conductor', status: 'refreshed' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: "header_repaired" (real report, in-place edit mirrored in the template) counts as success', () => {
+  const dir = tmpdtemp();
+  try {
+    const { templatesDir, registryPath, targetAgentsDir } = conductorFixture(dir);
+    syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
+    // the pinning incident: the same edit lands in the template AND the installed copy,
+    // but the installed header keeps the old hashes (mirrors the syncAgents test above).
+    const pinned = CONDUCTOR_TEMPLATE.replace('# Conductor', '# Conductor\n\nAn extra line.');
+    writeFileSync(join(templatesDir, 'conductor.md'), pinned);
+    const installedPath = join(targetAgentsDir, 'conductor.md');
+    writeFileSync(installedPath, readFileSync(installedPath, 'utf8').replace('# Conductor', '# Conductor\n\nAn extra line.'));
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1 });
+    assert.deepEqual(report, [{ name: 'conductor', status: 'header_repaired' }]);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'written', 'a repaired header is a verified install');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: existing settings.json with no "agent" key — sets it, preserving every other key and 2-space formatting', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ permissions: { allow: ['Bash'] }, other: 1 }, null, 2) + '\n');
+    const report = conductorSync(dir);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'written');
+    const doc = readSettings(dir);
+    assert.equal(doc.agent, 'conductor');
+    assert.deepEqual(doc.permissions, { allow: ['Bash'] }, 'unrelated keys survive the merge');
+    assert.equal(doc.other, 1);
+    assert.match(readFileSync(settingsPath(dir), 'utf8'), /^\{\n  "/, '2-space formatting');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: settings.json carrying a UTF-8 BOM, CRLF line endings, a trailing newline and unrelated keys — merges and preserves all three', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    const body = JSON.stringify({ permissions: { allow: ['Bash'] }, marker: 'kept' }, null, 2).replace(/\n/g, '\r\n');
+    writeFileSync(settingsPath(dir), '﻿' + body + '\r\n');
+    const report = conductorSync(dir);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'written');
+    const raw = readFileSync(settingsPath(dir), 'utf8');
+    assert.equal(raw.charCodeAt(0), '{'.charCodeAt(0), 'the BOM is stripped, never rewritten');
+    assert.match(raw, /\r\n/, 'CRLF line endings are preserved');
+    assert.ok(!/[^\r]\n/.test(raw), 'no bare LF is introduced among the CRLF pairs');
+    assert.match(raw, /\r\n$/, 'the trailing newline is preserved');
+    const doc = JSON.parse(raw);
+    assert.equal(doc.agent, 'conductor');
+    assert.deepEqual(doc.permissions, { allow: ['Bash'] });
+    assert.equal(doc.marker, 'kept');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: a settings.json with NO trailing newline stays that way after the merge', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), JSON.stringify({ marker: 'no-eol' }, null, 2)); // no trailing \n
+    const report = conductorSync(dir);
+    ensureConductorActivation(dir, report);
+    assert.doesNotMatch(readFileSync(settingsPath(dir), 'utf8'), /\n$/, 'no trailing newline was introduced');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: "agent" already "conductor" — reports already, writes nothing', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    const original = JSON.stringify({ agent: 'conductor', marker: 'untouched' }, null, 2);
+    writeFileSync(settingsPath(dir), original);
+    const report = conductorSync(dir);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'already');
+    assert.equal(readFileSync(settingsPath(dir), 'utf8'), original, 'byte-identical — no write occurred');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: "agent" set to a different value — refuses, writes nothing', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    const original = JSON.stringify({ agent: 'someone-else' }, null, 2);
+    writeFileSync(settingsPath(dir), original);
+    const report = conductorSync(dir);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'refused');
+    assert.match(result.reason, /someone-else/);
+    assert.equal(readFileSync(settingsPath(dir), 'utf8'), original, 'byte-identical — the deliberate choice is never overwritten');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: malformed JSON — refuses, writes nothing', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), '{ not json');
+    const report = conductorSync(dir);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'refused');
+    assert.equal(readFileSync(settingsPath(dir), 'utf8'), '{ not json', 'byte-identical — never touched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: settings.json is a JSON array (non-object) — refuses, writes nothing', () => {
+  const dir = tmpdtemp();
+  try {
+    mkdirSync(join(dir, '.claude'), { recursive: true });
+    writeFileSync(settingsPath(dir), '[1,2,3]');
+    const report = conductorSync(dir);
+    const result = ensureConductorActivation(dir, report);
+    assert.equal(result.activation, 'refused');
+    assert.equal(readFileSync(settingsPath(dir), 'utf8'), '[1,2,3]');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: skipped on a real "foreign_file" report, a real "refused_local_modification" report, an absent conductor entry, and an empty report', () => {
+  const dir = tmpdtemp();
+  try {
+    // real foreign_file: pre-seed the target with a non-sterling file at the conductor path
+    const { templatesDir, registryPath, targetAgentsDir } = conductorFixture(dir);
+    mkdirSync(targetAgentsDir, { recursive: true });
+    writeFileSync(join(targetAgentsDir, 'conductor.md'), '---\nname: conductor\n---\nhand-written, no sterling header\n');
+    let { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
+    assert.deepEqual(report, [{ name: 'conductor', status: 'foreign_file', instruction: report[0].instruction }]);
+    assert.equal(ensureConductorActivation(dir, report).activation, 'skipped');
+
+    // real refused_local_modification: install clean, hand-edit the body, then change the template
+    const dir2 = tmpdtemp();
+    try {
+      const f2 = conductorFixture(dir2);
+      syncAgents({ templatesDir: f2.templatesDir, registryPath: f2.registryPath, targetAgentsDir: f2.targetAgentsDir, ...OPTS });
+      const installedPath = join(f2.targetAgentsDir, 'conductor.md');
+      writeFileSync(installedPath, readFileSync(installedPath, 'utf8').replace('Fixture body line one.', 'a real local edit'));
+      writeFileSync(join(f2.templatesDir, 'conductor.md'), CONDUCTOR_TEMPLATE.replace('line one', 'line one v2'));
+      const r2 = syncAgents({ templatesDir: f2.templatesDir, registryPath: f2.registryPath, targetAgentsDir: f2.targetAgentsDir, pluginVersion: '0.2.0', now: T1 });
+      assert.equal(r2.report[0].status, 'refused_local_modification');
+      assert.equal(ensureConductorActivation(dir2, r2.report).activation, 'skipped');
+    } finally {
+      rmSync(dir2, { recursive: true, force: true });
+    }
+
+    for (const badReport of [
+      [{ name: 'implementor', status: 'installed' }], // no conductor entry at all
+      [],
+    ]) {
+      assert.equal(ensureConductorActivation(dir, badReport).activation, 'skipped', JSON.stringify(badReport));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('ensureConductorActivation: "installed" / "up_to_date" / "refreshed" all count as success (real reports; "header_repaired" is covered separately above)', () => {
+  for (const makeReport of [
+    (dir) => conductorSync(dir),
+    (dir) => {
+      conductorSync(dir);
+      return conductorSync(dir);
+    },
+    (dir) => {
+      conductorSync(dir);
+      const { templatesDir } = conductorFixture(dir);
+      writeFileSync(join(templatesDir, 'conductor.md'), CONDUCTOR_TEMPLATE.replace('line one', 'line one v2'));
+      return conductorSync(dir, { pluginVersion: '0.2.0' });
+    },
+  ]) {
+    const dir = tmpdtemp();
+    try {
+      const report = makeReport(dir);
+      const result = ensureConductorActivation(dir, report);
+      assert.equal(result.activation, 'written', `status '${report[0].status}' must activate`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

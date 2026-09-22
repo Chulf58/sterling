@@ -702,3 +702,72 @@ export function checkRegistryConsistency({ templatesDir, registryPath, scanDirs 
   }
   return violations;
 }
+
+// Route A activation (decision conductor-instructions-via-main-session-agent-route-a):
+// a project's .claude/settings.json "agent" key is what turns an installed but inert
+// .claude/agents/conductor.md into the session's actual system prompt. Written only
+// once the conductor's OWN install/sync result was a success — never guessed at from a
+// half-installed state (P5). Preserves every other settings key; a settings file that
+// already names a DIFFERENT agent is a deliberate project choice, refused loudly rather
+// than silently overwritten.
+const CONDUCTOR_ACTIVATION_SUCCESS_STATUSES = new Set(['installed', 'up_to_date', 'refreshed', 'header_repaired']);
+
+export function ensureConductorActivation(targetDir, agentResults) {
+  const conductorResult = (agentResults ?? []).find((r) => r.name === 'conductor');
+  if (!conductorResult || !CONDUCTOR_ACTIVATION_SUCCESS_STATUSES.has(conductorResult.status)) {
+    return {
+      activation: 'skipped',
+      reason: conductorResult
+        ? `conductor's own install/sync result was '${conductorResult.status}', not installed/up_to_date/refreshed/header_repaired`
+        : "no 'conductor' entry in the agent install/sync report",
+    };
+  }
+
+  const settingsPath = join(targetDir, '.claude', 'settings.json');
+  let parsed;
+  // Preserved on write, never assumed: a hand-authored settings.json may carry a
+  // leading BOM (stripped before parsing, never rewritten back), CRLF line
+  // endings, and/or no trailing newline. A brand-new file uses the plain LF +
+  // trailing-newline defaults this function always used.
+  let eol = '\n';
+  let trailingNewline = true;
+  if (existsSync(settingsPath)) {
+    let raw = readFileSync(settingsPath, 'utf8');
+    if (raw.charCodeAt(0) === 0xfeff) raw = raw.slice(1);
+    eol = raw.includes('\r\n') ? '\r\n' : '\n';
+    trailingNewline = /\r?\n$/.test(raw);
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const reason = `${settingsPath} is not valid JSON — refusing to touch it; add "agent": "conductor" by hand`;
+      console.error(`REFUSED: ${reason}`);
+      return { activation: 'refused', reason };
+    }
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      const reason = `${settingsPath} does not contain a JSON object — refusing to touch it; add "agent": "conductor" by hand`;
+      console.error(`REFUSED: ${reason}`);
+      return { activation: 'refused', reason };
+    }
+  } else {
+    parsed = {};
+  }
+
+  if ('agent' in parsed) {
+    if (parsed.agent === 'conductor') {
+      return { activation: 'already' };
+    }
+    const reason = `${settingsPath} already sets "agent": "${parsed.agent}" — refusing to overwrite a deliberate choice`;
+    console.error(`REFUSED: ${reason}`);
+    return { activation: 'refused', reason };
+  }
+
+  parsed.agent = 'conductor';
+  mkdirSync(join(targetDir, '.claude'), { recursive: true });
+  const tmp = `${settingsPath}.tmp-${randomUUID()}`;
+  let body = JSON.stringify(parsed, null, 2);
+  if (eol === '\r\n') body = body.replace(/\n/g, '\r\n');
+  if (trailingNewline) body += eol;
+  writeFileSync(tmp, body);
+  renameSync(tmp, settingsPath);
+  return { activation: 'written', path: settingsPath };
+}

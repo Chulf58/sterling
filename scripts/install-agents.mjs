@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
-import { installAgents, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
+import { installAgents, agentChangesRequireRestart, ensureConductorActivation } from './lib/agent-distribution.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -51,4 +51,16 @@ for (const r of report) {
 }
 if (report.length === 0) console.log('no agents registered — nothing installed');
 else if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
+
+// Route A (decision conductor-instructions-via-main-session-agent-route-a): a settings-only
+// change also needs a restart — EXIT AND RELAUNCH is printed only when this run is the one
+// that wrote it, never on 'already'/'skipped'/'refused'.
+const activationResult = ensureConductorActivation(targetDir, report);
+console.log(`conductor activation: ${activationResult.activation}${activationResult.reason ? ` (${activationResult.reason})` : ''}`);
+if (activationResult.activation === 'written') {
+  console.log(`EXIT AND RELAUNCH: conductor activation newly written in ${activationResult.path}`);
+}
+// A refused activation means the conductor is installed but NOT the main-session
+// agent — /sterling:update must not stamp this complete (Sol review HIGH finding).
+if (activationResult.activation === 'refused') refused += 1;
 process.exit(refused > 0 ? 2 : 0);

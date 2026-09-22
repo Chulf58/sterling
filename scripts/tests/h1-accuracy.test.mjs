@@ -125,10 +125,6 @@ function additionalContext(res) {
   return res.out && res.out.hookSpecificOutput ? res.out.hookSpecificOutput.additionalContext : undefined;
 }
 
-/** The window of text around a "concurrent" mention — where the delegation-conventions
- *  ceiling number lives, per the conductor-contract bullet ("N concurrent subagents is
- *  a CEILING, not a target"). Scoping the assertion to this window (rather than the
- *  whole context blob) avoids false matches on unrelated digits elsewhere in H1's output. */
 // --------------------------- board/maintenance fixtures ---------------------------
 
 const maintenanceItem = (store, text, over = {}) =>
@@ -164,12 +160,16 @@ test('AC1: 250 system maintenance items across lanes — H1 reports the TRUE tot
 // tests that stood here pinned H1's hardcoded conventions block, which
 // interpolated config.delegation.max_concurrent into a live "N concurrent
 // subagents is a CEILING" sentence it computed itself. That block — and the
-// maxConcurrent config read behind it — is deleted outright: H1 now injects
-// docs/conductor-contract.md's bytes verbatim from the clone, a STATIC file
-// with no per-config interpolation, so there is no live number left to pin.
-// Replaced by a single test proving the new invariant: H1's injected output
-// is identical whether or not config.delegation.max_concurrent is set,
-// because nothing in the injection path reads it any more.
+// maxConcurrent config read behind it — is deleted outright. RETIRED AGAIN
+// 2026-09-22 (route A, decision
+// conductor-instructions-via-main-session-agent-route-a): the
+// docs/conductor-contract.md injection that briefly replaced it is ALSO
+// gone — H1 injects no conductor posture text of any kind any more; that
+// text now lives in agent-templates/conductor.md, the main-session agent's
+// system prompt. There is no live number, and no contract text at all, left
+// to pin here. The test below still proves the surviving invariant: H1's
+// injected output is identical whether or not config.delegation.max_concurrent
+// is set, because nothing in H1's injection path reads it.
 test('AC2 (retired mechanism, new invariant): config.delegation.max_concurrent no longer changes H1\'s injected output at all', () => {
   const withCeiling = makeProject({ delegation: { max_concurrent: 15 } });
   const withoutCeiling = makeProject(); // no `delegation` key at all
@@ -181,10 +181,15 @@ test('AC2 (retired mechanism, new invariant): config.delegation.max_concurrent n
     assert.ok(r1.out, 'H1 must emit parseable JSON');
     assert.ok(r2.out, 'H1 must emit parseable JSON');
 
-    const ctx1 = additionalContext(r1) ?? '';
-    const ctx2 = additionalContext(r2) ?? '';
-    assert.equal(ctx1, ctx2, 'the delegation ceiling config no longer affects H1\'s injected output — the conductor-contract injection is a static file read, not a templated one');
-    assert.doesNotMatch(ctx1, /concurrent subagents is a CEILING/i, 'the old live-interpolated delegation-ceiling sentence is gone from H1\'s own output (any such wording now lives, unparametrized, in docs/conductor-contract.md itself)');
+    // Strip the CONDUCTOR NOT ACTIVE diagnostic (route A) before comparing: it
+    // legitimately embeds each fixture's own absolute tmpdir path (neither
+    // fixture writes .claude/settings.json), which would make ctx1 !== ctx2 for
+    // a reason unrelated to the delegation config this test actually pins.
+    const stripActivation = (s) => s.replace(/\n\nCONDUCTOR NOT ACTIVE:.*$/m, '');
+    const ctx1 = stripActivation(additionalContext(r1) ?? '');
+    const ctx2 = stripActivation(additionalContext(r2) ?? '');
+    assert.equal(ctx1, ctx2, 'the delegation ceiling config no longer affects H1\'s injected output at all');
+    assert.doesNotMatch(ctx1, /concurrent subagents is a CEILING/i, 'the old live-interpolated delegation-ceiling sentence is gone from H1\'s own output (any such wording now lives, unparametrized, in agent-templates/conductor.md itself)');
   } finally {
     withCeiling.cleanup();
     withoutCeiling.cleanup();

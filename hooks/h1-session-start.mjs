@@ -8670,22 +8670,6 @@ async function deleteRegisterUnderLock(cwd) {
     }
   }
 }
-function conductorContractBlock() {
-  const root = pluginRoot();
-  if (!root) {
-    return "CONDUCTOR CONTRACT UNAVAILABLE (H1): the Sterling plugin root could not be resolved, so docs/conductor-contract.md could not be read. The conductor has no posture contract this session.";
-  }
-  const contractPath = join8(root, "docs", "conductor-contract.md");
-  try {
-    const text = readFileSync5(contractPath, "utf8");
-    if (!text.trim()) {
-      return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} exists but is empty. The conductor has no posture contract this session.`;
-    }
-    return text;
-  } catch (e) {
-    return `CONDUCTOR CONTRACT UNAVAILABLE (H1): ${contractPath} could not be read (${e?.code ?? e?.message ?? e}). The conductor has no posture contract this session.`;
-  }
-}
 var BANNER_ROWS = [
   "\u2584\u2580\u2580 \u2580\u2588\u2580 \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588   \u2580\u2588\u2580 \u2588\u2584 \u2588 \u2584\u2580\u2580\u2584",
   "\u2580\u2580\u2584  \u2588  \u2588\u2580\u2580 \u2588\u2580\u2584 \u2588    \u2588  \u2588 \u2580\u2588 \u2588 \u2584\u2584",
@@ -9481,11 +9465,37 @@ if (process.env.STERLING_NO_BANNER !== "1") {
   process.stderr.write(`${paint(BANNER_ROWS)}
 ${versionLine}`);
 }
-var conventionsBlock = conductorContractBlock();
+var conductorActivationContext = "";
+try {
+  const settingsPath = join8(input.cwd, ".claude", "settings.json");
+  let settingsAgent;
+  if (existsSync6(settingsPath)) {
+    try {
+      const parsed = JSON.parse(readFileSync5(settingsPath, "utf8"));
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) settingsAgent = parsed.agent;
+    } catch {
+    }
+  }
+  const conductorFileMissing = !existsSync6(join8(input.cwd, ".claude", "agents", "conductor.md"));
+  let reason = null;
+  if (settingsAgent !== "conductor") {
+    reason = settingsAgent === void 0 ? "settings key missing" : `settings key is ${JSON.stringify(settingsAgent)}`;
+  } else if (conductorFileMissing) {
+    reason = ".claude/agents/conductor.md missing";
+  }
+  if (reason !== null) {
+    const clone = pluginRoot() ?? "<clone>";
+    const shq = (value) => `'${String(value).split("'").join(`'\\''`)}'`;
+    conductorActivationContext = `
+
+CONDUCTOR NOT ACTIVE: ${reason} \u2014 run \`node ${shq(clone)}/scripts/sync-agents.mjs --target ${shq(input.cwd)}\` then EXIT AND RELAUNCH`;
+  }
+} catch {
+}
 var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
-  // session may take on, so it is read before the conventions, not after them.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conventionsBlock + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  // session may take on, so it is read before everything else.
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

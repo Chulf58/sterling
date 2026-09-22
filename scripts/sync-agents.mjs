@@ -3,12 +3,14 @@
 // locally modified generated agent (three-way review stubbed to
 // refuse-and-instruct per spec §16.1 Slice 1).
 //   node scripts/sync-agents.mjs --target <projectDir>
-// Exit codes: 0 = synced/up-to-date; 2 = at least one refusal (loud).
+// Exit codes: 0 = synced/up-to-date; 2 = at least one refusal (loud), including a
+// refused conductor activation (route A) — /sterling:update must not stamp complete
+// while the conductor is installed but not the project's main-session agent.
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
-import { syncAgents, agentChangesRequireRestart } from './lib/agent-distribution.mjs';
+import { syncAgents, agentChangesRequireRestart, ensureConductorActivation } from './lib/agent-distribution.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -62,4 +64,15 @@ if (report.length === 0) console.log('no agents registered — nothing to sync')
 // decision sterling-claude-code-scale-down-boundary (2ad87dd1); there is no
 // latch left to clear. restartInstruction above is the only follow-up needed.
 if (agentChangesRequireRestart(report)) console.log('\n' + restartInstruction);
+
+// Route A (decision conductor-instructions-via-main-session-agent-route-a): so
+// /sterling:update's sync-agents fan-out also activates the conductor on every sibling.
+const activationResult = ensureConductorActivation(targetDir, report);
+console.log(`conductor activation: ${activationResult.activation}${activationResult.reason ? ` (${activationResult.reason})` : ''}`);
+if (activationResult.activation === 'written') {
+  console.log(`EXIT AND RELAUNCH: conductor activation newly written in ${activationResult.path}`);
+}
+// A refused activation means the conductor is installed but NOT the main-session
+// agent — /sterling:update must not stamp this complete (Sol review HIGH finding).
+if (activationResult.activation === 'refused') refused += 1;
 process.exit(refused > 0 ? 2 : 0);

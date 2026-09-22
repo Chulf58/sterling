@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { SterlingStore } from '@sterling/store';
+import { AGENT_MODEL_KEY } from '@sterling/schemas';
 import { buildDashboardState, initialUi, TABS, type UiState, type DashboardState } from '../state.js';
 import * as stateMod from '../state.js';
 import * as viewmodel from '../viewmodel.js';
@@ -200,9 +201,17 @@ interface SystemArityStateMod {
 const SR = stateMod as unknown as SystemArityStateMod;
 
 // ---- fixtures --------------------------------------------------------------
+// GOVERNED roster agents only (main.ts's buildSystemTab source: Object.keys(AGENT_MODEL_KEY)) —
+// NOT every registry.json entry. Route A (decision
+// conductor-instructions-via-main-session-agent-route-a) added 'conductor' to the
+// registry with no AGENT_MODEL_KEY entry (a main-session agent, never dispatched,
+// has no model:/effort: to govern here), so the full registry list is no longer
+// 1:1 with "agents this tab lists a row for".
 const ROSTER_AGENTS: string[] = JSON.parse(
   readFileSync(join(process.cwd(), 'agent-templates', 'registry.json'), 'utf8'),
-).agents.map((agent: { name: string }) => agent.name);
+)
+  .agents.map((agent: { name: string }) => agent.name)
+  .filter((name: string) => name in AGENT_MODEL_KEY);
 const GOVERNED_KEY = ROSTER_AGENTS[0];
 
 /** Catalog entries. Entry[0] is claude-opus-4-8 (the researcher

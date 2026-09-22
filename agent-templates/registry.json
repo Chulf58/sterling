@@ -4,6 +4,7 @@
     { "name": "implementor", "file": "implementor.md" },
     { "name": "researcher", "file": "researcher.md" },
     { "name": "scout", "file": "scout.md" },
-    { "name": "librarian", "file": "librarian.md" }
+    { "name": "librarian", "file": "librarian.md" },
+    { "name": "conductor", "file": "conductor.md" }
   ]
 }

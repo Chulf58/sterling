@@ -128,12 +128,13 @@ test('H1: banner art to stderr (env-only suppression), counts to the human, conv
     const out = JSON.parse(r.stdout);
     assert.match(out.systemMessage, /^2 tasks · 1 maintenance item pending/);
     // CHANGED 2026-09-19 (slice 3, conductor context diet): H1's hardcoded
-    // conventions block (which carried "Anti-speculation") is deleted; H1 now
-    // injects docs/conductor-contract.md verbatim. This runHook() spawn runs
-    // scripts/hooks/h1-session-start.mjs from its real source location inside
-    // this repo, so pluginRoot()'s walk-up finds the real clone and the real
-    // contract file is read — its own heading is the new liveness marker.
-    assert.match(out.hookSpecificOutput.additionalContext, /You are the delegator, not the worker/);
+    // conventions block (which carried "Anti-speculation") is deleted. CHANGED
+    // AGAIN 2026-09-22 (route A, decision
+    // conductor-instructions-via-main-session-agent-route-a): the
+    // docs/conductor-contract.md injection that replaced it is ALSO gone — the
+    // conductor's posture now lives in agent-templates/conductor.md, installed
+    // as the main-session agent's system prompt, never a SessionStart injection.
+    assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /# Conductor contract/, 'H1 no longer injects any contract text');
     assert.ok(r.stderr.includes(ART_ROW), 'banner art on stderr');
     assert.ok(!r.stderr.includes('\x1b['), 'NO_COLOR strips ANSI');
     assert.match(r.stderr, /v\d+\.\d+\.\d+/, 'plugin version read live (fail-open contract)');
@@ -186,9 +187,9 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
     assert.match(ctx, /2 items in lane article_missing/);
     assert.match(ctx, /\/sterling:drain/, 'and names the remedy');
     assert.match(ctx, /ALREADY DONE/, 'and warns that queue items are detected debt, not necessarily owed debt');
-    // CHANGED 2026-09-19 (slice 3): see the note at :131 — same runHook() shape,
-    // same real-contract marker.
-    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract injection is unaffected');
+    // CHANGED 2026-09-22 (route A): see the note near :130 — H1 injects no
+    // contract text any more, so there is nothing left to pin here.
+    assert.doesNotMatch(ctx, /# Conductor contract/, 'H1 still injects no contract text at this queue depth');
 
     // file_parked closes at branch merge, never by drain — it must not trip the
     // drain signal (2026-08-09 consuming project: 15 by-design-open file_parked
@@ -222,12 +223,12 @@ test('H1 deep-queue signal: a queue at threshold reaches the CONDUCTOR with its 
       cleanupParked();
     }
 
-    // A malformed config costs the THRESHOLD, never the conventions: H1 is soft,
-    // unlike the gates that fail closed on this same input (anti_pattern foreign_e13f0fb5).
+    // A malformed config costs the THRESHOLD, never H1's basic output shape: H1
+    // is soft, unlike the gates that fail closed on this same input (anti_pattern foreign_e13f0fb5).
     writeFileSync(join(dir, '.sterling', 'config.json'), '{ not json');
     const broken = runHook('h1-session-start.mjs', hookInput(dir, { hook_event_name: 'SessionStart' }), dir, { NO_COLOR: '1' });
     assert.equal(broken.code, 0, broken.stderr);
-    assert.match(JSON.parse(broken.stdout).hookSpecificOutput.additionalContext, /You are the delegator, not the worker/, 'the conductor-contract injection survives a corrupt config');
+    assert.equal(typeof JSON.parse(broken.stdout).hookSpecificOutput.additionalContext, 'string', 'H1 still emits parseable additionalContext despite a corrupt config');
   } finally {
     cleanup();
   }
@@ -259,13 +260,6 @@ test('H1 machine role (todo cabbc10f, decision foreign_a9b98b7d): stated only on
     writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ machine_role: 'consumer' }));
     const consumer = JSON.parse(runHookAt(H1_SEAM.hookPath, hookInput(dir, { hook_event_name: 'SessionStart' }), dir, selfHosted).stdout);
     assert.match(consumer.hookSpecificOutput.additionalContext, /MACHINE ROLE: CONSUMER — this clone consumes via \/sterling:update/);
-    // CHANGED 2026-09-19 (slice 3): H1's hardcoded conventions block is
-    // deleted; H1 now reads docs/conductor-contract.md from pluginRoot(). This
-    // fixture's STERLING_PLUGIN_ROOT (`dir`, a bare makeProject() tmp dir) has
-    // no docs/ subdirectory, so the read genuinely fails and H1's fail-LOUD
-    // fallback fires — asserting that fallback text is present is itself the
-    // "never a crash, always something rendered" proof this line existed for.
-    assert.match(consumer.hookSpecificOutput.additionalContext, /CONDUCTOR CONTRACT UNAVAILABLE/, 'the contract fallback still renders alongside the role line');
 
     // NOT a clone (no STERLING_PLUGIN_ROOT override — and the seam bundle's
     // marker-free temp location means its own walk-up finds no plugin tree
@@ -297,10 +291,7 @@ test('H1 machine role (isolates the notAClone arm at :290-291): a fixture root w
     // and passes vacuously even if H1 crashed or returned garbage instead of
     // real additionalContext.
     assert.equal(typeof ctx, 'string', 'additionalContext must be a real string, not absent/undefined');
-    // CHANGED 2026-09-19 (slice 3): see the note at :254 — no resolvable plugin
-    // root here either, so H1's fail-LOUD contract fallback is the proof of
-    // real (non-crashed) rendering.
-    assert.match(ctx, /CONDUCTOR CONTRACT UNAVAILABLE/, 'H1 produced its normal banner — proof the hook actually ran and rendered content, not that it crashed silently');
+    assert.ok(ctx.length > 0, 'H1 produced non-empty additionalContext — proof the hook actually ran and rendered content, not that it crashed silently');
     assert.ok(!/MACHINE ROLE/.test(ctx), 'no role line off the plugin\'s own clone');
   } finally {
     cleanup();
@@ -323,10 +314,6 @@ test('H1 machine role: a malformed config on the plugin\'s own clone costs only 
     });
     assert.equal(r.code, 0, r.stderr);
     const out = JSON.parse(r.stdout);
-    // CHANGED 2026-09-19 (slice 3): see the note at :254 — this fixture's
-    // STERLING_PLUGIN_ROOT has no docs/ subdirectory, so H1's fail-LOUD
-    // fallback is what "never a crash" now looks like.
-    assert.match(out.hookSpecificOutput.additionalContext, /CONDUCTOR CONTRACT UNAVAILABLE/, 'the contract fallback survives a corrupt config even on the self-hosted clone');
     assert.match(out.hookSpecificOutput.additionalContext, /MACHINE ROLE: UNDECLARED/, 'a malformed config reads as absent, the safe default — never a crash');
   } finally {
     cleanup();
@@ -370,10 +357,6 @@ test('H1 clone-currency signal (the gap decision foreign_be9168e8 parked): a con
     assert.match(behind.systemMessage, /Sterling is 1 update\(s\) behind/, 'the human is told, with the double-click remedy');
     assert.match(behind.systemMessage, /sterling-update\.bat/);
     assert.match(behind.hookSpecificOutput.additionalContext, /STERLING CLONE IS BEHIND \(H1\)/, 'the conductor is told');
-    // CHANGED 2026-09-19 (slice 3): see the note at :254 — the fixture `clone`
-    // git repo has no docs/conductor-contract.md, so the fail-LOUD fallback is
-    // what "intact alongside the signal" now means.
-    assert.match(behind.hookSpecificOutput.additionalContext, /CONDUCTOR CONTRACT UNAVAILABLE/, 'the contract fallback is intact alongside the signal');
     assert.ok(existsSync(join(clone, '.git', 'sterling-update-check.json')), 'the fetch throttle is stamped');
 
     // fast-forward the clone → silent IMMEDIATELY: behind is computed locally
@@ -421,9 +404,6 @@ test('H1: shared project registry — touches this project last_seen + makes the
     const ctx = out.hookSpecificOutput.additionalContext;
     assert.match(ctx, /Sibling Sterling projects/);
     assert.match(ctx, /- sib-live: node/, 'live sibling listed with its domains');
-    // CHANGED 2026-09-19 (slice 3): see the note at :131 — real runHook() spawn,
-    // real contract file read.
-    assert.match(ctx, /You are the delegator, not the worker/, 'the conductor-contract injection is still present');
     assert.doesNotMatch(ctx, /sib-missing/, 'a missing (stale) sibling is excluded from conductor awareness');
     assert.doesNotMatch(out.systemMessage, /sibling/, 'the human systemMessage is not used for sibling awareness');
     assert.match(out.systemMessage, /pending$/, 'systemMessage is counts-only');
@@ -2507,16 +2487,13 @@ test('H1 rotation restore: source=clear injects the note into additionalContext 
   }
 });
 
-test('H1 rotation restore: source=startup/resume neither injects nor consumes; conventions intact throughout', () => {
+test('H1 rotation restore: source=startup/resume neither injects nor consumes', () => {
   const { dir, cleanup } = gitProject();
   try {
     assert.equal(runRotationNote(dir, ['--next-slice', 'Finish Goblin animations']).status, 0);
     for (const source of ['startup', 'resume']) {
       const r = h1(dir, { source });
       assert.doesNotMatch(r.out.hookSpecificOutput.additionalContext, /ROTATION RESTORE/, `${source} does not inject`);
-      // CHANGED 2026-09-19 (slice 3): see the note at :131 — real runHook()
-      // spawn (via the local h1() wrapper), real contract file read.
-      assert.match(r.out.hookSpecificOutput.additionalContext, /You are the delegator, not the worker/, 'conductor-contract injection intact');
       assert.ok(readRotationNote(dir), `${source} does not consume`);
     }
   } finally {

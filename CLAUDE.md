@@ -1,6 +1,6 @@
 # CLAUDE.md — Sterling
 
-Durable conventions and repo facts. The **knowledge base is the authority**, not this file. The conductor's working posture is not here: H1 injects it once per session from `docs/conductor-contract.md`. Each rule lives in exactly one of the two.
+Durable conventions and repo facts. The **knowledge base is the authority**, not this file. The conductor's working posture is not here: it is `agent-templates/conductor.md`, installed to every project's `.claude/agents/conductor.md` by install-agents/sync-agents and activated as the main-session agent through `"agent": "conductor"` in that project's `.claude/settings.json` (decision `conductor-instructions-via-main-session-agent-route-a`). Each rule lives in exactly one of the two.
 
 Scope (decision `sterling-claude-code-scale-down-boundary`, user-ruled 2026-09-19, verbatim: *"All the rules and locks is friction, so I want to scale it down ALOT!"*): Sterling on Claude Code is the **knowledge loop plus the task board**. No staged pipeline, no frozen-test wall, no read wall, no shell allowlist, no review ledger, no merge gate, no config key allowlist. Do not reintroduce one because a single incident argues for it.
 

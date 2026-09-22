@@ -20,14 +20,13 @@
 //     fixture pattern.
 //   - "TDD posture:" as H1's own ordinary-banner liveness marker (present on
 //     every plain SessionStart regardless of fixture content, computed
-//     unconditionally and independent of the conductor-contract injection —
-//     see h1-plugin-root-sites.test.mjs's LIVENESS CONTROL docstring). CHANGED
-//     2026-09-19 (slice 3, conductor context diet): the old marker, "reading
-//     files by hand", was a phrase inside H1's hardcoded conventions block,
-//     which is deleted — H1 now injects docs/conductor-contract.md verbatim
-//     instead, and that file does not carry the phrase. "TDD posture:" is
-//     produced by an unrelated, unconditional H1 section and survives any
-//     future rewording of the contract.
+//     unconditionally by an unrelated H1 section — see
+//     h1-plugin-root-sites.test.mjs's LIVENESS CONTROL docstring). The old
+//     marker, "reading files by hand", was a phrase inside H1's hardcoded
+//     conventions block, deleted 2026-09-19 (slice 3, conductor context diet).
+//     "TDD posture:" survives both that deletion and the later route-A move
+//     (2026-09-22, decision conductor-instructions-via-main-session-agent-route-a)
+//     that stopped H1 injecting any conductor posture text at all.
 //
 // ASSUMPTIONS disclosed (see the authoring report for the same list):
 //   - the decision's own line template is quoted essentially verbatim:
