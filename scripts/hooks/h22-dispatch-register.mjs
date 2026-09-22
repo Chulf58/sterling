@@ -145,7 +145,7 @@ async function endTaskStoppedDispatch(input, lines) {
         disclosure(
           'register_lock_held',
           e.facts ?? {},
-          `H22: could not mark the TaskStop-killed round '${resp.task_id}' ended — the register lock is held at ${e.facts?.lock_dir ?? '(unknown)'}; the round stays presumed-active until its lease expires`
+          `H22: could not mark the TaskStop-killed round '${resp.task_id}' ended — the register lock at ${e.facts?.lock_path ?? '(unknown)'} is held by another live writer; the round stays presumed-active until its lease expires`
         )
       )
     );
@@ -323,7 +323,7 @@ try {
             disclosure(
               'register_lock_held',
               e.facts ?? {},
-              `H22: could not mark this round ended — the register lock is held at ${e.facts?.lock_dir ?? '(unknown)'}: coordination, not evidence — remove by hand only once no writer runs. This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
+              `H22: could not mark this round ended — the register lock at ${e.facts?.lock_path ?? '(unknown)'} is held by another live writer (kernel-held: released when that writer finishes or dies, so there is nothing to remove by hand). This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
             )
           )
         );

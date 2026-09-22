@@ -7900,9 +7900,9 @@ function extractPathCandidates(text) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
-import { hostname } from "node:os";
-import { join as join4, dirname as dirname3 } from "node:path";
+import { mkdirSync as mkdirSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync4, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join4, resolve as resolve2 } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -8016,7 +8016,7 @@ function refusal(code, facts = {}, message = code) {
 function registerPath(root) {
   return join4(root, ".sterling", "transient", "dispatch-register.json");
 }
-function registerLockDir(root) {
+function legacyRegisterLockDir(root) {
   return join4(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
@@ -8067,181 +8067,98 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-function lockCodeFor() {
-  return "register_lock_held";
+var LOCK_ROOT = "/tmp/sterling-locks";
+var SQLITE_BUSY = 5;
+function registerLockPath(root) {
+  const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
+  return join4(LOCK_ROOT, `${hash}.db`);
 }
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e?.code !== "ESRCH";
+function ensureLockRoot() {
+  mkdirSync3(LOCK_ROOT, { recursive: true, mode: 448 });
+  const st = lstatSync(LOCK_ROOT);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${LOCK_ROOT} is not a real directory \u2014 refusing to take the register lock through it`);
   }
-}
-function readOwner(lockDir) {
-  try {
-    return JSON.parse(readFileSync2(join4(lockDir, "owner.json"), "utf8"));
-  } catch {
-    return null;
+  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+    throw new Error(`dispatch-register: ${LOCK_ROOT} is owned by uid ${st.uid}, not this user (${process.getuid()}) \u2014 refusing to take the register lock through it`);
   }
+  if ((st.mode & 63) !== 0) chmodSync(LOCK_ROOT, 448);
 }
-function looksDeadOwner(o) {
-  return !!o && o.host === hostname() && !isPidAlive(o.pid);
-}
-var OWNERLESS_RECLAIM_MS = 6e4;
-function ownerlessAgeMs(lockDir) {
-  if (readOwner(lockDir) !== null) return null;
-  try {
-    return Date.now() - statSync2(lockDir).mtimeMs;
-  } catch {
-    return null;
-  }
-}
-function isReclaimableOwnerless(lockDir) {
-  const age = ownerlessAgeMs(lockDir);
-  return age !== null && age >= OWNERLESS_RECLAIM_MS;
-}
-function statIno(p) {
-  try {
-    return statSync2(p).ino;
-  } catch {
-    return null;
-  }
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
 }
 function sleepAsync(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
-async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+var heldConnections = /* @__PURE__ */ new Set();
+function clearLegacyLockDir(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
+  try {
+    entries = readdirSync(legacy);
+  } catch (e) {
+    if (e?.code === "ENOENT") return;
+    if (!warnedLegacyDirs.has(legacy)) {
+      warnedLegacyDirs.add(legacy);
+      process.stderr.write(`dispatch-register: legacy lock path ${legacy} exists but could not be listed (${e?.code ?? e}) \u2014 it no longer locks anything; left in place
+`);
+    }
+    return;
+  }
+  if (entries.length === 0) {
+    rmdirSync(legacy);
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
+`);
+    return;
+  }
+  if (!warnedLegacyDirs.has(legacy)) {
+    warnedLegacyDirs.add(legacy);
+    process.stderr.write(`dispatch-register: legacy lock dir ${legacy} is NOT empty (${entries.join(", ")}) \u2014 it no longer locks anything and was left in place; remove it by hand once no pre-rebuild session is running
+`);
+  }
+}
+async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
-  const start = Date.now();
-  for (; ; ) {
-    try {
-      mkdirSync3(dirname3(lockDir), { recursive: true });
-      mkdirSync3(lockDir);
-      break;
-    } catch (e) {
-      if (e?.code !== "EEXIST") throw e;
-      const owner = readOwner(lockDir);
-      const ownerless = owner === null && isReclaimableOwnerless(lockDir);
-      if (looksDeadOwner(owner) || ownerless) {
-        const examinedIno = statIno(lockDir);
-        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
-        let renamed = false;
-        try {
-          renameSync2(lockDir, tombstone);
-          renamed = true;
-        } catch (renameErr) {
-          if (renameErr?.code !== "ENOENT") throw renameErr;
+  ensureLockRoot();
+  const lockPath = registerLockPath(root);
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    const start = Date.now();
+    for (; ; ) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+        break;
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited = Date.now() - start;
+        if (waited >= timeoutMs) {
+          throw refusal(
+            "register_lock_held",
+            { lock_path: lockPath, waited_ms: waited },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited}ms`
+          );
         }
-        if (renamed) {
-          const tombstoneOwner = readOwner(tombstone);
-          const sameIno = examinedIno !== null && statIno(tombstone) === examinedIno;
-          const reclaimAgeMs = ownerless ? ownerlessAgeMs(tombstone) : null;
-          const verified = ownerless ? sameIno && reclaimAgeMs !== null && reclaimAgeMs >= OWNERLESS_RECLAIM_MS : sameIno && tombstoneOwner?.nonce === owner.nonce && looksDeadOwner(tombstoneOwner);
-          if (verified) {
-            if (ownerless) {
-              process.stderr.write(
-                `dispatch-register: reclaimed an OWNERLESS lock at ${lockDir} \u2014 no readable owner.json, ${Math.round(reclaimAgeMs / 1e3)}s old (bound ${OWNERLESS_RECLAIM_MS / 1e3}s): a writer died between mkdir and its owner write
-`
-              );
-            }
-            try {
-              rmSync(tombstone, { recursive: true, force: true });
-            } catch (rmErr) {
-              process.stderr.write(`dispatch-register: reclaimed lock at ${lockDir} but could not delete its tombstone ${tombstone} (${rmErr?.code ?? rmErr}) \u2014 remove it by hand
-`);
-            }
-          } else {
-            try {
-              renameSync2(tombstone, lockDir);
-            } catch (restoreErr) {
-              if (restoreErr?.code === "EEXIST" || restoreErr?.code === "ENOTEMPTY") {
-                process.stderr.write(
-                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
-`
-                );
-                throw refusal(
-                  lockCodeFor(),
-                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
-                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
-                );
-              }
-              if (restoreErr?.code !== "ENOENT") throw restoreErr;
-            }
-          }
-        }
+        await sleepAsync(retryMs);
       }
-      if (Date.now() - start >= timeoutMs) {
-        throw refusal(
-          lockCodeFor(),
-          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
-          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
-        );
-      }
-      await sleepAsync(retryMs);
     }
-  }
-  const createdIno = statIno(lockDir);
-  const nonce = randomBytes(8).toString("hex");
-  const lost = (why) => refusal(lockCodeFor(), { lock_dir: lockDir, owner: null }, `lock at ${lockDir} was lost before this holder's owner write took hold (${why}) \u2014 refusing rather than running beside another holder`);
-  try {
-    writeFileSync2(
-      join4(lockDir, "owner.json"),
-      JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce }),
-      { flag: "wx" }
-    );
-  } catch (writeErr) {
-    if (writeErr?.code === "EEXIST") throw lost("another holder already owns the canonical path");
-    if (writeErr?.code === "ENOENT") throw lost("the directory this call created was moved away");
-    throw writeErr;
-  }
-  if (createdIno === null || statIno(lockDir) !== createdIno || readOwner(lockDir)?.nonce !== nonce) {
-    process.stderr.write(
-      `dispatch-register: lock at ${lockDir} is no longer the directory this call created (pid ${process.pid}) \u2014 not entering the critical section and not touching the directory now at that path; if it holds this pid's owner.json it becomes reclaimable once this process exits
-`
-    );
-    throw lost("the canonical path is a different incarnation");
-  }
-  try {
-    return await fn();
+    heldConnections.add(db);
+    try {
+      clearLegacyLockDir(root);
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+`);
+      }
+    }
   } finally {
-    releaseOwnLock(lockDir, nonce);
-  }
-}
-function releaseOwnLock(lockDir, nonce) {
-  const tombstone = `${lockDir}.release-${randomBytes(8).toString("hex")}`;
-  try {
-    renameSync2(lockDir, tombstone);
-  } catch (e) {
-    process.stderr.write(
-      e?.code === "ENOENT" ? `dispatch-register: release found no lock at ${lockDir} \u2014 it was removed while this holder held it
-` : `dispatch-register: release could not move the lock at ${lockDir} (${e?.code ?? e}) \u2014 left in place
-`
-    );
-    return;
-  }
-  if (readOwner(tombstone)?.nonce === nonce) {
-    try {
-      rmSync(tombstone, { recursive: true, force: true });
-    } catch (e) {
-      process.stderr.write(`dispatch-register: released the lock at ${lockDir} but could not delete its tombstone ${tombstone} (${e?.code ?? e}) \u2014 remove it by hand
-`);
-    }
-    return;
-  }
-  if (existsSync4(lockDir)) {
-    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's, and the path is already re-occupied \u2014 the moved lock is left at ${tombstone}; verify and remove by hand
-`);
-    return;
-  }
-  try {
-    renameSync2(tombstone, lockDir);
-    process.stderr.write(`dispatch-register: release skipped at ${lockDir} \u2014 this holder's owner token is no longer inside (the lock was reclaimed); restored it to its current holder
-`);
-  } catch (e) {
-    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's and could not restore it (${e?.code ?? e}) \u2014 it is left at ${tombstone}; verify and remove by hand
-`);
+    db.close();
   }
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
@@ -8476,7 +8393,7 @@ async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, 
   const sleep = typeof opts.sleep === "function" ? opts.sleep : sleepAsync;
   async function tryLocked(timeoutMs, retryMs) {
     try {
-      return await withOwnerMkdirLock(registerLockDir(root), () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs });
+      return await withRegisterLock(root, () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs });
     } catch (e) {
       if (e?.code === "register_lock_held") return { verdict: "lock-held" };
       throw e;
@@ -8502,7 +8419,7 @@ async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, 
 
 // scripts/hooks/lib/delivery.mjs
 import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, mkdirSync as mkdirSync4, existsSync as existsSync5, renameSync as renameSync3, openSync as openSync2, closeSync as closeSync2 } from "node:fs";
-import { join as join5, dirname as dirname4 } from "node:path";
+import { join as join5, dirname as dirname3 } from "node:path";
 function deliveryDir(cwd) {
   return join5(cwd, ".sterling", "transient", "delivery");
 }
@@ -8583,7 +8500,7 @@ function readGuard(path) {
 }
 function writeGuard(path, guard) {
   if (!path) return;
-  mkdirSync4(dirname4(path), { recursive: true });
+  mkdirSync4(dirname3(path), { recursive: true });
   const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync3(tmp, JSON.stringify(guard));
   renameSync3(tmp, path);

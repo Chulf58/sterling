@@ -95,7 +95,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
     // FRESH-READ MERGE UNDER THE COOPERATING REGISTER LOCK (decision
     // register-writers-cooperating-lock, 1e0ba0d0) — H10 is a register writer
     // like H22's Start/Stop/prune and H1's session-boundary delete, so it
-    // takes the SAME mkdir-mutex lock (scripts/lib/dispatch-register.mjs withRegisterLock, R1)
+    // takes the SAME kernel-held register lock (scripts/lib/dispatch-register.mjs withRegisterLock, R1)
     // rather than a second divergent cross-hook lock. TIMEOUT POSTURE: SKIP
     // THE STAMP, LOUD, never an unlocked write — an unlocked whole-array
     // rewrite here could erase a concurrent H22 SubagentStart/Stop's

@@ -3,7 +3,7 @@
 // CONTRACT SOURCE: decision `review-receipt-rebuild-invariant-three-owner-modules-tri-state-liveness-receipt-bound-supersession`
 // + the R1 contract sheet §1.1 / §6 A1, A2, A4, A5, A6, A9. This file pins the
 // MODULE surface: one parser, one availability reader, one tri-state
-// classifier, one owner-mkdir lock. Consumer POLICY lives in the consumer
+// classifier, one kernel-held register lock. Consumer POLICY lives in the consumer
 // files (h26-dispatch-overlap, h10-dispatch-status-policy, rotation-note-live-
 // dispatches, dispatch-register-consumers).
 //
@@ -20,8 +20,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
-import { tmpdir, hostname } from 'node:os';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import * as REG from '../lib/dispatch-register.mjs';
 
 const LEASE = 60; // staleMinutes used by every status pin below
@@ -70,10 +71,6 @@ function readRaw(dir) {
 }
 
 // A pid that is provably not running: a child that has already exited.
-function forgeLock(lockDir, owner) {
-  mkdirSync(lockDir, { recursive: true });
-  writeFileSync(join(lockDir, 'owner.json'), JSON.stringify(owner));
-}
 
 // ===========================================================================
 // MODULE SURFACE — one owner, and the removed names are GONE
@@ -82,10 +79,10 @@ function forgeLock(lockDir, owner) {
 test('R1-A01: scripts/lib/dispatch-register.mjs exports the whole owner surface', () => {
   for (const name of [
     'registerPath',
-    'registerLockDir',
+    'registerLockPath',
+    'legacyRegisterLockDir',
     'parseRegisterEntry',
     'readRegister',
-    'withOwnerMkdirLock',
     'withRegisterLock',
     'registerStart',
     'registerEnd',
@@ -103,16 +100,17 @@ test('R1-A01: scripts/lib/dispatch-register.mjs exports the whole owner surface'
 // can still import a second liveness notion has not been re-pointed, it has been
 // left beside the owner.
 test('R1-A02: the retired liveness/lock names are NOT exported — importing one is a defect, not a fallback', () => {
-  for (const name of ['liveDispatches', 'liveDispatchesOrUnknown', 'acquireLock', 'filterLive', 'withLedgerLock', 'resolveSessionIdentity']) {
-    assert.equal(REG[name], undefined, `'${name}' must not survive the rebuild — every TTL predicate lives in dispatchStatus, and withLedgerLock/resolveSessionIdentity had no non-test caller (H22 slim-down)`);
+  for (const name of ['liveDispatches', 'liveDispatchesOrUnknown', 'acquireLock', 'filterLive', 'withLedgerLock', 'resolveSessionIdentity', 'withOwnerMkdirLock', 'registerLockDir']) {
+    assert.equal(REG[name], undefined, `'${name}' must not survive the rebuild — every TTL predicate lives in dispatchStatus, withLedgerLock/resolveSessionIdentity had no non-test caller (H22 slim-down), and withOwnerMkdirLock/registerLockDir were the retired mkdir lock`);
   }
 });
 
-test('R1-A03: registerPath and registerLockDir name the two session-scoped paths', () => {
+test('R1-A03: registerPath names the register in .sterling/transient; the lock is OUTSIDE the project (registerLockPath); legacyRegisterLockDir names the retired mkdir lock', () => {
   const { dir, cleanup } = project([]);
   try {
     assert.equal(REG.registerPath(dir), join(dir, '.sterling', 'transient', 'dispatch-register.json'));
-    assert.equal(REG.registerLockDir(dir), join(dir, '.sterling', 'transient', 'dispatch-register.lock'));
+    assert.ok(REG.registerLockPath(dir).startsWith('/tmp/sterling-locks/'), REG.registerLockPath(dir));
+    assert.equal(REG.legacyRegisterLockDir(dir), join(dir, '.sterling', 'transient', 'dispatch-register.lock'));
   } finally {
     cleanup();
   }
@@ -502,90 +500,15 @@ test('R1-A39 CONTROL: with the sole unended round in the NAMED session, that rou
 });
 
 // ===========================================================================
-// withOwnerMkdirLock — A5: pid-verified takeover only, NO age takeover
-// ===========================================================================
-
-test('R1-A31: withOwnerMkdirLock runs fn holding the lock, writes owner.json {pid, host, at, nonce}, and releases after', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    let seen = null;
-    const value = await REG.withOwnerMkdirLock(lockDir, () => {
-      seen = JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8'));
-      return 'result';
-    }, { retryMs: 20, timeoutMs: 500 });
-    assert.equal(value, 'result', 'the wrapper returns fn\'s result');
-    assert.equal(seen.pid, process.pid);
-    assert.equal(seen.host, hostname());
-    assert.ok(!Number.isNaN(Date.parse(seen.at)));
-    assert.ok(typeof seen.nonce === 'string' && seen.nonce.length > 0);
-    // The mutex IS the directory (mkdir is the atomic primitive), so release
-    // must remove the DIRECTORY: an implementation that unlinks owner.json but
-    // leaves the dir behind still owns the mkdir and deadlocks the next writer,
-    // while passing an owner.json-absent assertion.
-    assert.equal(existsSync(lockDir), false, 'the lock DIRECTORY is gone when fn returns — unlinking owner.json alone still holds the mkdir');
-  } finally {
-    cleanup();
-  }
-});
-
-// THE age-takeover pin, and its control is R1-A33 immediately below: the two
-// forgeries differ ONLY in whether the owner pid is alive, so a green pair can
-// only be explained by a pid-liveness test — never by an age threshold.
-test('R1-A32: a lock whose owner.at is a DAY old but whose pid is ALIVE is never taken — refusal register_lock_held with facts.lock_dir and facts.owner', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    const owner = { pid: process.pid, host: hostname(), at: new Date(Date.now() - 24 * 60 * MIN).toISOString(), nonce: 'forged' };
-    forgeLock(lockDir, owner);
-    let ran = false;
-    const r = await refusalOf(() => REG.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }));
-    assert.equal(r.code, 'register_lock_held', `expected register_lock_held, got ${JSON.stringify(r)}`);
-    assert.equal(ran, false, 'the critical section never ran');
-    assert.equal(r.facts?.lock_dir, lockDir, 'the refusal names the directory the operator must inspect');
-    assert.equal(r.facts?.owner?.pid, owner.pid, 'the refusal names the owner it could not verify dead');
-    assert.equal(JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8')).nonce, 'forged', "the live holder's owner file is untouched");
-  } finally {
-    cleanup();
-  }
-});
-
-// MUTUAL EXCLUSION, in-process and deterministic: this is the property the
-// whole primitive exists for, and a no-op lock fails it immediately.
-test('R1-A36: two concurrent withOwnerMkdirLock calls never overlap their critical sections', async () => {
-  const { dir, cleanup } = project([]);
-  try {
-    const lockDir = REG.registerLockDir(dir);
-    let inside = 0;
-    let maxInside = 0;
-    const body = async () => {
-      inside += 1;
-      maxInside = Math.max(maxInside, inside);
-      await new Promise((res) => setTimeout(res, 40));
-      inside -= 1;
-      return 'ok';
-    };
-    const results = await Promise.all([
-      refusalOf(() => REG.withOwnerMkdirLock(lockDir, body, { retryMs: 10, timeoutMs: 3000 })),
-      refusalOf(() => REG.withOwnerMkdirLock(lockDir, body, { retryMs: 10, timeoutMs: 3000 })),
-    ]);
-    assert.equal(maxInside, 1, 'the two critical sections must never be inside the lock at once');
-    assert.ok(results.some((r) => r.code === undefined), 'at least one contender must get in');
-    for (const r of results) {
-      if (r.code !== undefined) assert.equal(r.code, 'register_lock_held', 'the only legitimate loss is a held-lock refusal');
-    }
-    assert.equal(existsSync(lockDir), false, 'the lock DIRECTORY is gone — a leftover dir with no owner.json still deadlocks the next writer');
-  } finally {
-    cleanup();
-  }
-});
-
-// ===========================================================================
-// REMOVED 2026-09-22 ahead of the kernel-held register lock (decision
+// withRegisterLock — the KERNEL-HELD register lock (decision
 // `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`,
-// REVISED block). Each pinned an internal of the mkdir reclaim protocol that
-// the rebuild deletes; the surviving behaviour each one carried is ported to
-// the named replacement pin:
+// REVISED block). The cross-process scenarios (a dead holder, N contending
+// processes, a paused holder) are pinned in
+// scripts/tests/dispatch-register-kernel-lock.test.mjs; what stays HERE is the
+// module-level contract every register writer relies on.
+//
+// REMOVED 2026-09-22 with the mkdir protocol they pinned (each asserted an
+// internal of a mechanism that no longer exists):
 //   R1-A33 (a dead-pid owner.json is taken over) — there is no owner file and
 //     no takeover; "a dead holder frees the lock" is now KL-a (process.exit and
 //     SIGKILL, real processes).
@@ -609,3 +532,81 @@ test('R1-A36: two concurrent withOwnerMkdirLock calls never overlap their critic
 //     never enters fn) — there is no mkdir/owner-write window; acquisition is
 //     the single BEGIN IMMEDIATE. "Never two writers" is KL-b / KL-b2.
 // ===========================================================================
+
+// Holds the register lock from THIS process through a separate connection —
+// a genuine hold, exactly what another writer would take.
+function holdLock(dir) {
+  mkdirSync(dirname(REG.registerLockPath(dir)), { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(REG.registerLockPath(dir));
+  db.exec('BEGIN IMMEDIATE');
+  return () => {
+    db.exec('ROLLBACK');
+    db.close();
+  };
+}
+
+test('R1-A31: withRegisterLock runs fn holding the lock, returns its result, and releases after — nothing is written under .sterling/transient', async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    let heldInside = null;
+    const value = await REG.withRegisterLock(dir, async () => {
+      heldInside = await refusalOf(() => REG.withRegisterLock(dir, () => 'nested', { retryMs: 10, timeoutMs: 0 }));
+      return 'result';
+    }, { retryMs: 20, timeoutMs: 500 });
+    assert.equal(value, 'result', "the wrapper returns fn's result");
+    assert.equal(heldInside.code, 'register_lock_held', 'the lock is really held while fn runs (and it is not reentrant)');
+    assert.equal(await REG.withRegisterLock(dir, () => 'next', { timeoutMs: 0 }), 'next', 'released when fn returns — the next single attempt enters');
+    assert.equal(existsSync(REG.legacyRegisterLockDir(dir)), false, 'no mkdir lock dir is created');
+  } finally {
+    rmSync(REG.registerLockPath(dir), { force: true });
+    cleanup();
+  }
+});
+
+test('R1-A32: a HELD lock refuses a second entrant with register_lock_held naming facts.lock_path — fn never runs and the holder keeps the lock', async () => {
+  const { dir, cleanup } = project([]);
+  const release = holdLock(dir);
+  try {
+    let ran = false;
+    const r = await refusalOf(() => REG.withRegisterLock(dir, () => { ran = true; }, { retryMs: 10, timeoutMs: 120 }));
+    assert.equal(r.code, 'register_lock_held', `expected register_lock_held, got ${JSON.stringify(r)}`);
+    assert.equal(ran, false, 'the critical section never ran');
+    assert.equal(r.facts?.lock_path, REG.registerLockPath(dir), 'the refusal names the lock database');
+    const again = await refusalOf(() => REG.withRegisterLock(dir, () => { ran = true; }, { timeoutMs: 0 }));
+    assert.equal(again.code, 'register_lock_held', 'the holder was not displaced by the refused contender');
+  } finally {
+    release();
+    rmSync(REG.registerLockPath(dir), { force: true });
+    cleanup();
+  }
+});
+
+// MUTUAL EXCLUSION, in-process and deterministic: this is the property the
+// whole primitive exists for, and a no-op lock fails it immediately.
+test('R1-A36: two concurrent withRegisterLock calls never overlap their critical sections, and the lock is free afterwards', async () => {
+  const { dir, cleanup } = project([]);
+  try {
+    let inside = 0;
+    let maxInside = 0;
+    const body = async () => {
+      inside += 1;
+      maxInside = Math.max(maxInside, inside);
+      await new Promise((res) => setTimeout(res, 40));
+      inside -= 1;
+      return 'ok';
+    };
+    const results = await Promise.all([
+      refusalOf(() => REG.withRegisterLock(dir, body, { retryMs: 10, timeoutMs: 3000 })),
+      refusalOf(() => REG.withRegisterLock(dir, body, { retryMs: 10, timeoutMs: 3000 })),
+    ]);
+    assert.equal(maxInside, 1, 'the two critical sections must never be inside the lock at once');
+    assert.ok(results.some((r) => r.code === undefined), 'at least one contender must get in');
+    for (const r of results) {
+      if (r.code !== undefined) assert.equal(r.code, 'register_lock_held', 'the only legitimate loss is a held-lock refusal');
+    }
+    assert.equal(await REG.withRegisterLock(dir, () => 'free', { timeoutMs: 0 }), 'free', 'no leftover state jams the next writer');
+  } finally {
+    rmSync(REG.registerLockPath(dir), { force: true });
+    cleanup();
+  }
+});

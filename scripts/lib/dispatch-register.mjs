@@ -4,8 +4,7 @@
 //
 // INVARIANT (register): this module is the ONE authority for the transient
 // dispatch register's persisted shape (RegisterEntry), its parser, its
-// TRI-STATE liveness classifier, and the owner-mkdir lock primitive shared
-// with a legacy compatibility lock. A dispatch's liveness is never a binary live/dead
+// TRI-STATE liveness classifier, and the kernel-held register lock. A dispatch's liveness is never a binary live/dead
 // verdict — the platform emits no death signal for a killed subagent, so an
 // expired lease is UNKNOWN, never confirmed dead; only an explicit terminal
 // event (`ended`) yields inactive-confirmed. Stop MARKS an entry ended; it is
@@ -31,13 +30,13 @@
 // path that emits no hook still is not; correctness under
 // concurrent live sessions in one worktree (one live session per worktree is
 // the contract — H1's SessionStart wipe is global and transient/session.json
-// is single); that the owner-mkdir lock protects against anything but this
+// is single); that the register lock protects against anything but this
 // module's own cooperating writers; staging for a spawn whose Post is late
 // AND whose type has another pending or orphaned sibling (unattributable
 // after a bounded wait); recovery of knowledge already staged into the wrong
 // child before a later Post contradicts a derivation (recorded as
-// derived_post_mismatch, never repaired); attribution across a lock a
-// live-looking stale owner holds (fails closed 'lock-held'); transactional
+// derived_post_mismatch, never repaired); attribution across a lock another
+// live writer holds past the bound (fails closed 'lock-held'); transactional
 // atomicity across the register file and a state file (two writes under one
 // lock — the ORDER is chosen so a crash between them leaves the harmless
 // half); a cancelled (Pre-denied) dispatch's pending orphan ever clearing
@@ -46,9 +45,9 @@
 // enforced by the filesystem — parity with the POSIX guarantee is NOT
 // delivered there (C5, correctness review).
 
-import { mkdirSync, readFileSync, writeFileSync, rmSync, renameSync, existsSync, statSync, lstatSync, readdirSync } from 'node:fs';
-import { hostname } from 'node:os';
-import { join, dirname } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync, rmSync, rmdirSync, renameSync, existsSync, lstatSync, readdirSync, realpathSync, chmodSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { randomBytes, createHash } from 'node:crypto';
 import { refusal, disclosure, render } from './review-errors.mjs';
 
@@ -60,7 +59,9 @@ export function registerPath(root) {
   return join(root, '.sterling', 'transient', 'dispatch-register.json');
 }
 
-export function registerLockDir(root) {
+// The RETIRED mkdir lock directory — no longer a lock; named only so a
+// leftover can be recognised and cleared (see withRegisterLock).
+export function legacyRegisterLockDir(root) {
   return join(root, '.sterling', 'transient', 'dispatch-register.lock');
 }
 
@@ -185,275 +186,156 @@ export function readRegister(root) {
 }
 
 // ---------------------------------------------------------------------------
-// withOwnerMkdirLock — the ONE lock primitive, shared by the register and the
-// legacy compatibility lock. mkdir-exclusivity + an owner.json {pid, host, at, nonce}.
-// Takeover when owner.host === this host AND owner.pid is verified not
-// running (process.kill(pid, 0) -> ESRCH), OR when the lock dir is OWNERLESS
-// (no readable owner.json) and its mtime is older than OWNERLESS_RECLAIM_MS —
-// a writer that died between mkdir and the owner write (decision
-// `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`;
-// measured: an empty lock dir jammed a register for 3.5 days). A lock WITH a
-// live-looking owner is NEVER taken by age: elapsed time is not proof of
-// death. Such a lock refuses (coordination, not evidence); the operator
-// removes it by hand only after confirming no writer runs.
-// OWNERSHIP IS PROVEN AFTER THE OWNER WRITE, not assumed from the mkdir: the
-// creator keeps the inode it created, writes owner.json with an EXCLUSIVE
-// create ('wx'), then re-verifies that the canonical path is still that inode
-// and still carries its own nonce. Any miss (a paused creator reclaimed and
-// re-owned, or a fresh creator displaced by a takeover that could not restore
-// it) refuses as lock-held WITHOUT entering fn and without touching whatever
-// now sits at the canonical path. RELEASE is takeover-shaped: rename the
-// canonical dir to a private tombstone, verify the TOMBSTONE carries our
-// nonce, then delete it; a tombstone that is not ours goes back while the
-// canonical path is free, and is disclosed otherwise.
-// NOT GUARANTEED: that a holder paused longer than OWNERLESS_RECLAIM_MS
-// between mkdir and its owner write keeps the lock — age cannot tell that
-// pause from a crash (accepted residual risk; it now costs that holder its
-// round, never a second concurrent writer). A displaced creator whose
-// owner.json landed in a contender's still-ownerless dir leaves that dir
-// holding its live pid until its process exits (then the dead-pid path
-// reclaims it). A rename back onto the canonical path can replace a
-// contender's EMPTY dir (POSIX rename); that contender's post-write check
-// then fails, so the cost is a lost round, never two writers.
+// withRegisterLock — the ONE register lock, KERNEL-HELD (decision
+// `dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own`,
+// REVISED block). The lock is a SQLite `BEGIN IMMEDIATE` transaction on a
+// small lock database that is never unlinked, at
+// /tmp/sterling-locks/<sha256 of the resolved project root>.db — native ext4,
+// never the project tree, because the tree may sit on /mnt/c drvfs, whose
+// byte-range locking is unvalidated. The register DATA stays in
+// .sterling/transient/. The transaction is held for the whole of fn; COMMIT in
+// the finally releases it, closing the connection releases it too, and the
+// kernel releases it when the holding process dies. Nothing is ever written
+// to the lock database, so no journal is ever created.
 //
-// ASYNC ONLY: withOwnerMkdirLock always returns a promise — a held lock
-// REJECTS with the refusal object rather than throwing synchronously. Every
-// caller (register and ledger alike) awaits it.
+// INVARIANT: at most one cooperating writer per resolved project root is
+// inside fn at a time, and a lock is only ever released by its own holder's
+// COMMIT/close or by the kernel on that holder's death — there is no
+// reclaim, rename, owner file or tombstone, so no process can displace
+// another's lock and no crash can leave a stale one. A contender retries a
+// busy lock every retryMs up to timeoutMs (at least one attempt; sleeping
+// OUTSIDE the lock, never blocking the event loop), then REJECTS with the
+// register_lock_held refusal — fn never runs unlocked (P5).
+//
+// A leftover mkdir lock dir from the retired protocol
+// (.sterling/transient/dispatch-register.lock) is ignored for locking. Under
+// the lock, an EMPTY one is removed as residue and said once on stderr; a
+// non-empty one is left in place and warned about.
+//
+// NOT GUARANTEED: exclusion against a writer still running a PRE-rebuild
+// bundle (it takes the mkdir lock, not this one) — hook processes are
+// short-lived, so this ends when every session has relaunched onto the new
+// bundles; exclusion across two WSL distros or machines sharing one /mnt/c
+// tree (each has its own /tmp); one lock for two spellings of one drvfs path
+// that differ only in case (realpath does not fold case); fairness or FIFO
+// order among contenders; that a holder paused longer than a contender's
+// bound finishes before that contender gives up (the contender refuses, it
+// never proceeds). Not reentrant: calling it again from inside fn waits on
+// itself and refuses at the bound.
+//
+// ASYNC ONLY: always returns a promise — a held lock REJECTS with the refusal
+// object rather than throwing synchronously. fn may be sync or async.
 // ---------------------------------------------------------------------------
 
-// lockCodeFor used to branch on the lock dir's basename to distinguish the
-// register lock from a legacy 'review-ledger.lock' compatibility lock
-// (withLedgerLock, DELETED — no caller anywhere, grepped). withOwnerMkdirLock
-// is now reached only through withRegisterLock, so every refusal it throws is
-// a register refusal.
-function lockCodeFor() {
-  return 'register_lock_held';
+const LOCK_ROOT = '/tmp/sterling-locks';
+const SQLITE_BUSY = 5;
+
+export function registerLockPath(root) {
+  const hash = createHash('sha256').update(realpathSync(resolve(root))).digest('hex');
+  return join(LOCK_ROOT, `${hash}.db`);
 }
 
-function isPidAlive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e?.code !== 'ESRCH'; // ESRCH = provably not running; anything else is unverifiable, treat as alive
+// The lock directory is shared /tmp territory: it must be a real directory
+// (never a symlink) owned by this user, and private. Anything else refuses
+// loudly rather than locking through a path another user controls.
+function ensureLockRoot() {
+  mkdirSync(LOCK_ROOT, { recursive: true, mode: 0o700 });
+  const st = lstatSync(LOCK_ROOT);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${LOCK_ROOT} is not a real directory — refusing to take the register lock through it`);
   }
-}
-
-function readOwner(lockDir) {
-  try {
-    return JSON.parse(readFileSync(join(lockDir, 'owner.json'), 'utf8'));
-  } catch {
-    return null;
+  if (typeof process.getuid === 'function' && st.uid !== process.getuid()) {
+    throw new Error(`dispatch-register: ${LOCK_ROOT} is owned by uid ${st.uid}, not this user (${process.getuid()}) — refusing to take the register lock through it`);
   }
+  if ((st.mode & 0o077) !== 0) chmodSync(LOCK_ROOT, 0o700);
 }
 
-function looksDeadOwner(o) {
-  return !!o && o.host === hostname() && !isPidAlive(o.pid);
-}
-
-// Real holds last milliseconds, and the ownerless window is the gap between
-// mkdir and the owner.json write, so a 60s-old ownerless dir is a crash.
-const OWNERLESS_RECLAIM_MS = 60_000;
-
-// Age of an OWNERLESS lock dir in ms, or null when the dir has a readable
-// owner or cannot be stat'ed (gone — a release raced us).
-function ownerlessAgeMs(lockDir) {
-  if (readOwner(lockDir) !== null) return null;
-  try {
-    return Date.now() - statSync(lockDir).mtimeMs;
-  } catch {
-    return null;
-  }
-}
-
-function isReclaimableOwnerless(lockDir) {
-  const age = ownerlessAgeMs(lockDir);
-  return age !== null && age >= OWNERLESS_RECLAIM_MS;
-}
-
-function statIno(p) {
-  try {
-    return statSync(p).ino;
-  } catch {
-    return null;
-  }
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
 }
 
 function sleepAsync(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+const warnedLegacyDirs = new Set();
+
+// Every connection currently holding the lock, kept strongly reachable for
+// the whole hold. Measured 2026-09-22: a holder whose fn awaited a promise
+// nothing referenced had its suspended frame — and with it the connection —
+// garbage-collected, and the finalizer's close RELEASED the lock mid-section
+// while the process lived on. Pinned here, only the holder's own finally or
+// its process death ends a hold.
+const heldConnections = new Set();
+
+// Runs INSIDE the lock hold, so two writers never race the rmdir.
+function clearLegacyLockDir(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
+  try {
+    entries = readdirSync(legacy);
+  } catch (e) {
+    if (e?.code === 'ENOENT') return;
+    if (!warnedLegacyDirs.has(legacy)) {
+      warnedLegacyDirs.add(legacy);
+      process.stderr.write(`dispatch-register: legacy lock path ${legacy} exists but could not be listed (${e?.code ?? e}) — it no longer locks anything; left in place\n`);
+    }
+    return;
+  }
+  if (entries.length === 0) {
+    rmdirSync(legacy);
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} — residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}\n`);
+    return;
+  }
+  if (!warnedLegacyDirs.has(legacy)) {
+    warnedLegacyDirs.add(legacy);
+    process.stderr.write(`dispatch-register: legacy lock dir ${legacy} is NOT empty (${entries.join(', ')}) — it no longer locks anything and was left in place; remove it by hand once no pre-rebuild session is running\n`);
+  }
+}
+
+export async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1000;
-  const start = Date.now();
-  for (;;) {
-    try {
-      // The lock dir's PARENT must exist (an absent .sterling/transient/ etc.
-      // must not throw ENOENT before either contender ever contends); the
-      // lock mkdir itself stays NON-RECURSIVE — that exclusivity is the mutex.
-      mkdirSync(dirname(lockDir), { recursive: true });
-      mkdirSync(lockDir);
-      break;
-    } catch (e) {
-      if (e?.code !== 'EEXIST') throw e;
-      const owner = readOwner(lockDir);
-      const ownerless = owner === null && isReclaimableOwnerless(lockDir);
-      if (looksDeadOwner(owner) || ownerless) {
-        // ATOMIC TAKEOVER: rename the stale dir away under a private name —
-        // rename is atomic, so exactly ONE contender wins the rename. That
-        // alone does not prove we moved the INCARNATION we examined: A and B
-        // can both read dead owner X, B renames X away and a fresh contender
-        // C then acquires a LIVE lock at lockDir, and A's rename would move
-        // C's live lock instead. So after the rename, verify the tombstone
-        // is the SAME incarnation (inode + owner.nonce) we examined AND is
-        // still dead — only then is it removed. A mismatch (or a now-live
-        // owner) is restored to lockDir immediately and treated as a lost
-        // race. If the restore itself loses to a fourth contender (EEXIST —
-        // someone acquired lockDir in the gap since our rename-out), we
-        // cannot silently drop the displaced dir (it may be live): disclose
-        // on stderr and REFUSE this call outright rather than proceed on
-        // unverified state. NOT GUARANTEED: three contenders racing inside
-        // this one syscall gap (rename-out, stat, rename-back) is a residual
-        // window this closes down to, not fully closes. An OWNERLESS dir has
-        // no nonce, so its incarnation check is inode + STILL ownerless + STILL
-        // older than the bound (a reused inode of a fresh dir fails the age).
-        const examinedIno = statIno(lockDir);
-        const tombstone = `${lockDir}.stale-${randomBytes(8).toString('hex')}`;
-        let renamed = false;
-        try {
-          renameSync(lockDir, tombstone);
-          renamed = true;
-        } catch (renameErr) {
-          // ENOENT: another contender moved it first — a lost race, retry.
-          // Anything else is a real I/O failure and is surfaced (P5).
-          if (renameErr?.code !== 'ENOENT') throw renameErr;
+  ensureLockRoot();
+  const lockPath = registerLockPath(root);
+  const db = new DatabaseSync(lockPath);
+  try {
+    db.exec('PRAGMA busy_timeout=0');
+    const start = Date.now();
+    for (;;) {
+      try {
+        db.exec('BEGIN IMMEDIATE');
+        break;
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited = Date.now() - start;
+        if (waited >= timeoutMs) {
+          throw refusal(
+            'register_lock_held',
+            { lock_path: lockPath, waited_ms: waited },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) — gave up after ${waited}ms`
+          );
         }
-        if (renamed) {
-          const tombstoneOwner = readOwner(tombstone);
-          const sameIno = examinedIno !== null && statIno(tombstone) === examinedIno;
-          const reclaimAgeMs = ownerless ? ownerlessAgeMs(tombstone) : null;
-          const verified = ownerless
-            ? sameIno && reclaimAgeMs !== null && reclaimAgeMs >= OWNERLESS_RECLAIM_MS
-            : sameIno && tombstoneOwner?.nonce === owner.nonce && looksDeadOwner(tombstoneOwner);
-          if (verified) {
-            if (ownerless) {
-              process.stderr.write(
-                `dispatch-register: reclaimed an OWNERLESS lock at ${lockDir} — no readable owner.json, ${Math.round(reclaimAgeMs / 1000)}s old (bound ${OWNERLESS_RECLAIM_MS / 1000}s): a writer died between mkdir and its owner write\n`
-              );
-            }
-            try {
-              rmSync(tombstone, { recursive: true, force: true });
-            } catch (rmErr) {
-              // The takeover itself succeeded (lockDir is free); a lingering
-              // tombstone blocks nothing, but it is disclosed, not swallowed.
-              process.stderr.write(`dispatch-register: reclaimed lock at ${lockDir} but could not delete its tombstone ${tombstone} (${rmErr?.code ?? rmErr}) — remove it by hand\n`);
-            }
-          } else {
-            try {
-              renameSync(tombstone, lockDir);
-            } catch (restoreErr) {
-              if (restoreErr?.code === 'EEXIST' || restoreErr?.code === 'ENOTEMPTY') {
-                process.stderr.write(
-                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) — left as a tombstone at ${tombstone}; verify and remove by hand\n`
-                );
-                throw refusal(
-                  lockCodeFor(),
-                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
-                  `lock takeover at ${lockDir} raced a third contender — refusing this call rather than proceeding on unverified state`
-                );
-              }
-              // ENOENT: the tombstone itself vanished — nothing left to
-              // restore, a lost race. Anything else is surfaced (P5).
-              if (restoreErr?.code !== 'ENOENT') throw restoreErr;
-            }
-          }
-        }
+        await sleepAsync(retryMs);
       }
-      if (Date.now() - start >= timeoutMs) {
-        throw refusal(
-          lockCodeFor(),
-          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
-          `lock held at ${lockDir} — coordination, not evidence; remove by hand only after confirming no writer runs`
-        );
-      }
-      await sleepAsync(retryMs);
     }
-  }
-
-  // PROVE OWNERSHIP before entering fn (see the header): the inode we
-  // created, an exclusive owner write, then re-verification.
-  const createdIno = statIno(lockDir);
-  const nonce = randomBytes(8).toString('hex');
-  const lost = (why) =>
-    refusal(lockCodeFor(), { lock_dir: lockDir, owner: null }, `lock at ${lockDir} was lost before this holder's owner write took hold (${why}) — refusing rather than running beside another holder`);
-  try {
-    writeFileSync(
-      join(lockDir, 'owner.json'),
-      JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce }),
-      { flag: 'wx' }
-    );
-  } catch (writeErr) {
-    if (writeErr?.code === 'EEXIST') throw lost('another holder already owns the canonical path');
-    if (writeErr?.code === 'ENOENT') throw lost('the directory this call created was moved away');
-    throw writeErr;
-  }
-  if (createdIno === null || statIno(lockDir) !== createdIno || readOwner(lockDir)?.nonce !== nonce) {
-    process.stderr.write(
-      `dispatch-register: lock at ${lockDir} is no longer the directory this call created (pid ${process.pid}) — not entering the critical section and not touching the directory now at that path; if it holds this pid's owner.json it becomes reclaimable once this process exits\n`
-    );
-    throw lost('the canonical path is a different incarnation');
-  }
-
-  try {
-    return await fn();
+    heldConnections.add(db);
+    try {
+      clearLegacyLockDir(root);
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec('COMMIT');
+      } catch (e) {
+        // Never thrown: a throw here would replace fn's own result or error.
+        // Closing the connection below releases the lock regardless.
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) — the lock is released by closing the connection\n`);
+      }
+    }
   } finally {
-    releaseOwnLock(lockDir, nonce);
+    db.close();
   }
-}
-
-// RELEASE ONLY OUR OWN, takeover-shaped: move the canonical dir to a private
-// tombstone FIRST, so what we inspect is exactly what we will delete — a
-// read-then-delete of the canonical path could delete a successor that
-// arrived between the two. Failures are disclosed on stderr, never thrown:
-// this runs in fn's finally, and a throw here would replace fn's own result
-// or error; a lock left behind by a failed release carries this live pid and
-// becomes reclaimable once the process exits.
-function releaseOwnLock(lockDir, nonce) {
-  const tombstone = `${lockDir}.release-${randomBytes(8).toString('hex')}`;
-  try {
-    renameSync(lockDir, tombstone);
-  } catch (e) {
-    process.stderr.write(
-      e?.code === 'ENOENT'
-        ? `dispatch-register: release found no lock at ${lockDir} — it was removed while this holder held it\n`
-        : `dispatch-register: release could not move the lock at ${lockDir} (${e?.code ?? e}) — left in place\n`
-    );
-    return;
-  }
-  if (readOwner(tombstone)?.nonce === nonce) {
-    try {
-      rmSync(tombstone, { recursive: true, force: true });
-    } catch (e) {
-      process.stderr.write(`dispatch-register: released the lock at ${lockDir} but could not delete its tombstone ${tombstone} (${e?.code ?? e}) — remove it by hand\n`);
-    }
-    return;
-  }
-  // Not ours: a successor holds it. Put it back while the path is free.
-  if (existsSync(lockDir)) {
-    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's, and the path is already re-occupied — the moved lock is left at ${tombstone}; verify and remove by hand\n`);
-    return;
-  }
-  try {
-    renameSync(tombstone, lockDir);
-    process.stderr.write(`dispatch-register: release skipped at ${lockDir} — this holder's owner token is no longer inside (the lock was reclaimed); restored it to its current holder\n`);
-  } catch (e) {
-    process.stderr.write(`dispatch-register: release at ${lockDir} moved a lock that is not this holder's and could not restore it (${e?.code ?? e}) — it is left at ${tombstone}; verify and remove by hand\n`);
-  }
-}
-
-export function withRegisterLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
 
 // ---------------------------------------------------------------------------
@@ -466,7 +348,7 @@ export function withRegisterLock(root, fn, opts = {}) {
 // correctness review): the CALLER already holds withRegisterLock. Factored
 // out so a composite (resolveAndRegisterStart, finishDispatchAndRegisterEnd)
 // can combine this work with other locked steps under ONE acquisition —
-// withOwnerMkdirLock is NOT reentrant, so calling the public, self-locking
+// withRegisterLock is NOT reentrant, so calling the public, self-locking
 // registerStart/registerEnd from inside another lock hold would deadlock.
 function registerStartLocked(root, entry) {
   const { availability, arr } = readRawArray(root);
@@ -1286,7 +1168,7 @@ export async function resolveDispatchStart(root, { session_id, agent_id, agent_t
 
   async function tryLocked(timeoutMs, retryMs) {
     try {
-      return await withOwnerMkdirLock(registerLockDir(root), () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs });
+      return await withRegisterLock(root, () => attemptDetermine(root, { session_id, agent_id, agent_type, consumer }), { retryMs, timeoutMs });
     } catch (e) {
       if (e?.code === 'register_lock_held') return { verdict: 'lock-held' };
       throw e;
@@ -1329,16 +1211,16 @@ export async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
   const consumer = 'h22';
 
   // ONE LOCK HOLD per attempt (C3, correctness review): resolve AND (when
-  // resolved) register, fused into the SAME withOwnerMkdirLock callback — the
+  // resolved) register, fused into the SAME withRegisterLock callback — the
   // decision's "resolve -> write bind/started FIRST -> registerStart second"
-  // ordering survives inside that one hold. withOwnerMkdirLock is NOT
+  // ordering survives inside that one hold. withRegisterLock is NOT
   // reentrant, so the prior shape (resolveDispatchStart's own hold, released,
   // then a SEPARATE registerStart hold) was two acquisitions where the header
   // promised one.
   async function attemptAndRegister(timeoutMs, retryMs) {
     try {
-      return await withOwnerMkdirLock(
-        registerLockDir(root),
+      return await withRegisterLock(
+        root,
         () => {
           const determined = attemptDetermine(root, { session_id, agent_id, agent_type, consumer });
           if (determined.verdict !== 'resolved') return determined;

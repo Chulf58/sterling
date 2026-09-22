@@ -136,6 +136,17 @@
 // SABOTAGE PER PIN is stated on each test below.
 //
 // ===========================================================================
+// KERNEL-LOCK RE-CUT (2026-09-22, decision
+// dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own,
+// REVISED): withOwnerMkdirLock/registerLockDir are DELETED. The register lock
+// is withRegisterLock(projectDir, fn, {retryMs, timeoutMs}) — a SQLite BEGIN
+// IMMEDIATE on /tmp/sterling-locks/<hash>.db, released by COMMIT/close or by
+// the kernel on holder death. holdRegisterLock() below now takes that real
+// lock instead of forging an owner.json; R1-A95/R1-A96/D2/D3 keep their
+// contract (refusal code, exclusion, skip-and-disclose-once) unchanged. The
+// pid/host/age takeover rules the R1 notes below describe no longer exist.
+// The note that follows is kept as history.
+// ===========================================================================
 // R1 PIN RE-CUT (contract sheet §1.1/§1.4, §6 A1/A4/A5/A6/A9).
 // The lock helper moves: scripts/hooks/lib/dispatch-register-lock.mjs is
 // DELETED and its behaviour is absorbed by scripts/lib/dispatch-register.mjs as
@@ -181,7 +192,8 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
-import { tmpdir, hostname } from 'node:os';
+import { tmpdir } from 'node:os';
+import { DatabaseSync } from 'node:sqlite';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -296,26 +308,29 @@ function missingLockLibMessage() {
   return (
     'scripts/lib/dispatch-register.mjs is missing or failed to import' +
     (lockLibError ? ` (${lockLibError.message})` : '') +
-    ' — expected exports registerLockDir(projectDir) => string and ' +
-    'withOwnerMkdirLock(lockDir, fn, {retryMs?, timeoutMs?}), the ONE owner-mkdir ' +
+    ' — expected exports registerLockPath(projectDir) => string and ' +
+    'withRegisterLock(projectDir, fn, {retryMs?, timeoutMs?}), the ONE kernel-held register lock ' +
+    '(decision dispatch-register-lock-reclaims-an-ownerless-lock-and-releases-only-its-own, REVISED). ' +
+    'Historical contract (retired mkdir primitive): ' +
     'primitive shared by the register and the ledger (contract sheet §1.1, §6 A5): ' +
     'mkdir + owner.json {pid, host, at, nonce}, takeover ONLY when owner.host is ' +
     'this host AND owner.pid is verified not running, no age takeover, no force flag.'
   );
 }
 
-// A GENUINE hold, forged directly in the declared on-disk shape: this process is
-// alive on this host, so under A5 the lock is never takeable at any age. That is
-// what lets the integration arms below hold it across a child's whole lifetime
-// without a mtime-refresh race.
+// A GENUINE hold of the kernel-held register lock (RE-CUT 2026-09-22 from a
+// forged owner.json): a BEGIN IMMEDIATE on the project's lock database through
+// a separate connection, held by this live process across a child hook's whole
+// lifetime — exactly what another writer takes. Release rolls back and closes.
 function holdRegisterLock(dir) {
-  const lockDir = lockLib.registerLockDir(dir);
-  mkdirSync(lockDir, { recursive: true });
-  writeFileSync(
-    join(lockDir, 'owner.json'),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'test-holder' })
-  );
-  return () => rmSync(lockDir, { recursive: true, force: true });
+  const lockPath = lockLib.registerLockPath(dir);
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(lockPath);
+  db.exec('BEGIN IMMEDIATE');
+  return () => {
+    db.exec('ROLLBACK');
+    db.close();
+  };
 }
 
 // Accepts a refusal delivered as a throw OR as a {ok:false, code} return — the
@@ -457,18 +472,18 @@ test('R1-A95: a lock held by a LIVE owner on this host refuses a second entrant 
   const dir = makeProject();
   try {
     const release = holdRegisterLock(dir);
-    const lockDir = lockLib.registerLockDir(dir);
+    const lockPath = lockLib.registerLockPath(dir);
 
     let ran = false;
     const blocked = await refusalOf(() =>
-      lockLib.withOwnerMkdirLock(lockDir, () => { ran = true; }, { retryMs: 20, timeoutMs: 200 })
+      lockLib.withRegisterLock(dir, () => { ran = true; }, { retryMs: 20, timeoutMs: 200 })
     );
     assert.equal(blocked.code, 'register_lock_held', `expected register_lock_held, got ${JSON.stringify(blocked)}`);
     assert.equal(ran, false, 'the critical section never ran while the lock was held');
-    assert.equal(blocked.facts?.lock_dir, lockDir, 'the refusal names the directory the operator must inspect by hand');
+    assert.equal(blocked.facts?.lock_path, lockPath, 'the refusal names the lock database');
 
     release();
-    const after = await lockLib.withOwnerMkdirLock(lockDir, () => 'entered', { retryMs: 20, timeoutMs: 2000 });
+    const after = await lockLib.withRegisterLock(dir, () => 'entered', { retryMs: 20, timeoutMs: 2000 });
     assert.equal(after, 'entered', 'once the holder is gone the lock is cleanly acquirable — no orphaned owner file');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -478,14 +493,13 @@ test('R1-A95: a lock held by a LIVE owner on this host refuses a second entrant 
 // The exclusivity property the whole primitive exists for, deterministic and
 // in-process. A no-op lock fails it immediately; a lock that serialises but
 // leaks its owner file fails the release check.
-test('R1-A96: two concurrent withOwnerMkdirLock calls never overlap their critical sections, and the lock ends up released', async () => {
+test('R1-A96: two concurrent withRegisterLock calls never overlap their critical sections, and the lock ends up released', async () => {
   if (!lockLib) {
     assert.fail(missingLockLibMessage());
     return;
   }
   const dir = makeProject();
   try {
-    const lockDir = lockLib.registerLockDir(dir);
     let inside = 0;
     let maxInside = 0;
     const body = async () => {
@@ -496,18 +510,17 @@ test('R1-A96: two concurrent withOwnerMkdirLock calls never overlap their critic
       return 'ok';
     };
     const results = await Promise.all([
-      refusalOf(() => lockLib.withOwnerMkdirLock(lockDir, body, { retryMs: 10, timeoutMs: 3000 })),
-      refusalOf(() => lockLib.withOwnerMkdirLock(lockDir, body, { retryMs: 10, timeoutMs: 3000 })),
+      refusalOf(() => lockLib.withRegisterLock(dir, body, { retryMs: 10, timeoutMs: 3000 })),
+      refusalOf(() => lockLib.withRegisterLock(dir, body, { retryMs: 10, timeoutMs: 3000 })),
     ]);
     assert.equal(maxInside, 1, 'two writers must never be inside the register lock at once');
     assert.ok(results.some((r) => r.code === undefined), 'at least one contender must get in');
     for (const r of results) {
       if (r.code !== undefined) assert.equal(r.code, 'register_lock_held', 'the only legitimate loss is a held-lock refusal');
     }
-    // The mutex IS the directory, so release must remove the DIRECTORY: an
-    // implementation that unlinks owner.json but leaves the dir still holds the
-    // mkdir and deadlocks the next writer (same correction as owner R1-A31/A36).
-    assert.equal(existsSync(lockDir), false, 'the lock DIRECTORY is gone — the next writer is not deadlocked by an ownerless leftover');
+    // Released for real: the next single attempt enters (no leftover state
+    // can deadlock the next writer — the kernel lock leaves none).
+    assert.equal(await lockLib.withRegisterLock(dir, () => 'free', { timeoutMs: 0 }), 'free', 'the lock is free once both contenders are done');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -594,7 +607,7 @@ test('D3: under a HELD register lock a reviewer-class SubagentStop writes NOTHIN
     const ledgerBefore = existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null;
 
     const release = holdRegisterLock(dir);
-    const lockDir = lockLib.registerLockDir(dir);
+    const lockPath = lockLib.registerLockPath(dir);
     const r = await runHookAsync(
       HOOK_SCRIPT,
       h22Input(dir, { agent_id: entry.agent_id, agent_type: entry.agent_type, session_id: 's1', hook_event_name: 'SubagentStop' }),
@@ -606,8 +619,8 @@ test('D3: under a HELD register lock a reviewer-class SubagentStop writes NOTHIN
     const text = `${r.stdout}\n${r.stderr}`;
     const skipLines = registerSkipLines(text);
     assert.equal(skipLines.length, 1, `exactly one [register_lock_held] disclosure, found ${skipLines.length}: ${JSON.stringify(r.stderr.split('\n'))}`);
-    assert.ok(skipLines[0].includes(lockDir), `the disclosure names the lock dir the operator must inspect by hand; got: ${skipLines[0]}`);
-    assert.match(text, /coordination, not evidence/, 'and states the remedy posture: the lock is coordination, removed by hand only once no writer runs');
+    assert.ok(skipLines[0].includes(lockPath), `the disclosure names the lock database; got: ${skipLines[0]}`);
+    assert.match(text, /held by another live writer/, 'and states the posture: a live writer holds it, released when it finishes or dies — nothing to remove by hand');
 
     assert.equal(
       existsSync(ledgerPath(dir)) ? readFileSync(ledgerPath(dir), 'utf8') : null,
