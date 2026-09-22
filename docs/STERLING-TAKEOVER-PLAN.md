@@ -37,7 +37,7 @@ H3, H4, H5, H6, H8, H9, H13, H14, H17, H18, H21, H24, H25, H26, H27, H29 and H30
 
 ### Three harness-specific changes to the port plan
 
-1. H10 uses 1,000,000-token windows for `claude-fable-5-1` and `claude-opus-5`; there is no `default` fallback, and an unmapped model reports the pressure figure as unreliable. Its warning is non-blocking: `systemMessage` plus next-prompt queue.
+1. H10 uses 1,000,000-token windows for `claude-fable-5-1` and `claude-opus-5`; `context_watch.windows.default` is seeded at 1,000,000 and is a real fallback (decision `context-window-default-is-a-real-fallback`, user-ruled 2026-09-22) — a per-model entry always wins when one exists, an unmapped model falls back to the default and the pressure line names it, and only a model with neither a per-model entry nor a default still reports the pressure figure as unreliable. Its warning is non-blocking: `systemMessage` plus next-prompt queue.
 2. Touches come from git against persisted `.sterling/transient/git-settled.json`, seeded by H1 at session start; working tree, index and untracked changes participate. The delegation nag is gone.
 3. The roster is implementor, researcher, scout and librarian (decision `f0893161`, superseding `87f5f982`); review is the other model family. Retired roles and their frontmatter/pipeline class machinery are gone.
 
@@ -97,7 +97,7 @@ COMPLETE. The migration implements decision `knowledge-delivery-target-design-no
 
 ### Slice 4 — touches from git, gauge with the right window
 
-DONE — landed in `8df86a6`. Git touches use the persisted settled snapshot, seeded by H1. Fable and Opus use 1,000,000-token windows; no default fallback exists, so unmapped-model pressure is explicitly unreliable. Pressure is non-blocking (`systemMessage` + next-prompt queue), and the delegation nag is removed. Decision records: `c87e6e0d`; finding `4f385d7a`.
+DONE — landed in `8df86a6`. Git touches use the persisted settled snapshot, seeded by H1. Fable and Opus use 1,000,000-token windows; `context_watch.windows.default` (also 1,000,000) is now a real fallback for any unmapped model — user-ruled 2026-09-22, decision `context-window-default-is-a-real-fallback` — so only a model with no per-model entry AND no default still reports pressure as unreliable. Pressure is non-blocking (`systemMessage` + next-prompt queue), and the delegation nag is removed. Decision records: `c87e6e0d`; finding `4f385d7a`.
 
 ### Slice 5 — roster to OpenSterling's shape
 

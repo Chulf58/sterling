@@ -81,10 +81,10 @@ const CONFIG = {
   context_watch: { windows: { default: 200_000, 'claude-fable-5': 200_000 } },
 };
 
-function makeProject() {
+function makeProject(config = CONFIG) {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-h5-'));
   mkdirSync(join(dir, '.sterling'), { recursive: true });
-  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(config));
   const store = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
   const cleanup = () => {
     store.close();
@@ -2185,13 +2185,12 @@ test('H10 conductor pressure: hard warns ONCE per session naming fill, threshold
 
 // 2026-09-19 deliberate change (1): unknown-window pressure remains loud but
 // no longer denies Stop.
-test('H10 conductor pressure: an UNMAPPED model warns loudly ONCE that the fill is UNRELIABLE — names the model and the config key, prints no percentage against a default (slice 4)', () => {
-  const { dir, cleanup } = makeProject();
+test('H10 conductor pressure: an UNMAPPED model with NO default configured warns loudly ONCE that the fill is UNRELIABLE — names the model and the config key, prints no percentage (slice 4; still true with no default under decision context-window-default-is-a-real-fallback)', () => {
+  // No `windows.default` key at all — the case the ruling did NOT change: a
+  // model with neither a per-model entry nor a default still cannot be
+  // measured. See the two tests below for the (now real) default-fallback path.
+  const { dir, cleanup } = makeProject({ ...CONFIG, context_watch: { windows: { 'claude-fable-5': 200_000 } } });
   try {
-    // 25% of the 200k DEFAULT would be a plausible-looking number — the
-    // dangerous case (2026-08-11 retrospective: 48% believed at ~10% of real
-    // capacity; 2026-09-19: 66.2% on a 1M session). Slice 4: no default
-    // denominator at all — the fill is reported as unreliable instead.
     writeConductorTranscript(dir, 50_000, { model: 'claude-novel-9' });
     const first = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(first.code, 0, 'the gauge warning is non-blocking');
@@ -2206,6 +2205,32 @@ test('H10 conductor pressure: an UNMAPPED model warns loudly ONCE that the fill 
     assert.equal(sample.fill_pct, null, 'no fill number without a real window');
     const second = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
     assert.equal(second.code, 0, 'once per session — gauge marker spent');
+  } finally {
+    cleanup();
+  }
+});
+
+// decision context-window-default-is-a-real-fallback (user-ruled 2026-09-22,
+// "Make it real: fall back to 1M"), reversing the "never a default" position
+// this suite pinned above: an unmapped model with a real default configured
+// (CONFIG carries windows.default: 200_000) now gets a MEASURED fill, and
+// the pressure line names the default so a reader can tell a guessed
+// denominator from a mapped one (P5).
+test('H10 conductor pressure: an UNMAPPED model WITH a default configured falls back to context_watch.windows.default — fill IS measured, and the line names the default', () => {
+  const { dir, cleanup } = makeProject(); // CONFIG carries windows.default: 200_000
+  try {
+    writeConductorTranscript(dir, 170_000, { model: 'claude-novel-9' }); // 85% of the 200k default -> hard
+    const r = runHook('h10-direct-capture.mjs', hookInput(dir, { hook_event_name: 'Stop' }), dir);
+    assert.equal(r.code, 0, 'pressure is non-blocking');
+    const message = JSON.parse(r.stdout).systemMessage;
+    assert.doesNotMatch(message, /unreliable/i, 'a default window means the fill IS reported, not UNRELIABLE');
+    assert.match(message, /85\.0%/, 'names the fill measured against the default window');
+    assert.match(message, /\(window from context_watch\.windows\.default\)/, 'flags the guessed denominator');
+    const sample = readPressureFile(dir);
+    assert.equal(sample.window, 200_000);
+    assert.equal(sample.window_source, 'default');
+    assert.equal(sample.unmapped_model, undefined, 'a resolved default is not the unmapped-model case');
+    assert.equal(sample.level, 'hard');
   } finally {
     cleanup();
   }

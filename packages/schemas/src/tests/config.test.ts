@@ -105,7 +105,16 @@ test('conductor pressure: shipped windows map carries verified per-model context
   assert.equal(shipped.context_watch.windows['claude-opus-5'], 1_000_000);
   assert.equal(shipped.context_watch.windows['claude-sonnet-5'], 1_000_000);
   assert.equal(shipped.context_watch.windows['claude-haiku-4-5'], 200_000);
-  assert.equal(shipped.context_watch.windows.default, 200_000, 'unknown models stay conservative — mismatch degrades loud, never false-blocks');
+  // Reversed by decision context-window-default-is-a-real-fallback (user-ruled
+  // 2026-09-22, "Make it real: fall back to 1M"): a model with no per-model
+  // entry now falls back to this window rather than reporting the fill as
+  // unreliable — a per-model entry still always wins when one is present.
+  assert.equal(shipped.context_watch.windows.default, 1_000_000, 'an unmapped model falls back to this real window');
+});
+
+test('parseConfig: an empty config seeds context_watch.windows.default at 1,000,000 (decision context-window-default-is-a-real-fallback)', () => {
+  const empty = parseConfig({});
+  assert.equal(empty.context_watch.windows.default, 1_000_000);
 });
 
 // ------------------- delivery.total_cap_bytes (H19 delivery per-delivery cap) -------------------

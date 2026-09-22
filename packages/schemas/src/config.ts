@@ -135,10 +135,15 @@ export const configSchema = z.object({
   // H6-only (agent-scoped context enforcement) and DELETED with H6 under
   // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
   // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
-  // denominator and the direct-mode pressure thresholds).
+  // denominator and the direct-mode pressure thresholds). `windows.default`
+  // is a REAL fallback (decision context-window-default-is-a-real-fallback,
+  // user-ruled 2026-09-22, reversing the earlier "never a default"): it is
+  // the window H10 uses for any model with no per-model entry, so it is
+  // seeded at the largest generation's window rather than a conservative
+  // guess — a per-model entry still always wins when one exists.
   context_watch: z
     .object({
-      windows: z.record(z.string(), z.number().int().positive()).default({ default: 200_000 }),
+      windows: z.record(z.string(), z.number().int().positive()).default({ default: 1_000_000 }),
       // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
       // "finish before opening new areas"; hard = once-per-session soft-block naming the
       // delegation remedy.

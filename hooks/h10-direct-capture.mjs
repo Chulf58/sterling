@@ -4901,9 +4901,14 @@ var configSchema = external_exports.object({
   // H6-only (agent-scoped context enforcement) and DELETED with H6 under
   // decision `sterling-claude-code-scale-down-boundary` (2ad87dd1); windows
   // and conductor.{soft_pct,hard_pct} survive — H10 reads both (the gauge
-  // denominator and the direct-mode pressure thresholds).
+  // denominator and the direct-mode pressure thresholds). `windows.default`
+  // is a REAL fallback (decision context-window-default-is-a-real-fallback,
+  // user-ruled 2026-09-22, reversing the earlier "never a default"): it is
+  // the window H10 uses for any model with no per-model entry, so it is
+  // seeded at the largest generation's window rather than a conservative
+  // guess — a per-model entry still always wins when one exists.
   context_watch: external_exports.object({
-    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 2e5 }),
+    windows: external_exports.record(external_exports.string(), external_exports.number().int().positive()).default({ default: 1e6 }),
     // Conductor-session pressure thresholds (direct mode, H10 Stop seam): soft = advisory
     // "finish before opening new areas"; hard = once-per-session soft-block naming the
     // delegation remedy.
@@ -8341,17 +8346,19 @@ try {
         sample = { session_id: input.session_id, level: "unknown", fill_pct: null, reason, at: now };
       } else {
         const baseModel = model ? String(model).replace(/\[[^\]]*\]$/, "") : null;
-        const windowSize = model ? cw.windows[model] ?? cw.windows[baseModel] : void 0;
+        const perModelWindow = model ? cw.windows[model] ?? cw.windows[baseModel] : void 0;
+        const windowSize = model ? perModelWindow ?? cw.windows.default : void 0;
+        const usedDefault = Boolean(model && perModelWindow === void 0 && cw.windows.default !== void 0);
         const fill = windowSize ? fillPct(usage, windowSize) : null;
         if (!windowSize) {
           store.recordCheckSkipped("conductor-pressure", `window_unmapped:${model ?? "no-model-id"}`, void 0, now);
           sample = { session_id: input.session_id, level: "unknown", fill_pct: null, model: model ?? null, reason: "window_unmapped", ...model ? { unmapped_model: model } : {}, at: now };
         } else if (fill > 100) {
           store.recordCheckSkipped("conductor-pressure", `window_mismatch:${model ?? "unknown-model"}:${fill.toFixed(1)}pct`, void 0, now);
-          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", at: now };
+          sample = { session_id: input.session_id, level: "unknown", fill_pct: fill, model: model ?? null, window: windowSize, reason: "window_mismatch", ...usedDefault ? { window_source: "default" } : {}, at: now };
         } else {
           const level = fill >= cw.conductor.hard_pct ? "hard" : fill >= cw.conductor.soft_pct ? "soft" : "below_soft";
-          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, at: now };
+          sample = { session_id: input.session_id, level, fill_pct: fill, model: model ?? null, window: windowSize, ...usedDefault ? { window_source: "default" } : {}, at: now };
         }
       }
       mkdirSync5(join6(input.cwd, ".sterling", "transient"), { recursive: true });
@@ -8383,7 +8390,8 @@ try {
     }
   })();
   const boundaryLine = () => dirtyPaths > 0 ? ` Tree: ${dirtyPaths} uncommitted path(s) \u2192 commit boundary before new work.` : "";
-  const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${boundaryLine()}`;
+  const defaultWindowNote = () => pressure.window_source === "default" ? " (window from context_watch.windows.default)" : "";
+  const pressurePart = () => pressure.level === "hard" ? `H10 context warning: fill ${pressure.fill_pct.toFixed(1)}% of the ${pressure.window}-tok window is past the ${config.context_watch.conductor.hard_pct}% target \u2192 finish the open work and commit it; delegate reads & mechanical work to subagents (P1).${defaultWindowNote()}${boundaryLine()}` : `H10 pressure: fill ${pressure.fill_pct.toFixed(1)}% \u2265 soft threshold ${config.context_watch.conductor.soft_pct}% \u2192 prefer finishing open work, delegate reads to subagents.${defaultWindowNote()}${boundaryLine()}`;
   const pressureMarkerState = () => {
     try {
       const m = JSON.parse(readFileSync5(pressureMarker, "utf8"));
