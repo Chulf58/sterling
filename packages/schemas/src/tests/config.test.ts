@@ -283,3 +283,43 @@ test('templates/default-config.json still parses and carries tdd.enabled true', 
   assert.ok(shipped.tdd, 'the shipped default-config carries a tdd block');
   assert.equal(shipped.tdd?.enabled, true, 'the shipped tdd.enabled is true');
 });
+
+// Per-project agent tool extension (decision
+// per-project-agent-extra-tools-config-appended-at-render, 587472e3): the block
+// MUST be in the schema — the top-level object strips unknown keys silently, so
+// an unschema'd `agents` would vanish and the grant would never render.
+test('agents: absent block defaults to {} (config stays optional)', () => {
+  assert.deepEqual(parseConfig({}).agents, {});
+});
+
+test('agents: extra_tools round-trips, accepting a trailing * wildcard and the whole-server form', () => {
+  const cfg = parseConfig({ agents: { implementor: { extra_tools: ['mcp__godot__*', 'mcp__godot', 'WebFetch', 'mcp__plugin_x_y__run.it-now'] } } });
+  assert.deepEqual(cfg.agents.implementor.extra_tools, ['mcp__godot__*', 'mcp__godot', 'WebFetch', 'mcp__plugin_x_y__run.it-now']);
+});
+
+test('agents: an agent entry without extra_tools defaults it to []', () => {
+  assert.deepEqual(parseConfig({ agents: { scout: {} } }).agents.scout.extra_tools, []);
+});
+
+// Review fix (MEDIUM): a hand-edit typo in config.json must NOT make every
+// parseConfig throw — the MCP server and every hook parse this file (the same
+// hazard the delivery block's comment records for .strict()). The schema is
+// lenient; install/sync refuse malformed entries loudly at render
+// (scripts/lib/agent-distribution.mjs), naming the problem.
+test('agents: a malformed extra_tools entry still parses (validated at render, not here) — comma, space, newline, empty, mid-string *', () => {
+  for (const bad of ['mcp__a, mcp__b', 'mcp__a mcp__b', 'mcp__a\nhooks:', '', 'mcp__*__x', '*', 'mcp__a**']) {
+    assert.deepEqual(parseConfig({ agents: { implementor: { extra_tools: [bad] } } }).agents.implementor.extra_tools, [bad]);
+  }
+});
+
+test('agents: an unknown key inside an agent entry survives parsing (passthrough) so render can refuse the typo by name, instead of it vanishing silently', () => {
+  const cfg = parseConfig({ agents: { implementor: { extra_tool: ['mcp__godot__*'] } } });
+  assert.deepEqual((cfg.agents.implementor as Record<string, unknown>).extra_tool, ['mcp__godot__*']);
+  assert.deepEqual(cfg.agents.implementor.extra_tools, []);
+});
+
+test('agents: a non-array extra_tools (e.g. a string) still parses — refused at render as "not an array", never at parse', () => {
+  for (const bad of ['a', 42, { x: 1 }, null]) {
+    assert.deepEqual(parseConfig({ agents: { implementor: { extra_tools: bad } } }).agents.implementor.extra_tools, bad);
+  }
+});

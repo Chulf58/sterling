@@ -28,7 +28,7 @@ import { ProjectRegistry, registryPath } from '@sterling/store';
 import { arg, argAll, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
-import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation } from './lib/agent-distribution.mjs';
+import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -910,7 +910,7 @@ for (const a of agentReport) {
     config_drift: {
       status: 'differs',
       detail: a.status === 'config_drift'
-        ? `model/effort drift — installed model=${a.installed.model ?? '(none)'} effort=${a.installed.effort ?? '(none)'}, config.models resolves model=${a.configured.model ?? '(none)'} effort=${a.configured.effort ?? '(none)'}; not rewritten — realize it with ${a.fix}`
+        ? `${[a.installed.model !== a.configured.model || a.installed.effort !== a.configured.effort ? 'model/effort' : null, a.tools ? 'tools' : null].filter(Boolean).join(' + ')} drift — ${describeConfigDrift(a)}; not rewritten — realize it with ${a.fix}`
         : '',
     },
     locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },

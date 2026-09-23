@@ -14,6 +14,7 @@ import {
   collectSkills,
   lintToolGrants,
   readRegisteredToolNames,
+  INHERIT_ALL_AGENTS,
 } from '../lib/checks.mjs';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
@@ -174,3 +175,73 @@ test('skills ship with live file references and pass the skill linter', () => {
 // tracks the shipped file. The existing linter test above keeps dead-term + prompt
 // -section linters green across all templates.
 // ---------------------------------------------------------------------------
+
+// Inherit-all implementor (decision
+// implementor-inherits-all-tools-read-only-agents-keep-allowlists, bc1894e5):
+// the implementor drops its tools: allowlist so it inherits every session tool
+// (every project MCP server, both Sterling prefixes, ToolSearch) and declares a
+// disallowedTools deny-list instead. The marker is the frontmatter itself: a
+// template with disallowedTools: and no tools: is inherit-all. The allowlist
+// agents (researcher, scout, librarian) must still carry tools:.
+const STORE_WRITE_TOOLS = [
+  'knowledge_create', 'knowledge_split', 'knowledge_extract', 'knowledge_retire', 'knowledge_supersede',
+  'knowledge_update', 'knowledge_append', 'knowledge_edit', 'knowledge_array_remove', 'knowledge_promote',
+  'knowledge_link', 'board_add', 'board_remove', 'board_update', 'board_edit', 'maintenance_remove',
+  'config_set', 'no_capture', 'concept_designed', 'capture_pending',
+];
+// Every registered Sterling tool is classified READ or WRITE, so a newly
+// registered tool cannot slip past the implementor's deny-list unclassified.
+const STORE_READ_TOOLS = [
+  'knowledge_query', 'knowledge_get', 'knowledge_render', 'knowledge_schema', 'knowledge_stats',
+  'knowledge_preflight', 'board_query', 'board_get', 'maintenance_query',
+];
+
+test('every registered Sterling tool is classified READ or WRITE — exactly, no overlap, no gap', () => {
+  const registered = readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'));
+  const classified = [...STORE_READ_TOOLS, ...STORE_WRITE_TOOLS];
+  assert.equal(new Set(classified).size, classified.length, 'no tool is both READ and WRITE');
+  assert.deepEqual([...classified].sort(), [...registered].sort(), 'classify a newly registered tool in STORE_READ_TOOLS or STORE_WRITE_TOOLS (and the implementor deny-list)');
+});
+
+const fmOf = (content) => content.match(/^---\r?\n([\s\S]*?)\r?\n---/)[1];
+
+test('inherit-all implementor: no tools: line; disallowedTools denies exactly the Sterling store-write tools under both prefixes', () => {
+  const impl = readFileSync(join(TPL, 'implementor.md'), 'utf8');
+  assert.doesNotMatch(fmOf(impl), /^tools:/m, 'the implementor inherits every session tool (bc1894e5)');
+  const line = fmOf(impl).match(/^disallowedTools:\s*(.+)$/m);
+  assert.ok(line, 'the implementor declares a disallowedTools deny-list');
+  const denied = line[1].split(',').map((t) => t.trim());
+  const expected = STORE_WRITE_TOOLS.flatMap((t) => ['mcp__sterling__' + t, 'mcp__plugin_sterling_sterling__' + t]);
+  assert.deepEqual([...denied].sort(), [...expected].sort(), 'store writes are the conductor\'s (the implementor role contract) — nothing more is denied');
+  for (const read of ['knowledge_query', 'knowledge_get', 'board_query', 'board_get', 'knowledge_preflight']) {
+    assert.ok(!denied.some((d) => d.endsWith('__' + read)), `${read} stays inherited`);
+  }
+});
+
+test('the allowlist agents keep their tools: line (a read-only agent must not silently gain an MCP writer)', () => {
+  for (const file of ['researcher.md', 'scout.md', 'librarian.md']) {
+    assert.match(fmOf(readFileSync(join(TPL, file), 'utf8')), /^tools:/m, `${file} keeps its allowlist`);
+  }
+});
+
+test('tool-grant linter: inherit-all (disallowedTools, no tools:) passes; a template with neither still fails; deny entries are linted like grants', () => {
+  const registeredTools = readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'));
+  const tpl = (fmLine) => `---\nname: probe\n${fmLine}required_inputs:\n  - x\n---\n\nbody\n`;
+  // labelled implementor.md: inherit-all is reserved to INHERIT_ALL_AGENTS (review LOW 2)
+  const kinds = (fmLine) => lintToolGrants(tpl(fmLine), 'implementor.md', registeredTools).map((v) => v.kind);
+  assert.deepEqual(kinds('disallowedTools: mcp__sterling__board_add, mcp__plugin_sterling_sterling__board_add\n'), [], 'a well-formed inherit-all deny-list passes');
+  assert.deepEqual(kinds(''), ['missing_tools_line'], 'no tools: and no disallowedTools: is still a missing allowlist');
+  assert.ok(kinds('disallowedTools: mcp__sterling__board_add\n').includes('missing_mcp_prefix'), 'a single-prefix deny is dead under the other launcher');
+  assert.ok(kinds('disallowedTools: mcp__sterling__board_ad, mcp__plugin_sterling_sterling__board_ad\n').includes('unknown_mcp_tool'), 'a misspelled deny is caught');
+  assert.ok(kinds('disallowedTools: mcp__other__x\n').includes('unknown_mcp_prefix'), 'a foreign mcp deny is not silently accepted');
+});
+
+test('tool-grant linter: inherit-all is allowed only for INHERIT_ALL_AGENTS — any other template with disallowedTools and no tools: fails', () => {
+  const registeredTools = readRegisteredToolNames(join(root, 'packages', 'mcp-server', 'src', 'server.ts'));
+  const body = `---\nname: probe\ndisallowedTools: mcp__sterling__board_add, mcp__plugin_sterling_sterling__board_add\nrequired_inputs:\n  - x\n---\n\nbody\n`;
+  assert.deepEqual(INHERIT_ALL_AGENTS, ['implementor.md']);
+  assert.deepEqual(lintToolGrants(body, 'implementor.md', registeredTools), []);
+  for (const label of ['scout.md', 'researcher.md', 'librarian.md', 'probe.md']) {
+    assert.deepEqual(lintToolGrants(body, label, registeredTools).map((v) => v.kind), ['inherit_all_not_allowed'], `${label} may not inherit every tool`);
+  }
+});

@@ -365,3 +365,63 @@ test('OWNERSHIP: a files[] entry marked unverified:true still counts as ownershi
 // the path were not in files[] at all) — the NEW-FILE trigger then fires for
 // the untracked unverifiedOwned path and both the exit-code and
 // articleMissing-length assertions above go red.
+
+// ===========================================================================
+// 4. IGNORE GLOBS — per-project policy data (Dome Farmer issue #52; decision
+// article-demand-ignore-globs-per-project-policy-data). Godot 4 writes a
+// one-line `.uid` identity sidecar beside every script; a project opts out of
+// demanding ownership for such files with article_demand.ignore_globs. The
+// filter is PER PATH: the sibling .gd is still demanded.
+// ===========================================================================
+
+const GD = 'game/player.gd';
+const GD_UID = 'game/player.gd.uid';
+
+function makeGodotProject(articleDemand) {
+  const proj = makeProject('sterling-h10-ignore-globs-');
+  const config = articleDemand ? { ...H10_CONFIG, article_demand: articleDemand } : H10_CONFIG;
+  writeFileSync(join(proj.dir, '.sterling', 'config.json'), JSON.stringify(config));
+  initRepoWithHead(proj.dir);
+  touchRegister(proj.dir, [GD, GD_UID]);
+  return proj;
+}
+
+test('IGNORE GLOBS: with ignore_globs ["**/*.uid"] a touched .gd.uid is not demanded while its sibling .gd still is', () => {
+  const { dir, store, cleanup } = makeGodotProject({ ignore_globs: ['**/*.uid'] });
+  try {
+    declareNoCapture(dir);
+    const first = stop(dir);
+    assert.equal(first.code, 2, `the brand-new unowned .gd still raises the demand: ${first.stderr}`);
+    assert.match(first.stderr, /article demand/i);
+    assert.match(first.stderr, /game\/player\.gd\b(?!\.uid)/, 'the .gd is named');
+    assert.doesNotMatch(first.stderr, /player\.gd\.uid/, 'the ignored .uid sidecar is not named in the demand');
+
+    const second = stop(dir);
+    assert.equal(second.code, 0, `the session releases: ${second.stderr}`);
+    assert.deepEqual(demandedPaths(store), [GD], 'only the .gd is demanded — the ignore glob applies per path');
+  } finally {
+    cleanup();
+  }
+});
+
+test('IGNORE GLOBS REGRESSION GUARD: with no article_demand config the .gd.uid IS demanded beside the .gd (nothing ships in the default)', () => {
+  const { dir, store, cleanup } = makeGodotProject(null);
+  try {
+    declareNoCapture(dir);
+    const first = stop(dir);
+    assert.equal(first.code, 2, `demand fires: ${first.stderr}`);
+    assert.match(first.stderr, /player\.gd\.uid/, 'the .uid is named when no project policy ignores it');
+    const second = stop(dir);
+    assert.equal(second.code, 0, `the session releases: ${second.stderr}`);
+    assert.deepEqual(demandedPaths(store), [GD, GD_UID].sort(), 'both files are demanded without ignore_globs');
+  } finally {
+    cleanup();
+  }
+});
+
+test('IGNORE GLOBS SCHEMA: article_demand.ignore_globs defaults to [] and refuses an empty-string glob', async () => {
+  const { parseConfig } = await import('@sterling/schemas');
+  assert.deepEqual(parseConfig({}).article_demand.ignore_globs, []);
+  assert.deepEqual(parseConfig({ article_demand: { ignore_globs: ['**/*.uid'] } }).article_demand.ignore_globs, ['**/*.uid']);
+  assert.throws(() => parseConfig({ article_demand: { ignore_globs: [''] } }));
+});

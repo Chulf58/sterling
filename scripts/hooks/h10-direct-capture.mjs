@@ -1529,7 +1529,14 @@ try {
     }
     return seen;
   };
-  let unowned = paths.filter(isUnowned);
+  // Per-project ignore globs (decision
+  // article-demand-ignore-globs-per-project-policy-data): policy data, applied
+  // PER PATH before the ownership join, so a generated sidecar (Godot's
+  // `.gd.uid`) is never demanded while its sibling source still is. Only the
+  // demand candidates are filtered — `paths` itself (the image-only release
+  // test, the live recompute's reach) is unchanged.
+  const ignoreGlobs = config.article_demand.ignore_globs;
+  let unowned = paths.filter((p) => !ignoreGlobs.some((g) => matchesGlob(p, g))).filter(isUnowned);
   // A gitignored path is never governed territory (board 1de3653b) — it cannot
   // be owned, so demanding an article for it is a false demand. A failed ignore
   // check degrades to the unfiltered list (toward signaling), recorded loudly.
@@ -2242,7 +2249,21 @@ try {
       // ONE line replaces the duty bullets below (capture/research AND, since
       // FIX 4, concept/article) — tokens stay executable in the repeat
       // (context compaction can evict CLAUDE.md mid-session).
-      const segs = openLanes.map((lane) => `${lane}→${tokenFor(lane)}`);
+      // The articles segment names the files CURRENTLY owed (Dome Farmer #51,
+      // decision article-demand-ignore-globs-per-project-policy-data): the
+      // fingerprint above is path-free, so a different file can keep the lane
+      // open behind an identical one-liner. Rendered text only — never
+      // fingerprinted. Deferred files are named with their live dispatch(es).
+      // Joined with ', ' / ' · ', never ';', which separates lane segments.
+      const capList = (arr) => (arr.length > 5 ? `${arr.slice(0, 5).join(', ')} +${arr.length - 5} more` : arr.join(', '));
+      const articleFiles = () => {
+        const owedText = unowned.length ? ` · owed: ${capList(unowned)}` : '';
+        const deferredText = deferredPaths.length
+          ? ` · deferred: ${capList(deferredPaths.map((p) => `${p} (${[...deferredOwners.get(joinKey(p))].join(', ')})`))}`
+          : '';
+        return `${owedText}${deferredText}`;
+      };
+      const segs = openLanes.map((lane) => `${lane}→${tokenFor(lane)}${lane === 'articles' ? articleFiles() : ''}`);
       parts.push(`H10 ▸ ${openLanes.length} duty(ies) unchanged since ${hhmm(dutyNagAt)}: ${segs.join('; ')}`);
     } else {
       // Capture duty nag (touches or debug events present, nothing captured).

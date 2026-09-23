@@ -14,6 +14,14 @@ import { join } from 'node:path';
 // the one agent that IS the session. Currently just conductor.md.
 export const MAIN_SESSION_AGENTS = ['conductor.md'];
 
+// Inherit-all agents (decision
+// implementor-inherits-all-tools-read-only-agents-keep-allowlists, bc1894e5):
+// no tools: allowlist, a disallowedTools deny-list instead, so they inherit
+// every session tool including every project MCP server. Explicit, like
+// MAIN_SESSION_AGENTS: any OTHER template with disallowedTools and no tools:
+// fails the tool-grant linter — the read-only agents must keep their allowlists.
+export const INHERIT_ALL_AGENTS = ['implementor.md'];
+
 // §7.3 agent-prompt contract: every agent definition contains, in order.
 // The linter enforces presence; missing = build failure.
 export const PROMPT_CONTRACT_SECTIONS = [
@@ -137,44 +145,68 @@ export function parseToolsLine(content) {
     .filter(Boolean);
 }
 
-export function lintToolGrants(content, label, registeredTools) {
-  if (MAIN_SESSION_AGENTS.includes(label)) return [];
-  const grants = parseToolsLine(content);
-  if (grants === null) return [{ kind: 'missing_tools_line', detail: `${label}: no 'tools:' line in frontmatter` }];
+// The frontmatter disallowedTools: deny-list (null when absent). With no tools:
+// line it makes an agent inherit every session tool minus the deny-list, which
+// only INHERIT_ALL_AGENTS may do (bc1894e5).
+export function parseDisallowedToolsLine(content) {
+  const fm = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!fm) return null;
+  const line = fm[1].match(/^disallowedTools:\s*(.+)$/m);
+  if (!line) return null;
+  return line[1]
+    .split(',')
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
 
+// Every Sterling entry of a deny-list must name a real registered tool under
+// BOTH prefixes — a single-prefix deny is dead under the launcher that mounts
+// the other one, silently (the same failure class as a grant).
+function lintSterlingNames(entries, label, registeredTools, verb) {
   const violations = [];
   const baseNames = new Set();
-
-  for (const grant of grants) {
-    if (!grant.startsWith('mcp__')) continue;
-    const prefix = MCP_PREFIXES.find((p) => grant.startsWith(p));
+  for (const entry of entries) {
+    if (!entry.startsWith('mcp__')) continue;
+    const prefix = MCP_PREFIXES.find((p) => entry.startsWith(p));
     if (!prefix) {
-      violations.push({ kind: 'unknown_mcp_prefix', detail: `${label}: '${grant}' uses no known Sterling MCP prefix` });
+      violations.push({ kind: 'unknown_mcp_prefix', detail: `${label}: '${entry}' uses no known Sterling MCP prefix` });
       continue;
     }
-    const base = grant.slice(prefix.length);
+    const base = entry.slice(prefix.length);
     if (!registeredTools.has(base)) {
-      violations.push({
-        kind: 'unknown_mcp_tool',
-        detail: `${label}: '${grant}' names '${base}', which is not a registered Sterling tool`,
-      });
+      violations.push({ kind: 'unknown_mcp_tool', detail: `${label}: '${entry}' names '${base}', which is not a registered Sterling tool` });
       continue;
     }
     baseNames.add(base);
   }
-
-  // both prefixes per granted store tool — a single-prefix grant is dead under
-  // whichever launcher does not mount it, silently.
   for (const base of [...baseNames].sort()) {
     for (const prefix of MCP_PREFIXES) {
-      if (!grants.includes(prefix + base)) {
+      if (!entries.includes(prefix + base)) {
         violations.push({
           kind: 'missing_mcp_prefix',
-          detail: `${label}: store tool '${base}' is granted without '${prefix}${base}' — dead under the launcher that mounts that prefix`,
+          detail: `${label}: store tool '${base}' is ${verb} without '${prefix}${base}' — dead under the launcher that mounts that prefix`,
         });
       }
     }
   }
+  return { violations, baseNames };
+}
+
+export function lintToolGrants(content, label, registeredTools) {
+  if (MAIN_SESSION_AGENTS.includes(label)) return [];
+  const grants = parseToolsLine(content);
+  if (grants === null) {
+    const denied = parseDisallowedToolsLine(content);
+    if (denied === null) return [{ kind: 'missing_tools_line', detail: `${label}: no 'tools:' line in frontmatter` }];
+    if (!INHERIT_ALL_AGENTS.includes(label)) {
+      return [{ kind: 'inherit_all_not_allowed', detail: `${label}: disallowedTools with no 'tools:' line inherits every session tool — only INHERIT_ALL_AGENTS (${INHERIT_ALL_AGENTS.join(', ')}) may (decision bc1894e5)` }];
+    }
+    // Inherit-all agent: ToolSearch and both Sterling prefixes are inherited,
+    // so only the deny-list's names are checked.
+    return lintSterlingNames(denied, label, registeredTools, 'denied').violations;
+  }
+
+  const { violations, baseNames } = lintSterlingNames(grants, label, registeredTools, 'granted');
 
   // ToolSearch is required whenever any store tool is granted (deferred serving).
   if (baseNames.size > 0 && !grants.includes('ToolSearch')) {

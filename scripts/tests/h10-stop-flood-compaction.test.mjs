@@ -738,3 +738,64 @@ test('C7: when the fd-2 write FAILS, none of the three markers is spent (the tex
     } finally { cleanup(); }
   });
 });
+
+// ===========================================================================
+// C9 — the compacted repeat NAMES the files currently owed (Dome Farmer issue
+// #51; decision article-demand-ignore-globs-per-project-policy-data). The
+// fingerprint stays lane-based and path-free, so a DIFFERENT file keeping the
+// article lane open still compacts — and the one-liner must then say which
+// file that is, or the reader cannot tell what is owed. Deferred files are
+// named with their live dispatch.
+// ===========================================================================
+
+const C9_A = 'src/owed/a.mjs';
+const C9_B = 'src/owed/b.mjs';
+const c9Article = (store, files) =>
+  store.create({
+    ...envelope('feature_article', CAP1),
+    slug: 'owns-a', title: 'owns a', what_it_does: 'x', intended_behavior: 'x',
+    files: files.map((path) => ({ path, role: 'impl' })),
+    current_ac: [{ ac_id: 'AC1', text: 'x', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] },
+    state: 'active', version: 1, history: [{ date: CAP1, event: 'originating brief' }], live_test_refs: [],
+  });
+
+// Cycle 1 demands C9_A (plus `extra`); C9_A then becomes owned; cycle 2's
+// touched set holds an unowned C9_B (plus `extra`) and the repeat compacts.
+function driveOwedShift(dir, store, extra = []) {
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ ...CONFIG, article_demand: { min_unowned_files: 1 } }));
+  touch(dir, [C9_A, ...extra], T1);
+  captureDecision(store, CAP1); // capture lane closed: the article lane is the only open duty
+  const first = runStop(dir);
+  assertFullForm(first, 'C9', 'the first nag of the session');
+  assert.match(first.stderr, /src\/owed\/a\.mjs/, 'C9 PRECONDITION: cycle 1 demands A');
+  const convert = runStop(dir);
+  assert.equal(convert.code, 0, `C9: the Stop after a nag converts and releases; out=${out(convert)}`);
+  c9Article(store, [C9_A]);
+  touch(dir, [C9_A, C9_B, ...extra], T2);
+  captureDecision(store, '2026-06-10T13:00:00.000Z');
+  const second = runStop(dir);
+  assert.equal(second.code, 2, `C9 FIXTURE PRECONDITION: the unowned B keeps the article lane open; out=${out(second)}`);
+  const compacted = lines(second.stderr).filter((l) => /unchanged since/.test(l));
+  assert.equal(compacted.length, 1, `C9: the repeat compacts (same lane set, path-free fingerprint); got: ${second.stderr}`);
+  return compacted[0];
+}
+
+test('C9a: the compacted articles segment names the file CURRENTLY owed (B), not the one that became owned (A)', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    const line = driveOwedShift(dir, store);
+    assert.match(line, /articles→knowledge_create feature_article[^;]*src\/owed\/b\.mjs/, `C9a: the articles segment names B; got ${JSON.stringify(line)}`);
+    assert.doesNotMatch(line, /src\/owed\/a\.mjs/, `C9a: A is owned now and is not named; got ${JSON.stringify(line)}`);
+  } finally { cleanup(); }
+});
+
+test('C9b: a deferred file is named in the compacted articles segment with its live dispatch', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    writeRegister(dir, [liveEntry()]);
+    const line = driveOwedShift(dir, store, [DEFERRED]);
+    assert.match(line, /articles→[^;]*src\/owed\/b\.mjs/, `C9b: B is named; got ${JSON.stringify(line)}`);
+    assert.match(line, /articles→[^;]*src\/flood\/deferred\.mjs[^;]*sub-live-1/, `C9b: the deferred file is named with its live dispatch; got ${JSON.stringify(line)}`);
+  } finally { cleanup(); }
+});

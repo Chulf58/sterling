@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
-import { syncAgents, agentChangesRequireRestart, ensureConductorActivation } from './lib/agent-distribution.mjs';
+import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -47,12 +47,12 @@ const { report, restartInstruction } = syncAgents({
 });
 
 let refused = 0;
-const modelEffort = ({ model, effort }) => `model=${model ?? '(none)'} effort=${effort ?? '(none)'}`;
 for (const r of report) {
   if (r.status === 'config_drift') {
-    // Decision 256d1059: loud, one line, never a refusal (exit stays 0); nothing written.
+    // Decisions 256d1059 / 587472e3: loud, one line, never a refusal (exit stays 0);
+    // nothing written. Names model/effort and/or the tools difference.
     console.log(
-      `config_drift: ${r.name} — installed ${modelEffort(r.installed)}, config.models resolves ${modelEffort(r.configured)}; ` +
+      `config_drift: ${r.name} — ${describeConfigDrift(r)}; ` +
         `NOT rewritten by sync — realize it with ${r.fix}, then restart the session`
     );
   } else {
