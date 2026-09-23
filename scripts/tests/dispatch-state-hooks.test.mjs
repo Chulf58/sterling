@@ -41,7 +41,7 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, renameSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -1142,6 +1142,163 @@ test('DSH-25: a Start made state-poisoned by a stray live-!!bad.json NAMES the f
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stderr, /state-poisoned/);
     assert.ok(r.stderr.includes('live-!!bad.json'), `the Start output names the file: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// TaskStop of an UNATTRIBUTED dispatch (board 138c05b3, research_finding
+// h22-sendmessage-resume-stale-sidecar-is-a-no-op-at-stop-september-2026 repro
+// D3). No record carries the killed agent's id, so TaskStop falls back to the
+// SAME keyed sidecar lookup SubagentStop uses: the killed agent's
+// <session>/subagents/agent-<task_id>.meta.json, derived from the PostToolUse
+// transcript_path, names the toolUseId of the Agent call that spawned it. The
+// record under that exact key is terminalized as task-stop if it is live; a
+// terminal hit is a no-op; nothing is ever type-matched.
+// ===========================================================================
+
+function writeSidecar(dir, agentId, toolUseId) {
+  const subagents = join(dir, 't', 'parent', 'subagents');
+  mkdirSync(subagents, { recursive: true });
+  const path = join(subagents, `agent-${agentId}.meta.json`);
+  writeFileSync(path, JSON.stringify({ agentType: 'coder', description: 'a lane', toolUseId }));
+  return path;
+}
+function snapshotStateDir(dir) {
+  return Object.fromEntries(readdirSync(stateDir(dir)).sort().map((f) => [f, readFileSync(join(stateDir(dir), f), 'utf8')]));
+}
+
+test('DSH-26: a TaskStop of an UNATTRIBUTED dispatch terminalizes the record its sidecar names (task-stop), and the next same-type Start binds type-unique without waiting', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('killed-unattr', ['src/killed-unattr.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_T1', subagent_type: 'coder', prompt: 'work on src/killed-unattr.mjs' }), dir).code, 0);
+    assert.equal(derivedState(stateFor(dir, 'toolu_T1')), 'pending', 'sanity: no Post, no Start bound it — no record carries the agent id');
+    writeSidecar(dir, 'agent-x', 'toolu_T1');
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-x' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const rec = stateFor(dir, 'toolu_T1');
+    assert.equal(derivedState(rec), 'terminal', `the killed dispatch is located through its sidecar: ${r.stderr}`);
+    assert.equal(rec.terminal.reason, 'task-stop');
+    assert.equal(rec.prompt, null);
+    assert.ok(readdirSync(stateDir(dir)).some((f) => f.startsWith('done-') && f.includes('toolu_T1')), 'the record is renamed onto its done- name');
+
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_T2', subagent_type: 'coder', prompt: 'work on src/killed-unattr.mjs' }), dir).code, 0);
+    const t0 = Date.now();
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-y', agent_type: 'coder' }), dir).code, 0);
+    const elapsed = Date.now() - t0;
+    assert.equal(entryFor(dir, 'agent-y').attribution_case, 'derived-type-unique', 'the killed sibling no longer makes the new Start ambiguous');
+    assert.ok(elapsed < 2500, `no sibling wait: the Start took ${elapsed} ms`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-27: a TaskStop whose sidecar names an ALREADY-TERMINAL record changes nothing — the state directory is byte-identical', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('already', ['src/already.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_done', file: 'src/already.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-done' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-done', agent_type: d.type }), dir).code, 0);
+    assert.equal(h22(stopInput(dir, { agent_id: 'agent-done', agent_type: d.type }), dir).code, 0);
+    assert.equal(stateFor(dir, 'toolu_done').terminal?.reason, 'stop', 'sanity: the record is terminal before the kill');
+    writeSidecar(dir, 'agent-done', 'toolu_done');
+    const before = snapshotStateDir(dir);
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-done' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'a terminal hit is a no-op, as at Stop');
+    assert.doesNotMatch(r.stderr, /dispatch_unattributable/, `the sidecar was found and read, so nothing is reported as unlocated: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-28: a TaskStop of an unattributed dispatch with NO sidecar changes nothing and discloses that the killed dispatch could not be located', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('nosidecar', ['src/nosidecar.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_lost', subagent_type: 'coder', prompt: 'work on src/nosidecar.mjs' }), dir).code, 0);
+    const before = snapshotStateDir(dir);
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-lost' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'no sidecar, no guess: the record stays pending until the boundary sweep');
+    assert.match(r.stderr, /\[dispatch_unattributable\]/, `disclosed: ${r.stderr}`);
+    assert.match(r.stderr, /agent-lost/);
+    assert.match(r.stderr, /could not be located/);
+    assert.match(r.stderr, /sidecar .*absent or unreadable/, `the reason is named: ${r.stderr}`);
+    assert.match(r.stderr, /no open register round matched/, `whether the round was ended is stated: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-29: a RESUMED SubagentStop whose stale sidecar still names the original tool_use_id leaves done-T1 byte-identical', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('resumed', ['src/resumed.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_R1', file: 'src/resumed.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-r' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-r', agent_type: d.type }), dir).code, 0);
+    assert.equal(h22(stopInput(dir, { agent_id: 'agent-r', agent_type: d.type }), dir).code, 0);
+    assert.equal(stateFor(dir, 'toolu_R1').terminal?.reason, 'stop', 'sanity: done-R1 exists');
+    const sidecar = writeSidecar(dir, 'agent-r', 'toolu_R1');
+
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-r', agent_type: d.type }), dir).code, 0);
+    assert.equal(entryFor(dir, 'agent-r').attribution_case, 'resume', 'sanity: the second Start is classified resume');
+    const before = snapshotStateDir(dir);
+
+    const r = h22({ ...stopInput(dir, { agent_id: 'agent-r', agent_type: d.type }), agent_transcript_path: sidecar.replace(/\.meta\.json$/, '.jsonl') }, dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'the stale sidecar hits a terminal record: nothing is rewritten or renamed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-30: a TaskStop whose dispatch-state directory is UNAVAILABLE (a symlink) says so — never that no record exists — and states that the register round was ended', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('unavail', ['src/unavail.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_U1', subagent_type: 'coder', prompt: 'work on src/unavail.mjs' }), dir).code, 0);
+    writeRegisterRaw(dir, [{ agent_id: 'agent-u', agent_type: 'coder', session_id: 's1', files: [], attribution: 'none', at: new Date().toISOString() }]);
+    writeSidecar(dir, 'agent-u', 'toolu_U1');
+    const real = join(dir, 'real-state');
+    renameSync(stateDir(dir), real);
+    symlinkSync(real, stateDir(dir), 'dir');
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-u' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-u').ended?.event, 'task-stop', 'sanity: the round is ended (write one)');
+    assert.match(r.stderr, /could not be located/, r.stderr);
+    assert.match(r.stderr, /unavailable/, `the unavailable state directory is named: ${r.stderr}`);
+    assert.match(r.stderr, /containment/, `with its reason: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /no dispatch-state record exists/, 'nobody checked, so it is not claimed');
+    assert.match(r.stderr, /register round was ended/, r.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-31: a TaskStop whose task_id is not a plain id (path characters) never reaches the filesystem as a sidecar path — nothing terminalized, the reason disclosed', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('traverse', ['src/traverse.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_V1', subagent_type: 'coder', prompt: 'work on src/traverse.mjs' }), dir).code, 0);
+    // 'x/../../y' would resolve <session>/subagents/agent-x/../../y.meta.json = <session>/y.meta.json
+    mkdirSync(join(dir, 't', 'parent', 'subagents', 'agent-x'), { recursive: true });
+    writeFileSync(join(dir, 't', 'parent', 'y.meta.json'), JSON.stringify({ toolUseId: 'toolu_V1' }));
+    const before = snapshotStateDir(dir);
+
+    const r = h22(taskStopInput(dir, { task_id: 'x/../../y' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'an unsafe task_id is never turned into a sidecar path');
+    assert.match(r.stderr, /\[dispatch_unattributable\]/, r.stderr);
+    assert.match(r.stderr, /not a plain id/, `the reason is named: ${r.stderr}`);
   } finally {
     cleanup();
   }

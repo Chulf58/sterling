@@ -998,7 +998,7 @@ function readDispatchStateLocked(root) {
 function scanLiveState(root, { repair }) {
   const dir = dispatchStateDir(root);
   const listing = listStateDir(root);
-  if (listing.availability !== 'ok') return { availability: listing.availability, records: [], poisoned: [], done: [] };
+  if (listing.availability !== 'ok') return { availability: listing.availability, ...(listing.reason ? { reason: listing.reason } : {}), records: [], poisoned: [], done: [] };
   const records = [];
   const poisoned = [];
   const done = [];
@@ -1725,7 +1725,17 @@ export async function finishDispatchAndRegisterEnd(root, { session_id, agent_id,
         }
       }
     }
-    return { found: ended.found, entry: ended.found ? ended.entry : null, record, disclosures };
+    // state_availability/state_reason let a caller say WHY no record was
+    // located: an unavailable directory was never searched, which is not the
+    // same fact as "no record exists".
+    return {
+      found: ended.found,
+      entry: ended.found ? ended.entry : null,
+      record,
+      disclosures,
+      state_availability: scan.availability,
+      ...(scan.reason ? { state_reason: scan.reason } : {}),
+    };
   });
 }
 

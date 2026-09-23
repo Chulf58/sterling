@@ -17,7 +17,11 @@
 // PostToolUse on the "TaskStop" matcher does the same for a local_agent task
 // killed by TaskStop (decision `h22-observes-taskstop-to-end-a-killed-dispatch`),
 // joined on tool_response.task_id — the RESOLVED task id, which for a
-// local_agent is its agentId (tool_input.task_id may be a name). This
+// local_agent is its agentId (tool_input.task_id may be a name). When no
+// record carries that agent id (the Start was unattributable), TaskStop uses
+// the SAME keyed sidecar fallback as SubagentStop: the killed agent's
+// <session>/subagents/agent-<task_id>.meta.json toolUseId, never a type match
+// (board 138c05b3). This
 // hook provides minimal dispatch bookkeeping for child-agent knowledge staging:
 // the register and its Start-time attribution advisory.
 // Every refusal/disclosure this file renders is built through
@@ -35,6 +39,7 @@ import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
 import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { deriveAgentTranscript } from './lib/transcript.mjs';
 import { isReviewerClass } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
 import {
@@ -140,13 +145,59 @@ async function endTaskStoppedDispatch(input, lines) {
     warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id — nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
     return;
   }
+  // KEYED FALLBACK for an unattributed dispatch (no record carries this agent
+  // id): the killed agent's sidecar, derived from the parent transcript_path
+  // exactly as H6 derives the child transcript, names the toolUseId of the
+  // Agent call that spawned it. The owner module terminalizes that exact
+  // record only if it is live; a terminal hit is a no-op, as at Stop.
+  // task_id becomes a path segment, so only a plain id is ever looked up.
+  const plainTaskId = /^[A-Za-z0-9_-]+$/.test(resp.task_id);
+  let sidecar = { ok: false };
+  if (plainTaskId && typeof input.transcript_path === 'string' && input.transcript_path.endsWith('.jsonl')) {
+    sidecar = sidecarForChildTranscript(deriveAgentTranscript(input.transcript_path, resp.task_id));
+  }
   try {
-    const finished = await finishDispatchAndRegisterEnd(input.cwd, { session_id: input.session_id, agent_id: resp.task_id, event: 'task-stop' });
+    const finished = await finishDispatchAndRegisterEnd(input.cwd, {
+      session_id: input.session_id,
+      agent_id: resp.task_id,
+      sidecarToolUseId: sidecar.ok ? sidecar.meta.toolUseId : undefined,
+      event: 'task-stop',
+    });
     // A killed agent never writes a final message, so the residue probe runs
     // unconditionally — the same signature a message-less SubagentStop gets.
     if (finished.found) lines.push(...residueLines(input.cwd, finished.entry));
     // A state record the Stop could not terminalize is disclosed, never dropped.
     if (finished.disclosures?.length) lines.push(...finished.disclosures);
+    // Neither the agent id nor the sidecar located a record: the killed
+    // dispatch stays as it was (a pending one clears at the session-boundary
+    // sweep) and that is said, never assumed.
+    if (!finished.record && !finished.disclosures?.length) {
+      const stateOk = finished.state_availability === 'ok' || finished.state_availability === 'absent';
+      const why = !plainTaskId
+        ? `its task_id is not a plain id (only [A-Za-z0-9_-] is turned into a sidecar path), so no sidecar was looked up`
+        : !sidecar.ok
+          ? `its subagent sidecar (agent-${resp.task_id}.meta.json beside the session transcript) is absent or unreadable`
+          : stateOk
+            ? `its sidecar names tool_use_id '${sidecar.meta.toolUseId}', for which no dispatch-state record was found`
+            : `its sidecar names tool_use_id '${sidecar.meta.toolUseId}'`;
+      const stateNote = stateOk ? '' : `; the dispatch-state directory is unavailable (${finished.state_reason ?? finished.state_availability}), so it was not searched`;
+      const round = finished.found ? 'its register round was ended' : 'no open register round matched it';
+      lines.push(
+        render(
+          disclosure(
+            'dispatch_unattributable',
+            {
+              agent_id: resp.task_id,
+              sidecar_tool_use_id: sidecar.ok ? sidecar.meta.toolUseId : null,
+              state_availability: finished.state_availability ?? null,
+              state_reason: finished.state_reason ?? null,
+              round_ended: finished.found,
+            },
+            `H22: the TaskStop-killed dispatch '${resp.task_id}' could not be located — no live record carries its agent id and ${why}${stateNote}; ${round}; no dispatch-state record was terminalized, so a pending one stays pending until the session-boundary sweep and a later same-type Start may wait on it`
+          )
+        )
+      );
+    }
   } catch (e) {
     if (e?.code !== 'register_lock_held') throw e;
     lines.push(

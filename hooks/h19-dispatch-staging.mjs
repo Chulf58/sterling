@@ -8467,7 +8467,7 @@ function readDispatchStateLocked(root) {
 function scanLiveState(root, { repair }) {
   const dir = dispatchStateDir(root);
   const listing = listStateDir(root);
-  if (listing.availability !== "ok") return { availability: listing.availability, records: [], poisoned: [], done: [] };
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
   const records = [];
   const poisoned = [];
   const done = [];

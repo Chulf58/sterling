@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5183,6 +5183,24 @@ function extractPathCandidates(text) {
   return [...new Set(found)];
 }
 
+// scripts/hooks/lib/transcript.mjs
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync2, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
+function deriveAgentTranscript(parentTranscriptPath, agentId) {
+  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
+  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
+  if (existsSync2(flat)) return flat;
+  const wfRoot = `${sessionDir}/subagents/workflows`;
+  try {
+    for (const d of readdirSync(wfRoot)) {
+      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
+      if (existsSync2(candidate)) return candidate;
+    }
+  } catch {
+  }
+  return flat;
+}
+
 // scripts/hooks/lib/dispatch-advisory.mjs
 var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
 var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
@@ -5349,7 +5367,7 @@ function claimedResources(promptText, configuredNames) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync2, lstatSync, readdirSync, realpathSync, chmodSync } from "node:fs";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync as readdirSync2, realpathSync, chmodSync } from "node:fs";
 import { join as join2, resolve as resolve2, dirname as dirname2, isAbsolute } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -5497,7 +5515,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync2(p)) return { availability: "absent", arr: [] };
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync2(p, "utf8");
@@ -5602,7 +5620,7 @@ function legacyLockHolder(root) {
   const legacy = legacyRegisterLockDir(root);
   let entries;
   try {
-    entries = readdirSync(legacy);
+    entries = readdirSync2(legacy);
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
@@ -5941,7 +5959,7 @@ function listStateDir(root) {
   if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
   if (containment.availability === "absent") return { availability: "absent", names: [] };
   try {
-    return { availability: "ok", names: readdirSync(dispatchStateDir(root)) };
+    return { availability: "ok", names: readdirSync2(dispatchStateDir(root)) };
   } catch (e) {
     return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
   }
@@ -5987,7 +6005,7 @@ function readDispatchStateLocked(root) {
 function scanLiveState(root, { repair }) {
   const dir = dispatchStateDir(root);
   const listing = listStateDir(root);
-  if (listing.availability !== "ok") return { availability: listing.availability, records: [], poisoned: [], done: [] };
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
   const records = [];
   const poisoned = [];
   const done = [];
@@ -6511,7 +6529,14 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
         }
       }
     }
-    return { found: ended.found, entry: ended.found ? ended.entry : null, record, disclosures };
+    return {
+      found: ended.found,
+      entry: ended.found ? ended.entry : null,
+      record,
+      disclosures,
+      state_availability: scan.availability,
+      ...scan.reason ? { state_reason: scan.reason } : {}
+    };
   });
 }
 
@@ -6535,7 +6560,7 @@ function normalizeRegisterPaths(cands, cwd) {
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync3(sidecarPath)) return { ok: false };
+  if (!existsSync4(sidecarPath)) return { ok: false };
   let meta;
   try {
     meta = JSON.parse(readFileSync3(sidecarPath, "utf8"));
@@ -6567,10 +6592,41 @@ async function endTaskStoppedDispatch(input2, lines) {
     warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id \u2014 nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
     return;
   }
+  const plainTaskId = /^[A-Za-z0-9_-]+$/.test(resp.task_id);
+  let sidecar = { ok: false };
+  if (plainTaskId && typeof input2.transcript_path === "string" && input2.transcript_path.endsWith(".jsonl")) {
+    sidecar = sidecarForChildTranscript(deriveAgentTranscript(input2.transcript_path, resp.task_id));
+  }
   try {
-    const finished = await finishDispatchAndRegisterEnd(input2.cwd, { session_id: input2.session_id, agent_id: resp.task_id, event: "task-stop" });
+    const finished = await finishDispatchAndRegisterEnd(input2.cwd, {
+      session_id: input2.session_id,
+      agent_id: resp.task_id,
+      sidecarToolUseId: sidecar.ok ? sidecar.meta.toolUseId : void 0,
+      event: "task-stop"
+    });
     if (finished.found) lines.push(...residueLines(input2.cwd, finished.entry));
     if (finished.disclosures?.length) lines.push(...finished.disclosures);
+    if (!finished.record && !finished.disclosures?.length) {
+      const stateOk = finished.state_availability === "ok" || finished.state_availability === "absent";
+      const why = !plainTaskId ? `its task_id is not a plain id (only [A-Za-z0-9_-] is turned into a sidecar path), so no sidecar was looked up` : !sidecar.ok ? `its subagent sidecar (agent-${resp.task_id}.meta.json beside the session transcript) is absent or unreadable` : stateOk ? `its sidecar names tool_use_id '${sidecar.meta.toolUseId}', for which no dispatch-state record was found` : `its sidecar names tool_use_id '${sidecar.meta.toolUseId}'`;
+      const stateNote = stateOk ? "" : `; the dispatch-state directory is unavailable (${finished.state_reason ?? finished.state_availability}), so it was not searched`;
+      const round = finished.found ? "its register round was ended" : "no open register round matched it";
+      lines.push(
+        render(
+          disclosure(
+            "dispatch_unattributable",
+            {
+              agent_id: resp.task_id,
+              sidecar_tool_use_id: sidecar.ok ? sidecar.meta.toolUseId : null,
+              state_availability: finished.state_availability ?? null,
+              state_reason: finished.state_reason ?? null,
+              round_ended: finished.found
+            },
+            `H22: the TaskStop-killed dispatch '${resp.task_id}' could not be located \u2014 no live record carries its agent id and ${why}${stateNote}; ${round}; no dispatch-state record was terminalized, so a pending one stays pending until the session-boundary sweep and a later same-type Start may wait on it`
+          )
+        )
+      );
+    }
   } catch (e) {
     if (e?.code !== "register_lock_held") throw e;
     lines.push(
@@ -6586,7 +6642,7 @@ async function endTaskStoppedDispatch(input2, lines) {
 }
 var input = readStdin();
 try {
-  if (!existsSync3(`${input.cwd}/.sterling/config.json`)) allow();
+  if (!existsSync4(`${input.cwd}/.sterling/config.json`)) allow();
   mkdirSync2(join3(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
