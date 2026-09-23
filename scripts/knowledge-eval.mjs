@@ -254,22 +254,86 @@ function patchReadOnlyTools(tree) {
   s += `\n${marker}\nSterlingTools.prototype.maintenanceEnqueue = function () { return undefined; };\n`;
   writeFileSync(p, s); return sha256(s);
 }
-function cleanStaleWorktrees(repo, workDir) {
-  const prefix = `${resolve(workDir)}/`;
-  const listing = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo, encoding: 'utf8' });
-  if (listing.status !== 0) throw new Error(`git worktree list in ${repo}: ${listing.stderr}`);
-  for (const block of listing.stdout.trim().split(/\n\n+/)) {
-    const path = block.match(/^worktree (.+)$/m)?.[1];
-    if (!path || !resolve(path).startsWith(prefix) || (!block.includes('\nlocked') && existsSync(path))) continue;
-    spawnSync('git', ['worktree', 'unlock', path], { cwd: repo, encoding: 'utf8' });
+// Reaps every worktree registered under THIS work-dir's worktrees/ or
+// projects/ tree -- what a killed run leaves behind, locked or not. Exact
+// prefix match on the registered path, so nothing outside the work dir is
+// ever touched; anything still registered afterwards fails loudly.
+export function reapRunWorktrees(repo, workDir) {
+  const prefixes = ['worktrees', 'projects'].map((d) => `${join(resolve(workDir), d)}/`);
+  const inRun = (path) => prefixes.some((prefix) => resolve(path).startsWith(prefix));
+  const registered = () => {
+    const listing = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: repo, encoding: 'utf8' });
+    if (listing.status !== 0) throw new Error(`git worktree list in ${repo}: ${listing.stderr}`);
+    return listing.stdout.trim().split(/\n\n+/).map((block) => ({ path: block.match(/^worktree (.+)$/m)?.[1], locked: /\nlocked/.test(block) })).filter((x) => x.path && inRun(x.path));
+  };
+  for (const { path, locked } of registered()) {
+    if (locked) spawnSync('git', ['worktree', 'unlock', path], { cwd: repo, encoding: 'utf8' });
     spawnSync('git', ['worktree', 'remove', '--force', path], { cwd: repo, encoding: 'utf8' });
   }
   const prune = spawnSync('git', ['worktree', 'prune'], { cwd: repo, encoding: 'utf8' });
   if (prune.status !== 0) throw new Error(`git worktree prune in ${repo}: ${prune.stderr}`);
+  const left = registered();
+  if (left.length) throw new Error(`knowledge-eval could not reap prior-run worktrees in ${repo}: ${left.map((x) => x.path).join(', ')}`);
 }
-function worktree(commit, workDir) {
-  cleanStaleWorktrees(root, workDir);
-  const tree = join(workDir, 'worktrees', commit); if (!existsSync(tree)) { mkdirSync(dirname(tree), { recursive: true }); run(['git', 'worktree', 'add', '--detach', tree, commit], root); }
+// P4: every worktree a run adds is recorded in a ledger and removed by the
+// event that ends its life -- a case's end for case projects, the commit's
+// replay end for the plugin tree. reapRunWorktrees only reaps what a killed
+// run left behind. Results are written under runs/, never inside a worktree.
+export function addWorktree(ledger, repo, path, commit) {
+  mkdirSync(dirname(path), { recursive: true });
+  run(['git', 'worktree', 'add', '--detach', path, commit], repo);
+  ledger.push({ repo, path });
+  return path;
+}
+export function removeWorktrees(ledger) {
+  const failures = [];
+  const repos = new Set(ledger.map((x) => x.repo));
+  for (const entry of [...ledger].reverse()) {
+    const r = spawnSync('git', ['worktree', 'remove', '--force', entry.path], { cwd: entry.repo, encoding: 'utf8' });
+    if (r.status === 0) ledger.splice(ledger.indexOf(entry), 1);
+    else failures.push(`git worktree remove --force ${entry.path} in ${entry.repo}: ${r.stderr.trim()}`);
+  }
+  for (const repo of repos) {
+    const r = spawnSync('git', ['worktree', 'prune'], { cwd: repo, encoding: 'utf8' });
+    if (r.status !== 0) failures.push(`git worktree prune in ${repo}: ${r.stderr.trim()}`);
+  }
+  if (failures.length) throw new Error(`knowledge-eval worktree cleanup failed:\n${failures.join('\n')}`);
+}
+// Runs fn, then every cleanup step independently guarded. A failure is never
+// replaced by a later one: execution and cleanup errors are thrown together.
+export async function runWithCleanup(fn, cleanups) {
+  let result, failed = false, failure;
+  try { result = await fn(); } catch (error) { failed = true; failure = error; }
+  const errors = failed ? [failure] : [];
+  for (const step of cleanups()) { try { step(); } catch (error) { errors.push(error); } }
+  if (errors.length === 0) return result;
+  if (errors.length === 1) throw errors[0];
+  throw new AggregateError(errors, errors.map((e) => e?.message ?? String(e)).join('; and '));
+}
+export async function withWorktreeLedger(fn) {
+  const ledger = [];
+  return runWithCleanup(() => fn(ledger), () => [() => removeWorktrees(ledger)]);
+}
+// Per-commit orchestration: reap this work-dir's prior-run worktrees, set up
+// the plugin tree in the commit ledger, then run each case with its own
+// ledger and close hooks. A case worktree that fails removal is handed to the
+// commit ledger, so it is retried when the commit's replay ends.
+export async function replayCommit({ workDir, repos, cases, setup, runCase, onCaseError, finish }) {
+  for (const repo of new Set(repos)) reapRunWorktrees(repo, workDir);
+  return withWorktreeLedger(async (commitLedger) => {
+    const ctx = await setup(commitLedger);
+    const scored = [];
+    for (const c of cases) {
+      const caseLedger = [], closers = [];
+      const release = () => { try { removeWorktrees(caseLedger); } finally { commitLedger.push(...caseLedger); } };
+      try { scored.push(await runWithCleanup(() => runCase(c, ctx, { ledger: caseLedger, onClose: (close) => closers.push(close) }), () => [...closers, release])); } catch (error) { scored.push(onCaseError(c, error)); }
+    }
+    return finish(ctx, scored);
+  });
+}
+export function pluginTree(repo, commit, workDir, ledger) { return addWorktree(ledger, repo, join(workDir, 'worktrees', commit), commit); }
+function worktree(commit, workDir, ledger) {
+  const tree = pluginTree(root, commit, workDir, ledger);
   const lockMatch = existsSync(join(root, 'package-lock.json')) && readFileSync(join(root, 'package-lock.json'), 'utf8') === readFileSync(join(tree, 'package-lock.json'), 'utf8');
   if (lockMatch && !existsSync(join(tree, 'node_modules'))) symlinkSync(join(root, 'node_modules'), join(tree, 'node_modules'), 'dir');
   if (!existsSync(join(tree, 'packages/schemas/dist/index.js'))) run(['npx', 'tsc', '-p', 'packages/schemas/tsconfig.json'], tree);
@@ -327,12 +391,11 @@ function replayEvents(tree, project, events) {
   }
   return captures;
 }
-function caseProject(pluginCommit, workDir, caseId, snap, projectName, projectSnapshot, caseConfig, needsMutation) {
+export function caseProject(pluginCommit, workDir, caseId, snap, projectName, projectSnapshot, caseConfig, needsMutation, ledger) {
   const project = join(workDir, 'projects', pluginCommit, projectName, caseId);
   if (existsSync(project)) throw new Error(`case project already exists at ${project}; choose a fresh --work-dir to preserve isolation`);
-  cleanStaleWorktrees(projectSnapshot.root, workDir);
   // Plugin hooks/dist and project source intentionally differ.
-  run(['git', 'worktree', 'add', '--detach', project, projectSnapshot.head], projectSnapshot.root);
+  addWorktree(ledger, projectSnapshot.root, project, projectSnapshot.head);
   const sterling = join(project, '.sterling');
   if (existsSync(sterling)) throw new Error(`case project unexpectedly contains tracked .sterling at ${sterling}`);
   mkdirSync(sterling, { recursive: true });
@@ -411,9 +474,12 @@ function pairedComparison(summaries) {
   return { invalid: invalidReasons.length > 0, invalid_reasons: invalidReasons, cases, paired_totals: totals };
 }
 async function evaluateCommit(commit, cases, workDir, snap) {
-  const started = Date.now(), w = worktree(commit, workDir), runDir = join(workDir, 'runs', commit); const manifest = JSON.parse(readFileSync(join(snap, 'manifest.json')));
-  const { MountedStores, resolveDomainMounts } = await import(pathToFileURL(join(w.tree, 'packages/store/dist/index.js')).href + `?${Date.now()}`); const { SterlingTools } = await import(pathToFileURL(join(w.tree, 'packages/mcp-server/dist/tools.js')).href + `?${Date.now()}`); const { parseConfig } = await import(pathToFileURL(join(w.tree, 'packages/schemas/dist/index.js')).href + `?${Date.now()}`);
-  const scored = []; for (const c of cases) { const out = join(runDir, c.id); const caseSchema = c.version ?? 'v1'; let stores; mkdirSync(out, { recursive: true }); try {
+  const started = Date.now(), runDir = join(workDir, 'runs', commit); const manifest = JSON.parse(readFileSync(join(snap, 'manifest.json')));
+  let MountedStores, resolveDomainMounts, SterlingTools, parseConfig;
+  return replayCommit({ workDir, repos: [root, ...Object.values(manifest.projects ?? {}).map((x) => x.root)], cases,
+  setup: async (commitLedger) => { const w = worktree(commit, workDir, commitLedger);
+  ({ MountedStores, resolveDomainMounts } = await import(pathToFileURL(join(w.tree, 'packages/store/dist/index.js')).href + `?${Date.now()}`)); ({ SterlingTools } = await import(pathToFileURL(join(w.tree, 'packages/mcp-server/dist/tools.js')).href + `?${Date.now()}`)); ({ parseConfig } = await import(pathToFileURL(join(w.tree, 'packages/schemas/dist/index.js')).href + `?${Date.now()}`)); return w; },
+  runCase: async (c, w, { ledger: caseLedger, onClose }) => { const out = join(runDir, c.id); const caseSchema = c.version ?? 'v1'; mkdirSync(out, { recursive: true });
     const projectName = c.project ?? 'sterling-main'; const projectSnapshot = manifest.projects?.[projectName];
     if (!projectSnapshot) throw new Error(`case ${c.id} names unknown project ${JSON.stringify(projectName)}`);
     const directives = (c.input?.events ?? []).flatMap((event, index) => parseCaseDirectives(event.note).map((directive) => ({ ...directive, index })));
@@ -421,14 +487,14 @@ async function evaluateCommit(commit, cases, workDir, snap) {
     for (const directive of directives.filter((x) => x.kind === 'config')) cfg.delivery = { ...cfg.delivery, injection_rung: directive.value };
     const effectiveRung = cfg.delivery?.injection_rung;
     if (!['prompt', 'read', 'edit'].includes(effectiveRung)) throw new Error(`project ${projectName} has no explicit valid delivery.injection_rung; refusing a silent default (${String(effectiveRung)})`);
-    const project = caseProject(commit, workDir, c.id, snap, projectName, projectSnapshot, cfg, directives.some((x) => x.kind === 'mutate'));
+    const project = caseProject(commit, workDir, c.id, snap, projectName, projectSnapshot, cfg, directives.some((x) => x.kind === 'mutate'), caseLedger);
     const caseDb = join(project, '.sterling', 'sterling.db'); const dbBefore = sha256(readFileSync(caseDb));
-    stores = new MountedStores(join(project, '.sterling', 'sterling.db'), resolveDomainMounts(parseConfig(cfg)), { skipMissing: true });
+    const stores = new MountedStores(join(project, '.sterling', 'sterling.db'), resolveDomainMounts(parseConfig(cfg)), { skipMissing: true }); onClose(() => stores.close());
     const tools = new SterlingTools({ store: stores, config: parseConfig(cfg), repoRoot: project });
     // MountedStores.all() is the mounted STORE fan, not a record list. Enumerate
     // each read-only store so push matching uses the frozen record content.
     const records = Object.fromEntries(stores.all().flatMap((store) => store.query({ cap: 10000 })).map((record) => [record.id, record]));
-    if (c.channel === 'pull') { const response = c.kind === 'preflight' ? tools.knowledgePreflight(c.input.text) : c.kind === 'get' ? tools.knowledgeGet(c.input.id) : tools.knowledgeQueryResult(c.input); if (dbBefore !== sha256(readFileSync(caseDb))) throw new Error('case-local store mutated during pull replay'); json(join(out, 'response.json'), response); scored.push({ id: c.id, project: projectName, channel: 'pull', case_schema: caseSchema, label_sha256: labelHash(c), score: scorePull(response, c.labels, c.negative) }); } else {
+    if (c.channel === 'pull') { const response = c.kind === 'preflight' ? tools.knowledgePreflight(c.input.text) : c.kind === 'get' ? tools.knowledgeGet(c.input.id) : tools.knowledgeQueryResult(c.input); if (dbBefore !== sha256(readFileSync(caseDb))) throw new Error('case-local store mutated during pull replay'); json(join(out, 'response.json'), response); return { id: c.id, project: projectName, channel: 'pull', case_schema: caseSchema, label_sha256: labelHash(c), score: scorePull(response, c.labels, c.negative) }; } else {
       if (!Array.isArray(c.input?.events) || c.input.events.length === 0) throw new Error(`push case ${c.id} requires a non-empty input.events sequence`);
       assertEventPaths(c.id, c.input.events, project);
       const events = [];
@@ -447,10 +513,12 @@ async function evaluateCommit(commit, cases, workDir, snap) {
       json(join(out, 'hooks.json'), { events, late });
       const dbAfter = sha256(readFileSync(caseDb)); if (dbBefore !== dbAfter && !directives.some((x) => x.kind === 'mutate')) throw new Error(`case-local store mutated by hooks (db ${dbBefore} -> ${dbAfter}); hooks run against a disposable, mutation-detected copy`);
       const selected = scoreIndexes.map((i) => events[i]);
-      scored.push({ id: c.id, project: projectName, channel: 'push', case_schema: caseSchema, label_sha256: labelHash(c), score_event: scoreInputIndex, score_hook_events: scoreIndexes, score: scorePush({ envelopes: selected.flatMap((event) => event.captures.map((x) => x.envelope)), lateEnvelopes: late.captures.map((x) => x.envelope).filter((x) => String(x).length > 0), labels: c.labels, recordsById: records, guardBefore: selected[0].guard_before, guardAfter: selected.at(-1).guard_after }) });
-    } } catch (error) { scored.push({ id: c.id, project: c.project ?? 'sterling-main', channel: c.channel, case_schema: caseSchema, label_sha256: labelHash(c), error: String(error) }); } finally { stores?.close(); } }
+      return { id: c.id, project: projectName, channel: 'push', case_schema: caseSchema, label_sha256: labelHash(c), score_event: scoreInputIndex, score_hook_events: scoreIndexes, score: scorePush({ envelopes: selected.flatMap((event) => event.captures.map((x) => x.envelope)), lateEnvelopes: late.captures.map((x) => x.envelope).filter((x) => String(x).length > 0), labels: c.labels, recordsById: records, guardBefore: selected[0].guard_before, guardAfter: selected.at(-1).guard_after }) };
+    } },
+  onCaseError: (c, error) => ({ id: c.id, project: c.project ?? 'sterling-main', channel: c.channel, case_schema: c.version ?? 'v1', label_sha256: labelHash(c), error: String(error) }),
+  finish: (w, scored) => {
   const perProjectTotals = Object.fromEntries([...new Set(scored.map((x) => x.project ?? 'sterling-main'))].map((project) => [project, channelTotals(scored.filter((x) => (x.project ?? 'sterling-main') === project))]));
-  const summary = { commit, runtime_ms: Date.now() - started, build: w.build, adapter_sha256: w.adapter_sha256, tools_adapter_sha256: w.tools_adapter_sha256, projects: manifest.projects, cases: scored, channel_totals: channelTotals(scored), project_totals: perProjectTotals, invalid: scored.some((x) => x.error) }; json(join(runDir, 'summary.json'), summary); return summary;
+  const summary = { commit, runtime_ms: Date.now() - started, build: w.build, adapter_sha256: w.adapter_sha256, tools_adapter_sha256: w.tools_adapter_sha256, projects: manifest.projects, cases: scored, channel_totals: channelTotals(scored), project_totals: perProjectTotals, invalid: scored.some((x) => x.error) }; json(join(runDir, 'summary.json'), summary); return summary; } });
 }
-async function main() { const commits = (arg('--commits', '') ?? '').split(',').filter(Boolean); const casesPath = arg('--cases'); const workDir = resolve(arg('--work-dir', '/tmp/claude-1000/knowledge-eval')); if (!commits.length || !casesPath) throw new Error('usage: --commits sha[,sha] --cases cases.jsonl [--work-dir dir] [--projects JSON] [--clean]'); const projects = resolveProjects(arg('--projects', undefined)); if (process.argv.includes('--clean')) { cleanStaleWorktrees(root, workDir); for (const project of Object.values(projects)) cleanStaleWorktrees(project, workDir); if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true }); } const snap = arg('--snapshot') ? resolve(arg('--snapshot')) : snapshot(workDir, projects); const cases = readJsonl(resolve(casesPath)); const summaries = []; for (const c of commits) summaries.push(await evaluateCommit(c, cases, workDir, snap)); const paired = pairedComparison(summaries); const projectTotals = Object.fromEntries(Object.keys(JSON.parse(readFileSync(join(snap, 'manifest.json'))).projects ?? {}).map((project) => [project, summaries.map((s) => ({ commit: s.commit, totals: s.project_totals[project] ?? {} }))])); const comparison = { harness_version: HARNESS_VERSION, snapshot: snap, invalid: summaries.some((x) => x.invalid) || paired.invalid, ...paired, project_totals: projectTotals, commits: summaries }; json(join(workDir, 'comparison.json'), comparison); console.log(JSON.stringify(comparison, null, 2)); }
+async function main() { const commits = (arg('--commits', '') ?? '').split(',').filter(Boolean); const casesPath = arg('--cases'); const workDir = resolve(arg('--work-dir', '/tmp/claude-1000/knowledge-eval')); if (!commits.length || !casesPath) throw new Error('usage: --commits sha[,sha] --cases cases.jsonl [--work-dir dir] [--projects JSON] [--clean]'); const projects = resolveProjects(arg('--projects', undefined)); if (process.argv.includes('--clean')) { for (const repo of new Set([root, ...Object.values(projects)])) reapRunWorktrees(repo, workDir); if (existsSync(workDir)) rmSync(workDir, { recursive: true, force: true }); } const snap = arg('--snapshot') ? resolve(arg('--snapshot')) : snapshot(workDir, projects); const cases = readJsonl(resolve(casesPath)); const summaries = []; for (const c of commits) summaries.push(await evaluateCommit(c, cases, workDir, snap)); const paired = pairedComparison(summaries); const projectTotals = Object.fromEntries(Object.keys(JSON.parse(readFileSync(join(snap, 'manifest.json'))).projects ?? {}).map((project) => [project, summaries.map((s) => ({ commit: s.commit, totals: s.project_totals[project] ?? {} }))])); const comparison = { harness_version: HARNESS_VERSION, snapshot: snap, invalid: summaries.some((x) => x.invalid) || paired.invalid, ...paired, project_totals: projectTotals, commits: summaries }; json(join(workDir, 'comparison.json'), comparison); console.log(JSON.stringify(comparison, null, 2)); }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch((e) => { console.error(`knowledge-eval: ${e.stack ?? e}`); process.exitCode = 1; });
