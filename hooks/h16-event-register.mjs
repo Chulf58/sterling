@@ -4914,7 +4914,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-opus-5-5", effort: "medium" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -7513,10 +7513,16 @@ try {
     kind = "agent_dispatch";
     detail = String(input.tool_input?.subagent_type ?? "");
   }
+  const event = { kind, detail, at: (/* @__PURE__ */ new Date()).toISOString() };
+  if (kind === "agent_dispatch") {
+    const agentId = input.tool_response?.agentId;
+    if (typeof agentId === "string" && agentId !== "") event.agent_id = agentId;
+    if (typeof input.tool_use_id === "string" && input.tool_use_id !== "") event.tool_use_id = input.tool_use_id;
+  }
   const eventsPath = join3(input.cwd, ".sterling", "transient", "session-events.json");
   mkdirSync2(dirname3(eventsPath), { recursive: true });
   const events = existsSync3(eventsPath) ? JSON.parse(readFileSync2(eventsPath, "utf8")) : [];
-  events.push({ kind, detail, at: (/* @__PURE__ */ new Date()).toISOString() });
+  events.push(event);
   writeFileSync(eventsPath, JSON.stringify(events));
   allow();
 } catch (e) {

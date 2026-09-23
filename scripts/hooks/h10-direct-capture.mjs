@@ -663,7 +663,7 @@ try {
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
   // Research-event classification, hoisted here (ahead of clearRegisters()'s
-  // definition below) so `researchDispatchLive` is available wherever it is
+  // definition below) so the per-dispatch join helpers are available wherever
   // needed; clearRegisters() itself takes its research survivors as an
   // explicit PARAMETER (outstandingResearchEvents, computed later once
   // dischargedOnResearchLane/isValidAt exist) rather than a closure, so no
@@ -672,33 +672,112 @@ try {
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
   );
-  // RESEARCH RETURN GATE (user-ruled 2026-09-22, "wait for return"): H10 must not
-  // raise the research duty for a DISPATCHED research/scout agent while that
-  // agent is still running — demanding a research_finding/no_capture before the
-  // agent has reported asks for a write-up of work that does not exist yet.
-  // `agent_dispatch` events in session-events.json carry only {kind, detail, at}
-  // (H16, out of this fix's scope) — no agent_id — so an event cannot be joined
-  // to the ONE register entry it came from. The gate is therefore lane-wide
-  // rather than per-dispatch: while ANY presumed-active H22 register entry
-  // (same session, age < config.dispatch_register.stale_minutes) names a
-  // CONFIGURED research agent type, every `agent_dispatch` research event
-  // defers as a block, exactly as though it had not fired yet — with two
-  // outstanding research dispatches, one returned and one still running, the
-  // whole lane stays quiet until BOTH leave presumed-active (chosen semantics;
-  // disclosed because no join key exists to release the returned one alone).
+  // PER-DISPATCH RESEARCH RETURN GATE (user-ruled 2026-09-22, "wait for
+  // return"; per-dispatch join fix, board d33d8ac4). H10 must not raise the
+  // research duty for a DISPATCHED research/scout agent while that agent is
+  // still running — demanding a research_finding/no_capture before the agent
+  // has reported asks for a write-up of work that does not exist yet.
   // `research_tool` events (WebSearch/WebFetch) are NEVER gated — those calls
-  // are synchronous conductor actions, already complete by construction.
-  // NARROWER than decision foreign_ec9eacaa's rejected "defer research/concept
-  // duties when ANY dispatch is live": that alternative was rejected because a
-  // live FILE-owning dispatch has nothing to do with a file-less research debt;
-  // this gate fires only for a dispatch that IS ITSELF a configured research
-  // agent — the actual source of the pending duty, not an unrelated one. Bounded
-  // exactly like the file deferral: once the lease expires (default 60m) with no
-  // SubagentStop, the entry drops out of presumed-active and the duty re-arms
-  // rather than deferring forever (P5) — an unattributed agent_id (H22
-  // 'unattributable') still lands in the register with a null agent_type, which
-  // never matches `researchAgents.has(...)`, so it can never gate this lane.
-  const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
+  // are synchronous conductor actions, already complete by construction, and
+  // never carry a join key at all.
+  //
+  // JOIN KEY (Sol review HIGH, round 2 of this fix): `agent_id` ALONE is NOT
+  // unique per dispatch — H22 permits the SAME agent_id across ROUNDS (a
+  // SendMessage-resumed agent keeps its id and gets round 2, 3, ...) and
+  // across SESSIONS, and `classified.entries` is not session-filtered. A
+  // last-write-wins map keyed only by agent_id could join an event to a
+  // FOREIGN round's row (letting an unrelated ended.at falsely discharge a
+  // still-live dispatch, or an unrelated live row over-defer an already-
+  // returned one — the exact two defects this fix already closed once, now
+  // reachable again through id reuse). `ownRegisterRow(e)` fixes this with a
+  // key unique per LAUNCH:
+  //   1. SESSION FILTER, always first: only rows whose `session_id` matches
+  //      this event's session are ever considered — a foreign session's row
+  //      is invisible regardless of what else matches.
+  //   2. EXACT: `tool_use_id`. H16 now stamps the launching PostToolUse's own
+  //      `tool_use_id` on the event; H22 stamps the SAME id on the register
+  //      entry via the state-machine resolver (source 'post'/
+  //      'derived-type-unique', h22-dispatch-register.mjs) wherever real
+  //      Pre/Post evidence bound it — this is unique per dispatch CALL, so a
+  //      resumed round (a fresh Task/Agent call, its own tool_use_id) never
+  //      collides with an earlier round sharing the same agent_id. Exactly
+  //      one session-scoped row carrying this id -> use it. Zero or 2+ ->
+  //      fall through (a genuine collision is refused elsewhere, at write
+  //      time; reaching 2+ here would itself be corruption, never trusted).
+  //   3. FALLBACK: `(session_id, agent_id)`, used when the event carries no
+  //      `tool_use_id` (a legacy H16 write) or no row matches it (a 'resume'/
+  //      'unattributable' Start, which the resolver deliberately leaves
+  //      tool_use_id-less rather than guessing one). If EXACTLY ONE
+  //      session-scoped row shares this agent_id — the overwhelmingly common
+  //      shape, one round per id per session — it is unambiguous and used.
+  //   4. AMBIGUOUS OR MISSING (2+ rows share the agent_id with no
+  //      `tool_use_id` to split them, or no row at all): falls to the LEGACY
+  //      RULE below rather than guessing which round the event belongs to —
+  //      a wrong guess is exactly the class of bug this fix exists to close,
+  //      and the legacy rule already has a proven-safe residual (next
+  //      paragraph). This deliberately does NOT attempt an `at`-proximity
+  //      guess between rounds: which of Start (register `at`) or Post (event
+  //      `at`) fires first is not a guaranteed ordering, so guessing a
+  //      direction risks silently binding to the WRONG round — worse than
+  //      the safe legacy fallback, which never binds wrongly.
+  //
+  // LEGACY EVENTS/ROWS (written by an H16/H22 build before this fix, or any
+  // case #4 above): no row is ever returned, so `isDispatchEventLive` is
+  // always false — never deferred merely because some OTHER dispatch happens
+  // to be live (defect 1) — and `dispatchEventReturnAt` (below) is always
+  // null — never discharged by another dispatch's `ended.at` (defect 2). It
+  // falls through to the ordinary group `researchSatisfied` anchor check
+  // further down, exactly as every research event behaved before the return
+  // gate existed — Sol confirmed that is safe: a research_finding or the
+  // research_owed queue always discharges it eventually.
+  const registerRowsBySession = new Map(); // session_id -> RegisterRow[]
+  if (classified.availability === 'ok') {
+    for (const row of classified.entries) {
+      const sid = row.entry.session_id;
+      if (typeof sid !== 'string' || !sid) continue;
+      if (!registerRowsBySession.has(sid)) registerRowsBySession.set(sid, []);
+      registerRowsBySession.get(sid).push(row);
+    }
+  }
+  const ownRegisterRow = (e) => {
+    if (typeof input.session_id !== 'string' || !input.session_id) return undefined; // no session -> no join possible, ever
+    const sessionRows = registerRowsBySession.get(input.session_id) ?? [];
+    if (!sessionRows.length) return undefined;
+    const hasEventToolUseId = typeof e.tool_use_id === 'string' && e.tool_use_id !== '';
+    if (hasEventToolUseId) {
+      const exact = sessionRows.filter((r) => r.entry.tool_use_id === e.tool_use_id);
+      if (exact.length === 1) return exact[0];
+      // 2+ exact matches is corruption (tool_use_id is supposed to be
+      // write-time unique) — never trusted, straight to legacy (Sol re-check
+      // HIGH: this must not fall through to the agent_id fallback below).
+      if (exact.length >= 2) return undefined;
+      // exact.length === 0: falls through to the agent_id fallback, but see
+      // the guard inside it — a singleton row carrying a DIFFERENT non-empty
+      // tool_use_id is evidence of ANOTHER round, never this event's own.
+    }
+    if (typeof e.agent_id === 'string' && e.agent_id) {
+      const byAgent = sessionRows.filter((r) => r.entry.agent_id === e.agent_id);
+      if (byAgent.length === 1) {
+        const row = byAgent[0];
+        // The event carries a tool_use_id (exact.length was 0 to reach here)
+        // AND the singleton row carries a DIFFERENT usable one of its own —
+        // that row belongs to another round, not this event's; accepting it
+        // would reintroduce the exact cross-round misjoin this fix closes.
+        // A row with NO usable tool_use_id (null/empty — the 'resume'/
+        // 'unattributable' Start shape Sol confirmed: a SendMessage resume
+        // creates no new H16 event and H22 records it with tool_use_id null)
+        // is still the legitimate singleton join either way.
+        const rowHasUsableToolUseId = typeof row.entry.tool_use_id === 'string' && row.entry.tool_use_id !== '';
+        if (hasEventToolUseId && rowHasUsableToolUseId) return undefined;
+        return row; // unambiguous: only one round ever recorded for this id, this session
+      }
+      // byAgent.length === 0 or >= 2: no row, or 2+ rounds sharing this id
+      // with nothing left to split them by (case #4) -> ambiguous/missing,
+      // legacy rule.
+    }
+    return undefined;
+  };
+  const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === 'presumed-active';
 
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
@@ -1219,68 +1298,73 @@ try {
   // the latest `--lane research`/`--lane all` declaration is discharged; one
   // arriving AFTER it, one whose `at` is missing or malformed (never trusted as
   // comparable), or one facing only a capture-lane declaration keeps the duty armed.
-  // RETURN-ANCHORED DISCHARGE FOR agent_dispatch EVENTS (review fix, HIGH found
-  // on commit 4b75112). `dischargedOnResearchLane` alone compares a declaration
-  // against the event's own `at` — for an agent_dispatch event that `at` is the
-  // DISPATCH time, always strictly earlier than the dispatch's actual
-  // completion. A no_capture declared between dispatch and return therefore
-  // always looked "at or before the cutoff" and discharged the event even
-  // though its result did not exist yet at declaration time — and once
-  // discharged, the event is gone (never resurrected once the dispatch really
-  // returns): P5 silent loss, the same failure shape as the stale-satisfaction
-  // fix above, this time for no_capture rather than a finding.
-  //   - CURRENTLY live (`researchDispatchLive` true): no return timestamp
-  //     exists yet, so NO declaration can be "at or after return" — never
-  //     discharge here; the event leaves this Stop only via
-  //     `individuallyResearchSatisfied` below (a REAL finding), never via a
-  //     declaration made while the dispatch was still running.
-  //   - NOT currently live: discharge ONLY with VALID return evidence — join
-  //     to the register's OWN `ended.at` when one exists (the LATEST ended
-  //     timestamp among this session's research-type entries, lane-wide — no
-  //     per-event join key exists, the same accepted coarseness
-  //     `researchDispatchLive` itself already carries) and only when the
-  //     declaration is at or after it.
-  //   - NO valid return evidence at all — the register is absent/unreadable
-  //     (`classified.availability !== 'ok'`), the entry's lease expired with
-  //     no SubagentStop ever recorded (status 'unknown', never
-  //     'inactive-confirmed'), or an ended entry exists with no valid
-  //     `ended.at` — is NEVER treated as "falls back to the event's own
-  //     `at`" (review fix, second HIGH found on commit 7f9f0b5): that fallback
-  //     reintroduced the exact original bug, since the event's dispatch-time
-  //     `at` is always earlier than any later declaration by construction and
-  //     would always look discharged. Absent proof the dispatch actually
-  //     returned, the event simply stays ARMED and is evaluated as an
-  //     ordinary unmet research event (P5: uncertain is never silently
-  //     discharged).
+  // PER-DISPATCH RETURN-ANCHORED DISCHARGE FOR agent_dispatch EVENTS (review
+  // fix, HIGH found on commit 4b75112; per-dispatch join fix, board d33d8ac4).
+  // `dischargedOnResearchLane` alone compares a declaration against the
+  // event's own `at` — for an agent_dispatch event that `at` is the DISPATCH
+  // time, always strictly earlier than the dispatch's actual completion. A
+  // no_capture declared between dispatch and return therefore always looked
+  // "at or before the cutoff" and discharged the event even though its result
+  // did not exist yet at declaration time — and once discharged, the event is
+  // gone (never resurrected once the dispatch really returns): P5 silent
+  // loss, the same failure shape as the stale-satisfaction fix above, this
+  // time for no_capture rather than a finding.
+  //   - CURRENTLY live (`isDispatchEventLive(e)` true, joined to the event's
+  //     OWN register entry by `e.agent_id`): no return timestamp exists yet,
+  //     so NO declaration can be "at or after return" — never discharge here;
+  //     the event leaves this Stop only via `individuallyResearchSatisfied`
+  //     below (a REAL finding), never via a declaration made while the
+  //     dispatch was still running.
+  //   - NOT currently live: discharge ONLY with VALID return evidence from
+  //     the event's OWN register entry's `ended.at` (`dispatchEventReturnAt`
+  //     below) — never a sibling dispatch's, which is exactly the residual
+  //     board d33d8ac4 fixed (a lease-expired dispatch with no ended.at of
+  //     its own could be discharged by an unrelated dispatch's return) — and
+  //     only when the declaration is at or after it.
+  //   - NO valid return evidence at all — no `agent_id` on the event (legacy,
+  //     see the header comment above), no matching register row, the
+  //     register is absent/unreadable (`classified.availability !== 'ok'`),
+  //     the entry's lease expired with no SubagentStop ever recorded (status
+  //     'unknown', never 'inactive-confirmed'), or an ended entry exists with
+  //     no valid `ended.at` — is NEVER treated as "falls back to the event's
+  //     own `at`" (review fix, second HIGH found on commit 7f9f0b5): that
+  //     fallback reintroduced the exact original bug, since the event's
+  //     dispatch-time `at` is always earlier than any later declaration by
+  //     construction and would always look discharged. Absent proof the
+  //     dispatch actually returned, the event simply stays ARMED and is
+  //     evaluated as an ordinary unmet research event (P5: uncertain is never
+  //     silently discharged).
   // `research_tool` events are NEVER touched by this — they are synchronous,
   // already complete at their own `at` by construction. Findings
   // (`individuallyResearchSatisfied` / the group `researchSatisfied` check)
   // keep their existing, unrelated satisfaction rule — only the no_capture
   // DISCHARGE anchor changes here.
-  const endedResearchReturnAts = (classified.availability === 'ok' ? classified.entries : [])
-    .filter((r) => r.status === 'inactive-confirmed' && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at))
-    .map((r) => r.entry.ended.at);
-  const latestResearchReturnAt = endedResearchReturnAts.length ? endedResearchReturnAts.sort().at(-1) : null;
+  const dispatchEventReturnAt = (e) => {
+    const row = ownRegisterRow(e);
+    return row && row.status === 'inactive-confirmed' && isValidAt(row.entry.ended?.at) ? row.entry.ended.at : null;
+  };
   const dischargedOnResearchLaneForDispatch = (e) => {
     if (e.kind !== 'agent_dispatch') return dischargedOnResearchLane(e.at);
-    if (researchDispatchLive) return false;
-    if (!latestResearchReturnAt) return false; // no valid return evidence — never discharge, stays armed
-    return dischargedOnResearchLane(latestResearchReturnAt);
+    if (isDispatchEventLive(e)) return false;
+    const returnAt = dispatchEventReturnAt(e);
+    if (!returnAt) return false; // no valid OWN return evidence — never discharge, stays armed
+    return dischargedOnResearchLane(returnAt);
   };
   const activeResearchEvents = researchEvents.filter((e) => {
-    // RESEARCH RETURN GATE (see the `researchDispatchLive` comment above): a
-    // dispatched research agent's own event waits for its return before it can
-    // arm the duty at all; a research_tool event is never gated.
-    if (e.kind === 'agent_dispatch' && researchDispatchLive) return false;
+    // RESEARCH RETURN GATE (see the per-dispatch join comment above): a
+    // dispatched research agent's own event waits for ITS OWN return before it
+    // can arm the duty at all; a research_tool event is never gated.
+    if (e.kind === 'agent_dispatch' && isDispatchEventLive(e)) return false;
     return !dischargedOnResearchLaneForDispatch(e);
   });
 
   // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
   // on a deferring release (review fix, HIGH found on commit 5306735). Among
   // the `agent_dispatch` events the gate above just excluded from
-  // activeResearchEvents, only the ones NOT already individually satisfied
-  // (a research_finding/decision/anti_pattern created/updated at or after
-  // THIS event's OWN `at`) and not already discharged by a `no_capture
+  // activeResearchEvents (now per-event: only an event whose OWN register
+  // entry is presumed-active), only the ones NOT already individually
+  // satisfied (a research_finding/decision/anti_pattern created/updated at or
+  // after THIS event's OWN `at`) and not already discharged by a `no_capture
   // --lane research` declaration survive. This is deliberately a PER-EVENT
   // check — never the group's earliest-active-event anchor
   // (`researchSatisfied` below) — because the group anchor is exactly what
@@ -1293,10 +1377,10 @@ try {
   // it — never resurrected merely because an unrelated research dispatch
   // happens to still be live (decision b2474b26's rejected alternative 1:
   // "retaining settled evidence lets an old capture satisfy later research").
-  // Computed only when there is something to check (a live research dispatch
-  // AND at least one agent_dispatch research event) — an unconditional store
+  // Computed only when there is something to check (at least one LIVE
+  // agent_dispatch research event, by its own join) — an unconditional store
   // query here would be wasted work on every ordinary Stop.
-  const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === 'agent_dispatch');
+  const hasLiveAgentDispatchEvents = researchEvents.some((e) => e.kind === 'agent_dispatch' && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents
     ? store.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
     : [];
@@ -1305,7 +1389,7 @@ try {
   const outstandingDeferredResearchEvents = researchEvents.filter(
     (e) =>
       e.kind === 'agent_dispatch' &&
-      researchDispatchLive &&
+      isDispatchEventLive(e) &&
       !dischargedOnResearchLaneForDispatch(e) &&
       !individuallyResearchSatisfied(e.at)
   );
@@ -1744,7 +1828,8 @@ try {
   }
 
   // §6 H10 article demand: touched files nothing owns, at threshold or any new
-  // unowned file (vs git HEAD; no-git degrades loud to threshold-only).
+  // unowned file (vs the settled snapshot's BASE commit, falling back to HEAD;
+  // no-git degrades loud to threshold-only).
   //
   // HOISTED ABOVE THE NO-DUTY TERMINAL RELEASE (item f4616312 hole 1,
   // 2026-08-29), completing what board ef206eca started. That fix moved the
@@ -1762,9 +1847,27 @@ try {
   // NOT a threshold question: newUnowned.length > 0 triggers the demand on its
   // own, so ONE newly created unowned file is enough — min_unowned_files never
   // enters it.
+  // NEWNESS BASE (board 4e624c1a, finding 6d1b3c99): a brand-new unowned file
+  // added by a PLAIN GIT COMMIT made outside Claude Code between sessions is
+  // already present in HEAD by the time this Stop runs, so testing newness
+  // against HEAD (the pre-fix behaviour) never sees it — silent, no matter
+  // who committed it. Test against the SETTLED SNAPSHOT'S BASE COMMIT
+  // instead — the same base gitTouches (scripts/hooks/lib/settlement.mjs
+  // :451-471) diffs candidates from — so a file absent at the last settled
+  // observation counts as new regardless of who committed it since. A file a
+  // Claude tool created and has not committed yet is absent from BOTH the
+  // base and HEAD, so it is still new either way — this preserves the
+  // existing meaning for that case exactly.
+  // FALLBACK TO HEAD: the settled base is unavailable — either no snapshot
+  // exists yet (`git.settled` null, a first-ever session: there is no prior
+  // observation to diff from) or the persisted SHA no longer resolves
+  // (`git.base_lost`, rewritten history: gitTouches already could not trust
+  // it as a diff base for the same reason) — falls back to today's
+  // HEAD-only behaviour rather than guessing at an interval it cannot prove.
+  const newnessBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : 'HEAD';
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync('git', ['ls-tree', '-r', 'HEAD', '--name-only', '--', ...unowned], {
+    const head = spawnSync('git', ['ls-tree', '-r', newnessBase, '--name-only', '--', ...unowned], {
       cwd: input.cwd,
       encoding: 'utf8',
       timeout: 30_000,
