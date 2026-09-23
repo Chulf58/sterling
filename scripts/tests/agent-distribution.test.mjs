@@ -2,7 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import {
   renderInstalledAgent,
   parseInstalledHeader,
@@ -220,6 +222,7 @@ test('syncAgents covers every status path', () => {
     writeFileSync(join(templatesDir, 'probe-agent.md'), v3);
     r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.3.0', now: T1 });
     assert.equal(r.report[0].status, 'refused_local_modification');
+    assert.equal(r.report[0].refused, true, 'sync must flag the refusal so sync-agents exits 2 (same as install)');
     assert.match(r.report[0].instruction, /will not overwrite local changes/);
     assert.ok(readFileSync(installedPath, 'utf8').includes('local tweak'), 'refused file must be untouched');
 
@@ -227,6 +230,7 @@ test('syncAgents covers every status path', () => {
     writeFileSync(installedPath, '---\nname: probe-agent\n---\nhand-written\n');
     r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.3.0', now: T1 });
     assert.equal(r.report[0].status, 'foreign_file');
+    assert.equal(r.report[0].refused, true, 'sync must flag the refusal so sync-agents exits 2 (same as install)');
     assert.ok(readFileSync(installedPath, 'utf8').includes('hand-written'));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -1052,7 +1056,7 @@ test('ensureConductorActivation: skipped on a real "foreign_file" report, a real
     mkdirSync(targetAgentsDir, { recursive: true });
     writeFileSync(join(targetAgentsDir, 'conductor.md'), '---\nname: conductor\n---\nhand-written, no sterling header\n');
     let { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
-    assert.deepEqual(report, [{ name: 'conductor', status: 'foreign_file', instruction: report[0].instruction }]);
+    assert.deepEqual(report, [{ name: 'conductor', status: 'foreign_file', refused: true, instruction: report[0].instruction }]);
     assert.equal(ensureConductorActivation(dir, report).activation, 'skipped');
 
     // real refused_local_modification: install clean, hand-edit the body, then change the template
@@ -1105,3 +1109,45 @@ test('ensureConductorActivation: "installed" / "up_to_date" / "refreshed" all co
     }
   }
 });
+
+// Regression: sync-agents exited 0 on a sync refusal because syncAgents omitted
+// `refused: true` for foreign_file / refused_local_modification (installAgents set
+// it), so /sterling:update printed the refusal as a change and could stamp
+// update-complete.json while the agent stayed stale. The CLI contract is exit 2.
+const SYNC_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'sync-agents.mjs');
+const runSyncCli = (target) => spawnSync(process.execPath, [SYNC_CLI, '--target', target], { encoding: 'utf8' });
+
+for (const [label, tamper, status] of [
+  [
+    'a hand-edited registered agent whose template is stale',
+    (path) => {
+      const content = readFileSync(path, 'utf8');
+      const header = parseInstalledHeader(content);
+      const staleHeader = header.headerLine.replace(`template_hash=${header.templateHash}`, `template_hash=${'0'.repeat(64)}`);
+      writeFileSync(path, content.replace(header.headerLine, staleHeader).replace(/\n$/, '\nA hand edit.\n'));
+    },
+    'refused_local_modification',
+  ],
+  [
+    'a header-less registered agent file',
+    (path) => writeFileSync(path, '---\nname: implementor\ndescription: hand-written\n---\nNot Sterling-generated.\n'),
+    'foreign_file',
+  ],
+]) {
+  test(`sync-agents CLI exits 2 on ${label} (${status})`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-sync-cli-'));
+    try {
+      const first = runSyncCli(dir);
+      assert.equal(first.status, 0, `clean install must exit 0:\n${first.stdout}${first.stderr}`);
+      const agentPath = join(dir, '.claude', 'agents', 'implementor.md');
+      tamper(agentPath);
+      const before = readFileSync(agentPath, 'utf8');
+      const r = runSyncCli(dir);
+      assert.match(r.stdout, new RegExp(`^${status}: implementor$`, 'm'));
+      assert.equal(r.status, 2, `a sync refusal must exit 2:\n${r.stdout}${r.stderr}`);
+      assert.equal(readFileSync(agentPath, 'utf8'), before, 'refused file must be untouched');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}

@@ -456,7 +456,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
     const header = parseInstalledHeader(installed);
     if (!header) {
       // Not Sterling-generated: never overwrite a file we did not write.
-      report.push({ name: entry.name, status: 'foreign_file', instruction: refuseInstruction(entry.name) });
+      report.push({ name: entry.name, status: 'foreign_file', refused: true, instruction: refuseInstruction(entry.name) });
       continue;
     }
     const modified = isLocallyModified(installed, header);
@@ -473,7 +473,7 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
         writeFileSync(installedPath, candidate);
         report.push({ name: entry.name, status: 'header_repaired' });
       } else {
-        report.push({ name: entry.name, status: 'refused_local_modification', instruction: refuseInstruction(entry.name) });
+        report.push({ name: entry.name, status: 'refused_local_modification', refused: true, instruction: refuseInstruction(entry.name) });
       }
     } else if (modified) {
       report.push({ name: entry.name, status: 'locally_modified_up_to_date' });

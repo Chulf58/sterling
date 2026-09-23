@@ -573,6 +573,7 @@ test('a per-project sync refusal surfaces as exit 2 without stopping the other p
     assert.equal(report.exit, 2);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 2, 'the refusal must not abort the fan-out');
     assert.deepEqual(report.projects.map((p) => p.status), [2, 0]);
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'a sync refusal must not leave a completion marker');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
