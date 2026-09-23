@@ -907,6 +907,12 @@ for (const a of agentReport) {
     header_repaired: { status: 'refreshed', detail: 'Sterling header repaired in place — content unchanged' },
     machine_rebaked: { status: 'refreshed', detail: 'machine-specific paths re-baked for this host (node/hooks dir), template unchanged' },
     up_to_date: { status: 'matches', detail: 'template hash + content hash match' },
+    config_drift: {
+      status: 'differs',
+      detail: a.status === 'config_drift'
+        ? `model/effort drift — installed model=${a.installed.model ?? '(none)'} effort=${a.installed.effort ?? '(none)'}, config.models resolves model=${a.configured.model ?? '(none)'} effort=${a.configured.effort ?? '(none)'}; not rewritten — realize it with ${a.fix}`
+        : '',
+    },
     locally_modified_up_to_date: { status: 'differs', detail: 'locally modified, template unchanged — left untouched' },
     refused_local_modification: { status: 'refused', detail: 'locally modified AND template changed — overwrite refused (see /sterling:sync-agents guidance below)' },
     foreign_file: { status: 'refused', detail: 'not Sterling-generated — never overwritten (see guidance below)' },

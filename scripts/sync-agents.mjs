@@ -3,7 +3,8 @@
 // locally modified generated agent (three-way review stubbed to
 // refuse-and-instruct per spec §16.1 Slice 1).
 //   node scripts/sync-agents.mjs --target <projectDir>
-// Exit codes: 0 = synced/up-to-date; 2 = at least one refusal (loud), including a
+// Exit codes: 0 = synced/up-to-date (config_drift is reported, never a refusal —
+// decision 256d1059); 2 = at least one refusal (loud), including a
 // refused conductor activation (route A) — /sterling:update must not stamp complete
 // while the conductor is installed but not the project's main-session agent.
 import { fileURLToPath } from 'node:url';
@@ -46,8 +47,17 @@ const { report, restartInstruction } = syncAgents({
 });
 
 let refused = 0;
+const modelEffort = ({ model, effort }) => `model=${model ?? '(none)'} effort=${effort ?? '(none)'}`;
 for (const r of report) {
-  console.log(`${r.status}: ${r.name}`);
+  if (r.status === 'config_drift') {
+    // Decision 256d1059: loud, one line, never a refusal (exit stays 0); nothing written.
+    console.log(
+      `config_drift: ${r.name} — installed ${modelEffort(r.installed)}, config.models resolves ${modelEffort(r.configured)}; ` +
+        `NOT rewritten by sync — realize it with ${r.fix}, then restart the session`
+    );
+  } else {
+    console.log(`${r.status}: ${r.name}`);
+  }
   if (r.instruction) {
     if (r.refused) refused += 1;
     console.error('\n' + r.instruction + '\n');
