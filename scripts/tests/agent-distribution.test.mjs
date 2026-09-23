@@ -23,6 +23,7 @@ import {
   sha256,
   RESTART_INSTRUCTION,
   ensureConductorActivation,
+  describeConfigDrift,
 } from '../lib/agent-distribution.mjs';
 import { AGENT_MODEL_KEY } from '@sterling/schemas';
 
@@ -1255,3 +1256,204 @@ for (const [label, tamper, status] of [
     }
   });
 }
+
+// -----------------------------------------------------------------------------
+// Per-project agent tool extension (decision
+// per-project-agent-extra-tools-config-appended-at-render, 587472e3; Dome Farmer
+// #50): config.agents.<name>.extra_tools is appended to the rendered tools: line.
+// Templates carry no token, so template_hash stays sha256(raw template); the
+// content_hash covers the rendered output, so the file is NOT locally modified.
+const EXTRAS = (name, extra_tools) => ({ agents: { [name]: { extra_tools } } });
+const toolsLine = (s) => frontmatter(s).match(/^tools:\s*(.*)$/m)[1];
+
+test('extra_tools: render appends de-duplicated extras to the tools: line; template_hash unchanged; not locally modified', () => {
+  const plain = renderInstalledAgent(TEMPLATE, 'probe.md', OPTS);
+  const { installedContent } = renderInstalledAgent(TEMPLATE, 'probe.md', {
+    ...OPTS,
+    config: EXTRAS('probe-agent', ['mcp__godot__*', 'Read', 'mcp__godot__*', 'WebFetch']),
+  });
+  assert.equal(toolsLine(installedContent), 'Read, mcp__godot__*, WebFetch', 'extras appended once each; a tool the template already grants is not repeated');
+  const header = parseInstalledHeader(installedContent);
+  assert.equal(header.templateHash, sha256(TEMPLATE), 'template_hash is the raw template hash — extras never move it');
+  assert.equal(header.templateHash, parseInstalledHeader(plain.installedContent).templateHash);
+  assert.equal(isLocallyModified(installedContent, header), false, 'the rendered extras are covered by content_hash');
+  assert.equal(frontmatter(installedContent).replace(/^tools:.*$/m, ''), frontmatter(plain.installedContent).replace(/^tools:.*$/m, ''), 'only the tools: line changes');
+});
+
+test('extra_tools: absent or empty extras render byte-identically to no config', () => {
+  const plain = renderInstalledAgent(TEMPLATE, 'probe.md', OPTS).installedContent;
+  assert.equal(renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: { agents: {} } }).installedContent, plain);
+  assert.equal(renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: EXTRAS('probe-agent', []) }).installedContent, plain);
+  assert.equal(renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: EXTRAS('someone-else', ['mcp__godot__*']) }).installedContent, plain, 'another agent\'s extras do not leak');
+});
+
+test('extra_tools: refused loudly for an agent without a tools: line (main-session conductor inherits every tool)', () => {
+  const noTools = TEMPLATE.replace('tools: Read\n', '');
+  assert.throws(
+    () => renderInstalledAgent(noTools, 'conductor.md', { ...OPTS, config: EXTRAS('probe-agent', ['mcp__godot__*']) }),
+    /extra_tools.*probe-agent.*no tools: line/,
+  );
+});
+
+test('extra_tools: refused loudly for any entry that would grant Sterling MCP tools (grants stay the template\'s job, b4388c11)', () => {
+  for (const bad of ['mcp__sterling__knowledge_update', 'mcp__plugin_sterling_sterling__board_add', 'mcp__sterling__*', 'mcp__sterling', 'mcp__plugin_sterling_sterling', 'mcp__*', 'mcp__ster*']) {
+    assert.throws(
+      () => renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: EXTRAS('probe-agent', [bad]) }),
+      /extra_tools.*Sterling MCP/,
+      `entry ${bad} must be refused`,
+    );
+  }
+});
+
+test('extra_tools: a malformed entry reaching render unparsed is refused (newline would inject frontmatter)', () => {
+  for (const bad of ['mcp__a\nhooks:', 'a, b', '', 42]) {
+    assert.throws(
+      () => renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: EXTRAS('probe-agent', [bad]) }),
+      /extra_tools.*not a valid tool name/,
+      `entry ${JSON.stringify(bad)} must be refused`,
+    );
+  }
+});
+
+test('extra_tools: an agent key not in the registry is refused by install AND sync, before anything is written', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe.md': TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    const config = EXTRAS('implementr', ['mcp__godot__*']);
+    assert.throws(() => installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, config }), /config\.agents.*'implementr'.*not a registered agent/);
+    assert.throws(() => syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, config }), /config\.agents.*'implementr'.*not a registered agent/);
+    assert.equal(existsSync(join(targetAgentsDir, 'probe-agent.md')), false, 'nothing written');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('extra_tools: an extras-only config change -> sync reports config_drift naming the tools difference, writes nothing; install realizes it; then up_to_date', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe.md': TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    const installedPath = join(targetAgentsDir, 'probe-agent.md');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, config: EXTRAS('probe-agent', ['WebFetch']) });
+    const before = readFileSync(installedPath, 'utf8');
+    const config = EXTRAS('probe-agent', ['mcp__godot__*']);
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, config });
+    assert.equal(report.length, 1);
+    assert.equal(report[0].status, 'config_drift', 'an extras-only change is never up_to_date (anti_pattern 85d15143)');
+    assert.equal(report[0].refused, undefined, 'config_drift is a report, not a refusal');
+    assert.deepEqual(report[0].tools, { missing: ['mcp__godot__*'], unexpected: ['WebFetch'] });
+    assert.match(describeConfigDrift(report[0]), /tools: missing mcp__godot__\*; unexpected WebFetch/);
+    assert.doesNotMatch(describeConfigDrift(report[0]), /model=/, 'model/effort did not drift, so the line does not claim it did');
+    assert.equal(readFileSync(installedPath, 'utf8'), before, 'sync writes nothing for config_drift');
+
+    const inst = installAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, config });
+    assert.equal(inst.report[0].status, 'installed');
+    assert.equal(toolsLine(readFileSync(installedPath, 'utf8')), 'Read, mcp__godot__*');
+    const after = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, config });
+    assert.deepEqual(after.report, [{ name: 'probe-agent', status: 'up_to_date' }]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('extra_tools: a template refresh picks the extras up (stale template -> refreshed with the configured tools)', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe.md': TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS });
+    writeFileSync(join(templatesDir, 'probe.md'), TEMPLATE.replace('Fixture body line one.', 'Fixture body line two.'));
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, config: EXTRAS('probe-agent', ['mcp__godot__*']) });
+    assert.equal(report[0].status, 'refreshed');
+    assert.equal(toolsLine(readFileSync(join(targetAgentsDir, 'probe-agent.md'), 'utf8')), 'Read, mcp__godot__*');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('describeConfigDrift: a model-only drift keeps naming installed and configured model/effort', () => {
+  const line = describeConfigDrift({ installed: { model: 'a', effort: 'low' }, configured: { model: 'b', effort: 'low' } });
+  assert.match(line, /installed model=a effort=low, config\.models resolves model=b effort=low/);
+});
+
+const INSTALL_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'install-agents.mjs');
+
+test('install-agents + sync-agents CLI: extras render into the real researcher (not scout), an extras-only change reports config_drift (exit 0, nothing written); extras on the inherit-all implementor or the conductor fail the install', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-extras-cli-'));
+  try {
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    const cfgPath = join(dir, '.sterling', 'config.json');
+    writeFileSync(cfgPath, JSON.stringify({ agents: { researcher: { extra_tools: ['mcp__godot__*'] } } }));
+    const inst = spawnSync(process.execPath, [INSTALL_CLI, '--target', dir], { encoding: 'utf8' });
+    assert.equal(inst.status, 0, `install must exit 0:\n${inst.stdout}${inst.stderr}`);
+    const agentPath = join(dir, '.claude', 'agents', 'researcher.md');
+    const installed = readFileSync(agentPath, 'utf8');
+    assert.ok(toolsLine(installed).endsWith(', mcp__godot__*'), `extras appended: ${toolsLine(installed)}`);
+    assert.doesNotMatch(toolsLine(readFileSync(join(dir, '.claude', 'agents', 'scout.md'), 'utf8')), /godot/, 'per-agent, never global');
+    const clean = runSyncCli(dir);
+    assert.match(clean.stdout, /^up_to_date: researcher$/m, `installed extras are current:\n${clean.stdout}`);
+
+    writeFileSync(cfgPath, JSON.stringify({ agents: { researcher: { extra_tools: [] } } }));
+    const r = runSyncCli(dir);
+    assert.equal(r.status, 0, `config_drift is a report, not a refusal:\n${r.stdout}${r.stderr}`);
+    const line = r.stdout.split('\n').find((l) => l.startsWith('config_drift: researcher'));
+    assert.ok(line, `a config_drift status line for researcher:\n${r.stdout}`);
+    assert.ok(line.includes('unexpected mcp__godot__*'), `names the tools difference: ${line}`);
+    assert.equal(readFileSync(agentPath, 'utf8'), installed, 'sync writes nothing for config_drift');
+
+    for (const agent of ['implementor', 'conductor']) {
+      writeFileSync(cfgPath, JSON.stringify({ agents: { [agent]: { extra_tools: ['mcp__godot__*'] } } }));
+      const refused = spawnSync(process.execPath, [INSTALL_CLI, '--target', dir], { encoding: 'utf8' });
+      assert.notEqual(refused.status, 0, `extras on the ${agent} fail the install`);
+      assert.match(refused.stderr, new RegExp(`'${agent}'.*no tools: line`), `names the problem:\n${refused.stderr}`);
+      const refusedSync = runSyncCli(dir);
+      assert.notEqual(refusedSync.status, 0, `extras on the ${agent} fail the sync too`);
+      assert.equal(readFileSync(agentPath, 'utf8'), installed, 'a refused install writes nothing');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('extra_tools: refused loudly for an inherit-all agent (disallowedTools, no tools: line — the implementor shape, bc1894e5)', () => {
+  const inheritAll = TEMPLATE.replace('tools: Read\n', 'disallowedTools: mcp__sterling__board_add, mcp__plugin_sterling_sterling__board_add\n');
+  assert.throws(
+    () => renderInstalledAgent(inheritAll, 'implementor.md', { ...OPTS, config: EXTRAS('probe-agent', ['mcp__godot__*']) }),
+    /extra_tools.*probe-agent.*no tools: line.*inherits every session tool/,
+  );
+});
+
+// Review fixes (#50): malformed agents entries parse fine (the schema is lenient
+// so a typo never breaks MCP boot or a hook) but FAIL install with a named
+// refusal; the Sterling-prefix ban is case-insensitive.
+test('extra_tools: a malformed agents entry does not break parseConfig but does fail install/sync with a named refusal', async () => {
+  const { parseConfig } = await import('@sterling/schemas');
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'probe.md': TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    for (const [raw, re] of [
+      [{ agents: { 'probe-agent': { extra_tools: ['a, b'] } } }, /extra_tools for 'probe-agent'.*"a, b" is not a valid tool name/],
+      [{ agents: { 'probe-agent': { extra_tool: ['mcp__godot__*'] } } }, /config\.agents\.probe-agent: unknown key 'extra_tool'/],
+      [{ agents: { 'probe-agent': { extra_tools: 'a' } } }, /config\.agents\.probe-agent\.extra_tools .*not an array/],
+    ]) {
+      const config = parseConfig(raw);
+      assert.throws(() => installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, config }), re);
+      assert.throws(() => syncAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, config }), re);
+    }
+    assert.equal(existsSync(join(targetAgentsDir, 'probe-agent.md')), false, 'nothing written');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('extra_tools: the Sterling-prefix ban is case-insensitive', () => {
+  for (const bad of ['MCP__sterling__x', 'mcp__Sterling__knowledge_update', 'Mcp__Plugin_Sterling_Sterling', 'MCP__*']) {
+    assert.throws(
+      () => renderInstalledAgent(TEMPLATE, 'probe.md', { ...OPTS, config: EXTRAS('probe-agent', [bad]) }),
+      /extra_tools.*Sterling MCP/,
+      `entry ${bad} must be refused`,
+    );
+  }
+});

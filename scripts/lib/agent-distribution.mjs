@@ -9,7 +9,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSync, lstatSync, unlinkSync, renameSync, linkSync } from 'node:fs';
 import { join } from 'node:path';
-import { AGENT_MODEL_KEY } from '@sterling/schemas';
+import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE } from '@sterling/schemas';
+import { MCP_PREFIXES } from './checks.mjs';
 
 // Dead-term check (spec §0.4, CLAUDE.md conduct rules): no residue of the
 // predecessor's vocabulary in anything shipped, scaffolded, or generated.
@@ -112,6 +113,58 @@ function resolveModelVars(templateContent, label, config) {
   return { MODEL: entry.model, EFFORT: entry.effort };
 }
 
+// Per-project tool extension (decision
+// per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+// config.agents[<name>].extra_tools is appended, de-duplicated, to the rendered
+// tools: line. Templates carry no token, so template_hash stays the raw template
+// hash; content_hash covers the rendered frontmatter, so the result is not
+// locally modified. Refused loudly (P5): an entry that is not one tool name (the
+// value lands in frontmatter — a newline could inject hooks:), an agent with no
+// tools: line (the main-session conductor and the inherit-all implementor,
+// decision bc1894e5, inherit every tool — nothing to extend), and any entry
+// that would grant Sterling MCP tools — including the whole-server form
+// (`mcp__sterling`) and a wildcard spanning a Sterling prefix (`mcp__*`) —
+// because Sterling grants stay the template's job (decision b4388c11).
+function refusesSterlingGrant(entry) {
+  // lowercased: the prefixes are lowercase, and a case variant must not slip past
+  const lower = entry.toLowerCase();
+  const wildcard = lower.endsWith('*');
+  const stem = wildcard ? lower.slice(0, -1) : lower;
+  return MCP_PREFIXES.some((p) => stem.startsWith(p) || stem === p.slice(0, -2) || (wildcard && p.startsWith(stem)));
+}
+
+function appendExtraTools(frontmatter, name, label, config) {
+  const agentEntry = config?.agents?.[name];
+  // The schema is lenient (passthrough) so a typo never breaks parseConfig;
+  // refuse it here instead, by name — a silently ignored typo would grant nothing.
+  const unknownKey = Object.keys(agentEntry ?? {}).find((key) => key !== 'extra_tools');
+  if (unknownKey !== undefined) {
+    throw new Error(`config.agents.${name}: unknown key '${unknownKey}' (${label}) — the only key is extra_tools (P5)`);
+  }
+  const extras = agentEntry?.extra_tools ?? [];
+  if (!Array.isArray(extras)) {
+    throw new Error(`config.agents.${name}.extra_tools (${label}) is not an array (got ${extras === null ? 'null' : typeof extras}) — it must be an array of tool names (P5)`);
+  }
+  if (extras.length === 0) return frontmatter;
+  for (const entry of extras) {
+    if (typeof entry !== 'string' || !AGENT_TOOL_NAME_RE.test(entry)) {
+      throw new Error(`extra_tools for '${name}' (${label}): ${JSON.stringify(entry)} is not a valid tool name — one name, optional trailing *, no commas/whitespace/newlines (P5)`);
+    }
+    if (refusesSterlingGrant(entry)) {
+      throw new Error(`extra_tools for '${name}' (${label}): '${entry}' would grant Sterling MCP tools — Sterling grants stay the template's job (decision b4388c11); remove it from config.agents.${name}.extra_tools`);
+    }
+  }
+  const lines = frontmatter.split('\n');
+  const idx = lines.findIndex((line) => /^tools:/.test(line));
+  if (idx === -1) {
+    throw new Error(`extra_tools for '${name}' (${label}): the agent has no tools: line, so it inherits every session tool (the main-session conductor, or an inherit-all agent such as the implementor, decision bc1894e5) and there is no allowlist to extend — remove config.agents.${name}`);
+  }
+  const tools = lines[idx].replace(/^tools:\s*/, '').split(',').map((t) => t.trim()).filter(Boolean);
+  for (const entry of extras) if (!tools.includes(entry)) tools.push(entry);
+  lines[idx] = `tools: ${tools.join(', ')}`;
+  return lines.join('\n');
+}
+
 export function renderInstalledAgent(templateContent, label, { pluginVersion, now, vars = {}, config } = {}) {
   // Install-time variable substitution: installed agents are project-side and
   // cannot use ${CLAUDE_PLUGIN_ROOT}; templates carry {{NODE}}/{{HOOKS_DIR}}
@@ -123,7 +176,9 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
   }
-  const { name, frontmatter, body } = parseTemplate(substituted, label);
+  const parsed = parseTemplate(substituted, label);
+  const { name, body } = parsed;
+  const frontmatter = appendExtraTools(parsed.frontmatter, name, label, config);
   // WHOLE rendered template, not just the frontmatter: templates now carry
   // substitution tokens in the BODY too ({{GIT_RO}} — the absolute path H14
   // grants for read-only git), and a forgotten body variable would otherwise
@@ -198,6 +253,32 @@ export function extractModelEffort(content) {
     model: fm.match(/^model:\s*(\S+)\s*$/m)?.[1] ?? null,
     effort: fm.match(/^effort:\s*(\S+)\s*$/m)?.[1] ?? null,
   };
+}
+
+// The frontmatter tools: entries of an agent file (null when it carries no tools:
+// line) — the second surface config_drift compares (587472e3).
+export function extractTools(content) {
+  const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
+  const line = (m ? m[1] : '').match(/^tools:\s*(.*)$/m);
+  return line ? line[1].split(',').map((t) => t.trim()).filter(Boolean) : null;
+}
+
+// One description of a config_drift report entry for every printer
+// (sync-agents, init): names only the surfaces that actually drifted.
+export function describeConfigDrift(r) {
+  const parts = [];
+  const { installed: i, configured: c } = r;
+  if (i.model !== c.model || i.effort !== c.effort) {
+    const me = ({ model, effort }) => `model=${model ?? '(none)'} effort=${effort ?? '(none)'}`;
+    parts.push(`installed ${me(i)}, config.models resolves ${me(c)}`);
+  }
+  if (r.tools) {
+    const t = [];
+    if (r.tools.missing.length) t.push(`missing ${r.tools.missing.join(', ')}`);
+    if (r.tools.unexpected.length) t.push(`unexpected ${r.tools.unexpected.join(', ')}`);
+    parts.push(`tools: ${t.join('; ')} (installed vs template + config.agents extra_tools)`);
+  }
+  return parts.join('; ');
 }
 
 export const CONFIG_DRIFT_FIX = 'node scripts/install-agents.mjs (--target <dir> for a sibling)';
@@ -278,6 +359,14 @@ export function agentChangesRequireRestart(report) {
 
 function prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config }) {
   const registry = loadRegistry(registryPath);
+  // config.agents keys name registered agents (587472e3): a typo would otherwise
+  // grant nothing, silently.
+  const registered = new Set(registry.agents.map((entry) => entry.name));
+  for (const key of Object.keys(config?.agents ?? {})) {
+    if (!registered.has(key)) {
+      throw new Error(`config.agents: '${key}' is not a registered agent (registered: ${[...registered].join(', ')}) — fix or remove it in .sterling/config.json`);
+    }
+  }
   // Render every replacement before modifying or retiring anything. In particular,
   // a bad template/config may not turn a registry typo into an irreversible prune.
   return registry.agents.map((entry) => {
@@ -519,11 +608,20 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
         JSON.stringify(extractHookCommandLines(installed)) === JSON.stringify(extractHookCommandLines(candidate));
       const installedModel = extractModelEffort(installed);
       const configuredModel = extractModelEffort(candidate);
+      // Tools compare as sets: config.agents extra_tools is the only config input
+      // to this line (587472e3), so any difference is an unrealized extras change.
+      const installedTools = extractTools(installed) ?? [];
+      const configuredTools = extractTools(candidate) ?? [];
+      const missing = configuredTools.filter((t) => !installedTools.includes(t));
+      const unexpected = installedTools.filter((t) => !configuredTools.includes(t));
+      const modelDrift = installedModel.model !== configuredModel.model || installedModel.effort !== configuredModel.effort;
       if (!sameCommands) {
         writeFileSync(installedPath, candidate);
         report.push({ name: entry.name, status: 'machine_rebaked' });
-      } else if (installedModel.model !== configuredModel.model || installedModel.effort !== configuredModel.effort) {
-        report.push({ name: entry.name, status: 'config_drift', installed: installedModel, configured: configuredModel, fix: CONFIG_DRIFT_FIX });
+      } else if (modelDrift || missing.length || unexpected.length) {
+        const drift = { name: entry.name, status: 'config_drift', installed: installedModel, configured: configuredModel, fix: CONFIG_DRIFT_FIX };
+        if (missing.length || unexpected.length) drift.tools = { missing, unexpected };
+        report.push(drift);
       } else {
         report.push({ name: entry.name, status: 'up_to_date' });
       }

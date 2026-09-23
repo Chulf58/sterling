@@ -43,6 +43,10 @@ const successPredicateSchema = z
     { message: 'success_predicates entry must declare at least one criterion (output_regex, output_regex_absent, or artifact)' }
   );
 
+// One tool name for config.agents.<name>.extra_tools (587472e3). Enforced at the
+// render step (not in the schema), because the rendered value lands in frontmatter.
+export const AGENT_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.-]*\*?$/;
+
 export const configSchema = z.object({
   toolchains: z
     .array(
@@ -200,11 +204,45 @@ export const configSchema = z.object({
       debugger: modelEffort.default({ model: 'claude-sonnet-5', effort: 'high' }),
     })
     .default({}),
+  // Per-project agent tool extension (decision
+  // per-project-agent-extra-tools-config-appended-at-render, 587472e3):
+  // agents.<registered-agent-name>.extra_tools is appended to that agent's
+  // rendered tools: line at install. It must live in the schema — this top-level
+  // object strips unknown keys silently. Each entry is one tool name with an
+  // optional trailing `*`; commas, whitespace and newlines are refused because a
+  // newline in the rendered frontmatter could inject keys such as hooks:.
+  // All of that — entry syntax, unknown keys, registry membership, tools:-line
+  // presence and the Sterling-MCP-prefix ban — is refused loudly at render
+  // (scripts/lib/agent-distribution.mjs), where install and sync fail; parsing
+  // stays lenient so a typo never breaks MCP boot or a hook.
+  agents: z
+    .record(
+      z.string(),
+      // LENIENT on purpose (review fix): the MCP server and every hook parse
+      // this file, so a hand-edit typo must not make every parseConfig throw —
+      // the hazard the delivery block records for .strict(). passthrough keeps
+      // an unknown key (a typo such as extra_tool) so render can refuse it by
+      // name; entry syntax (AGENT_TOOL_NAME_RE) is enforced at render too.
+      z
+        .object({
+          // z.unknown, not z.array: even a non-array value (a string) must
+          // parse; render refuses it by name ("not an array").
+          extra_tools: z.unknown().default([]),
+        })
+        .passthrough(),
+    )
+    .default({}),
   // §6 H10 article demand: direct-mode touches in unowned territory at this
   // threshold (or any new unowned file vs git HEAD) demand the owning article
   article_demand: z
     .object({
       min_unowned_files: z.number().int().positive().default(3),
+      // Per-project policy data (decision
+      // article-demand-ignore-globs-per-project-policy-data): a touched path
+      // matching any glob is dropped from the demand candidate set PER PATH.
+      // Ships empty so every project is unchanged until it opts in (Dome
+      // Farmer: `**/*.uid`, Godot's tracked identity sidecars).
+      ignore_globs: z.array(z.string().min(1)).default([]),
     })
     .default({}),
   // §3.2.7 H1 queue-depth signal: at or above this many open maintenance items,
