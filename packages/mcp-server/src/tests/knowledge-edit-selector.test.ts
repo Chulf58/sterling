@@ -510,3 +510,78 @@ test('LITERAL REPLACE (array selector): replace text containing $& and $$ is sto
     cleanup();
   }
 });
+
+// ---------------------------------------------------------------------------
+// BOOLEAN SUB-FIELD (Dome Farmer issue #48, 2026-09-23). A state_review item
+// directs "clear the unverified flags" on files[] entries, but the selector
+// edit refused every non-string sub-field, so the only route was a
+// whole-array knowledge_update of files[] — the retransmission hazard the
+// selector exists to avoid. For a BOOLEAN sub-field the exactly-once contract
+// maps onto the value itself: `find` must be the element's CURRENT value
+// spelled 'true' or 'false', and `replace` must be 'true' or 'false'.
+// Sabotage: restore the blanket `typeof cur !== 'string'` refusal — the
+// clear pin goes red with "is boolean, not a string".
+// ---------------------------------------------------------------------------
+test('BOOLEAN (array selector): files[path=x].unverified find "true" replace "false" clears the ONE flag — sibling byte-untouched, version bumps and persists', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'bool-clear', [
+      { path: 'src/a.ts', role: 'the a role', unverified: true },
+      { path: 'src/b.ts', role: 'the b role', unverified: true },
+    ]);
+    const id = article.id as string;
+    const before = getArticle(tools, id);
+
+    const edited = tools.knowledgeEdit(id, 'files[path=src/a.ts].unverified', 'true', 'false');
+    const files = (edited.record as unknown as { files: FileEntry[] }).files;
+    assert.deepEqual(files, [
+      { path: 'src/a.ts', role: 'the a role', unverified: false },
+      { path: 'src/b.ts', role: 'the b role', unverified: true },
+    ]);
+    const after = getArticle(tools, id);
+    assert.deepEqual(after.files, files, 'the edit is PERSISTED, not merely echoed');
+    assert.equal(after.version, before.version + 1, 'a normal versioned write');
+  } finally {
+    cleanup();
+  }
+});
+
+test('BOOLEAN (array selector): a find that is not the CURRENT value, or a replace that is not true/false, is refused and writes nothing', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'bool-refuse', [{ path: 'src/a.ts', role: 'the a role', unverified: true }]);
+    const id = article.id as string;
+    const before = getArticle(tools, id);
+
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'files[path=src/a.ts].unverified', 'false', 'true'),
+      /'unverified' on the selected files element is true, not 'false'/
+    );
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'files[path=src/a.ts].unverified', 'true', 'no'),
+      /boolean — 'replace' must be 'true' or 'false'/
+    );
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'files[path=src/a.ts].unverified', 'tru', 'false'),
+      /'unverified' on the selected files element is true, not 'tru'/
+    );
+    const after = getArticle(tools, id);
+    assert.deepEqual(after, before, 'nothing was written by any refused call');
+  } finally {
+    cleanup();
+  }
+});
+
+test('BOOLEAN (array selector): an ABSENT sub-field is still refused — edit changes an existing value, it does not add a key', () => {
+  const { tools, cleanup } = harness();
+  try {
+    const article = mkArticle(tools, 'bool-absent', [{ path: 'src/a.ts', role: 'the a role' }]);
+    const id = article.id as string;
+    assert.throws(
+      () => tools.knowledgeEdit(id, 'files[path=src/a.ts].unverified', 'true', 'false'),
+      /'unverified' on the selected files element is absent/
+    );
+  } finally {
+    cleanup();
+  }
+});
