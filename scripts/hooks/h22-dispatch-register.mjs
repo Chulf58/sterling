@@ -145,6 +145,8 @@ async function endTaskStoppedDispatch(input, lines) {
     // A killed agent never writes a final message, so the residue probe runs
     // unconditionally — the same signature a message-less SubagentStop gets.
     if (finished.found) lines.push(...residueLines(input.cwd, finished.entry));
+    // A state record the Stop could not terminalize is disclosed, never dropped.
+    if (finished.disclosures?.length) lines.push(...finished.disclosures);
   } catch (e) {
     if (e?.code !== 'register_lock_held') throw e;
     lines.push(
@@ -225,6 +227,20 @@ try {
       // (resume, unattributable) is exactly as untrustworthy as the old
       // walk-back/union fallbacks were.
       const positionalSafe = res.source === 'post' || res.source === 'derived-type-unique';
+
+      // A state-poisoned Start NAMES the poisoned file(s) for every class:
+      // a stray file blocks attribution until a human acts on it.
+      if (res.case === 'state-poisoned') {
+        lines.push(
+          render(
+            disclosure(
+              'dispatch_state_poisoned',
+              { case: res.case, files: res.poisoned_files ?? [] },
+              `H22: dispatch '${input.agent_id}' (${input.agent_type}) is unattributable [state-poisoned] — poisoned dispatch-state file(s): ${(res.poisoned_files ?? []).join(', ') || '(none named)'}`
+            )
+          )
+        );
+      }
 
       if (reviewerStart && !positionalSafe) {
         lines.push(
@@ -333,6 +349,9 @@ try {
         event: 'subagent-stop',
       });
       departing = finished.found ? finished.entry : undefined;
+      // A poisoned/duplicate state record the Stop could not terminalize
+      // (the round IS ended) is disclosed, mirroring the degraded-Stop line.
+      if (finished.disclosures?.length) lines.push(...finished.disclosures);
     } catch (e) {
       if (e?.code === 'register_lock_held') {
         lines.push(

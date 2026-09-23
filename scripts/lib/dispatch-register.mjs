@@ -601,14 +601,97 @@ const ORIGINS = new Set(['pre', 'post-only', 'failure-only']);
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const DERIVE_RETRY_INTERVAL_MS = 10;
 const DERIVE_PER_ATTEMPT_LOCK_MS = 30;
-const DERIVE_TOTAL_BUDGET_MS = 150;
+// SIBLINGS-RETRY BUDGET (decision dispatch-state-status-in-filename-live-
+// scan-parses-only-live-records, follow-on): a background Post carries the
+// exact agentId and lands 0.34-2.24 s after Start (finding aa3b4a4c), so
+// while the last verdict is siblings-retry the wait runs up to 3 s; a
+// lock-held retry keeps the original 150 ms bound. Neither ever guesses: an
+// expired budget is unattributable.
+const DERIVE_SIBLINGS_BUDGET_MS = 3000;
+const DERIVE_LOCK_HELD_BUDGET_MS = 150;
+
+function retryBudgetFor(verdict) {
+  return verdict === 'siblings-retry' ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
+}
 
 export function dispatchStateDir(root) {
   return join(root, '.sterling', 'transient', 'dispatch-state');
 }
 
-function dispatchStateFile(root, key) {
-  return join(dispatchStateDir(root), `${key}.json`);
+// STATUS IN THE FILENAME (decision `dispatch-state-status-in-filename-live-
+// scan-parses-only-live-records`). One flat directory:
+//   live-<key>.json               a non-terminal record
+//   done-<key>~<ids>.json         a terminal record; <ids> is the sorted,
+//                                 de-duplicated SHA-256 base64url of EVERY
+//                                 agent id it carries (started,
+//                                 derived_binding, post_binding) joined by
+//                                 '.', or `none` for the empty set.
+// '~' and '.' occur in neither a key nor a base64url hash, so the grammar is
+// unambiguous; the longest name (raw key + three hashes) is 226 characters.
+// The hot scan parses live-* only; a done-* NAME only locates a record, and a
+// parse of the hit validates it — a name alone is never evidence.
+const LIVE_PREFIX = 'live-';
+const DONE_PREFIX = 'done-';
+const IDS_DELIMITER = '~';
+const ID_SEPARATOR = '.';
+const EMPTY_IDS = 'none';
+const MAX_FILENAME_LENGTH = 254;
+const STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+const ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+
+export function agentIdHash(agentId) {
+  return createHash('sha256').update(String(agentId), 'utf8').digest('base64url');
+}
+
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+
+export function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters — over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+
+// parseStateFileName — NAMES ONLY, never a read. kinds: live, done, legacy
+// (a pre-migration `<key>.json`), tmp (an orphaned atomic-write staging
+// file), malformed-live, malformed-done, unknown-json, other.
+function parseStateFileName(name) {
+  if (name.includes('.json.tmp-')) return { kind: 'tmp' };
+  if (!name.endsWith('.json')) return { kind: 'other' };
+  const stem = name.slice(0, -'.json'.length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: 'live', key } : { kind: 'malformed-live' };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    // A malformed done- name KEEPS a key it validly carries: keyed reads for
+    // that key must refuse it, never read the key as absent.
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: 'malformed-done', key: parts[0] } : { kind: 'malformed-done' };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: 'done', key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: 'legacy', key: stem } : { kind: 'unknown-json' };
+}
+
+// LOUD, NEVER BLOCKING: a name the hot path ignores (malformed history, an
+// unknown .json) or a rename that failed is written to stderr once per file
+// per process — the Start retry loop re-scans many times, and one anomaly is
+// one line, not hundreds.
+const warnedStateFiles = new Set();
+function warnStateFile(file, text) {
+  const tag = `${file}\u0000${text}`;
+  if (warnedStateFiles.has(tag)) return;
+  warnedStateFiles.add(tag);
+  process.stderr.write(`${render(disclosure('dispatch_state_poisoned', { file }, text))}\n`);
 }
 
 export function dispatchStateKey(toolUseId) {
@@ -747,7 +830,7 @@ function checkDispatchStateContainment(root, { create }) {
   return { ok: true, availability: 'ok' };
 }
 
-function writeRecordAtomic(root, key, record) {
+function writeRecordAtomic(root, fileName, record) {
   const dir = dispatchStateDir(root);
   const containment = checkDispatchStateContainment(root, { create: true });
   if (!containment.ok) {
@@ -757,13 +840,133 @@ function writeRecordAtomic(root, key, record) {
       `dispatch-state write refused — ${dir} is ${containment.reason === 'symlink' ? 'a SYMLINK' : 'not a real directory'}, never mkdir'd or written through`
     );
   }
-  const file = dispatchStateFile(root, key);
+  const file = join(dir, fileName);
   // S3 (security review): the tmp write is EXCLUSIVE ('wx') — a default 'w'
   // would follow a pre-planted symlink at the tmp name and apply the mode to
   // whatever it points at rather than a fresh file this process owns.
-  const tmp = join(dir, `${key}.json.tmp-${randomBytes(4).toString('hex')}`);
+  const tmp = join(dir, `${fileName}.tmp-${randomBytes(4).toString('hex')}`);
   writeFileSync(tmp, JSON.stringify(record), { mode: 0o600, flag: 'wx' });
   renameSync(tmp, file);
+}
+
+function writeLiveRecord(root, key, record) {
+  if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
+  writeRecordAtomic(root, liveFileName(key), record);
+}
+
+// finishTerminalRename — step two of terminalization: live-<key>.json already
+// holds the terminal body; rename it to its done- name. A failure is LOUD and
+// the source is kept (no copy-and-delete fallback): the scan still excludes
+// it from candidates and keeps its resume evidence, and the next locked scan
+// retries. Returns the name the record now lives under.
+function finishTerminalRename(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  // NEVER OVERWRITE: renameSync silently replaces an existing regular file on
+  // POSIX, which would destroy a tombstone of the same name. Any existing
+  // destination keeps the live source and is disclosed; nothing is deleted.
+  // Every caller holds the lock, so no cooperating writer races this check.
+  let occupied = false;
+  try {
+    lstatSync(join(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== 'ENOENT') occupied = true;
+  }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed — ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync(join(dir, from), join(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) — kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+
+// terminalizeLiveRecord — the ORDER is the contract: first atomically replace
+// the live body with the terminal, prompt-cleared body, THEN rename. A crash
+// between the two leaves a terminal body under a live name, which every scan
+// recognizes; the still-live body is never renamed first.
+function terminalizeLiveRecord(root, key, record) {
+  writeRecordAtomic(root, liveFileName(key), record);
+  return finishTerminalRename(root, key, record);
+}
+
+// rewriteTerminalRecord — an in-place update of a done-* record whose agent
+// ids do not change (Pre absorbing missing fields, the boundary nulling a
+// prompt). The name is recomputed and must be the one it already has.
+// A crash-window record whose rename failed is still under its live name and
+// is rewritten there; the next locked scan retries the rename.
+function rewriteTerminalRecord(root, fileName, key, record) {
+  const expected = terminalFileName(key, record);
+  if (fileName !== expected && fileName !== liveFileName(key)) throw new Error(`dispatch-state: rewriting ${fileName} would change its agent ids (expected ${expected})`);
+  writeRecordAtomic(root, fileName, record);
+}
+
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: 'unavailable', reason: 'containment', names: [] };
+  if (containment.availability === 'absent') return { availability: 'absent', names: [] };
+  try {
+    return { availability: 'ok', names: readdirSync(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: 'unavailable', reason: 'unlistable', code: e?.code, names: [] };
+  }
+}
+
+// validateNamedRecord — parse-validates the record a NAME located: the body's
+// own tool_use_id must derive the key the name carries (X5), a done- name must
+// hold a terminal body whose recomputed name is exactly this one (so its id
+// hashes agree with the ids it actually carries).
+function validateNamedRecord(dir, name, parsed) {
+  const classified = classifyRecordFile(join(dir, name));
+  if (!classified.exists || classified.poisoned) return classified;
+  const record = classified.record;
+  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: 'key-mismatch' };
+  if (parsed.kind === 'done') {
+    if (!record.terminal) return { exists: true, poisoned: true, reason: 'done-name-not-terminal' };
+    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: 'ids-mismatch' };
+  }
+  return classified;
+}
+
+// findKeyedRecord(root, key) — the keyed read for Pre, Post, Failure and the
+// Stop sidecar: locate by NAME (live-<key>.json or done-<key>~*.json), then
+// validate by parse. A crash-window record found here (terminal body under
+// the live name) has its rename finished — every caller holds the lock.
+// Returns classifyRecordFile's shape plus `file`.
+function findKeyedRecord(root, key) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability === 'absent') return { exists: false };
+  // A symlinked/non-directory dispatch-state/ is refused by writeRecordAtomic
+  // itself (poisoned-dir); a directory that exists but cannot be listed can
+  // hide the record, so it is poison, never "absent".
+  if (listing.availability !== 'ok') {
+    return listing.reason === 'containment' ? { exists: false } : { exists: true, poisoned: true, reason: 'unlistable-dir', file: dir };
+  }
+  const hits = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    // An unmigrated legacy <key>.json for this key may BE this record: never
+    // written around, only migrated at the session boundary.
+    if (parsed.kind === 'legacy' && parsed.key === key) return { exists: true, poisoned: true, reason: 'legacy-unmigrated', file: name };
+    if (parsed.kind === 'malformed-done' && parsed.key === key) return { exists: true, poisoned: true, reason: 'malformed-filename', file: name };
+    if ((parsed.kind === 'live' || parsed.kind === 'done') && parsed.key === key) hits.push({ name, parsed });
+  }
+  if (hits.length === 0) return { exists: false };
+  if (hits.length > 1) return { exists: true, poisoned: true, reason: 'duplicate-key', file: hits.map((h) => h.name).join(', ') };
+  const { name, parsed } = hits[0];
+  const v = validateNamedRecord(dir, name, parsed);
+  if (!v.exists || v.poisoned) return { ...v, file: name };
+  if (parsed.kind === 'live' && v.record.terminal) {
+    return { ...v, file: finishTerminalRename(root, key, v.record) };
+  }
+  return { ...v, file: name };
 }
 
 // readDispatchState(root) — never throws. 'absent' only for ENOENT on the
@@ -771,25 +974,57 @@ function writeRecordAtomic(root, key, record) {
 // a symlink/non-directory (S2/X1), is 'unavailable'. Every individually
 // poisoned entry is reported, never silently skipped and never condemning the
 // readable remainder (mirrors readRegister's own posture).
+//
+// THE HOT SCAN PARSES live-* ONLY (decision `dispatch-state-status-in-
+// filename-live-scan-parses-only-live-records`): terminal history is listed
+// by NAME in `done` and never opened here. `records` holds every valid live-*
+// record — including a crash-window one (terminal body under a live name),
+// which every consumer's `!terminal` / pending filter already excludes from
+// candidates while its ids stay resume evidence. What the hot path cannot
+// read is handled by what it might be: an unmigrated legacy `<key>.json` or
+// an unkeyable live- name may be a live record, so it is POISON (fail
+// closed); a malformed done- name or an unknown .json is never a candidate,
+// so it is ignored LOUDLY. This exported form mutates nothing.
 export function readDispatchState(root) {
+  return scanLiveState(root, { repair: false });
+}
+
+// The LOCKED form every acting reader (Start, Post, Stop) uses: identical,
+// plus it finishes a crash-window rename (decision point 4).
+function readDispatchStateLocked(root) {
+  return scanLiveState(root, { repair: true });
+}
+
+function scanLiveState(root, { repair }) {
   const dir = dispatchStateDir(root);
-  const containment = checkDispatchStateContainment(root, { create: false });
-  if (!containment.ok) return { availability: 'unavailable', records: [], poisoned: [] };
-  if (containment.availability === 'absent') return { availability: 'absent', records: [], poisoned: [] };
-  let names;
-  try {
-    names = readdirSync(dir);
-  } catch {
-    return { availability: 'unavailable', records: [], poisoned: [] };
-  }
+  const listing = listStateDir(root);
+  if (listing.availability !== 'ok') return { availability: listing.availability, records: [], poisoned: [], done: [] };
   const records = [];
   const poisoned = [];
-  for (const name of names) {
-    if (!name.endsWith('.json')) {
-      if (name.includes('.json.tmp-')) poisoned.push({ file: name, reason: 'orphan-tmp-file' });
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === 'other') continue;
+    if (parsed.kind === 'tmp') {
+      poisoned.push({ file: name, reason: 'orphan-tmp-file' });
       continue;
     }
-    const key = name.slice(0, -'.json'.length);
+    if (parsed.kind === 'legacy') {
+      poisoned.push({ file: name, reason: 'legacy-unmigrated' });
+      continue;
+    }
+    if (parsed.kind === 'malformed-live') {
+      poisoned.push({ file: name, reason: 'malformed-filename' });
+      continue;
+    }
+    if (parsed.kind === 'malformed-done' || parsed.kind === 'unknown-json') {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name — ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === 'done') {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
     const classified = classifyRecordFile(join(dir, name));
     if (!classified.exists) continue; // vanished between readdir and lstat — not poison, just gone
     if (classified.poisoned) {
@@ -798,16 +1033,63 @@ export function readDispatchState(root) {
     }
     // READER KEY CORRESPONDENCE (X5, Codex review): a record whose OWN
     // tool_use_id does not derive the filename it is stored under is not live
-    // state — it is a planted/misfiled record (e.g. a raw-victim.json body
+    // state — it is a planted/misfiled record (e.g. a live-raw-victim.json body
     // carrying a different tool_use_id) and must never be read back as though
     // the filesystem name and the content agree.
-    if (dispatchStateKey(classified.record.tool_use_id) !== key) {
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
       poisoned.push({ file: name, reason: 'key-mismatch' });
       continue;
     }
-    records.push({ key, file: name, record: classified.record });
+    records.push({ key: parsed.key, file: name, record: classified.record });
   }
-  return { availability: 'ok', records, poisoned };
+  // DUPLICATE KEYS: a live record whose key also has a done- file is an
+  // inconsistent pair. A non-terminal one is POISON — excluded from Start and
+  // Stop selection, and never eliminated around (a sibling must not become
+  // "type-unique" by its absence). A terminal one (crash window) is never a
+  // candidate anyway; it stays resume evidence and is NOT repaired, since its
+  // rename could only land on the occupied name.
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: 'duplicate-key' });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists — left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: 'ok', records: kept, poisoned, done };
+}
+
+// terminalResumeHit — resume evidence from terminal HISTORY without parsing
+// it wholesale: the done- names carrying this agent id's hash LOCATE
+// candidates, and only those are parsed and validated. A name whose parsed
+// record disagrees is rejected, never evidence.
+function terminalResumeHit(root, scan, agentId) {
+  const h = agentIdHash(agentId);
+  const dir = dispatchStateDir(root);
+  for (const entry of scan.done) {
+    if (!entry.idHashes.includes(h)) continue;
+    const v = validateNamedRecord(dir, entry.file, { kind: 'done', key: entry.key });
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(entry.file, `dispatch-state: '${entry.file}' names agent id hash ${h} but failed validation (${v.reason}) — not taken as resume evidence`);
+      continue;
+    }
+    if (recordAgentIds(v.record).includes(agentId)) return true;
+  }
+  return false;
+}
+
+// poisonedFileList — every poisoned entry NAMED with its reason, so a stray
+// file that blocks attribution can be found and acted on by a human.
+function poisonedFileList(scan) {
+  return scan.poisoned.map((p) => `${p.file} (${p.reason})`);
 }
 
 function hasRegisterRound(root, sessionId, agentId) {
@@ -872,12 +1154,12 @@ export function recordDispatchPre(root, stdin) {
       };
     }
     const key = dispatchStateKey(toolUseId);
-    const existing = classifyRecordFile(dispatchStateFile(root, key));
+    const existing = findKeyedRecord(root, key);
     if (existing.exists && existing.poisoned) {
       return {
         ok: false,
         action: 'poisoned',
-        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason }, `Pre for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}) — left untouched`))],
+        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Pre for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? '(unnamed)'}) — left untouched`))],
       };
     }
 
@@ -902,7 +1184,7 @@ export function recordDispatchPre(root, stdin) {
         origin: 'pre',
         pre_at: new Date().toISOString(),
       };
-      writeRecordAtomic(root, key, record);
+      writeLiveRecord(root, key, record);
       return { ok: true, action: 'created-pending', disclosures: [], record };
     }
 
@@ -923,7 +1205,7 @@ export function recordDispatchPre(root, stdin) {
           changed = true;
         }
       }
-      if (changed) writeRecordAtomic(root, key, filled);
+      if (changed) rewriteTerminalRecord(root, existing.file, key, filled);
       return { ok: true, action: 'terminal-absorbed', disclosures: [], record: filled };
     }
 
@@ -974,12 +1256,12 @@ export function recordDispatchPost(root, stdin) {
     }
 
     const key = dispatchStateKey(toolUseId);
-    const existing = classifyRecordFile(dispatchStateFile(root, key));
+    const existing = findKeyedRecord(root, key);
     if (existing.exists && existing.poisoned) {
       return {
         ok: false,
         action: 'poisoned',
-        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason }, `Post for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}) — not bound`))],
+        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Post for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? '(unnamed)'}) — not bound`))],
       };
     }
 
@@ -1006,12 +1288,12 @@ export function recordDispatchPost(root, stdin) {
     // trivially no conflict) and must NOT fail closed; only a genuinely
     // UNREADABLE directory ('unavailable') or an 'ok' scan carrying poisoned
     // entries makes the one-to-one check untrustworthy.
-    const scan = readDispatchState(root);
+    const scan = readDispatchStateLocked(root);
     if (scan.availability === 'unavailable' || (scan.availability === 'ok' && scan.poisoned.length > 0)) {
       return {
         ok: false,
         action: 'refused-poisoned-scan',
-        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, availability: scan.availability, poisoned: scan.poisoned.length }, `Post for tool_use_id '${toolUseId}' refused to bind — the dispatch-state scan is ${scan.availability !== 'ok' ? scan.availability : `carrying ${scan.poisoned.length} poisoned entr${scan.poisoned.length === 1 ? 'y' : 'ies'}`}, so the one-to-one check cannot be trusted`))],
+        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, availability: scan.availability, poisoned: scan.poisoned.length, files: poisonedFileList(scan) }, `Post for tool_use_id '${toolUseId}' refused to bind — the dispatch-state scan is ${scan.availability !== 'ok' ? scan.availability : `carrying ${scan.poisoned.length} poisoned entr${scan.poisoned.length === 1 ? 'y' : 'ies'} (${poisonedFileList(scan).join(', ')})`}, so the one-to-one check cannot be trusted`))],
       };
     }
     for (const { key: otherKey, record: other } of scan.records) {
@@ -1046,7 +1328,7 @@ export function recordDispatchPost(root, stdin) {
         origin: 'post-only',
         post_binding: { agent_id: agentId, at: new Date().toISOString() },
       };
-      writeRecordAtomic(root, key, record);
+      writeLiveRecord(root, key, record);
       return {
         ok: true,
         action: 'created-post-only',
@@ -1076,7 +1358,7 @@ export function recordDispatchPost(root, stdin) {
       // post-collision tombstone is still a terminal record, and a 5-20 KB
       // prompt otherwise sits on disk for up to 7 days across sessions.
       const updated = { ...r, prompt: null, terminal: { at: new Date().toISOString(), reason: 'post-collision' } };
-      writeRecordAtomic(root, key, updated);
+      terminalizeLiveRecord(root, key, updated);
       return {
         ok: false,
         action: 'post-collision-terminal',
@@ -1088,12 +1370,12 @@ export function recordDispatchPost(root, stdin) {
     const at = new Date().toISOString();
     if (!r.started) {
       const updated = { ...r, post_binding: { agent_id: agentId, at } };
-      writeRecordAtomic(root, key, updated);
+      writeLiveRecord(root, key, updated);
       return { ok: true, action: 'post-bound', disclosures: [], record: updated };
     }
     if (r.started.agent_id === agentId) {
       const updated = { ...r, post_binding: { agent_id: agentId, at, confirmed_derived: true } };
-      writeRecordAtomic(root, key, updated);
+      writeLiveRecord(root, key, updated);
       return { ok: true, action: 'post-confirmed-derived', disclosures: [], record: updated };
     }
     const updated = {
@@ -1101,7 +1383,7 @@ export function recordDispatchPost(root, stdin) {
       post_binding: { agent_id: agentId, at },
       derived_post_mismatch: { derived_agent_id: r.started.agent_id, post_agent_id: agentId, at },
     };
-    writeRecordAtomic(root, key, updated);
+    writeLiveRecord(root, key, updated);
     return {
       ok: true,
       action: 'post-mismatch-recorded',
@@ -1126,13 +1408,13 @@ export function recordDispatchFailure(root, stdin) {
       return { ok: true, action: 'skipped-no-tool-use-id', disclosures: [] };
     }
     const key = dispatchStateKey(toolUseId);
-    const existing = classifyRecordFile(dispatchStateFile(root, key));
+    const existing = findKeyedRecord(root, key);
     const at = new Date().toISOString();
     if (existing.exists && existing.poisoned) {
       return {
         ok: false,
         action: 'poisoned',
-        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason }, `Failure for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}) — left untouched`))],
+        disclosures: [render(disclosure('dispatch_state_poisoned', { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Failure for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? '(unnamed)'}) — left untouched`))],
       };
     }
     if (!existing.exists) {
@@ -1154,7 +1436,7 @@ export function recordDispatchFailure(root, stdin) {
         origin: 'failure-only',
         terminal: { at, reason: 'tool-failure' },
       };
-      writeRecordAtomic(root, key, record);
+      writeRecordAtomic(root, terminalFileName(key, record), record);
       return { ok: true, action: 'created-terminal', disclosures: [], record };
     }
     const r = existing.record;
@@ -1163,7 +1445,7 @@ export function recordDispatchFailure(root, stdin) {
     }
     // S1: terminalizing an existing record ALSO nulls its prompt.
     const updated = { ...r, prompt: null, terminal: { at, reason: 'tool-failure' } };
-    writeRecordAtomic(root, key, updated);
+    terminalizeLiveRecord(root, key, updated);
     return { ok: true, action: 'terminated', disclosures: [], record: updated };
   }));
 }
@@ -1182,7 +1464,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     return { verdict: 'resolved', value: unattributable('no-agent-id', agent_type) };
   }
 
-  const scan = readDispatchState(root);
+  const scan = readDispatchStateLocked(root);
 
   if (scan.availability === 'ok') {
     for (const { key, record } of scan.records) {
@@ -1194,18 +1476,22 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
       // H19's delivery guard.
       if (boundId === agent_id && record.session_id === session_id && !record.terminal) {
         const updated = appendStartedBy(record, consumer);
-        writeRecordAtomic(root, key, updated);
+        writeLiveRecord(root, key, updated);
         const source = record.post_binding ? 'post' : 'derived-type-unique';
         return { verdict: 'resolved', value: buildResolution(source, source, updated) };
       }
     }
   }
 
+  // RESUME recognizes started, derived_binding OR post_binding — on live
+  // records (incl. a crash-window terminal body) from the scan, and on
+  // terminal history by name-locate then parse-validate.
   const resumeHit =
     scan.availability === 'ok' &&
-    scan.records.some(
+    (scan.records.some(
       ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
-    );
+    ) ||
+      terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
     return { verdict: 'resolved', value: { source: 'resume', case: 'resume', prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
   }
@@ -1226,7 +1512,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     return { verdict: 'resolved', value: unattributable('state-unavailable', agent_type) };
   }
   if (scan.poisoned.length > 0) {
-    return { verdict: 'resolved', value: unattributable('state-poisoned', agent_type) };
+    return { verdict: 'resolved', value: unattributable('state-poisoned', agent_type, { poisoned_files: poisonedFileList(scan) }) };
   }
 
   // STRICT STRING EQUALITY ON BOTH SIDES: a pending record whose subagent_type
@@ -1252,7 +1538,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     }
     const at = new Date().toISOString();
     const updated = { ...record, derived_binding: { agent_id, at, by: consumer }, started: { agent_id, at, by: consumer ? [consumer] : [] } };
-    writeRecordAtomic(root, key, updated);
+    writeLiveRecord(root, key, updated);
     return { verdict: 'resolved', value: buildResolution('derived-type-unique', 'derived-type-unique', updated) };
   }
   return { verdict: 'siblings-retry', count: candidates.length };
@@ -1287,14 +1573,16 @@ export async function resolveDispatchStart(root, { session_id, agent_id, agent_t
   // AMBIGUOUS (two-or-more same-type pending): bounded retry with a SHORT
   // per-attempt lock budget, sleeping only OUTSIDE the lock.
   const retryStart = now();
+  let count = result.count;
   for (;;) {
-    if (now() - retryStart >= DERIVE_TOTAL_BUDGET_MS) {
-      return unattributable('same-type-siblings-in-flight', agent_type, { count: result.count });
+    if (now() - retryStart >= retryBudgetFor(result.verdict)) {
+      return unattributable('same-type-siblings-in-flight', agent_type, { count });
     }
     await sleep(DERIVE_RETRY_INTERVAL_MS);
     result = await tryLocked(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
     if (result.verdict === 'resolved') return result.value;
-    // 'lock-held' or still 'siblings-retry' — keep trying within the total budget.
+    if (result.verdict === 'siblings-retry') count = result.count;
+    // 'lock-held' or still 'siblings-retry' — keep trying within that verdict's budget.
   }
 }
 
@@ -1360,14 +1648,16 @@ export async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
   }
 
   const retryStart = Date.now();
+  let count = result.count;
   for (;;) {
-    if (Date.now() - retryStart >= DERIVE_TOTAL_BUDGET_MS) {
-      return finalizeUnattributable(unattributable('same-type-siblings-in-flight', agent_type, { count: result.count }));
+    if (Date.now() - retryStart >= retryBudgetFor(result.verdict)) {
+      return finalizeUnattributable(unattributable('same-type-siblings-in-flight', agent_type, { count }));
     }
     await sleepAsync(DERIVE_RETRY_INTERVAL_MS);
     result = await attemptAndRegister(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
     if (result.verdict === 'resolved') return asResult(result);
-    // 'lock-held' or still 'siblings-retry' — keep trying within the total budget.
+    if (result.verdict === 'siblings-retry') count = result.count;
+    // 'lock-held' or still 'siblings-retry' — keep trying within that verdict's budget.
   }
 }
 
@@ -1379,8 +1669,9 @@ export async function finishDispatchAndRegisterEnd(root, { session_id, agent_id,
   // dead agent).
   return withRegisterLock(root, () => {
     const ended = registerEndLocked(root, agent_id, event ?? 'subagent-stop', { sessionId: session_id });
-    const scan = readDispatchState(root);
+    const scan = readDispatchStateLocked(root);
     let record = null;
+    const disclosures = [];
     if (scan.availability === 'ok') {
       // C2, correctness review: prefer a NON-terminal record carrying the
       // agent_id (bound/started) over any terminal tombstone naming it — a
@@ -1394,20 +1685,47 @@ export async function finishDispatchAndRegisterEnd(root, { session_id, agent_id,
         return boundId === agent_id && !r.terminal && (session_id === undefined || r.session_id === session_id);
       });
       if (!hit && typeof sidecarToolUseId === 'string' && sidecarToolUseId !== '') {
+        // KEYED: live or terminal, located by name and validated by parse.
         const key = dispatchStateKey(sidecarToolUseId);
-        hit = scan.records.find((x) => x.key === key);
+        const keyed = findKeyedRecord(root, key);
+        if (keyed.exists && !keyed.poisoned) hit = { key, file: keyed.file, record: keyed.record };
+        if (keyed.exists && keyed.poisoned) {
+          disclosures.push(
+            render(
+              disclosure(
+                'dispatch_state_poisoned',
+                { tool_use_id: sidecarToolUseId, reason: keyed.reason, file: keyed.file },
+                `Stop for agent '${agent_id}': the dispatch-state record for sidecar tool_use_id '${sidecarToolUseId}' is poisoned (${keyed.reason}, ${keyed.file}) — the round is ended but that record was NOT terminalized; left for an operator`
+              )
+            )
+          );
+        }
+      }
+      if (!hit) {
+        for (const p of scan.poisoned) {
+          if (p.reason !== 'duplicate-key') continue;
+          disclosures.push(
+            render(
+              disclosure(
+                'dispatch_state_poisoned',
+                { file: p.file, reason: p.reason },
+                `Stop for agent '${agent_id}': live record ${p.file} shares its key with a done- file (duplicate-key) — excluded from selection, NOT terminalized; left for an operator`
+              )
+            )
+          );
+        }
       }
       if (hit) {
         if (hit.record.terminal) {
           record = hit.record;
         } else {
           const updated = { ...hit.record, prompt: null, terminal: { at: new Date().toISOString(), reason: event === 'task-stop' ? 'task-stop' : 'stop' } };
-          writeRecordAtomic(root, hit.key, updated);
+          terminalizeLiveRecord(root, hit.key, updated);
           record = updated;
         }
       }
     }
-    return { found: ended.found, entry: ended.found ? ended.entry : null, record };
+    return { found: ended.found, entry: ended.found ? ended.entry : null, record, disclosures };
   });
 }
 
@@ -1427,56 +1745,142 @@ export function sessionBoundarySweep(root, opts = {}) {
     return {
       terminated: 0,
       pruned: 0,
+      migrated: 0,
       refused: render(disclosure('dispatch_state_poisoned', { dir, reason: containment.reason }, `sessionBoundarySweep: ${dir} is ${containment.reason === 'symlink' ? 'a SYMLINK' : 'not a real directory'} — refusing to touch it, never following a symlink`)),
     };
   }
-  if (containment.availability === 'absent') return { terminated: 0, pruned: 0 };
+  if (containment.availability === 'absent') return { terminated: 0, pruned: 0, migrated: 0 };
+  const unlistable = () => ({ terminated: 0, pruned: 0, migrated: 0, refused: render(disclosure('dispatch_state_poisoned', { dir }, `sessionBoundarySweep: could not list ${dir} — left untouched`)) });
   let names;
   try {
     names = readdirSync(dir);
   } catch {
-    return { terminated: 0, pruned: 0, refused: render(disclosure('dispatch_state_poisoned', { dir }, `sessionBoundarySweep: could not list ${dir} — left untouched`)) };
+    return unlistable();
   }
+
+  // LEGACY MIGRATION (decision `dispatch-state-status-in-filename-live-scan-
+  // parses-only-live-records` point 6): a pre-migration flat `<key>.json` is
+  // renamed onto its live-/done- name HERE — the session boundary, under
+  // H1's lock hold, never mid-burst. A poisoned or key-mismatched legacy file
+  // is left for a human (the hot scan keeps failing closed on it); an
+  // existing target is never overwritten.
+  let migrated = 0;
+  for (const name of names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind !== 'legacy') continue;
+    const v = validateNamedRecord(dir, name, parsed);
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' is poisoned (${v.reason}) — not migrated, left for an operator; live scans fail closed on it`);
+      continue;
+    }
+    const target = v.record.terminal ? terminalFileName(parsed.key, v.record) : liveFileName(parsed.key);
+    if (existsSync(join(dir, target))) {
+      warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' not migrated — '${target}' already exists; never overwritten`);
+      continue;
+    }
+    try {
+      renameSync(join(dir, name), join(dir, target));
+      migrated++;
+    } catch (e) {
+      warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' could not be renamed to '${target}' (${e?.code ?? e?.message}) — left in place`);
+    }
+  }
+  if (migrated > 0) {
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return unlistable();
+    }
+  }
+
   let terminated = 0;
   let pruned = 0;
   let refused;
+  // RETENTION BY terminal.at, NEVER mtime (point 5): late Pre, migration and
+  // repairs all touch mtimes. The boundary is the one place history bodies
+  // are parsed.
+  const pruneIfExpired = (fileName, record) => {
+    const terminalAt = Date.parse(record.terminal.at);
+    if (Number.isNaN(terminalAt) || now - terminalAt <= SEVEN_DAYS_MS) return;
+    const file = join(dir, fileName);
+    try {
+      const s2 = lstatSync(file);
+      if (s2.isFile() && !s2.isSymbolicLink()) {
+        rmSync(file, { force: true });
+        pruned++;
+      }
+    } catch {
+      // best-effort prune — a failed removal costs only disk, never correctness
+    }
+  };
   for (const name of names) {
-    if (!name.endsWith('.json')) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === 'tmp') {
       // S4 (security review): an orphan `*.json.tmp-*` from a crashed write is
       // POISON to derivation forever (§6) until removed — REGULAR FILES only,
       // verified by lstat immediately before unlink, never through a symlink
       // (a symlink-named-like-a-tmp-orphan is a delete-anything primitive
       // otherwise). A symlink found under that name is NEVER removed — it is
       // REPORTED, so the condition is never a silent skip.
-      if (name.includes('.json.tmp-')) {
-        const tmpFile = join(dir, name);
-        try {
-          const ts = lstatSync(tmpFile);
-          if (ts.isFile() && !ts.isSymbolicLink()) {
-            rmSync(tmpFile, { force: true });
-            pruned++;
-          } else if (ts.isSymbolicLink()) {
-            if (!refused) {
-              refused = render(
-                disclosure('dispatch_state_poisoned', { file: name }, `sessionBoundarySweep: '${name}' looks like an orphan tmp file but is a SYMLINK — left in place for an operator to see, never removed through`)
-              );
-            }
+      const tmpFile = join(dir, name);
+      try {
+        const ts = lstatSync(tmpFile);
+        if (ts.isFile() && !ts.isSymbolicLink()) {
+          rmSync(tmpFile, { force: true });
+          pruned++;
+        } else if (ts.isSymbolicLink()) {
+          if (!refused) {
+            refused = render(
+              disclosure('dispatch_state_poisoned', { file: name }, `sessionBoundarySweep: '${name}' looks like an orphan tmp file but is a SYMLINK — left in place for an operator to see, never removed through`)
+            );
           }
-        } catch {
-          // best-effort — a failed removal costs only disk, never correctness
         }
+      } catch {
+        // best-effort — a failed removal costs only disk, never correctness
       }
       continue;
     }
-    const file = join(dir, name);
-    const classified = classifyRecordFile(file);
-    if (!classified.exists || classified.poisoned) continue; // a poisoned entry stays poisoned until a human looks
-    const record = classified.record;
-    const key = name.slice(0, -'.json'.length);
-    if (!record.terminal) {
-      const updated = { ...record, prompt: null, terminal: { at: new Date(now).toISOString(), reason: 'session-boundary' } };
-      writeRecordAtomic(root, key, updated);
-      terminated++;
+    if (parsed.kind === 'malformed-live' || parsed.kind === 'unknown-json') {
+      // NAMED, never deleted: an unkeyable live- name could be a live record
+      // (the hot scan fails closed on it), and a human can act on a name.
+      warnStateFile(name, `sessionBoundarySweep: '${name}' is not a valid live-<key>.json or done-<key>~<ids>.json name — left in place for an operator${parsed.kind === 'malformed-live' ? '; every Start is state-poisoned and every Post refuses until it is resolved' : ''}`);
+      continue;
+    }
+    if (parsed.kind !== 'live' && parsed.kind !== 'done') continue;
+    const v = validateNamedRecord(dir, name, parsed);
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      // A poisoned entry stays until a human looks — but never silently: a
+      // corrupt terminal file evades the hot scan, so this is its one voice.
+      warnStateFile(name, `sessionBoundarySweep: '${name}' failed validation (${v.reason}) — left in place for an operator, neither terminalized nor pruned`);
+      continue;
+    }
+    const record = v.record;
+    if (parsed.kind === 'live') {
+      // DUPLICATE KEY (the scan's doneKeys exclusion, applied here too):
+      // terminalizing would mint a SECOND done- file for the key. Left in
+      // place, both files named — the same state Stop leaves for an operator.
+      const doneTwins = names.filter((n) => {
+        const pn = parseStateFileName(n);
+        return pn.kind === 'done' && pn.key === parsed.key;
+      });
+      if (doneTwins.length > 0) {
+        warnStateFile(name, `sessionBoundarySweep: live record '${name}' shares its key with ${doneTwins.join(', ')} (duplicate-key) — NOT terminalized, left for an operator`);
+        continue;
+      }
+      if (!record.terminal) {
+        const updated = { ...record, prompt: null, terminal: { at: new Date(now).toISOString(), reason: 'session-boundary' } };
+        terminalizeLiveRecord(root, parsed.key, updated);
+        terminated++;
+        continue;
+      }
+      // A crash-window record: null any prompt IN PLACE (still under the live
+      // name, the body stays terminal), then finish the rename.
+      const clean = record.prompt !== null ? { ...record, prompt: null } : record;
+      if (clean !== record) writeRecordAtomic(root, name, clean);
+      const renamed = finishTerminalRename(root, parsed.key, clean);
+      pruneIfExpired(renamed, clean);
       continue;
     }
     // S1: the boundary is the LAST CHANCE to drop a brief a terminal path
@@ -1484,20 +1888,9 @@ export function sessionBoundarySweep(root, opts = {}) {
     // (an older build, or a terminal path that forgot) is corrected in place,
     // WITHOUT re-stamping its terminal instant or reason.
     if (record.prompt !== null) {
-      writeRecordAtomic(root, key, { ...record, prompt: null });
+      rewriteTerminalRecord(root, name, parsed.key, { ...record, prompt: null });
     }
-    const terminalAt = Date.parse(record.terminal.at);
-    if (!Number.isNaN(terminalAt) && now - terminalAt > SEVEN_DAYS_MS) {
-      try {
-        const s2 = lstatSync(file);
-        if (s2.isFile() && !s2.isSymbolicLink()) {
-          rmSync(file, { force: true });
-          pruned++;
-        }
-      } catch {
-        // best-effort prune — a failed removal costs only disk, never correctness
-      }
-    }
+    pruneIfExpired(name, record);
   }
-  return { terminated, pruned, ...(refused ? { refused } : {}) };
+  return { terminated, pruned, migrated, ...(refused ? { refused } : {}) };
 }

@@ -69,7 +69,10 @@ async function deleteRegisterUnderLock(cwd) {
         // register evidence to explain them. Every non-terminal record
         // becomes terminal {reason:'session-boundary'}; tombstones older than
         // 7 days are pruned. A lock failure (caught below) leaves this
-        // unattempted too — the existing posture, unchanged.
+        // unattempted too — the existing posture, unchanged. The same sweep
+        // first MIGRATES legacy flat `<key>.json` records onto their
+        // live-/done- names: this boundary, never mid-burst (decision
+        // dispatch-state-status-in-filename-live-scan-parses-only-live-records).
         const sweep = sessionBoundarySweep(cwd, { now: Date.now() });
         if (sweep.refused) {
           process.stderr.write(`${sweep.refused}\n`);

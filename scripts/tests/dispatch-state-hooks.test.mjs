@@ -46,7 +46,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
-import { registerLockPath } from '../lib/dispatch-register.mjs';
+import { registerLockPath, terminalFileName, dispatchStateKey } from '../lib/dispatch-register.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -1082,3 +1082,67 @@ test('DSH-22: a Start whose store cannot OPEN (garbage bytes at sterling.db) is 
 });
 // SABOTAGE: collapse the two pre-resolution failures back into one flag —
 // the [store-unavailable] prefix assertion and the doesNotMatch go red.
+
+// FIX ROUND (Sol review, thread 01a0ce05): a Stop that ends the round but
+// cannot terminalize its state record — here a live record whose key already
+// has a done- file (duplicate-key) — must SAY so on stderr, mirroring the
+// degraded-Stop disclosure, never drop it silently.
+test('DSH-23: SubagentStop discloses a state record it could not terminalize (duplicate-key) — the round is ended, the record is named', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('dupstop', ['src/dup.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_dupstop', file: 'src/dup.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-dup' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-dup', agent_type: d.type }), dir).code, 0);
+    const live = readdirSync(stateDir(dir)).find((f) => f.startsWith('live-') && f.includes('toolu_dupstop'));
+    assert.ok(live, 'harness: the live record exists');
+    const body = JSON.parse(readFileSync(join(stateDir(dir), live), 'utf8'));
+    const tomb = { ...body, prompt: null, terminal: { at: new Date().toISOString(), reason: 'stop' } };
+    writeFileSync(join(stateDir(dir), terminalFileName(dispatchStateKey('toolu_dupstop'), tomb)), JSON.stringify(tomb));
+
+    const r = h22(stopInput(dir, { agent_id: 'agent-dup', agent_type: d.type }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-dup').ended?.event, 'subagent-stop', 'the round is still ended');
+    assert.match(r.stderr, /dispatch_state_poisoned/);
+    assert.match(r.stderr, /duplicate-key/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-24: a TaskStop that cannot terminalize its state record (duplicate-key) discloses it — the round is ended, the record is named', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('dupkill', ['src/dupkill.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_dupkill', file: 'src/dupkill.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-dupkill' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-dupkill', agent_type: d.type }), dir).code, 0);
+    const live = readdirSync(stateDir(dir)).find((f) => f.startsWith('live-') && f.includes('toolu_dupkill'));
+    const body = JSON.parse(readFileSync(join(stateDir(dir), live), 'utf8'));
+    const tomb = { ...body, prompt: null, terminal: { at: new Date().toISOString(), reason: 'stop' } };
+    writeFileSync(join(stateDir(dir), terminalFileName(dispatchStateKey('toolu_dupkill'), tomb)), JSON.stringify(tomb));
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-dupkill' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-dupkill').ended?.event, 'task-stop');
+    assert.match(r.stderr, /duplicate-key/);
+    assert.ok(r.stderr.includes(live), 'the undisposed live record is named');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-25: a Start made state-poisoned by a stray live-!!bad.json NAMES the file on H22 stderr', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('poisonstart', ['src/poison.mjs']));
+    stageOne(dir, { tool_use_id: 'toolu_poison', file: 'src/poison.mjs' });
+    writeFileSync(join(stateDir(dir), 'live-!!bad.json'), '{}');
+    const r = h22(startInput(dir, { agent_id: 'agent-poison', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /state-poisoned/);
+    assert.ok(r.stderr.includes('live-!!bad.json'), `the Start output names the file: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});

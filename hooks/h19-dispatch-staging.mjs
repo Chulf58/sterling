@@ -8028,6 +8028,14 @@ function refusal(code, facts = {}, message = code) {
   err.facts = facts;
   return err;
 }
+function disclosure(code, facts = {}, message = code) {
+  assertCode(code);
+  return { kind: "disclosure", code, facts, message };
+}
+function render(x) {
+  const label = x?.kind === "refusal" ? "REFUSED" : "NOTE";
+  return `${label} [${x?.code}] ${x?.message ?? ""}`;
+}
 
 // scripts/lib/dispatch-register.mjs
 function registerPath(root) {
@@ -8241,12 +8249,62 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var DERIVE_RETRY_INTERVAL_MS = 10;
 var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
-var DERIVE_TOTAL_BUDGET_MS = 150;
+var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
+var DERIVE_LOCK_HELD_BUDGET_MS = 150;
+function retryBudgetFor(verdict) {
+  return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
+}
 function dispatchStateDir(root) {
   return join4(root, ".sterling", "transient", "dispatch-state");
 }
-function dispatchStateFile(root, key) {
-  return join4(dispatchStateDir(root), `${key}.json`);
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag)) return;
+  warnedStateFiles.add(tag);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
@@ -8340,7 +8398,7 @@ function checkDispatchStateContainment(root, { create }) {
   }
   return { ok: true, availability: "ok" };
 }
-function writeRecordAtomic(root, key, record) {
+function writeRecordAtomic(root, fileName, record) {
   const dir = dispatchStateDir(root);
   const containment = checkDispatchStateContainment(root, { create: true });
   if (!containment.ok) {
@@ -8350,43 +8408,138 @@ function writeRecordAtomic(root, key, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = dispatchStateFile(root, key);
-  const tmp = join4(dir, `${key}.json.tmp-${randomBytes(4).toString("hex")}`);
+  const file = join4(dir, fileName);
+  const tmp = join4(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
   writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
   renameSync2(tmp, file);
 }
-function readDispatchState(root) {
+function writeLiveRecord(root, key, record) {
+  if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
+  writeRecordAtomic(root, liveFileName(key), record);
+}
+function finishTerminalRename(root, key, record) {
   const dir = dispatchStateDir(root);
-  const containment = checkDispatchStateContainment(root, { create: false });
-  if (!containment.ok) return { availability: "unavailable", records: [], poisoned: [] };
-  if (containment.availability === "absent") return { availability: "absent", records: [], poisoned: [] };
-  let names;
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
   try {
-    names = readdirSync(dir);
-  } catch {
-    return { availability: "unavailable", records: [], poisoned: [] };
+    lstatSync(join4(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
   }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync2(join4(dir, from), join4(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
+function validateNamedRecord(dir, name, parsed) {
+  const classified = classifyRecordFile(join4(dir, name));
+  if (!classified.exists || classified.poisoned) return classified;
+  const record = classified.record;
+  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
+  if (parsed.kind === "done") {
+    if (!record.terminal) return { exists: true, poisoned: true, reason: "done-name-not-terminal" };
+    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
+  }
+  return classified;
+}
+function readDispatchStateLocked(root) {
+  return scanLiveState(root, { repair: true });
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, records: [], poisoned: [], done: [] };
   const records = [];
   const poisoned = [];
-  for (const name of names) {
-    if (!name.endsWith(".json")) {
-      if (name.includes(".json.tmp-")) poisoned.push({ file: name, reason: "orphan-tmp-file" });
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
       continue;
     }
-    const key = name.slice(0, -".json".length);
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
     const classified = classifyRecordFile(join4(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
       continue;
     }
-    if (dispatchStateKey(classified.record.tool_use_id) !== key) {
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
       poisoned.push({ file: name, reason: "key-mismatch" });
       continue;
     }
-    records.push({ key, file: name, record: classified.record });
+    records.push({ key: parsed.key, file: name, record: classified.record });
   }
-  return { availability: "ok", records, poisoned };
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
+}
+function terminalResumeHit(root, scan, agentId) {
+  const h = agentIdHash(agentId);
+  const dir = dispatchStateDir(root);
+  for (const entry of scan.done) {
+    if (!entry.idHashes.includes(h)) continue;
+    const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(entry.file, `dispatch-state: '${entry.file}' names agent id hash ${h} but failed validation (${v.reason}) \u2014 not taken as resume evidence`);
+      continue;
+    }
+    if (recordAgentIds(v.record).includes(agentId)) return true;
+  }
+  return false;
+}
+function poisonedFileList(scan) {
+  return scan.poisoned.map((p) => `${p.file} (${p.reason})`);
 }
 function hasRegisterRound(root, sessionId, agentId) {
   const { availability, entries } = readRegister(root);
@@ -8416,21 +8569,21 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
   if (typeof agent_id !== "string" || agent_id === "") {
     return { verdict: "resolved", value: unattributable("no-agent-id", agent_type) };
   }
-  const scan = readDispatchState(root);
+  const scan = readDispatchStateLocked(root);
   if (scan.availability === "ok") {
     for (const { key, record } of scan.records) {
       const boundId = record.post_binding?.agent_id ?? record.derived_binding?.agent_id;
       if (boundId === agent_id && record.session_id === session_id && !record.terminal) {
         const updated = appendStartedBy(record, consumer);
-        writeRecordAtomic(root, key, updated);
+        writeLiveRecord(root, key, updated);
         const source = record.post_binding ? "post" : "derived-type-unique";
         return { verdict: "resolved", value: buildResolution(source, source, updated) };
       }
     }
   }
-  const resumeHit = scan.availability === "ok" && scan.records.some(
+  const resumeHit = scan.availability === "ok" && (scan.records.some(
     ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
-  );
+  ) || terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
     return { verdict: "resolved", value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
   }
@@ -8441,7 +8594,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     return { verdict: "resolved", value: unattributable("state-unavailable", agent_type) };
   }
   if (scan.poisoned.length > 0) {
-    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type) };
+    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type, { poisoned_files: poisonedFileList(scan) }) };
   }
   const candidates = scan.records.filter(
     ({ record }) => dispatchState(record) === "pending" && record.session_id === session_id && typeof record.subagent_type === "string" && record.subagent_type === agent_type
@@ -8456,7 +8609,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     }
     const at = (/* @__PURE__ */ new Date()).toISOString();
     const updated = { ...record, derived_binding: { agent_id, at, by: consumer }, started: { agent_id, at, by: consumer ? [consumer] : [] } };
-    writeRecordAtomic(root, key, updated);
+    writeLiveRecord(root, key, updated);
     return { verdict: "resolved", value: buildResolution("derived-type-unique", "derived-type-unique", updated) };
   }
   return { verdict: "siblings-retry", count: candidates.length };
@@ -8481,13 +8634,15 @@ async function resolveDispatchStart(root, { session_id, agent_id, agent_type }, 
   }
   if (result.verdict === "resolved") return result.value;
   const retryStart = now();
+  let count = result.count;
   for (; ; ) {
-    if (now() - retryStart >= DERIVE_TOTAL_BUDGET_MS) {
-      return unattributable("same-type-siblings-in-flight", agent_type, { count: result.count });
+    if (now() - retryStart >= retryBudgetFor(result.verdict)) {
+      return unattributable("same-type-siblings-in-flight", agent_type, { count });
     }
     await sleep(DERIVE_RETRY_INTERVAL_MS);
     result = await tryLocked(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
     if (result.verdict === "resolved") return result.value;
+    if (result.verdict === "siblings-retry") count = result.count;
   }
 }
 
