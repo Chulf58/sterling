@@ -631,9 +631,14 @@ test('§3.2.3 article drift: only a real content change (not an mtime-only merge
     assert.equal(reconciled('feat-a').length, 1, 'deduplicated across repeated reads');
     assert.match((reconciled('feat-a')[0] as { text: string }).text, /out-of-band edit/);
 
-    // reconciliation clears mechanically: knowledge_update re-baselines to the
-    // current content ('v2') AND bumps updated_at, so the article reads clean
-    const v2 = tools.knowledgeUpdate(a.id, { what_it_does: 'trued up' });
+    // reconciliation clears mechanically: a resolves-bearing reconcile re-stamps
+    // the named paths to the current content ('v2') AND bumps updated_at, so the
+    // article reads clean. An ordinary write without resolves preserves the
+    // baseline (decision
+    // [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]).
+    const featAItem = reconciled('feat-a')[0] as { id: string } | undefined;
+    assert.ok(featAItem, 'the feat-a reconcile item exists to be resolved');
+    const v2 = tools.knowledgeUpdate(a.id, { what_it_does: 'trued up' }, [featAItem.id]);
     arts = tools.knowledgeQuery({ types: ['feature_article'] });
     assert.equal(arts.find((r) => r.id === v2.id)?.verify_before_use, undefined, 'reconciled article reads clean');
     // and the re-baseline immunizes against the next merge: bump mtime, same content

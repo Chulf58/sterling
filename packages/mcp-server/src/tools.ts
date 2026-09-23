@@ -1093,7 +1093,9 @@ interface DriftCheckContext {
    * and sha256s each attested path — up to ATTESTATION_MAX_PATHS paths and
    * ATTESTATION_MAX_TOTAL_BYTES per close, and more if several closes attested
    * different paths of one article. The cost stands until a CONTENT reconcile
-   * clears `baseline_attestations` wholesale (knowledgeUpdate's re-baseline).
+   * re-stamps that path (a write whose `resolves` names it, or one that stops
+   * claiming it) and so drops its `baseline_attestations` entry — an unrelated
+   * write keeps it (advanceBaselines).
    *
    * A MINT-SIDE BYTE BUDGET IS DELIBERATELY NOT ADDED, and this is a soundness
    * argument rather than a cost one: at the mint an `unavailable` verdict is read
@@ -1594,6 +1596,9 @@ export class SterlingTools {
    * mtime reset (a git merge/checkout touches every file's mtime without
    * changing content). No repoRoot, or a file absent at write time, → no entry
    * (the read-time deletion check still covers a vanished owned file).
+   * `only`, when given, restricts the hashing to those owned paths — the
+   * versioned write's evidence-gated advance (advanceBaselines) hashes nothing
+   * it is not about to stamp.
    *
    * A NON-REGULAR owned path (symlink, directory, device) also gets NO entry, on
    * exactly the same footing as an absent file. hashFile FOLLOWS symlinks — it
@@ -1606,7 +1611,7 @@ export class SterlingTools {
    * attested close refuses such a path outright (pin R9-14a); this closes the
    * upstream route by which those bytes reached file_baselines anyway.
    */
-  private computeBaselines(record: Record<string, unknown>): Record<string, string> | undefined {
+  private computeBaselines(record: Record<string, unknown>, only?: ReadonlySet<string>): Record<string, string> | undefined {
     if (!this.repoRoot) return undefined;
     const type = record.type as string;
     if (type !== 'feature_article' && type !== 'reference_material') return undefined;
@@ -1621,6 +1626,7 @@ export class SterlingTools {
     // read-time drift check (baselineablePaths) so the writer of these hashes
     // and the reader that re-checks them cannot drift apart.
     for (const rel of SterlingTools.baselineablePaths(record)) {
+      if (only && !only.has(rel)) continue;
       // lstat, not stat: the question is what the PATH ITSELF is, and a symlink
       // to a regular file passes `stat`. Absent → skip, same as before.
       const shape = lstatSync(join(root, rel), { throwIfNoEntry: false });
@@ -1629,6 +1635,116 @@ export class SterlingTools {
       if (hash !== undefined) baselines[rel] = hash;
     }
     return Object.keys(baselines).length ? baselines : undefined;
+  }
+
+  /**
+   * THE EVIDENCE-GATED BASELINE ADVANCE of a versioned write (decision
+   * [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]),
+   * computed per path over the record's owned set AFTER the merge:
+   *   - a path in `resolvedKeys` (the file_keys of the items this write
+   *     resolves) is RE-STAMPED to its current bytes — the resolves claim is
+   *     the evidence that the article now describes them;
+   *   - an owned path with NO baseline yet (newly claimed, or absent when last
+   *     stamped) is STAMPED — there is no drift to lose on a path nothing
+   *     compares against, and this is the "established on the next write"
+   *     contract contentChanged documents;
+   *   - every other still-owned path keeps its baseline byte-for-byte, so an
+   *     unrelated write can never erase un-reconciled drift;
+   *   - a path the record stops claiming drops its baseline (decision f841392b's
+   *     prune is the queue half of the same departure).
+   * Attestation PROVENANCE follows the stamp, per path (board 8c8b6d78 / R9):
+   * a path this write stamps loses its baseline_attestations and
+   * absence_attestations entries, because its baseline now belongs to this
+   * content write, not to the close that attested it; an untouched path keeps
+   * its entry, because its baseline is still the attested one; a departed path
+   * loses both with its baseline. A resolved path whose file cannot be hashed
+   * (absent, non-regular, unmapped tree) is left with NO baseline and no
+   * markers, exactly as computeBaselines leaves it; an unbaselined path that
+   * still cannot be hashed was not stamped, so its absence attestation stands.
+   *
+   * `resolvedKeys` must be read in the SAME transaction that drains the items
+   * (knowledgeUpdate's `advance`), so an item widened or re-keyed by another
+   * writer is re-stamped exactly as it is drained. WHAT THIS DOES NOT
+   * GUARANTEE: that the article's prose describes the re-stamped bytes — a
+   * resolves claim is the caller's assertion, and the receipt's resolved_items
+   * discloses every path it actually closed.
+   */
+  /** A per-path map re-keyed by the normalized repo path. A record written
+   *  before baselineablePaths normalized can carry a raw './x' key beside (or
+   *  instead of) 'x'; the normalized spelling wins when both are present, and
+   *  a key that cannot be normalized matches no owned path and is dropped. */
+  private static normalizedKeys<T>(map: Record<string, T>): Record<string, T> {
+    const out: Record<string, T> = {};
+    for (const [key, value] of Object.entries(map)) {
+      let rel: string;
+      try {
+        rel = normalizeRepoPath(key);
+      } catch {
+        continue;
+      }
+      if (!(rel in out) || key === rel) out[rel] = value;
+    }
+    return out;
+  }
+
+  /** The union of the claimed items' file_keys, normalized — the re-stamp set
+   *  a resolves-bearing write earns (advanceBaselines). */
+  private static claimedFileKeys(items: readonly unknown[]): Set<string> {
+    const keys = new Set<string>();
+    for (const item of items) {
+      const fileKeys = (item as { file_keys?: unknown }).file_keys;
+      if (!Array.isArray(fileKeys)) continue;
+      for (const key of fileKeys) {
+        if (typeof key !== 'string') continue;
+        try {
+          keys.add(normalizeRepoPath(key));
+        } catch {
+          continue;
+        }
+      }
+    }
+    return keys;
+  }
+
+  private advanceBaselines(
+    old: Record<string, unknown>,
+    next: Record<string, unknown>,
+    resolvedKeys: ReadonlySet<string>
+  ): {
+    file_baselines: Record<string, string> | undefined;
+    baseline_attestations: Record<string, unknown> | undefined;
+    absence_attestations: Record<string, unknown> | undefined;
+  } {
+    const oldBaselines = SterlingTools.normalizedKeys((old.file_baselines as Record<string, string> | undefined) ?? {});
+    const oldAttestations = SterlingTools.normalizedKeys((old.baseline_attestations as Record<string, unknown> | undefined) ?? {});
+    const oldAbsences = SterlingTools.normalizedKeys((old.absence_attestations as Record<string, unknown> | undefined) ?? {});
+    const owned = SterlingTools.baselineablePaths(next);
+    const stamp = new Set(owned.filter((rel) => resolvedKeys.has(rel) || oldBaselines[rel] === undefined));
+    const fresh = stamp.size ? (this.computeBaselines(next, stamp) ?? {}) : {};
+    const baselines: Record<string, string> = {};
+    const attestations: Record<string, unknown> = {};
+    const absences: Record<string, unknown> = {};
+    for (const rel of owned) {
+      if (fresh[rel] !== undefined) {
+        baselines[rel] = fresh[rel];
+        continue;
+      }
+      // a resolved path that could not be hashed is still re-stamped (to no
+      // baseline) and loses its markers; an unbaselined path that still cannot
+      // be hashed was not stamped at all, so its absence attestation stands
+      if (resolvedKeys.has(rel)) continue;
+      if (oldBaselines[rel] !== undefined) baselines[rel] = oldBaselines[rel];
+      if (oldAttestations[rel] !== undefined) attestations[rel] = oldAttestations[rel];
+      if (oldAbsences[rel] !== undefined) absences[rel] = oldAbsences[rel];
+    }
+    const orUndefined = <T,>(map: Record<string, T>) => (Object.keys(map).length ? map : undefined);
+    // `owned` is normalized (baselineablePaths), so every map written here is
+    // keyed by the spelling the store persists and every reader compares.
+    return {
+      file_baselines: orUndefined(baselines),
+      baseline_attestations: orUndefined(attestations),
+      absence_attestations: orUndefined(absences),
+    };
   }
 
   /**
@@ -2276,8 +2392,9 @@ export class SterlingTools {
         // THE RECHECK ALWAYS HASHES (review FIX 1, 2026-08-31 — REPLACING the
         // 'licensed prefilter' this call site first shipped with). The licence was
         // "the article was re-baselined after this item was minted", and it does
-        // not hold: drift lands, an unrelated article write re-baselines every
-        // owned file, then a second edit whose mtime is preserved (a copy, a
+        // not hold: drift lands, a later write re-stamps the file (before decision
+        // [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]
+        // ANY article write did; now a resolves claim naming it), then a second edit whose mtime is preserved (a copy, a
         // restore, clock skew) sits at or below updated_at and short-circuits to
         // `clean`. At the MINT `clean` raises nothing; HERE it is the affirmative
         // claim "the drift no longer reproduces", which is precisely the P5
@@ -2310,8 +2427,9 @@ export class SterlingTools {
           `every path it names matches the live article's recorded baseline, so this is very likely a closeable no-op. ` +
           `A BEST-EFFORT READ CHECK, NEVER CLOSURE AUTHORITY: confirm it yourself, then close it by NAMING it in a write's ` +
           `resolves claim (or maintenance_remove) — nothing here closes anything. CONFIRM WHAT "MATCHES" MEANS HERE: a later ` +
-          `article write RE-BASELINES every file that article owns, so a re-baseline can absorb a drift whose PROSE was never ` +
-          `reconciled — the bytes agreeing with the recorded baseline does not prove the article still describes them.`,
+          `write whose resolves names a path (or an attested close of it) RE-STAMPS that path's baseline, so a re-stamp can absorb a ` +
+          `drift whose PROSE was never reconciled — the bytes agreeing with the recorded baseline does not prove the article still ` +
+          `describes them.`,
         short: ` ⚠no longer reproduces in the working tree at HEAD ${sha8}`,
       });
     }
@@ -2566,7 +2684,8 @@ export class SterlingTools {
     // version kept the prefilter under a "licence" (the article was re-baselined
     // after the item was minted), meaning to honour the cost design's
     // "re-baselined items terminate without hashing". That licence does not hold:
-    // drift lands, an unrelated article write re-baselines EVERY owned file, and
+    // drift lands, a later write re-stamps the file (any article write did,
+    // before the evidence-gated advance; a resolves claim naming it does now), and
     // a second edit whose mtime is preserved or skewed to at-or-below updated_at
     // (an mtime-preserving copy, a restore from backup, a clock skew) then
     // short-circuits to `clean`. At the mint `clean` merely raises nothing; at
@@ -2884,7 +3003,22 @@ export class SterlingTools {
   private static baselineablePaths(record: Record<string, unknown>): string[] {
     const type = record.type as string;
     if (type !== 'feature_article' && type !== 'reference_material') return [];
-    return RECORD_TYPES[type].fileKeys(record);
+    // NORMALIZED AND DEDUPED, because the write path baselines the PRE-SCHEMA
+    // record: a caller's './src/a.ts' reaches here raw, while the store persists
+    // (and every reader compares) the schema-normalized 'src/a.ts'. Keying the
+    // baseline by the raw spelling emitted an orphan key nothing ever read, and
+    // made a re-spelled owned path look newly claimed. A path that cannot be
+    // normalized is skipped here only because the schema boundary refuses the
+    // whole write for it; a stored record never carries one.
+    const paths = new Set<string>();
+    for (const raw of RECORD_TYPES[type].fileKeys(record)) {
+      try {
+        paths.add(normalizeRepoPath(raw));
+      } catch {
+        continue;
+      }
+    }
+    return [...paths];
   }
 
   /** Bound a caller-supplied path before it is interpolated into a refusal the
@@ -3806,8 +3940,9 @@ export class SterlingTools {
         // EVERY drifting file, not just the first (board 2ded3b4b). This loop used
         // to `break` on the first drift, and the enqueue dedup keyed on the
         // ARTICLE — so a second drifting file never got an item, and because
-        // knowledge_update re-baselines EVERY owned file, reconciling the first
-        // absorbed the second's drift into a fresh baseline. The finding neither
+        // knowledge_update then re-baselined EVERY owned file (since superseded by
+        // the evidence-gated advance), reconciling the first absorbed the second's
+        // drift into a fresh baseline. The finding neither
         // queued nor survived. Each call below still passes ONE file's worth of
         // file_keys and its own specific per-file text (missing vs edited) — that
         // is what makes each finding actionable and legible on its own — but the
@@ -4060,7 +4195,7 @@ export class SterlingTools {
    *
    * It delegates to knowledgeUpdate rather than writing its own supersede, so it
    * CANNOT diverge from the update path's guarantees: version bump, prior version
-   * retained, file_baselines re-baseline, and (decision foreign_68988832) an EXPLICIT
+   * retained, the evidence-gated file_baselines advance, and (decision foreign_68988832) an EXPLICIT
    * resolves claim — never an implicit drain — all happen exactly once and
    * exactly as before. Any open reconcile_needed/refresh_reference debt on the
    * chain not named in resolves is warned on the receipt, not silently
@@ -4185,7 +4320,7 @@ export class SterlingTools {
    * the article.
    *
    * Everything else rides the ONE update path — version bump, retained prior
-   * version, file_baselines re-baseline, the explicit resolves claim (decision
+   * version, the evidence-gated file_baselines advance, the explicit resolves claim (decision
    * 68988832 — never an implicit auto-drain), coherence warnings — so an edit
    * is a normal supersession and not a back door around any of it.
    */
@@ -6953,8 +7088,11 @@ export class SterlingTools {
     previousVersion?: number;
     ts: string;
     toolName: string;
+    /** knowledgeUpdate's evidence-gated baseline advance, fed the claims as
+     *  revalidated HERE, under this transaction's lock */
+    advance: (liveClaims: readonly unknown[]) => void;
   }): { updated: DurableRecord; retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[] } {
-    const { old, next, resolves, chain, appendedPaths, expectedVersion, previousVersion, ts, toolName } = args;
+    const { old, next, resolves, chain, appendedPaths, expectedVersion, previousVersion, ts, toolName, advance } = args;
 
     // (1) RE-READ THE TARGET ARTICLE, under the write lock this transaction
     //     already holds. `next` was merged from a read taken before the lock;
@@ -7058,7 +7196,17 @@ export class SterlingTools {
       dispositions.push({ item, countBefore: keys.length, joined, alreadyOwned, remaining });
     }
 
-    // (4) WRITE THE ARTICLE.
+    // (4) WRITE THE ARTICLE. The baseline advance re-stamps the paths of every
+    //     item this write RESOLVES, as revalidated above under this lock (rule
+    //     (d) has no lane exception): the pass-through (reconcile/refresh)
+    //     claims, which the store drains below, and each article_missing item
+    //     step 5 FULLY drains (no remaining keys). A partially covered item is
+    //     rewritten and stays open, so it resolves nothing and advances nothing;
+    //     the paths it joins are newly claimed and stamped regardless.
+    advance([
+      ...claims.filter((claim) => passThrough.includes(claim.id)),
+      ...dispositions.filter((d) => d.remaining.length === 0).map((d) => d.item),
+    ]);
     const cas = expectedVersion ?? previousVersion;
     const updated = this.store.updateRecord(old.id, next, {
       ...(cas !== undefined ? { expected_version: cas } : {}),
@@ -7154,7 +7302,14 @@ export class SterlingTools {
       retained: { item_id: string; keys: string[]; joined: string[]; already_owned: string[] }[];
     },
     /** Internal-only: knowledge_array_remove's exact authoritative graph deletion. */
-    relationRemoval?: { rel: string; target_id: string }
+    relationRemoval?: { rel: string; target_id: string },
+    /**
+     * Internal-only: knowledge_split drains its OWN resolves claims beside this
+     * nested update (its lane rules differ from this path's), so it passes the
+     * claimed items' file_keys — re-read inside its transaction — for the
+     * baseline advance to re-stamp exactly what the split closes.
+     */
+    outerResolvedKeys?: ReadonlySet<string>
   ): DurableRecord & {
     same_subject?: SameSubjectEntry[];
     previous_version?: number;
@@ -7352,27 +7507,30 @@ export class SterlingTools {
     // [path-claims-are-leaf-or-absent-directory-claims-refused-at-the-tool-write-boundary]).
     // Placed here so knowledge_append / _edit / _array_remove — which all merge
     // through this one path — are covered by the same call, never by a second
-    // per-surface copy; and BEFORE the re-baseline below, whose lstat would
+    // per-surface copy; and BEFORE the baseline advance below, whose lstat would
     // otherwise surface a raw EACCES ahead of this check's named refusal.
     const claimsCheck = this.assertClaimedPaths(toolName, next);
-    // re-baseline on every reconcile: the new version's owned-file hashes become
-    // the truth the next read-time drift check compares against, so reconciling
-    // an article both clears its current flag and immunizes it against the next
-    // merge's mtime reset (§3.2.3). Overwrites any stale baseline carried from old.
-    if (next.type === 'feature_article' || next.type === 'reference_material') {
-      next.file_baselines = this.computeBaselines(next);
-      // AND THE ATTESTATION MAP IS CLEARED WHOLESALE (board 8c8b6d78 / R9), never
-      // per path. computeBaselines re-hashes EVERY owned path, so after this write
-      // every baseline belongs to the CONTENT-UPDATE generation — including paths
-      // whose hash coincidentally still matches what an earlier close attested.
-      // Keeping a stale attestation entry beside a content-minted baseline would
-      // make the provenance lie about which write produced it, and the whole
-      // point of the sibling map is that those two claims stay distinguishable.
-      // Clearing wholesale also drops, for free, any attestation on a path this
-      // article has stopped owning.
-      next.baseline_attestations = undefined;
-      next.absence_attestations = undefined;
-    }
+    // EVIDENCE-GATED BASELINE ADVANCE (decision
+    // [baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines]).
+    // A versioned write no longer re-hashes every owned path: that silently
+    // erased un-reconciled drift on any unrelated write (finding
+    // a-re-baseline-can-auto-drain-a-reconcile-needed-item-before). Only the
+    // resolved items' own file_keys are re-stamped, plus owned paths that have
+    // no baseline yet; every other baseline and its attestation entry stays
+    // as it was. See advanceBaselines for the per-path rule.
+    //
+    // THE RE-STAMP SET COMES FROM THE SAME TRANSACTIONAL SNAPSHOT AS THE DRAIN.
+    // `claims` is a pre-transaction read, and an item can fold or widen before
+    // the drain removes it; stamping from `claims` would re-stamp paths the
+    // drain no longer closes, or drain paths nothing re-stamped. So every branch
+    // below calls this with the claimed items as read INSIDE its transaction,
+    // immediately before the write that drains them.
+    const advance = (liveClaims: readonly unknown[]): void => {
+      if (next.type !== 'feature_article' && next.type !== 'reference_material') return;
+      const resolvedKeys = SterlingTools.claimedFileKeys(liveClaims);
+      for (const key of outerResolvedKeys ?? []) resolvedKeys.add(key);
+      Object.assign(next, this.advanceBaselines(old as unknown as Record<string, unknown>, next, resolvedKeys));
+    };
     const previousVersion = (old as unknown as { version?: number }).version;
     // EXPLICIT-RESOLVES CLOSURE (decision foreign_68988832;
     // board 68fe8373): drain EXACTLY the named+validated items, through the
@@ -7452,6 +7610,7 @@ export class SterlingTools {
             previousVersion,
             ts,
             toolName,
+            advance,
           })
         );
         updated = outcome.updated;
@@ -7476,12 +7635,25 @@ export class SterlingTools {
         // retry loop, deliberately (a silent retry would re-merge onto a body the
         // caller never saw, which is the lost update by another route).
         const cas = expectedVersion ?? previousVersion;
-        updated = this.store.updateRecord(old.id, next, {
-          ...(cas !== undefined ? { expected_version: cas } : {}),
-          ...(claims.length ? { resolves: claims.map((claim) => claim.id), resolvedReceipt } : {}),
-          ...(relationRemoval ? { remove_relation: relationRemoval } : {}),
-          prunedReceipt,
-        });
+        const write = (): DurableRecord =>
+          this.store.updateRecord(old.id, next, {
+            ...(cas !== undefined ? { expected_version: cas } : {}),
+            ...(claims.length ? { resolves: claims.map((claim) => claim.id), resolvedReceipt } : {}),
+            ...(relationRemoval ? { remove_relation: relationRemoval } : {}),
+            prunedReceipt,
+          });
+        if (claims.length) {
+          // The claims already passed the project-mount check above, so the
+          // PROJECT transaction is the one the drain joins (withTransaction is
+          // reentrant): the re-read, the advance and the drain see one state.
+          updated = this.store.withTransaction(() => {
+            advance(claims.map((claim) => this.store.get(claim.id)).filter((item) => item !== undefined));
+            return write();
+          });
+        } else {
+          advance([]);
+          updated = write();
+        }
       }
     } catch (err) {
       if (err instanceof ZodError) throw this.renderValidationFailure(err, old.type, toolName);
@@ -7805,15 +7977,30 @@ export class SterlingTools {
       const remainingAc = currentAcIsArray ? parentAcArray.filter((a) => !claimedAcIds.has(a.ac_id)) : parentRec.current_ac;
       const remainingRefs = liveRefsIsArray ? parentRefsArray.filter((r) => !claimedAcIds.has(r.ac_id)) : parentRec.live_test_refs;
       const splitEvent = { date: ts, event: `split off ${childSlugs}${reason ? ` — ${reason}` : ''}` };
-      parentResult = this.knowledgeUpdate(parentRec.id, {
-        what_it_does: parent_what_it_does,
-        ...(parent_intended_behavior !== undefined ? { intended_behavior: parent_intended_behavior } : {}),
-        files: remainingFiles,
-        current_ac: remainingAc,
-        live_test_refs: remainingRefs,
-        history: [...parentRec.history, splitEvent],
-        dependencies: { relies_on: parentRec.dependencies?.relies_on ?? [], relied_by: parentReliedBy },
-      });
+      // The claims as they stand NOW, inside this transaction — the same state
+      // the removals below act on — so the parent re-stamps exactly the paths
+      // the split closes (evidence-gated baseline advance).
+      const liveClaimKeys = SterlingTools.claimedFileKeys(
+        resolveClaims.map((claim) => this.store.get(claim.id)).filter((item) => item !== undefined)
+      );
+      parentResult = this.knowledgeUpdate(
+        parentRec.id,
+        {
+          what_it_does: parent_what_it_does,
+          ...(parent_intended_behavior !== undefined ? { intended_behavior: parent_intended_behavior } : {}),
+          files: remainingFiles,
+          current_ac: remainingAc,
+          live_test_refs: remainingRefs,
+          history: [...parentRec.history, splitEvent],
+          dependencies: { relies_on: parentRec.dependencies?.relies_on ?? [], relied_by: parentReliedBy },
+        },
+        undefined,
+        undefined,
+        'knowledge_update',
+        undefined,
+        undefined,
+        liveClaimKeys
+      );
 
       // Explicit-claim closure (decision foreign_68988832's posture, broadened per
       // validateResolveClaim's split semantics above): drained INSIDE the
@@ -10029,7 +10216,7 @@ export class SterlingTools {
       throw new Error(
         `${op}: item '${itemId}' names ${keys.length} paths, over the ${ATTESTATION_MAX_PATHS}-path attestation cap. ` +
           `The whole close is refused (never a partial attestation). Reconcile the ${ATTESTABLE_OWNER_NOUN} with knowledge_update, ` +
-          `which re-baselines every owned path in one write, and claim the item in 'resolves'. Nothing was written.`
+          `claiming the item in 'resolves' — that write re-stamps every owned path the item names. Nothing was written.`
       );
     }
   }
@@ -10274,8 +10461,8 @@ export class SterlingTools {
           `deliberately NOT advanced (advancing it would suppress unrelated standing drift on its other owned files). ` +
           `THE STANDING COST OF THAT, so it is not a surprise later: from now on EVERY knowledge_query that returns this record ` +
           `re-reads and sha256s each of these ${keys.length} attested path(s) — the mint-side drift check has no byte budget, so the ` +
-          `always-hash rule is uncapped there — and the cost stands until a CONTENT reconcile (knowledge_update) clears ` +
-          `baseline_attestations wholesale.`
+          `always-hash rule is uncapped there — and the cost stands, per path, until a write whose resolves names that path ` +
+          `re-stamps it (or the record stops claiming it); an unrelated write keeps the attestation.`
         : `Closed as ALREADY-PAID: ${presentPaths.length ? `${presentPaths.length} path(s) were marked as BYTE ATTESTATIONS ("the prose already describes these bytes"), not as a content reconcile. ` : ''}` +
           `${absencePaths.length} path(s) were marked as proven ABSENCE ATTESTATIONS: git's tree for commit ${headBefore.slice(0, 8)} has NO entry whose name equals the path BYTE-FOR-BYTE. No file was read, no blob or sha256 exists, and no baseline was stamped for those paths. ` +
           `${presentPaths.length ? `For each byte attestation, git's tree for commit ${headBefore.slice(0, 8)} supplied an exact-name regular-file entry; the file was read ONCE through ONE descriptor (lstat-checked and opened with O_NOFOLLOW where available), and \`git hash-object --path\` of THAT SAME BUFFER printed that entry's blob id. The stamped baseline is the sha256 of that same buffer. ` : ''}` +
