@@ -174,8 +174,19 @@ let activePlanLine = '';
 // set inside main() once resolveDispatchStart's verdict is known, and folded
 // into combinedContext() beside the return contract — never a transcript
 // fallback, exactly one line, on 'unattributable' only ('resume' emits
-// nothing extra).
+// nothing extra). The line is addressed to the CHILD (decision
+// h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar (3)): it
+// says its knowledge was not staged and that its brief is what to rely on,
+// because no Start-time key exists for same-type parallel Starts. A throw
+// before attribution settles is the same unattributable Start and gets the
+// same line in the catch below, named by the PHASE that threw: 'store' ->
+// [store-unavailable] (openStore failed, attribution never attempted),
+// 'resolution' -> [resolution-failed] (resolveDispatchStart itself threw).
 let unattributableLine = '';
+let startPhase = 'store';
+function notStagedLine(kase) {
+  return `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${kase}] — YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first Read/Edit.`;
+}
 try {
   if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
     // The shared VALIDATING reader: a record that is JSON but not a lock stages
@@ -235,6 +246,7 @@ async function main(input) {
   try {
     const store = openStore(input.cwd);
     if (!store) return finish(''); // not a Sterling project — no ceremony for the payload half (P1)
+    startPhase = 'resolution';
 
     // DISPATCH-STATE RESOLUTION replaces the old parent-transcript prompt scan
     // (decision dispatch-state-machine-pre-slot-post-binding-locked-start-
@@ -246,8 +258,9 @@ async function main(input) {
       { session_id: input.session_id, agent_id: input.agent_id, agent_type: input.agent_type },
       { consumer: 'h19' }
     );
+    startPhase = 'settled';
     if (resolution.source === 'unattributable') {
-      unattributableLine = `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${resolution.case}] — no territory was staged; file-touch delivery still fires on your first Read/Edit`;
+      unattributableLine = notStagedLine(resolution.case);
     }
 
     const prompts = typeof resolution.prompt === 'string' ? [resolution.prompt] : [];
@@ -496,6 +509,8 @@ async function main(input) {
     } catch {
       /* a failed stderr note must not change the delivery outcome */
     }
+    if (startPhase === 'store') unattributableLine = notStagedLine('store-unavailable');
+    else if (startPhase === 'resolution') unattributableLine = notStagedLine('resolution-failed');
     const out = combinedContext('');
     if (out) return exitAfterWrite(envelope(out), 0);
     return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);

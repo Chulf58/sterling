@@ -45,6 +45,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, exist
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
+import { registerLockPath } from '../lib/dispatch-register.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -961,3 +963,122 @@ test("DSH-18: a TaskStop from ANOTHER session naming the same agent_id ends neit
     cleanup();
   }
 });
+
+// ===========================================================================
+// PIN H19 — THE CHILD IS TOLD ITS KNOWLEDGE WAS NOT STAGED (decision
+// h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar, points
+// (2) and (3)). The disclosure lands in the child's own additionalContext, not
+// only in the register row, and it says two things: nothing was staged, and
+// the brief is what to rely on. The prefix (STAGING_DISCLOSURE) is pinned by
+// DSH-3/DSH-4; these pins cover the child-facing instruction that follows it.
+// ===========================================================================
+
+const NOT_STAGED = /YOUR KNOWLEDGE WAS NOT STAGED/;
+const RELY_ON_BRIEF = /rely on your dispatch brief/;
+
+function assertNotStagedDisclosure(ctx, kase) {
+  assert.ok(ctx.includes(STAGING_DISCLOSURE(kase)), `the [${kase}] case is named; got: ${ctx}`);
+  assert.match(ctx, NOT_STAGED, `the child is told, loudly, that its knowledge was not staged; got: ${ctx}`);
+  assert.match(ctx, RELY_ON_BRIEF, `the child is told to rely on its brief; got: ${ctx}`);
+  assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'the disclosure rides BESIDE the return contract, never instead of it');
+}
+
+test('DSH-19 CONTROL (placed FIRST): exactly ONE same-type pending dispatch stages its own knowledge and carries no not-staged disclosure', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('solo', ['src/solo.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_solo', subagent_type: 'coder', prompt: 'work on src/solo.mjs' }), dir).code, 0);
+    const a = h19(startInput(dir, { agent_id: 'agent-solo', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    const ctx = ctxOf(a);
+    assert.match(ctx, /solo does the solo thing/, `the unambiguous Start is staged; got: ${ctx}`);
+    assert.doesNotMatch(ctx, /could not be attributed at Start/);
+    assert.doesNotMatch(ctx, NOT_STAGED);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-19: two SAME-TYPE pending dispatches — the child is told its knowledge was NOT staged and to rely on its brief; neither sibling is guessed', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('twinA', ['src/twin-a.mjs']));
+    store.create(article('twinB', ['src/twin-b.mjs']));
+    for (const [id, file] of [['toolu_nsa', 'src/twin-a.mjs'], ['toolu_nsb', 'src/twin-b.mjs']]) {
+      assert.equal(h22(preInput(dir, { tool_use_id: id, subagent_type: 'coder', prompt: `work on ${file}` }), dir).code, 0);
+    }
+    const a = h19(startInput(dir, { agent_id: 'agent-ns', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    const ctx = ctxOf(a);
+    assertNotStagedDisclosure(ctx, 'same-type-siblings-in-flight');
+    assert.doesNotMatch(ctx, /twinA does the twinA thing|twinB does the twinB thing/, 'no sibling is staged on a guess');
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: restore the old tail ("no territory was staged; file-touch
+// delivery still fires ...") — NOT_STAGED and RELY_ON_BRIEF go red while
+// DSH-3's prefix pin stays green, which is exactly the gap this pin closes.
+
+test('DSH-20: a lock-held Start (another live writer holds the register lock past the bound) gets the same not-staged disclosure in the child context', () => {
+  const { dir, store, cleanup } = makeProject();
+  let db = null;
+  try {
+    store.create(article('held', ['src/held.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_held', subagent_type: 'coder', prompt: 'work on src/held.mjs' }), dir).code, 0);
+    db = new DatabaseSync(registerLockPath(dir));
+    db.exec('BEGIN IMMEDIATE');
+    const a = h19(startInput(dir, { agent_id: 'agent-held', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    const ctx = ctxOf(a);
+    assertNotStagedDisclosure(ctx, 'lock-held');
+    assert.doesNotMatch(ctx, /held does the held thing/, 'a lock-held Start stages nothing — it never proceeds unlocked');
+  } finally {
+    if (db) {
+      db.exec('ROLLBACK');
+      db.close();
+    }
+    rmSync(registerLockPath(dir), { force: true });
+    cleanup();
+  }
+});
+
+test('DSH-21: a Start whose dispatch resolution THROWS is disclosed to the child as not staged [resolution-failed], never left silent', () => {
+  const { dir, store, cleanup } = makeProject();
+  const lockPath = registerLockPath(dir);
+  try {
+    store.create(article('broken', ['src/broken.mjs']));
+    // A DIRECTORY where the lock database must be: opening it throws a
+    // non-busy error, which resolveDispatchStart rethrows.
+    mkdirSync(lockPath, { recursive: true });
+    const a = h19(startInput(dir, { agent_id: 'agent-broken', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, /H19: dispatch staging failed/, 'the internal failure is still reported on stderr');
+    assertNotStagedDisclosure(ctxOf(a), 'resolution-failed');
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+// SABOTAGE: drop the catch-path disclosure — the child gets only the return
+// contract, and NOT_STAGED goes red.
+
+test('DSH-22: a Start whose store cannot OPEN (garbage bytes at sterling.db) is disclosed as not staged [store-unavailable] — never as [resolution-failed], because attribution was never attempted', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-dispatch-state-hooks-'));
+  try {
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'this is not a sqlite database, it is garbage bytes '.repeat(200));
+    const a = h19(startInput(dir, { agent_id: 'agent-nostore', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, /H19: dispatch staging failed/, 'the store-open failure is still reported on stderr');
+    const ctx = ctxOf(a);
+    assertNotStagedDisclosure(ctx, 'store-unavailable');
+    assert.doesNotMatch(ctx, /\[resolution-failed\]/, 'resolution was never attempted, so it cannot be named as the failure');
+    assert.equal(readStateRecords(dir).length, 0, 'no dispatch state was touched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: collapse the two pre-resolution failures back into one flag —
+// the [store-unavailable] prefix assertion and the doesNotMatch go red.

@@ -9018,6 +9018,10 @@ var PLAN_TITLE_MAX = 120;
 var PLAN_PATH_MAX = 320;
 var activePlanLine = "";
 var unattributableLine = "";
+var startPhase = "store";
+function notStagedLine(kase) {
+  return `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${kase}] \u2014 YOUR KNOWLEDGE WAS NOT STAGED: no owning articles, hazards or decisions were delivered for your task. Do not assume the store is silent on it: rely on your dispatch brief for knowledge pointers and query the store for the area before acting. File-touch delivery still fires on your first Read/Edit.`;
+}
 try {
   if (PLAN_LINE_AGENT_TYPES.has(input.agent_type)) {
     const read = readLock(sterlingDirOf(input.cwd));
@@ -9052,13 +9056,15 @@ async function main(input2) {
   try {
     const store = openStore(input2.cwd);
     if (!store) return finish("");
+    startPhase = "resolution";
     const resolution = await resolveDispatchStart(
       input2.cwd,
       { session_id: input2.session_id, agent_id: input2.agent_id, agent_type: input2.agent_type },
       { consumer: "h19" }
     );
+    startPhase = "settled";
     if (resolution.source === "unattributable") {
-      unattributableLine = `STERLING DISPATCH STAGING (H19): this spawn's dispatch could not be attributed at Start [${resolution.case}] \u2014 no territory was staged; file-touch delivery still fires on your first Read/Edit`;
+      unattributableLine = notStagedLine(resolution.case);
     }
     const prompts = typeof resolution.prompt === "string" ? [resolution.prompt] : [];
     const candidates = [...new Set(prompts.flatMap(extractPathCandidates))];
@@ -9181,6 +9187,8 @@ async function main(input2) {
 `);
     } catch {
     }
+    if (startPhase === "store") unattributableLine = notStagedLine("store-unavailable");
+    else if (startPhase === "resolution") unattributableLine = notStagedLine("resolution-failed");
     const out = combinedContext("");
     if (out) return exitAfterWrite(envelope(out), 0);
     return warnNonBlocking(`H19: dispatch staging failed and nothing was emitted`);
