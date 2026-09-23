@@ -50,9 +50,19 @@ function namesStoreComponent(absPath) {
 // (case-insensitive); `rmdir <..>/.sterling`; `find <..>.sterling ... -delete`/`-exec rm`; `git clean` with `x`/`X`
 // together with `d`/`f`; PowerShell Remove-Item/ri/rd with `-Recurse`/`-r`/`/s` on a `.sterling` path. A PROTECTED DB
 // PATH is a token whose path components include `.sterling` (case-insensitive) AND whose basename matches DB_FILE_RE —
-// a same-named file elsewhere (`fixtures/sterling.db`) is NOT protected. A non-string `command` is DENIED outright (it
-// cannot be inspected); a missing/empty one allows. Everything else allows: reads, mentions, unknown verbs, `node -e`/
-// `python -c` one-liners (accident guard, not a sandbox), Sterling scripts taking `--store <db>`.
+// a same-named file elsewhere (`fixtures/sterling.db`) is NOT protected. EXCEPTION to (b) for `sqlite3` only (user-ruled
+// 2026-09-22, review-hardened same day, twice): a fragment is allowed when a bare `-readonly` token precedes the
+// PROTECTED DB PATH argument and survives SQLITE3_VALUE_OPTS arity (e.g. `-separator -readonly` does NOT count — that
+// `-readonly` is `-separator`'s value); `--readonly` is not recognized (unverified on this machine, not invented).
+// DENIED for EVERY sqlite3 invocation regardless of `-readonly` or of which db is positionally opened — ATTACH and a
+// dot-command target a path of THEIR OWN, unrelated to the opened db: a `.output`/`.once`/`.backup`/`.save`
+// dot-command whose TARGET (the LAST argument on its line — `.backup`/`.save` accept an optional leading DB-schema
+// name that is not the target) names a `.sterling/` path; a VACUUM [SCHEMA] INTO or ATTACH (raw text, its own
+// SQL/heredoc body) naming a `.sterling/` path — VACUUM INTO creates a new file rather than writing the opened db,
+// and ATTACH opens a second db read-write by default, so neither is stopped by -readonly's OS-level read-only open
+// on the primary connection. A non-string `command` is DENIED outright (it cannot be inspected); a missing/empty one
+// allows. Everything else allows: reads, mentions, unknown verbs, `node -e`/`python -c` one-liners (accident guard,
+// not a sandbox), Sterling scripts taking `--store <db>`.
 
 /** Index just past the quote run starting at s[i] (s[i] is `'` or `"`). */
 function skipQuoted(s, i) {
@@ -63,8 +73,10 @@ function skipQuoted(s, i) {
 }
 const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** Excise heredoc BODIES (never fragmented/tokenized) from a command string. */
-function stripHeredocBodies(cmd) {
+/** Excise heredoc BODIES (never fragmented/tokenized) from a command string. `bodies`, if given, collects
+ *  each excised body's raw text — used only by the sqlite3 -readonly VACUUM INTO / ATTACH raw-text scan
+ *  below, since a heredoc-fed sqlite3 script never appears in any fragment's tokens. */
+function stripHeredocBodies(cmd, bodies) {
   let out = '', i = 0;
   const n = cmd.length;
   while (i < n) {
@@ -89,7 +101,9 @@ function stripHeredocBodies(cmd) {
         const lineEnd = cmd.indexOf('\n', j);
         if (lineEnd === -1) { out += cmd.slice(i, j); i = n; continue; }
         out += cmd.slice(i, j) + '\n';
-        const m = new RegExp('^\\t*' + escapeRe(tag) + '$', 'm').exec(cmd.slice(lineEnd + 1));
+        const rest = cmd.slice(lineEnd + 1);
+        const m = new RegExp('^\\t*' + escapeRe(tag) + '$', 'm').exec(rest);
+        if (bodies) bodies.push(m ? rest.slice(0, m.index) : rest);
         i = m ? lineEnd + 1 + m.index + m[0].length : n;
         continue;
       }
@@ -291,8 +305,68 @@ const DESTRUCTIVE_VERBS = new Set([
   'remove-item', 'ri', 'rd', 'move-item', 'copy-item', 'rename-item', 'set-content', 'add-content', 'out-file', 'clear-content', 'new-item',
 ]);
 
-/** True when a fragment's tokens show a destructive shape aimed at the store database. */
-function isDestructiveFragment(tokens) {
+// sqlite3 CLI options that consume N following tokens as their OWN value (checked against the CLI's
+// documented flag list, not invented — no sqlite3 binary is installed on this machine to verify against).
+// A `-readonly` token consumed as one of these values is not the read-only flag; the db still opens
+// writable. Single-value: -cmd, -init, -maxsize, -mmap, -newline, -nullvalue, -separator, -vfs.
+// Two-value: -lookaside, -pagecache.
+const SQLITE3_VALUE_OPTS = new Map([
+  ['-cmd', 1], ['-init', 1], ['-maxsize', 1], ['-mmap', 1], ['-newline', 1], ['-nullvalue', 1], ['-separator', 1], ['-vfs', 1],
+  ['-lookaside', 2], ['-pagecache', 2],
+]);
+
+/** True when a bare `-readonly` token appears among `tokens[0, end)`, skipping the values consumed by any
+ *  preceding sqlite3 option that takes its own argument(s) (SQLITE3_VALUE_OPTS) — so `-separator -readonly`
+ *  does NOT count (the reader is `-readonly` used as -separator's value), but `-separator , -readonly` does. */
+function sqlite3ReadonlyBefore(tokens, end) {
+  let i = 0;
+  while (i < end) {
+    const t = tokens[i];
+    if (t.type === 'word' && t.value === '-readonly') return true;
+    if (t.type === 'word' && SQLITE3_VALUE_OPTS.has(t.value)) { i += 1 + SQLITE3_VALUE_OPTS.get(t.value); continue; }
+    i++;
+  }
+  return false;
+}
+
+/** True when a `.output`/`.once`/`.backup`/`.save` dot-command's TARGET (not its mere presence, and not
+ *  an earlier optional argument) names a `.sterling/` path — these CLI dot-commands write files at the
+ *  client level regardless of -readonly, and independently of which db sqlite3 opened as its positional
+ *  argument (`.backup`/`.save` can copy FROM an unprotected opened db INTO the store). `.backup`/`.save`
+ *  take an optional DB-schema name BEFORE the file (`.backup main .sterling/sterling.db`), so the TARGET
+ *  is the LAST whitespace/quote-separated argument on the dot-command's line, not the first — a schema
+ *  name like `main` is never mistaken for the target. A target elsewhere (e.g. `.output /tmp/report`) is
+ *  not a match. Scans the fragment's own SQL words and any heredoc bodies feeding this command. */
+function sqlite3DotCommandTargetsStore(words, heredocBodies) {
+  const text = words.join('\n') + '\n' + heredocBodies.join('\n');
+  const re = /\.(?:output|once|backup|save)\b([^\n;]*)/gi;
+  let m;
+  while ((m = re.exec(text))) {
+    const args = m[1].trim().match(/'[^']*'|"[^"]*"|\S+/g);
+    if (!args || args.length === 0) continue;
+    const target = args[args.length - 1].replace(/^['"]|['"]$/g, '');
+    if (/\.sterling[\\/]/i.test(target)) return true;
+  }
+  return false;
+}
+
+/** True when the fragment's SQL text (its own quoted words, plus any heredoc bodies feeding this command)
+ *  contains VACUUM [SCHEMA] INTO or ATTACH naming a `.sterling/` path — raw text, scoped to the statement
+ *  (up to the next `;`) it appears in, checked for EVERY sqlite3 invocation regardless of its positional
+ *  db (ATTACH opens a SECOND db, unrelated to whichever db sqlite3 was invoked against). VACUUM INTO
+ *  creates a NEW file rather than writing the opened db, so -readonly's OS-level read-only open does not
+ *  stop it; ATTACH opens that second db read-write by default regardless of -readonly on the primary
+ *  connection. A plain VACUUM (no INTO) is not matched — -readonly already blocks it at the OS level,
+ *  since it writes the opened db in place. */
+function sqlite3VacuumOrAttachTargetsStore(words, heredocBodies) {
+  const text = words.join(' ') + ' ' + heredocBodies.join(' ');
+  return /vacuum\s+(?:\w+\s+)?into\b[^;]*\.sterling[\\/]/i.test(text) || /\battach\b[^;]*\.sterling[\\/]/i.test(text);
+}
+
+/** True when a fragment's tokens show a destructive shape aimed at the store database. `heredocBodies` are
+ *  this COMMAND's excised heredoc bodies (see stripHeredocBodies) — scanned only for the sqlite3 VACUUM
+ *  INTO / ATTACH check above, since a heredoc-fed script never appears in any fragment's own tokens. */
+function isDestructiveFragment(tokens, heredocBodies = []) {
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     if (t.type === 'op' && /^\d*(>>|>\||&>|>)$/.test(t.value)) {
@@ -307,7 +381,25 @@ function isDestructiveFragment(tokens) {
   const rest = tokens.slice(idx0 + 1);
   const restWords = rest.filter((t) => t.type === 'word').map((t) => t.value);
 
-  if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
+  if (lv === 'sqlite3') {
+    // user-ruled 2026-09-22 ("Yes, allow reads"): `sqlite3 -readonly <db> ...` is allowed — the
+    // flag decides, H15 does not parse SQL. `-readonly` must appear before the db-path argument
+    // (sqlite3 reads flags left of its positional args) and survive SQLITE3_VALUE_OPTS arity
+    // (skipWrappers-style); `--readonly` is not recognized because this rebuild does not invent
+    // CLI support that hasn't been checked against a real binary. Checked for EVERY sqlite3
+    // invocation, whatever its positional db (an ATTACH or a dot-command target names ITS OWN
+    // path, unrelated to the db sqlite3 opened): a dot-command TARGETING a `.sterling/` path
+    // (sqlite3DotCommandTargetsStore) and a SQL/heredoc VACUUM INTO or ATTACH naming a `.sterling/`
+    // path (sqlite3VacuumOrAttachTargetsStore) — -readonly's OS-level protection does not cover
+    // either. Only past both of those does the -readonly-before-the-db-path check decide.
+    if (sqlite3DotCommandTargetsStore(restWords, heredocBodies)) return true;
+    if (sqlite3VacuumOrAttachTargetsStore(restWords, heredocBodies)) return true;
+    const dbIdx = rest.findIndex((t) => t.type === 'word' && isDbPath(t.value));
+    if (dbIdx !== -1) {
+      const readonly = sqlite3ReadonlyBefore(rest, dbIdx);
+      if (!readonly) return true;
+    }
+  } else if (DESTRUCTIVE_VERBS.has(lv) && restWords.some(isDbPath)) return true;
   if ((lv === 'sed' || lv === 'perl') && restWords.some((w) => /^-\S*i\S*$/.test(w)) && restWords.some(isDbPath)) return true;
   if (lv === 'rm') {
     const recursive = restWords.some((w) => w === '--recursive' || /^-[A-Za-z]*[rR][A-Za-z]*$/.test(w));
@@ -340,9 +432,10 @@ if (tool === 'Bash' || tool === 'PowerShell') {
   if (rawCommand === undefined || rawCommand === null) command = '';
   else if (typeof rawCommand === 'string') command = rawCommand;
   else deny(`H15: this ${tool} call carries a non-string command (${typeof rawCommand}), which cannot be safely inspected for a destructive shape — re-issue with a string command.`);
-  const fragments = splitTopLevel(stripHeredocBodies(command));
+  const heredocBodies = [];
+  const fragments = splitTopLevel(stripHeredocBodies(command, heredocBodies));
   for (const fragment of fragments) {
-    if (isDestructiveFragment(tokenizeFragment(fragment))) {
+    if (isDestructiveFragment(tokenizeFragment(fragment), heredocBodies)) {
       deny(
         'H15: this command would overwrite, delete, move or rewrite the Sterling store database (sterling.db) or the .sterling directory that holds it, which only the Sterling MCP server writes — ' +
           'write it with knowledge_create / knowledge_update / board_add and the other MCP tools. ' +

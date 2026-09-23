@@ -55,12 +55,14 @@ if (!nextSlice) {
 // --reason=code-reload (board d5942fa0, fix candidate d): an OPTIONAL, explicit
 // flag for the one case the rotation mechanism cannot serve on its own — a
 // rotation that requires a code reload (migration, update, rebuild) BEFORE the
-// /clear that consumes this note. H1's source=clear gate is deliberate and
-// unchanged (a note prepared for a rotation that hasn't happened must survive
-// an unrelated restart) — this flag only sharpens the wording, additive to the
-// unconditional guidance already printed/injected below. Validated against the
-// one supported value rather than accepted as free text: a typo'd reason would
-// otherwise silently fail to trigger the sequence it exists to state (P5).
+// next slice can proceed. H1 consumes this note on source=startup OR
+// source=clear (Dome Farmer's issue log 2026-09-08: source=clear only meant
+// the EXIT AND RELAUNCH sequence this flag prints did not, by itself, deliver
+// the note — a /clear was ALSO required). This flag only sharpens the
+// wording, additive to the unconditional guidance already printed/injected
+// below. Validated against the one supported value rather than accepted as
+// free text: a typo'd reason would otherwise silently fail to trigger the
+// sequence it exists to state (P5).
 const reasonArg = arg('reason');
 if (reasonArg !== null && reasonArg !== 'code-reload') {
   fail(`--reason '${reasonArg}' is not recognized — the only supported value is 'code-reload' (flags that a server/hook code reload is required before the next slice can proceed)`);
@@ -230,8 +232,8 @@ process.stdout.write(
       : '') +
     (note.reason === 'code-reload'
       ? `CODE RELOAD REQUIRED (--reason=code-reload) — /clear alone will NOT load it (MCP servers survive it). The sequence is:\n` +
-        `  1. exit and relaunch the Claude Code CLI now\n` +
-        `  2. THEN /clear — H1 restores and consumes this note automatically\n`
-      : `Tell the user READY TO CLEAR — on /clear, H1 restores and consumes this note automatically.\n` +
-        `If server/hook CODE changed since this session started (migration, update, rebuild), /clear alone will not reload it — EXIT AND RELAUNCH the Claude Code CLI first, THEN /clear.\n`)
+        `  1. exit and relaunch the Claude Code CLI now — H1 restores and consumes this note automatically at that very startup\n` +
+        `  2. THEN /clear — H1 restores and consumes this note automatically if step 1 hasn't already delivered it (single-shot: whichever of startup/clear happens first wins, and the other becomes a no-op)\n`
+      : `Tell the user READY TO CLEAR — on /clear, H1 restores and consumes this note automatically. The very next session STARTUP (e.g. after a relaunch) restores it the same way, single-shot — whichever comes first.\n` +
+        `If server/hook CODE changed since this session started (migration, update, rebuild), /clear alone will not reload it — EXIT AND RELAUNCH the Claude Code CLI first, THEN /clear if the note has not already appeared at that relaunch's startup.\n`)
 );

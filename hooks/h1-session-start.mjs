@@ -7,7 +7,7 @@ var __export = (target, all) => {
 
 // scripts/hooks/h1-session-start.mjs
 import { randomUUID as randomUUID5 } from "node:crypto";
-import { readFileSync as readFileSync5, existsSync as existsSync6, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync5, statSync as statSync5, writeFileSync as writeFileSync5, rmSync as rmSync3 } from "node:fs";
+import { readFileSync as readFileSync5, existsSync as existsSync6, mkdirSync as mkdirSync7, readdirSync as readdirSync3, renameSync as renameSync5, statSync as statSync4, writeFileSync as writeFileSync5, rmSync as rmSync3 } from "node:fs";
 import { spawnSync as spawnSync4 } from "node:child_process";
 import { basename as basename2, dirname as dirname7, join as join8 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5399,6 +5399,15 @@ var SchemaMigrationRequiredError = class extends Error {
     this.db_path = dbPath;
   }
 };
+function refreshReferenceDeltaSuffix(catalogRecord) {
+  const entries = catalogRecord?.catalog?.entries ?? [];
+  if (entries.length === 0)
+    return "";
+  const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
+  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
+  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
+  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+}
 function activityTitleOf(record) {
   const r = record;
   const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
@@ -7330,6 +7339,13 @@ var SterlingStore = class _SterlingStore {
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
    * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
+   *
+   * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
+   * "Refresh the KB models catalog" with no file_keys and a project-local catalog
+   * gave a drain nothing to act on): every current entry's id/tier/status, with
+   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * it by writing the looked-up values into catalog.entries[] on the linked
+   * record (feature_link) and citing this item's id in `resolves`.
    */
   enqueueRefreshReferenceOnce(nowISO) {
     const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
@@ -7347,7 +7363,7 @@ var SterlingStore = class _SterlingStore {
       links: [],
       scope: "project",
       stack_tags: [],
-      text: "Refresh the KB models catalog",
+      text: "Refresh the KB models catalog" + refreshReferenceDeltaSuffix(catalogs[0]),
       source: "system",
       system_reason: "refresh_reference"
     };
@@ -7788,9 +7804,10 @@ function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) 
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, renameSync as renameSync2, existsSync as existsSync4, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
+import { mkdirSync as mkdirSync4, readFileSync as readFileSync2, writeFileSync as writeFileSync2, rmSync, rmdirSync, renameSync as renameSync2, existsSync as existsSync4, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join6, resolve as resolve2, dirname as dirname5, isAbsolute } from "node:path";
 import { hostname } from "node:os";
-import { join as join6, dirname as dirname5 } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash as createHash2 } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -7912,7 +7929,7 @@ function render(x) {
 function registerPath(root) {
   return join6(root, ".sterling", "transient", "dispatch-register.json");
 }
-function registerLockDir(root) {
+function legacyRegisterLockDir(root) {
   return join6(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
@@ -7963,8 +7980,54 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-function lockCodeFor() {
-  return "register_lock_held";
+var SQLITE_BUSY = 5;
+function currentUid() {
+  if (typeof process.getuid !== "function") {
+    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
+  }
+  return process.getuid();
+}
+function registerLockRoot() {
+  const uid = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === "string" && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join6(xdg, "sterling-locks");
+    } catch (e) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid}`;
+}
+function registerLockPath(root) {
+  const hash = createHash2("sha256").update(realpathSync2(resolve2(root))).digest("hex");
+  return join6(registerLockRoot(), `${hash}.db`);
+}
+function ensureLockRoot(dir) {
+  mkdirSync4(dir, { recursive: true, mode: 448 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
+  }
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
+  }
+  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
+}
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
+}
+function sleepAsync(ms) {
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
+}
+var heldConnections = /* @__PURE__ */ new Set();
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
+`);
 }
 function isPidAlive(pid) {
   try {
@@ -7974,99 +8037,99 @@ function isPidAlive(pid) {
     return e?.code !== "ESRCH";
   }
 }
-function readOwner(lockDir) {
+function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync2(join6(lockDir, "owner.json"), "utf8"));
-  } catch {
-    return null;
+    return JSON.parse(readFileSync2(join6(legacy, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
+    throw e;
   }
 }
-function looksDeadOwner(o) {
-  return !!o && o.host === hostname() && !isPidAlive(o.pid);
-}
-function statIno(p) {
+function legacyLockHolder(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
   try {
-    return statSync2(p).ino;
-  } catch {
+    entries = readdirSync(legacy);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
     return null;
   }
+  if (entries.length === 0) {
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === "ENOENT") return null;
+      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
+      throw e;
+    }
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
+`);
+    return null;
+  }
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
+  }
+  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
 }
-function sleepAsync(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
-async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
-  const start = Date.now();
-  for (; ; ) {
-    try {
-      mkdirSync4(dirname5(lockDir), { recursive: true });
-      mkdirSync4(lockDir);
-      break;
-    } catch (e) {
-      if (e?.code !== "EEXIST") throw e;
-      const owner = readOwner(lockDir);
-      if (looksDeadOwner(owner)) {
-        const examinedIno = statIno(lockDir);
-        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
-        let renamed = false;
-        try {
-          renameSync2(lockDir, tombstone);
-          renamed = true;
-        } catch {
+  const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname5(lockPath));
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    const start = Date.now();
+    for (; ; ) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited2 = Date.now() - start;
+        if (waited2 >= timeoutMs) {
+          throw refusal(
+            "register_lock_held",
+            { lock_path: lockPath, waited_ms: waited2 },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
+          );
         }
-        if (renamed) {
-          const tombstoneOwner = readOwner(tombstone);
-          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
-          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
-            try {
-              rmSync(tombstone, { recursive: true, force: true });
-            } catch {
-            }
-          } else {
-            try {
-              renameSync2(tombstone, lockDir);
-            } catch (restoreErr) {
-              if (restoreErr?.code === "EEXIST") {
-                process.stderr.write(
-                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
-`
-                );
-                throw refusal(
-                  lockCodeFor(),
-                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
-                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
-                );
-              }
-            }
-          }
-        }
+        await sleepAsync(retryMs);
+        continue;
       }
-      if (Date.now() - start >= timeoutMs) {
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      db.exec("ROLLBACK");
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs) {
+        const { pid, host, at } = held.owner;
         throw refusal(
-          lockCodeFor(),
-          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
-          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+          "register_lock_held",
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
         );
       }
       await sleepAsync(retryMs);
     }
-  }
-  writeFileSync2(
-    join6(lockDir, "owner.json"),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
-  );
-  try {
-    return await fn();
-  } finally {
+    heldConnections.add(db);
     try {
-      rmSync(lockDir, { recursive: true, force: true });
-    } catch {
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+`);
+      }
     }
+  } finally {
+    db.close();
   }
-}
-function withRegisterLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
 var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
@@ -8489,7 +8552,7 @@ function computeUndeclaredSourceDisclosure({ cwd, config: config2 }) {
 
 // scripts/lib/agent-distribution.mjs
 import { createHash as createHash3, randomUUID as randomUUID3 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync3, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync3, readdirSync as readdirSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, statSync as statSync2, lstatSync as lstatSync2, unlinkSync as unlinkSync2, renameSync as renameSync3, linkSync } from "node:fs";
 var normalize = (s2) => s2.replace(/\r\n/g, "\n");
 function sha256(text) {
   return createHash3("sha256").update(normalize(text), "utf8").digest("hex");
@@ -8553,7 +8616,7 @@ var RESTART_INSTRUCTION = [
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash4, randomUUID as randomUUID4 } from "node:crypto";
-import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync2, statSync as statSync4, renameSync as renameSync4 } from "node:fs";
+import { readFileSync as readFileSync4, writeFileSync as writeFileSync4, mkdirSync as mkdirSync6, rmSync as rmSync2, statSync as statSync3, renameSync as renameSync4 } from "node:fs";
 import { spawnSync as spawnSync3 } from "node:child_process";
 import { join as join7, dirname as dirname6 } from "node:path";
 function hashFile(root, rel) {
@@ -8607,7 +8670,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync4(join7(root, path)).mtime.toISOString();
+        at = statSync3(join7(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -8837,7 +8900,7 @@ var currencyContext = "";
 try {
   const root = process.env.STERLING_CURRENCY_DISABLE === "1" ? null : pluginRoot();
   const gitDir = root ? join8(root, ".git") : null;
-  if (gitDir && existsSync6(gitDir) && statSync5(gitDir).isDirectory()) {
+  if (gitDir && existsSync6(gitDir) && statSync4(gitDir).isDirectory()) {
     let role = null;
     try {
       role = JSON.parse(readFileSync5(join8(root, ".sterling", "config.json"), "utf8")).machine_role;
@@ -8996,7 +9059,7 @@ var NOTE_FIELD_MAX = {
 };
 var rotationContext = "";
 try {
-  if (input.source === "clear") {
+  if (input.source === "startup" || input.source === "clear") {
     const notePath = join8(input.cwd, ".sterling", "transient", "rotation-note.json");
     if (existsSync6(notePath)) {
       const note = JSON.parse(readFileSync5(notePath, "utf8"));
@@ -9102,11 +9165,12 @@ ${uncertainDispatches.length} dispatch(es) UNCERTAIN at rotation (lease expired,
 ${renderedUncertain}` + (omittedUncertain > 0 ? `
 \u2026 (+${omittedUncertain} more)` : "");
       }
+      const isClear = input.source === "clear";
       rotationContext = `
 
-ROTATION RESTORE (H1, source=clear): a rotation note was prepared before this /clear; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
+ROTATION RESTORE (H1, source=${input.source}): a rotation note was prepared before this ${isClear ? "/clear" : "restart"}; this injection CONSUMES it (single-shot).` + (cautions.length ? ` CAUTION: ${cautions.join("; ")}.` : "") + `
 ${fields}${liveLine}${uncertainLine}
-Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.`);
+Resume from next_slice. The board and knowledge store remain the authorities for remaining work and decisions \u2014 the note carries only the residue they cannot hold. ` + (note.reason === "code-reload" ? isClear ? `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 the correct sequence was: 1. exit and relaunch the Claude Code CLI, 2. THEN this /clear. If step 1 was skipped, this session's MCP server/hooks may still be stale: exit and relaunch the CLI now, then /clear again.` : `CODE RELOAD WAS REQUIRED (note reason: code-reload) \u2014 this restore is happening at session STARTUP, which already implies the exit-and-relaunch that reloads server/hook code.` : isClear ? `If next_slice depends on a server/hook code change (migration, update, rebuild), that requires having EXITED AND RELAUNCHED the Claude Code CLI BEFORE this /clear \u2014 a /clear alone never reloads code, so relaunch now if that didn't happen yet.` : `If next_slice depends on a server/hook code change (migration, update, rebuild), this STARTUP already reloaded it.`);
     }
   }
 } catch {

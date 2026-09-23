@@ -301,6 +301,27 @@ export function catalogStatus(
 }
 
 /**
+ * The concrete delta a refresh_reference item on the models catalog appends
+ * to its text, so a drain has something to act on instead of a bare "refresh
+ * the catalog" (Dome Farmer friction 2026-09-17, `sterling-issues.md`
+ * 2026-09-17 entry): every current entry's id/tier/status, with any entry
+ * whose tier is still 'unknown' called out by name as the thing to look up.
+ * No catalog record → no delta to append (bootstrap has not run yet).
+ */
+function refreshReferenceDeltaSuffix(catalogRecord: Record<string, unknown> | undefined): string {
+  const entries = (catalogRecord?.catalog as { entries?: { id: string; label: string; tier: string; status: string }[] } | undefined)
+    ?.entries ?? [];
+  if (entries.length === 0) return '';
+  const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(', ');
+  const unknownTier = entries.filter((e) => e.tier === 'unknown').map((e) => e.id);
+  const lookup =
+    unknownTier.length > 0
+      ? `tier is still 'unknown' for: ${unknownTier.join(', ')} — look these up and `
+      : 're-verify these against current provider info and ';
+  return ` — current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+}
+
+/**
  * Board 39d6462d activity feed: the "title-or-slug clipped" the record is
  * shown under on the Queue tab's activity section. Most types carry `title`;
  * feature_article also carries `slug` but title wins when both exist; todo
@@ -3656,6 +3677,13 @@ export class SterlingStore {
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
    * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
+   *
+   * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
+   * "Refresh the KB models catalog" with no file_keys and a project-local catalog
+   * gave a drain nothing to act on): every current entry's id/tier/status, with
+   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * it by writing the looked-up values into catalog.entries[] on the linked
+   * record (feature_link) and citing this item's id in `resolves`.
    */
   enqueueRefreshReferenceOnce(nowISO: string): void {
     const pending = this.query({ types: ['todo'], cap: 200 }).filter(
@@ -3678,7 +3706,7 @@ export class SterlingStore {
       links: [],
       scope: 'project',
       stack_tags: [],
-      text: 'Refresh the KB models catalog',
+      text: 'Refresh the KB models catalog' + refreshReferenceDeltaSuffix(catalogs[0] as Record<string, unknown> | undefined),
       source: 'system',
       system_reason: 'refresh_reference',
     };

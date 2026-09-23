@@ -5324,6 +5324,15 @@ var SchemaMigrationRequiredError = class extends Error {
     this.db_path = dbPath;
   }
 };
+function refreshReferenceDeltaSuffix(catalogRecord) {
+  const entries = catalogRecord?.catalog?.entries ?? [];
+  if (entries.length === 0)
+    return "";
+  const snapshot = entries.map((e) => `${e.id} (tier: ${e.tier}, status: ${e.status})`).join(", ");
+  const unknownTier = entries.filter((e) => e.tier === "unknown").map((e) => e.id);
+  const lookup = unknownTier.length > 0 ? `tier is still 'unknown' for: ${unknownTier.join(", ")} \u2014 look these up and ` : "re-verify these against current provider info and ";
+  return ` \u2014 current entries: ${snapshot}. ${lookup}update catalog.entries[] on the linked record via knowledge_edit/knowledge_update, then bump its source_date and cite this item's id in resolves.`;
+}
 function activityTitleOf(record) {
   const r = record;
   const raw = r.title ?? r.text?.split("\n")[0] ?? r.slug ?? r.id;
@@ -7255,6 +7264,13 @@ var SterlingStore = class _SterlingStore {
    * Dedup: if a pending item with system_reason='refresh_reference' already exists,
    * this is a no-op. Dedup is lane-scoped — an unrelated reconcile_needed item
    * must NOT suppress the enqueue (§3.2.5, decision foreign_98064d77).
+   *
+   * The item's `text` names a real delta (Dome Farmer friction 2026-09-17: a bare
+   * "Refresh the KB models catalog" with no file_keys and a project-local catalog
+   * gave a drain nothing to act on): every current entry's id/tier/status, with
+   * any 'unknown' tier called out as the concrete thing to look up. A drain closes
+   * it by writing the looked-up values into catalog.entries[] on the linked
+   * record (feature_link) and citing this item's id in `resolves`.
    */
   enqueueRefreshReferenceOnce(nowISO) {
     const pending = this.query({ types: ["todo"], cap: 200 }).filter((r) => r.system_reason === "refresh_reference");
@@ -7272,7 +7288,7 @@ var SterlingStore = class _SterlingStore {
       links: [],
       scope: "project",
       stack_tags: [],
-      text: "Refresh the KB models catalog",
+      text: "Refresh the KB models catalog" + refreshReferenceDeltaSuffix(catalogs[0]),
       source: "system",
       system_reason: "refresh_reference"
     };
@@ -7547,9 +7563,10 @@ function openStore(cwd) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync3, statSync as statSync2, lstatSync, readdirSync } from "node:fs";
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync, realpathSync as realpathSync2, chmodSync } from "node:fs";
+import { join as join3, resolve as resolve2, dirname as dirname3, isAbsolute } from "node:path";
 import { hostname } from "node:os";
-import { join as join3, dirname as dirname3 } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -7671,7 +7688,7 @@ function render(x) {
 function registerPath(root) {
   return join3(root, ".sterling", "transient", "dispatch-register.json");
 }
-function registerLockDir(root) {
+function legacyRegisterLockDir(root) {
   return join3(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
@@ -7722,8 +7739,54 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-function lockCodeFor() {
-  return "register_lock_held";
+var SQLITE_BUSY = 5;
+function currentUid() {
+  if (typeof process.getuid !== "function") {
+    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
+  }
+  return process.getuid();
+}
+function registerLockRoot() {
+  const uid = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === "string" && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join3(xdg, "sterling-locks");
+    } catch (e) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid}`;
+}
+function registerLockPath(root) {
+  const hash = createHash("sha256").update(realpathSync2(resolve2(root))).digest("hex");
+  return join3(registerLockRoot(), `${hash}.db`);
+}
+function ensureLockRoot(dir) {
+  mkdirSync2(dir, { recursive: true, mode: 448 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
+  }
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
+  }
+  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
+}
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
+}
+function sleepAsync(ms) {
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
+}
+var heldConnections = /* @__PURE__ */ new Set();
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
+`);
 }
 function isPidAlive(pid) {
   try {
@@ -7733,99 +7796,99 @@ function isPidAlive(pid) {
     return e?.code !== "ESRCH";
   }
 }
-function readOwner(lockDir) {
+function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync2(join3(lockDir, "owner.json"), "utf8"));
-  } catch {
-    return null;
+    return JSON.parse(readFileSync2(join3(legacy, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
+    throw e;
   }
 }
-function looksDeadOwner(o) {
-  return !!o && o.host === hostname() && !isPidAlive(o.pid);
-}
-function statIno(p) {
+function legacyLockHolder(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
   try {
-    return statSync2(p).ino;
-  } catch {
+    entries = readdirSync(legacy);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
     return null;
   }
+  if (entries.length === 0) {
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === "ENOENT") return null;
+      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
+      throw e;
+    }
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
+`);
+    return null;
+  }
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
+  }
+  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
 }
-function sleepAsync(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
-async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
-  const start = Date.now();
-  for (; ; ) {
-    try {
-      mkdirSync2(dirname3(lockDir), { recursive: true });
-      mkdirSync2(lockDir);
-      break;
-    } catch (e) {
-      if (e?.code !== "EEXIST") throw e;
-      const owner = readOwner(lockDir);
-      if (looksDeadOwner(owner)) {
-        const examinedIno = statIno(lockDir);
-        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
-        let renamed = false;
-        try {
-          renameSync(lockDir, tombstone);
-          renamed = true;
-        } catch {
+  const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname3(lockPath));
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    const start = Date.now();
+    for (; ; ) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited2 = Date.now() - start;
+        if (waited2 >= timeoutMs) {
+          throw refusal(
+            "register_lock_held",
+            { lock_path: lockPath, waited_ms: waited2 },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
+          );
         }
-        if (renamed) {
-          const tombstoneOwner = readOwner(tombstone);
-          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
-          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
-            try {
-              rmSync(tombstone, { recursive: true, force: true });
-            } catch {
-            }
-          } else {
-            try {
-              renameSync(tombstone, lockDir);
-            } catch (restoreErr) {
-              if (restoreErr?.code === "EEXIST") {
-                process.stderr.write(
-                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
-`
-                );
-                throw refusal(
-                  lockCodeFor(),
-                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
-                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
-                );
-              }
-            }
-          }
-        }
+        await sleepAsync(retryMs);
+        continue;
       }
-      if (Date.now() - start >= timeoutMs) {
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      db.exec("ROLLBACK");
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs) {
+        const { pid, host, at } = held.owner;
         throw refusal(
-          lockCodeFor(),
-          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
-          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+          "register_lock_held",
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
         );
       }
       await sleepAsync(retryMs);
     }
-  }
-  writeFileSync(
-    join3(lockDir, "owner.json"),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
-  );
-  try {
-    return await fn();
-  } finally {
+    heldConnections.add(db);
     try {
-      rmSync(lockDir, { recursive: true, force: true });
-    } catch {
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+`);
+      }
     }
+  } finally {
+    db.close();
   }
-}
-function withRegisterLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
 function statusReason(entry, ctx) {
   if (!entry) return "clock-unreadable";
@@ -7871,7 +7934,7 @@ var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 
 // scripts/hooks/lib/settlement.mjs
 import { createHash as createHash2, randomUUID as randomUUID2 } from "node:crypto";
-import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync3, renameSync as renameSync2 } from "node:fs";
+import { readFileSync as readFileSync3, writeFileSync as writeFileSync2, mkdirSync as mkdirSync3, rmSync as rmSync2, statSync as statSync2, renameSync as renameSync2 } from "node:fs";
 import { spawnSync as spawnSync2 } from "node:child_process";
 import { join as join4, dirname as dirname4 } from "node:path";
 var LOCK_DEADLINE_MS = 150;
@@ -7892,7 +7955,7 @@ function withFileLock(targetPath, fn, { onTimeout } = {}) {
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
       try {
-        if (Date.now() - statSync3(lockPath).mtimeMs > LOCK_STALE_MS) {
+        if (Date.now() - statSync2(lockPath).mtimeMs > LOCK_STALE_MS) {
           console.error(`settlement: touches lock '${lockPath}' is stale (>${LOCK_STALE_MS}ms) \u2014 breaking it (a crashed holder's leftover)`);
           rmSync2(lockPath, { recursive: true, force: true });
           continue;
@@ -8051,7 +8114,7 @@ function gitTouches(root, now) {
     const candidates = [...changed].map((path) => {
       let at = settled.at;
       try {
-        at = statSync3(join4(root, path)).mtime.toISOString();
+        at = statSync2(join4(root, path)).mtime.toISOString();
       } catch {
       }
       return { path, at: typeof at === "string" ? at : now };
@@ -8088,7 +8151,7 @@ function gitTrackedSubset(root, paths) {
 }
 
 // scripts/hooks/lib/transcript.mjs
-import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync4, readdirSync as readdirSync2 } from "node:fs";
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync4, statSync as statSync3, readdirSync as readdirSync2 } from "node:fs";
 var TAIL_BYTES = 1024 * 1024;
 function readTail(path, bytes = TAIL_BYTES) {
   if (!existsSync4(path)) return null;
@@ -8125,7 +8188,7 @@ function latestUsage(path) {
     }
   }
   if (sawAssistant) return { usage: null, reason: "format_unparseable" };
-  const exhausted = statSync4(path).size > TAIL_BYTES;
+  const exhausted = statSync3(path).size > TAIL_BYTES;
   return { usage: null, reason: exhausted ? "window_exhausted" : "no_assistant_entries" };
 }
 function fillPct(usage, windowSize) {
@@ -8543,6 +8606,11 @@ try {
   const nowMs = Date.parse(now);
   const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
   const liveDispatches = classified.availability === "ok" ? classified.entries.filter((r) => r.status === "presumed-active").map((r) => r.entry) : [];
+  const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
+  const researchEvents = sessionEvents.filter(
+    (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
+  );
+  const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const deferredOwners = /* @__PURE__ */ new Map();
@@ -8627,7 +8695,7 @@ try {
       )
     );
   }
-  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
+  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [] } = {}) => {
     if (deferredPaths.length || settlementFailed) {
       releaseTouchesClaim();
     } else {
@@ -8635,8 +8703,9 @@ try {
     }
     if (!deferredPaths.length) {
       const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
-      if (pendingDeclarations.length) {
-        writeFileSync4(eventsPath, JSON.stringify(pendingDeclarations));
+      const survivors = [...pendingDeclarations, ...outstandingResearchEvents];
+      if (survivors.length) {
+        writeFileSync4(eventsPath, JSON.stringify(survivors));
       } else {
         rmSync3(eventsPath, { force: true });
       }
@@ -8669,10 +8738,6 @@ try {
   const ISO_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
   const isValidAt = (a) => typeof a === "string" && ISO_AT.test(a) && Number.isFinite(Date.parse(a));
   const debugEvents = sessionEvents.filter((e) => e.kind === "debug_scope");
-  const researchAgents = new Set(config.session_events?.research_agents ?? ["researcher", "claude-code-guide"]);
-  const researchEvents = sessionEvents.filter(
-    (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
-  );
   const conceptEvents = sessionEvents.filter((e) => e.kind === "concept_designed" && e.detail);
   const conceptFamilies = /* @__PURE__ */ new Map();
   for (const e of conceptEvents) {
@@ -8712,7 +8777,24 @@ try {
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync6(join6(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
-  const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
+  const endedResearchReturnAts = (classified.availability === "ok" ? classified.entries : []).filter((r) => r.status === "inactive-confirmed" && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at)).map((r) => r.entry.ended.at);
+  const latestResearchReturnAt = endedResearchReturnAts.length ? endedResearchReturnAts.sort().at(-1) : null;
+  const dischargedOnResearchLaneForDispatch = (e) => {
+    if (e.kind !== "agent_dispatch") return dischargedOnResearchLane(e.at);
+    if (researchDispatchLive) return false;
+    if (!latestResearchReturnAt) return false;
+    return dischargedOnResearchLane(latestResearchReturnAt);
+  };
+  const activeResearchEvents = researchEvents.filter((e) => {
+    if (e.kind === "agent_dispatch" && researchDispatchLive) return false;
+    return !dischargedOnResearchLaneForDispatch(e);
+  });
+  const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === "agent_dispatch");
+  const researchSatisfyingRecords = hasLiveAgentDispatchEvents ? store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }) : [];
+  const individuallyResearchSatisfied = (at) => isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
+  const outstandingDeferredResearchEvents = researchEvents.filter(
+    (e) => e.kind === "agent_dispatch" && researchDispatchLive && !dischargedOnResearchLaneForDispatch(e) && !individuallyResearchSatisfied(e.at)
+  );
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
@@ -8856,7 +8938,7 @@ try {
   const imageBinaryOnly = paths.length > 0 && paths.every((p) => IMAGE_BINARY_EXT.test(p));
   if (!hasCaptureDuty && !hasResearchDuty && !hasConceptDuty && (!articleDemand || imageBinaryOnly)) {
     runSettlement();
-    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail), outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
   const allTimestamps = [...activeTouches.map((t) => t.at), ...activeDebugEvents.map((e) => e.at)].filter(isValidAt).sort();
@@ -8895,7 +8977,7 @@ try {
   if (captureSatisfied && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
     const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters({ preservePendingDeclaration });
+    clearRegisters({ preservePendingDeclaration, outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
@@ -8928,7 +9010,7 @@ try {
       });
     }
     runSettlement();
-    clearRegisters();
+    clearRegisters({ outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
   const testGlobs = (config.toolchains ?? []).flatMap((tc) => tc.test_globs ?? []);
@@ -9139,7 +9221,10 @@ ${parts.join("\n\n")}`;
     }
   }
   runSettlement();
-  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
+  clearRegisters({
+    preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty,
+    outstandingResearchEvents: outstandingDeferredResearchEvents
+  });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

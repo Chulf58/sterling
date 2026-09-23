@@ -1124,6 +1124,44 @@ test('AC8 enqueue: creates exactly ONE refresh_reference system maintenance item
   }
 });
 
+// Dome Farmer friction 2026-09-17 (sterling-issues.md): a bare "Refresh the KB
+// models catalog" with no file_keys named no delta, so no drain could act on
+// it. The mint must now name a concrete delta: the catalog's current entries,
+// and which of them still need a real lookup (tier 'unknown').
+test('AC8 enqueue: the item text names a delta — current entries and which ones still carry tier "unknown"', () => {
+  const { dir, store } = tempStore();
+  try {
+    callBootstrap(store, { models: MODELS }, NOW); // bootstrap seeds tier:'unknown' for every entry
+    callEnqueue(store, NOW);
+
+    const item = refreshItems(store)[0];
+    const text = item.text as string;
+    for (const id of DISTINCT_IDS) {
+      assert.ok(text.includes(id), `text names entry id ${id} so a drain knows the catalog's current contents`);
+    }
+    assert.match(text, /tier is still 'unknown'/, 'freshly-bootstrapped entries all carry tier \'unknown\' — the item must call that out as the concrete lookup to do');
+    assert.match(text, /resolves/, 'text tells the drain how to close the item (cite it in resolves on the write)');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('AC8 enqueue: with no catalog record present, the item text has no delta to append (falls back to the bare instruction)', () => {
+  const { dir, store } = tempStore();
+  try {
+    // no bootstrap — no catalog record exists
+    callEnqueue(store, NOW);
+
+    const item = refreshItems(store)[0];
+    assert.equal(item.text, 'Refresh the KB models catalog', 'no catalog record → nothing to enumerate, so no delta suffix is fabricated');
+    assert.equal(item.feature_link, undefined, 'no catalog record → nothing to link either');
+  } finally {
+    store.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('AC8 enqueue: deduped — a second enqueue is a no-op while one is pending (never a duplicate)', () => {
   const { dir, store } = tempStore();
   try {

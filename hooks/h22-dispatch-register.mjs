@@ -5349,9 +5349,10 @@ function claimedResources(promptText, configuredNames) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, renameSync, existsSync as existsSync2, statSync, lstatSync, readdirSync } from "node:fs";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync2, lstatSync, readdirSync, realpathSync, chmodSync } from "node:fs";
+import { join as join2, resolve as resolve2, dirname as dirname2, isAbsolute } from "node:path";
 import { hostname } from "node:os";
-import { join as join2, dirname as dirname2 } from "node:path";
+import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
 import { randomBytes, createHash } from "node:crypto";
 
 // scripts/lib/review-errors.mjs
@@ -5473,7 +5474,7 @@ function render(x) {
 function registerPath(root) {
   return join2(root, ".sterling", "transient", "dispatch-register.json");
 }
-function registerLockDir(root) {
+function legacyRegisterLockDir(root) {
   return join2(root, ".sterling", "transient", "dispatch-register.lock");
 }
 function parseRegisterEntry(raw) {
@@ -5532,8 +5533,54 @@ function readRegister(root) {
   }
   return { availability: "ok", entries, dropped };
 }
-function lockCodeFor() {
-  return "register_lock_held";
+var SQLITE_BUSY = 5;
+function currentUid() {
+  if (typeof process.getuid !== "function") {
+    throw new Error("dispatch-register: process.getuid() is unavailable \u2014 the register lock root is per POSIX user (Sterling runs under WSL2)");
+  }
+  return process.getuid();
+}
+function registerLockRoot() {
+  const uid = currentUid();
+  const xdg = process.env.XDG_RUNTIME_DIR;
+  if (typeof xdg === "string" && isAbsolute(xdg)) {
+    try {
+      const st = lstatSync(xdg);
+      if (st.isDirectory() && !st.isSymbolicLink() && st.uid === uid) return join2(xdg, "sterling-locks");
+    } catch (e) {
+      if (!["ENOENT", "ENOTDIR", "EACCES"].includes(e?.code)) throw e;
+    }
+  }
+  return `/tmp/sterling-locks-${uid}`;
+}
+function registerLockPath(root) {
+  const hash = createHash("sha256").update(realpathSync(resolve2(root))).digest("hex");
+  return join2(registerLockRoot(), `${hash}.db`);
+}
+function ensureLockRoot(dir) {
+  mkdirSync(dir, { recursive: true, mode: 448 });
+  const st = lstatSync(dir);
+  if (!st.isDirectory() || st.isSymbolicLink()) {
+    throw new Error(`dispatch-register: ${dir} is not a real directory \u2014 refusing to take the register lock through it`);
+  }
+  if (st.uid !== currentUid()) {
+    throw new Error(`dispatch-register: ${dir} is owned by uid ${st.uid}, not this user (${currentUid()}) \u2014 refusing to take the register lock through it`);
+  }
+  if ((st.mode & 63) !== 0) chmodSync(dir, 448);
+}
+function isBusy(e) {
+  return e?.errcode === SQLITE_BUSY;
+}
+function sleepAsync(ms) {
+  return new Promise((resolve3) => setTimeout(resolve3, ms));
+}
+var heldConnections = /* @__PURE__ */ new Set();
+var warnedLegacyDirs = /* @__PURE__ */ new Set();
+function warnLegacyOnce(legacy, text) {
+  if (warnedLegacyDirs.has(legacy)) return;
+  warnedLegacyDirs.add(legacy);
+  process.stderr.write(`dispatch-register: legacy lock dir ${legacy} ${text}
+`);
 }
 function isPidAlive(pid) {
   try {
@@ -5543,99 +5590,99 @@ function isPidAlive(pid) {
     return e?.code !== "ESRCH";
   }
 }
-function readOwner(lockDir) {
+function readLegacyOwner(legacy) {
   try {
-    return JSON.parse(readFileSync2(join2(lockDir, "owner.json"), "utf8"));
-  } catch {
-    return null;
+    return JSON.parse(readFileSync2(join2(legacy, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e?.code === "ENOENT" || e instanceof SyntaxError) return null;
+    throw e;
   }
 }
-function looksDeadOwner(o) {
-  return !!o && o.host === hostname() && !isPidAlive(o.pid);
-}
-function statIno(p) {
+function legacyLockHolder(root) {
+  const legacy = legacyRegisterLockDir(root);
+  let entries;
   try {
-    return statSync(p).ino;
-  } catch {
+    entries = readdirSync(legacy);
+  } catch (e) {
+    if (e?.code === "ENOENT") return null;
+    warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
     return null;
   }
+  if (entries.length === 0) {
+    try {
+      rmdirSync(legacy);
+    } catch (e) {
+      if (e?.code === "ENOENT") return null;
+      if (e?.code === "ENOTEMPTY" || e?.code === "EEXIST") return legacyLockHolder(root);
+      throw e;
+    }
+    process.stderr.write(`dispatch-register: removed the EMPTY legacy lock dir ${legacy} \u2014 residue of the retired mkdir lock; the register lock is now kernel-held at ${registerLockPath(root)}
+`);
+    return null;
+  }
+  const owner = readLegacyOwner(legacy);
+  const pid = owner?.pid;
+  if (owner && owner.host === hostname() && Number.isInteger(pid) && pid > 0 && isPidAlive(pid)) {
+    return { legacy, owner };
+  }
+  const why = owner === null ? "has no readable owner.json" : owner.host !== hostname() ? `names another host (${owner.host})` : `names pid ${pid}, which is not running`;
+  warnLegacyOnce(legacy, `is NOT empty (${entries.join(", ")}) but ${why}, so no pre-rebuild writer can be inside it \u2014 left in place, proceeding; remove it by hand once no pre-rebuild session is running`);
+  return null;
 }
-function sleepAsync(ms) {
-  return new Promise((resolve2) => setTimeout(resolve2, ms));
-}
-async function withOwnerMkdirLock(lockDir, fn, opts = {}) {
+async function withRegisterLock(root, fn, opts = {}) {
   const retryMs = opts.retryMs ?? 50;
   const timeoutMs = opts.timeoutMs ?? 1e3;
-  const start = Date.now();
-  for (; ; ) {
-    try {
-      mkdirSync(dirname2(lockDir), { recursive: true });
-      mkdirSync(lockDir);
-      break;
-    } catch (e) {
-      if (e?.code !== "EEXIST") throw e;
-      const owner = readOwner(lockDir);
-      if (looksDeadOwner(owner)) {
-        const examinedIno = statIno(lockDir);
-        const tombstone = `${lockDir}.stale-${randomBytes(8).toString("hex")}`;
-        let renamed = false;
-        try {
-          renameSync(lockDir, tombstone);
-          renamed = true;
-        } catch {
+  const lockPath = registerLockPath(root);
+  ensureLockRoot(dirname2(lockPath));
+  const db = new DatabaseSync3(lockPath);
+  try {
+    db.exec("PRAGMA busy_timeout=0");
+    const start = Date.now();
+    for (; ; ) {
+      try {
+        db.exec("BEGIN IMMEDIATE");
+      } catch (e) {
+        if (!isBusy(e)) throw e;
+        const waited2 = Date.now() - start;
+        if (waited2 >= timeoutMs) {
+          throw refusal(
+            "register_lock_held",
+            { lock_path: lockPath, waited_ms: waited2 },
+            `register lock at ${lockPath} is held by another live writer (kernel-held: it is released when that writer finishes or dies) \u2014 gave up after ${waited2}ms`
+          );
         }
-        if (renamed) {
-          const tombstoneOwner = readOwner(tombstone);
-          const sameIncarnation = examinedIno !== null && statIno(tombstone) === examinedIno && tombstoneOwner?.nonce === owner.nonce;
-          if (sameIncarnation && looksDeadOwner(tombstoneOwner)) {
-            try {
-              rmSync(tombstone, { recursive: true, force: true });
-            } catch {
-            }
-          } else {
-            try {
-              renameSync(tombstone, lockDir);
-            } catch (restoreErr) {
-              if (restoreErr?.code === "EEXIST") {
-                process.stderr.write(
-                  `dispatch-register: lock takeover at ${lockDir} displaced a live incarnation and could not restore it (already reoccupied) \u2014 left as a tombstone at ${tombstone}; verify and remove by hand
-`
-                );
-                throw refusal(
-                  lockCodeFor(),
-                  { lock_dir: lockDir, owner: tombstoneOwner ? { pid: tombstoneOwner.pid, host: tombstoneOwner.host, at: tombstoneOwner.at } : null },
-                  `lock takeover at ${lockDir} raced a third contender \u2014 refusing this call rather than proceeding on unverified state`
-                );
-              }
-            }
-          }
-        }
+        await sleepAsync(retryMs);
+        continue;
       }
-      if (Date.now() - start >= timeoutMs) {
+      const held = legacyLockHolder(root);
+      if (held === null) break;
+      db.exec("ROLLBACK");
+      const waited = Date.now() - start;
+      if (waited >= timeoutMs) {
+        const { pid, host, at } = held.owner;
         throw refusal(
-          lockCodeFor(),
-          { lock_dir: lockDir, owner: owner ? { pid: owner.pid, host: owner.host, at: owner.at } : null },
-          `lock held at ${lockDir} \u2014 coordination, not evidence; remove by hand only after confirming no writer runs`
+          "register_lock_held",
+          { lock_path: held.legacy, legacy: true, owner: { pid, host, at }, waited_ms: waited },
+          `register lock at ${held.legacy} is held by a PRE-rebuild writer (legacy mkdir lock, live pid ${pid} on this host) \u2014 gave up after ${waited}ms; it clears when that writer finishes, and for good once every session has relaunched onto the rebuilt hooks`
         );
       }
       await sleepAsync(retryMs);
     }
-  }
-  writeFileSync(
-    join2(lockDir, "owner.json"),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: (/* @__PURE__ */ new Date()).toISOString(), nonce: randomBytes(8).toString("hex") })
-  );
-  try {
-    return await fn();
-  } finally {
+    heldConnections.add(db);
     try {
-      rmSync(lockDir, { recursive: true, force: true });
-    } catch {
+      return await fn();
+    } finally {
+      heldConnections.delete(db);
+      try {
+        db.exec("COMMIT");
+      } catch (e) {
+        process.stderr.write(`dispatch-register: COMMIT of the register lock at ${lockPath} failed (${e?.message ?? e}) \u2014 the lock is released by closing the connection
+`);
+      }
     }
+  } finally {
+    db.close();
   }
-}
-function withRegisterLock(root, fn, opts = {}) {
-  return withOwnerMkdirLock(registerLockDir(root), fn, opts);
 }
 function registerStartLocked(root, entry) {
   const { availability, arr } = readRawArray(root);
@@ -6188,8 +6235,8 @@ async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
   const consumer = "h22";
   async function attemptAndRegister(timeoutMs, retryMs) {
     try {
-      return await withOwnerMkdirLock(
-        registerLockDir(root),
+      return await withRegisterLock(
+        root,
         () => {
           const determined = attemptDetermine(root, { session_id, agent_id, agent_type, consumer });
           if (determined.verdict !== "resolved") return determined;
@@ -6241,7 +6288,7 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
     if (scan.availability === "ok") {
       let hit = scan.records.find(({ record: r }) => {
         const boundId = r.post_binding?.agent_id ?? r.derived_binding?.agent_id ?? r.started?.agent_id;
-        return boundId === agent_id && !r.terminal;
+        return boundId === agent_id && !r.terminal && (session_id === void 0 || r.session_id === session_id);
       });
       if (!hit && typeof sidecarToolUseId === "string" && sidecarToolUseId !== "") {
         const key = dispatchStateKey(sidecarToolUseId);
@@ -6251,7 +6298,7 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
         if (hit.record.terminal) {
           record = hit.record;
         } else {
-          const updated = { ...hit.record, prompt: null, terminal: { at: (/* @__PURE__ */ new Date()).toISOString(), reason: "stop" } };
+          const updated = { ...hit.record, prompt: null, terminal: { at: (/* @__PURE__ */ new Date()).toISOString(), reason: event === "task-stop" ? "task-stop" : "stop" } };
           writeRecordAtomic(root, hit.key, updated);
           record = updated;
         }
@@ -6292,6 +6339,43 @@ function sidecarForChildTranscript(childPath) {
   if (typeof meta.toolUseId !== "string" || meta.toolUseId === "") return { ok: false };
   return { ok: true, meta };
 }
+function residueLines(cwd, departing) {
+  const probe = probeDirtyPaths(cwd, departing.files);
+  const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+  if (probe.verified && dirty.length === 0) return [];
+  return [render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason })))];
+}
+async function endTaskStoppedDispatch(input2, lines) {
+  const resp = input2.tool_response;
+  if (!resp || typeof resp !== "object" || typeof resp.task_type !== "string") {
+    warnNonBlocking(`H22: TaskStop's tool_response has no readable task_type (${JSON.stringify(resp)?.slice(0, 200)}) \u2014 nothing was ended; a stopped dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  if (resp.task_type !== "local_agent") return;
+  if (typeof resp.task_id !== "string" || resp.task_id === "") {
+    warnNonBlocking(`H22: TaskStop stopped a local_agent task but tool_response.task_id is missing \u2014 nothing was ended; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  if (typeof input2.session_id !== "string" || input2.session_id === "") {
+    warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id \u2014 nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  try {
+    const finished = await finishDispatchAndRegisterEnd(input2.cwd, { session_id: input2.session_id, agent_id: resp.task_id, event: "task-stop" });
+    if (finished.found) lines.push(...residueLines(input2.cwd, finished.entry));
+  } catch (e) {
+    if (e?.code !== "register_lock_held") throw e;
+    lines.push(
+      render(
+        disclosure(
+          "register_lock_held",
+          e.facts ?? {},
+          `H22: could not mark the TaskStop-killed round '${resp.task_id}' ended \u2014 the register lock at ${e.facts?.lock_path ?? "(unknown)"} is held by another live writer; the round stays presumed-active until its lease expires`
+        )
+      )
+    );
+  }
+}
 var input = readStdin();
 try {
   if (!existsSync3(`${input.cwd}/.sterling/config.json`)) allow();
@@ -6306,7 +6390,11 @@ try {
     warnNonBlocking(`H22: ${event} carried no agent_id (entries are keyed by agent_id) \u2014 ${consequence}`);
   }
   const lines = [];
-  if (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure") {
+  if (event === "PostToolUse" && input.tool_name === "TaskStop") {
+    await endTaskStoppedDispatch(input, lines);
+    if (lines.length) process.stderr.write(lines.join("\n") + "\n");
+    allow();
+  } else if (event === "PreToolUse" || event === "PostToolUse" || event === "PostToolUseFailure") {
     if (input.tool_name !== "Task" && input.tool_name !== "Agent") {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher \u2014 allowing, nothing tracked`);
     } else {
@@ -6405,7 +6493,7 @@ try {
             disclosure(
               "register_lock_held",
               e.facts ?? {},
-              `H22: could not mark this round ended \u2014 the register lock is held at ${e.facts?.lock_dir ?? "(unknown)"}: coordination, not evidence \u2014 remove by hand only once no writer runs. This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
+              `H22: could not mark this round ended \u2014 the register lock at ${e.facts?.lock_path ?? "(unknown)"} is held by another live writer (kernel-held: released when that writer finishes or dies, so there is nothing to remove by hand). This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
             )
           )
         );
@@ -6416,13 +6504,7 @@ try {
     }
     if (departing) {
       const lastMsg = typeof input.last_assistant_message === "string" ? input.last_assistant_message : "";
-      if (lastMsg === "") {
-        const probe = probeDirtyPaths(input.cwd, departing.files);
-        const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
-        if (!(probe.verified && dirty.length === 0)) {
-          lines.push(render(disclosure("dispatch_residue", {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason }))));
-        }
-      }
+      if (lastMsg === "") lines.push(...residueLines(input.cwd, departing));
     }
   }
   if (lines.length) process.stderr.write(lines.join("\n") + "\n");

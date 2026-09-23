@@ -13,7 +13,11 @@
 // in the same call; the owner module is the ONE authority for the persisted
 // shape, the lock and the duplicate rule; this file never re-implements any of
 // that. SubagentStop closes the register round and the dispatch-state record
-// together via finishDispatchAndRegisterEnd (A1: marked, never deleted). This
+// together via finishDispatchAndRegisterEnd (A1: marked, never deleted); a
+// PostToolUse on the "TaskStop" matcher does the same for a local_agent task
+// killed by TaskStop (decision `h22-observes-taskstop-to-end-a-killed-dispatch`),
+// joined on tool_response.task_id — the RESOLVED task id, which for a
+// local_agent is its agentId (tool_input.task_id may be a name). This
 // hook provides minimal dispatch bookkeeping for child-agent knowledge staging:
 // the register and its Start-time attribution advisory.
 // Every refusal/disclosure this file renders is built through
@@ -106,6 +110,55 @@ function sidecarForChildTranscript(childPath) {
   return { ok: true, meta };
 }
 
+// KILL-DETECTION RESIDUE for a departing round: dirty declared files are
+// disclosed unless the probe VERIFIED the round left none.
+function residueLines(cwd, departing) {
+  const probe = probeDirtyPaths(cwd, departing.files);
+  const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
+  if (probe.verified && dirty.length === 0) return [];
+  return [render(disclosure('dispatch_residue', {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason })))];
+}
+
+// A TaskStop kill of a local_agent task ends that dispatch's round. Any other
+// task_type (a background shell, a monitor) is not a dispatch: nothing to do.
+// An unreadable tool_response is an unknown shape — disclosed, never guessed.
+async function endTaskStoppedDispatch(input, lines) {
+  const resp = input.tool_response;
+  if (!resp || typeof resp !== 'object' || typeof resp.task_type !== 'string') {
+    warnNonBlocking(`H22: TaskStop's tool_response has no readable task_type (${JSON.stringify(resp)?.slice(0, 200)}) — nothing was ended; a stopped dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  if (resp.task_type !== 'local_agent') return;
+  if (typeof resp.task_id !== 'string' || resp.task_id === '') {
+    warnNonBlocking(`H22: TaskStop stopped a local_agent task but tool_response.task_id is missing — nothing was ended; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  // The round is selected by the PAIR (session_id, agent_id). Without a
+  // session_id the selection would fall back to agent_id alone and could end
+  // another session's round, so an absent one ends nothing.
+  if (typeof input.session_id !== 'string' || input.session_id === '') {
+    warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id — nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
+    return;
+  }
+  try {
+    const finished = await finishDispatchAndRegisterEnd(input.cwd, { session_id: input.session_id, agent_id: resp.task_id, event: 'task-stop' });
+    // A killed agent never writes a final message, so the residue probe runs
+    // unconditionally — the same signature a message-less SubagentStop gets.
+    if (finished.found) lines.push(...residueLines(input.cwd, finished.entry));
+  } catch (e) {
+    if (e?.code !== 'register_lock_held') throw e;
+    lines.push(
+      render(
+        disclosure(
+          'register_lock_held',
+          e.facts ?? {},
+          `H22: could not mark the TaskStop-killed round '${resp.task_id}' ended — the register lock at ${e.facts?.lock_path ?? '(unknown)'} is held by another live writer; the round stays presumed-active until its lease expires`
+        )
+      )
+    );
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -140,7 +193,11 @@ try {
   // only, on the Task|Agent matcher (decision dispatch-state-machine-...).
   // Anything else reaching this hook on these events is a matcher mismatch:
   // allow and disclose, never gate (this hook is advisory-class).
-  if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'PostToolUseFailure') {
+  if (event === 'PostToolUse' && input.tool_name === 'TaskStop') {
+    await endTaskStoppedDispatch(input, lines);
+    if (lines.length) process.stderr.write(lines.join('\n') + '\n');
+    allow();
+  } else if (event === 'PreToolUse' || event === 'PostToolUse' || event === 'PostToolUseFailure') {
     if (input.tool_name !== 'Task' && input.tool_name !== 'Agent') {
       warnNonBlocking(`H22: unexpected ${event} tool_name '${input.tool_name}' on the Task|Agent matcher — allowing, nothing tracked`);
     } else {
@@ -273,7 +330,7 @@ try {
             disclosure(
               'register_lock_held',
               e.facts ?? {},
-              `H22: could not mark this round ended — the register lock is held at ${e.facts?.lock_dir ?? '(unknown)'}: coordination, not evidence — remove by hand only once no writer runs. This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
+              `H22: could not mark this round ended — the register lock at ${e.facts?.lock_path ?? '(unknown)'} is held by another live writer (kernel-held: released when that writer finishes or dies, so there is nothing to remove by hand). This Stop writes nothing (no receipt, no register change) so no round is ever promoted twice; the mark and any promotion happen on the next Stop of this round, or re-run the round if none follows.`
             )
           )
         );
@@ -287,13 +344,7 @@ try {
     // dirty declared files + an empty/absent last_assistant_message.
     if (departing) {
       const lastMsg = typeof input.last_assistant_message === 'string' ? input.last_assistant_message : '';
-      if (lastMsg === '') {
-        const probe = probeDirtyPaths(input.cwd, departing.files);
-        const dirty = Array.isArray(probe.dirty) ? probe.dirty : [];
-        if (!(probe.verified && dirty.length === 0)) {
-          lines.push(render(disclosure('dispatch_residue', {}, formatResidueLine(departing, dirty, { verified: probe.verified, reason: probe.reason }))));
-        }
-      }
+      if (lastMsg === '') lines.push(...residueLines(input.cwd, departing));
     }
 
   }

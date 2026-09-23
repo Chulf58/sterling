@@ -95,7 +95,7 @@ async function computeDeadDispatchResidue(cwd, sessionId) {
     // FRESH-READ MERGE UNDER THE COOPERATING REGISTER LOCK (decision
     // register-writers-cooperating-lock, 1e0ba0d0) — H10 is a register writer
     // like H22's Start/Stop/prune and H1's session-boundary delete, so it
-    // takes the SAME mkdir-mutex lock (scripts/lib/dispatch-register.mjs withRegisterLock, R1)
+    // takes the SAME kernel-held register lock (scripts/lib/dispatch-register.mjs withRegisterLock, R1)
     // rather than a second divergent cross-hook lock. TIMEOUT POSTURE: SKIP
     // THE STAMP, LOUD, never an unlocked write — an unlocked whole-array
     // rewrite here could erase a concurrent H22 SubagentStart/Stop's
@@ -662,6 +662,44 @@ try {
   // the file-deferral join above (who owns THIS touched path).
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
+  // Research-event classification, hoisted here (ahead of clearRegisters()'s
+  // definition below) so `researchDispatchLive` is available wherever it is
+  // needed; clearRegisters() itself takes its research survivors as an
+  // explicit PARAMETER (outstandingResearchEvents, computed later once
+  // dischargedOnResearchLane/isValidAt exist) rather than a closure, so no
+  // reference here needs to execute before this Stop's later duty code runs.
+  const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
+  const researchEvents = sessionEvents.filter(
+    (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
+  );
+  // RESEARCH RETURN GATE (user-ruled 2026-09-22, "wait for return"): H10 must not
+  // raise the research duty for a DISPATCHED research/scout agent while that
+  // agent is still running — demanding a research_finding/no_capture before the
+  // agent has reported asks for a write-up of work that does not exist yet.
+  // `agent_dispatch` events in session-events.json carry only {kind, detail, at}
+  // (H16, out of this fix's scope) — no agent_id — so an event cannot be joined
+  // to the ONE register entry it came from. The gate is therefore lane-wide
+  // rather than per-dispatch: while ANY presumed-active H22 register entry
+  // (same session, age < config.dispatch_register.stale_minutes) names a
+  // CONFIGURED research agent type, every `agent_dispatch` research event
+  // defers as a block, exactly as though it had not fired yet — with two
+  // outstanding research dispatches, one returned and one still running, the
+  // whole lane stays quiet until BOTH leave presumed-active (chosen semantics;
+  // disclosed because no join key exists to release the returned one alone).
+  // `research_tool` events (WebSearch/WebFetch) are NEVER gated — those calls
+  // are synchronous conductor actions, already complete by construction.
+  // NARROWER than decision foreign_ec9eacaa's rejected "defer research/concept
+  // duties when ANY dispatch is live": that alternative was rejected because a
+  // live FILE-owning dispatch has nothing to do with a file-less research debt;
+  // this gate fires only for a dispatch that IS ITSELF a configured research
+  // agent — the actual source of the pending duty, not an unrelated one. Bounded
+  // exactly like the file deferral: once the lease expires (default 60m) with no
+  // SubagentStop, the entry drops out of presumed-active and the duty re-arms
+  // rather than deferring forever (P5) — an unattributed agent_id (H22
+  // 'unattributable') still lands in the register with a null agent_type, which
+  // never matches `researchAgents.has(...)`, so it can never gate this lane.
+  const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
+
   // Worktree subagents record their touches under
   // .claude/worktrees/<name>/<repo-relative path> (anti_pattern foreign_b3972717) while
   // the dispatch prompt names the plain repo-relative path — an exact-string
@@ -831,7 +869,7 @@ try {
   // pending Stop, destroying the grace bd594c03 deliberately built. Repeat nags
   // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
   // acceptable, silence is not.
-  const clearRegisters = ({ preservePendingDeclaration = false } = {}) => {
+  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [] } = {}) => {
     // F3/F4/R4 (board c198866d fixer round): the touches claim is RELEASED
     // (see releaseTouchesClaim above) rather than discarded whenever a live
     // dispatch still owns work OR this Stop's own settlement attempt failed —
@@ -853,8 +891,22 @@ try {
       const pendingDeclarations = preservePendingDeclaration
         ? sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail)
         : [];
-      if (pendingDeclarations.length) {
-        writeFileSync(eventsPath, JSON.stringify(pendingDeclarations));
+      // RESEARCH RETURN GATE EXTENSION (review fix, commit 5306735's HIGH):
+      // `outstandingResearchEvents` is the caller's PRECISELY-COMPUTED set of
+      // still-live-dispatch, NOT-yet-individually-satisfied agent_dispatch
+      // research events (computed once, near `activeResearchEvents`, using a
+      // per-event satisfaction check — never the group's earliest-anchor
+      // check, which is what let an EARLIER dispatch's finding silently
+      // satisfy a LATER, still-outstanding one once whole-file preservation
+      // lifted the gate). Anything NOT in this set — an already-satisfied or
+      // already-discharged agent_dispatch event, or a synchronous research_tool
+      // event already converted to a queue item by the caller before reaching
+      // here — is consumed exactly as a non-deferring Stop would consume it;
+      // only the genuinely-still-outstanding ones survive to re-arm the duty
+      // once their dispatch returns (decision b2474b26).
+      const survivors = [...pendingDeclarations, ...outstandingResearchEvents];
+      if (survivors.length) {
+        writeFileSync(eventsPath, JSON.stringify(survivors));
       } else {
         rmSync(eventsPath, { force: true });
       }
@@ -952,10 +1004,6 @@ try {
 
   // Classify session events.
   const debugEvents = sessionEvents.filter((e) => e.kind === 'debug_scope');
-  const researchAgents = new Set(config.session_events?.research_agents ?? ['researcher', 'claude-code-guide']);
-  const researchEvents = sessionEvents.filter(
-    (e) => e.kind === 'research_tool' || (e.kind === 'agent_dispatch' && researchAgents.has(e.detail))
-  );
   // Concept duty (decision foreign_7208729b): concept_designed events, deduped to the
   // EARLIEST event per family — detail is the concept FAMILY slug.
   // FAIL-CLOSED on a missing/malformed `at` (2026-08-22): the old `e.at ?? now`
@@ -1171,7 +1219,96 @@ try {
   // the latest `--lane research`/`--lane all` declaration is discharged; one
   // arriving AFTER it, one whose `at` is missing or malformed (never trusted as
   // comparable), or one facing only a capture-lane declaration keeps the duty armed.
-  const activeResearchEvents = researchEvents.filter((e) => !dischargedOnResearchLane(e.at));
+  // RETURN-ANCHORED DISCHARGE FOR agent_dispatch EVENTS (review fix, HIGH found
+  // on commit 4b75112). `dischargedOnResearchLane` alone compares a declaration
+  // against the event's own `at` — for an agent_dispatch event that `at` is the
+  // DISPATCH time, always strictly earlier than the dispatch's actual
+  // completion. A no_capture declared between dispatch and return therefore
+  // always looked "at or before the cutoff" and discharged the event even
+  // though its result did not exist yet at declaration time — and once
+  // discharged, the event is gone (never resurrected once the dispatch really
+  // returns): P5 silent loss, the same failure shape as the stale-satisfaction
+  // fix above, this time for no_capture rather than a finding.
+  //   - CURRENTLY live (`researchDispatchLive` true): no return timestamp
+  //     exists yet, so NO declaration can be "at or after return" — never
+  //     discharge here; the event leaves this Stop only via
+  //     `individuallyResearchSatisfied` below (a REAL finding), never via a
+  //     declaration made while the dispatch was still running.
+  //   - NOT currently live: discharge ONLY with VALID return evidence — join
+  //     to the register's OWN `ended.at` when one exists (the LATEST ended
+  //     timestamp among this session's research-type entries, lane-wide — no
+  //     per-event join key exists, the same accepted coarseness
+  //     `researchDispatchLive` itself already carries) and only when the
+  //     declaration is at or after it.
+  //   - NO valid return evidence at all — the register is absent/unreadable
+  //     (`classified.availability !== 'ok'`), the entry's lease expired with
+  //     no SubagentStop ever recorded (status 'unknown', never
+  //     'inactive-confirmed'), or an ended entry exists with no valid
+  //     `ended.at` — is NEVER treated as "falls back to the event's own
+  //     `at`" (review fix, second HIGH found on commit 7f9f0b5): that fallback
+  //     reintroduced the exact original bug, since the event's dispatch-time
+  //     `at` is always earlier than any later declaration by construction and
+  //     would always look discharged. Absent proof the dispatch actually
+  //     returned, the event simply stays ARMED and is evaluated as an
+  //     ordinary unmet research event (P5: uncertain is never silently
+  //     discharged).
+  // `research_tool` events are NEVER touched by this — they are synchronous,
+  // already complete at their own `at` by construction. Findings
+  // (`individuallyResearchSatisfied` / the group `researchSatisfied` check)
+  // keep their existing, unrelated satisfaction rule — only the no_capture
+  // DISCHARGE anchor changes here.
+  const endedResearchReturnAts = (classified.availability === 'ok' ? classified.entries : [])
+    .filter((r) => r.status === 'inactive-confirmed' && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at))
+    .map((r) => r.entry.ended.at);
+  const latestResearchReturnAt = endedResearchReturnAts.length ? endedResearchReturnAts.sort().at(-1) : null;
+  const dischargedOnResearchLaneForDispatch = (e) => {
+    if (e.kind !== 'agent_dispatch') return dischargedOnResearchLane(e.at);
+    if (researchDispatchLive) return false;
+    if (!latestResearchReturnAt) return false; // no valid return evidence — never discharge, stays armed
+    return dischargedOnResearchLane(latestResearchReturnAt);
+  };
+  const activeResearchEvents = researchEvents.filter((e) => {
+    // RESEARCH RETURN GATE (see the `researchDispatchLive` comment above): a
+    // dispatched research agent's own event waits for its return before it can
+    // arm the duty at all; a research_tool event is never gated.
+    if (e.kind === 'agent_dispatch' && researchDispatchLive) return false;
+    return !dischargedOnResearchLaneForDispatch(e);
+  });
+
+  // OUTSTANDING DEFERRED RESEARCH EVENTS — what clearRegisters() must PRESERVE
+  // on a deferring release (review fix, HIGH found on commit 5306735). Among
+  // the `agent_dispatch` events the gate above just excluded from
+  // activeResearchEvents, only the ones NOT already individually satisfied
+  // (a research_finding/decision/anti_pattern created/updated at or after
+  // THIS event's OWN `at`) and not already discharged by a `no_capture
+  // --lane research` declaration survive. This is deliberately a PER-EVENT
+  // check — never the group's earliest-active-event anchor
+  // (`researchSatisfied` below) — because the group anchor is exactly what
+  // let a stale, EARLIER dispatch's finding silently satisfy a LATER,
+  // still-outstanding one: whole-file preservation kept both events "active"
+  // together, so once the live dispatch returned and the gate lifted, the
+  // earliest of the two re-anchored the window below the later event's own
+  // dispatch time. An event that IS already individually satisfied or
+  // discharged is CONSUMED here exactly as a non-deferring Stop would consume
+  // it — never resurrected merely because an unrelated research dispatch
+  // happens to still be live (decision b2474b26's rejected alternative 1:
+  // "retaining settled evidence lets an old capture satisfy later research").
+  // Computed only when there is something to check (a live research dispatch
+  // AND at least one agent_dispatch research event) — an unconditional store
+  // query here would be wasted work on every ordinary Stop.
+  const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === 'agent_dispatch');
+  const researchSatisfyingRecords = hasLiveAgentDispatchEvents
+    ? store.query({ types: ['research_finding', 'decision', 'anti_pattern'], cap: 1000 })
+    : [];
+  const individuallyResearchSatisfied = (at) =>
+    isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
+  const outstandingDeferredResearchEvents = researchEvents.filter(
+    (e) =>
+      e.kind === 'agent_dispatch' &&
+      researchDispatchLive &&
+      !dischargedOnResearchLaneForDispatch(e) &&
+      !individuallyResearchSatisfied(e.at)
+  );
 
   // Capture duty: triggered by file-touching work OR debug-scope events not
   // already covered by a no-capture declaration.
@@ -1672,7 +1809,7 @@ try {
     // no-capture declaration covered every touch/debug event). A pending
     // capture declaration has forward scope, so retain it for later work.
     runSettlement();
-    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) });
+    clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail), outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
 
@@ -1793,7 +1930,7 @@ try {
     // forward scope while this independent duty settles.
     const preservePendingDeclaration = Boolean(pendingDetail) && !hasCaptureDuty;
     runSettlement();
-    clearRegisters({ preservePendingDeclaration });
+    clearRegisters({ preservePendingDeclaration, outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
 
@@ -1876,7 +2013,7 @@ try {
     // even though the capture duty itself is still outstanding, is the last
     // chance before clearRegisters() below discards the claim for good.
     runSettlement();
-    clearRegisters();
+    clearRegisters({ outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
   }
 
@@ -2254,7 +2391,10 @@ try {
   runSettlement();
   // Queueing a non-capture duty does not spend a pending declaration's forward
   // scope; queueing capture work does, and `hasCaptureDuty` distinguishes them.
-  clearRegisters({ preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty });
+  clearRegisters({
+    preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty,
+    outstandingResearchEvents: outstandingDeferredResearchEvents,
+  });
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

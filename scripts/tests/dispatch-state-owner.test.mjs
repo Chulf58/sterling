@@ -35,8 +35,9 @@ import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync,
   rmSync, statSync, lstatSync, symlinkSync, chmodSync,
 } from 'node:fs';
-import { tmpdir, hostname } from 'node:os';
-import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import * as DS from '../lib/dispatch-register.mjs';
 
 const IS_WIN = process.platform === 'win32';
@@ -169,14 +170,17 @@ function deadPid() {
   assert.ok(r.pid, 'harness: the probe child must report a pid');
   return r.pid;
 }
-function forgeLiveLock(dir) {
-  const lockDir = DS.registerLockDir(dir);
-  mkdirSync(lockDir, { recursive: true });
-  writeFileSync(
-    join(lockDir, 'owner.json'),
-    JSON.stringify({ pid: process.pid, host: hostname(), at: new Date().toISOString(), nonce: 'forged' })
-  );
-  return lockDir;
+// A genuine hold of the kernel-held register lock through a separate
+// connection — exactly what another live writer would take.
+function holdLiveLock(dir) {
+  mkdirSync(dirname(DS.registerLockPath(dir)), { recursive: true, mode: 0o700 });
+  const db = new DatabaseSync(DS.registerLockPath(dir));
+  db.exec('BEGIN IMMEDIATE');
+  return () => {
+    db.exec('ROLLBACK');
+    db.close();
+    rmSync(DS.registerLockPath(dir), { force: true });
+  };
 }
 
 // A deterministic injected clock: every read advances 10 ms, so the resolver's
@@ -1090,19 +1094,20 @@ test('DS-R17 CONTROL: an ABSENT state directory is availability "absent" and cas
 // DS-R16 stays green; a first-ever session would then report a fault.
 
 test('DS-R18: a HELD register lock returns case "lock-held" within the budget and mutates nothing', async () => {
-  requireOwner('recordDispatchPre', 'resolveDispatchStart', 'registerLockDir');
+  requireOwner('recordDispatchPre', 'resolveDispatchStart', 'registerLockPath');
   const { dir, cleanup } = project();
+  let release = () => {};
   try {
     await DS.recordDispatchPre(dir, PRE());
     const before = stateFiles(dir).map((f) => readFileSync(join(stateDir(dir), f), 'utf8'));
-    forgeLiveLock(dir);
+    release = holdLiveLock(dir);
 
     const wall = Date.now();
     const res = await DS.resolveDispatchStart(dir, START(), { consumer: 'h22', lockTimeoutMs: 200, retryMs: 10 });
     const elapsed = Date.now() - wall;
 
     assert.equal(res.source, 'unattributable');
-    assert.equal(res.case, 'lock-held', 'a lock a live-looking owner holds fails CLOSED — it never proceeds unlocked');
+    assert.equal(res.case, 'lock-held', 'a lock another live writer holds fails CLOSED — it never proceeds unlocked');
     // TIGHTENED (review, 2026-09-08): the bound is the budget PASSED IN, not a
     // generous ceiling. 200 ms of budget plus process slack must land well
     // under 1 s; a 5 s bound was satisfiable by an implementation that ignored
@@ -1110,6 +1115,7 @@ test('DS-R18: a HELD register lock returns case "lock-held" within the budget an
     assert.ok(elapsed < 1000, `resolveDispatchStart must HONOUR {lockTimeoutMs:200}: took ${elapsed}ms`);
     assert.deepEqual(stateFiles(dir).map((f) => readFileSync(join(stateDir(dir), f), 'utf8')), before, 'nothing was written outside the lock');
   } finally {
+    release();
     cleanup();
   }
 });
