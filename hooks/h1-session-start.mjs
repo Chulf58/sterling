@@ -8132,13 +8132,64 @@ async function withRegisterLock(root, fn, opts = {}) {
   }
 }
 var MAX_PROMPT_BYTES = 512 * 1024;
+var TOOL_USE_ID_SHAPE_RE = /^[A-Za-z0-9_-]{1,80}$/;
 var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 function dispatchStateDir(root) {
   return join6(root, ".sterling", "transient", "dispatch-state");
 }
-function dispatchStateFile(root, key) {
-  return join6(dispatchStateDir(root), `${key}.json`);
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash2("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag)) return;
+  warnedStateFiles.add(tag);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
+}
+function dispatchStateKey(toolUseId) {
+  if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
+  return `sha256-${createHash2("sha256").update(String(toolUseId ?? "")).digest("hex")}`;
 }
 function isNonEmptyString(v) {
   return typeof v === "string" && v !== "";
@@ -8222,7 +8273,7 @@ function checkDispatchStateContainment(root, { create }) {
   }
   return { ok: true, availability: "ok" };
 }
-function writeRecordAtomic(root, key, record) {
+function writeRecordAtomic(root, fileName, record) {
   const dir = dispatchStateDir(root);
   const containment = checkDispatchStateContainment(root, { create: true });
   if (!containment.ok) {
@@ -8232,10 +8283,53 @@ function writeRecordAtomic(root, key, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = dispatchStateFile(root, key);
-  const tmp = join6(dir, `${key}.json.tmp-${randomBytes(4).toString("hex")}`);
+  const file = join6(dir, fileName);
+  const tmp = join6(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
   writeFileSync2(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
   renameSync2(tmp, file);
+}
+function finishTerminalRename(root, key, record) {
+  const dir = dispatchStateDir(root);
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
+  try {
+    lstatSync(join6(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
+  }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync2(join6(dir, from), join6(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function terminalizeLiveRecord(root, key, record) {
+  writeRecordAtomic(root, liveFileName(key), record);
+  return finishTerminalRename(root, key, record);
+}
+function rewriteTerminalRecord(root, fileName, key, record) {
+  const expected = terminalFileName(key, record);
+  if (fileName !== expected && fileName !== liveFileName(key)) throw new Error(`dispatch-state: rewriting ${fileName} would change its agent ids (expected ${expected})`);
+  writeRecordAtomic(root, fileName, record);
+}
+function validateNamedRecord(dir, name, parsed) {
+  const classified = classifyRecordFile(join6(dir, name));
+  if (!classified.exists || classified.poisoned) return classified;
+  const record = classified.record;
+  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
+  if (parsed.kind === "done") {
+    if (!record.terminal) return { exists: true, poisoned: true, reason: "done-name-not-terminal" };
+    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
+  }
+  return classified;
 }
 function sessionBoundarySweep(root, opts = {}) {
   const now = typeof opts.now === "number" ? opts.now : Date.now();
@@ -8245,67 +8339,122 @@ function sessionBoundarySweep(root, opts = {}) {
     return {
       terminated: 0,
       pruned: 0,
+      migrated: 0,
       refused: render(disclosure("dispatch_state_poisoned", { dir, reason: containment.reason }, `sessionBoundarySweep: ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"} \u2014 refusing to touch it, never following a symlink`))
     };
   }
-  if (containment.availability === "absent") return { terminated: 0, pruned: 0 };
+  if (containment.availability === "absent") return { terminated: 0, pruned: 0, migrated: 0 };
+  const unlistable = () => ({ terminated: 0, pruned: 0, migrated: 0, refused: render(disclosure("dispatch_state_poisoned", { dir }, `sessionBoundarySweep: could not list ${dir} \u2014 left untouched`)) });
   let names;
   try {
     names = readdirSync(dir);
   } catch {
-    return { terminated: 0, pruned: 0, refused: render(disclosure("dispatch_state_poisoned", { dir }, `sessionBoundarySweep: could not list ${dir} \u2014 left untouched`)) };
+    return unlistable();
+  }
+  let migrated = 0;
+  for (const name of names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind !== "legacy") continue;
+    const v = validateNamedRecord(dir, name, parsed);
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' is poisoned (${v.reason}) \u2014 not migrated, left for an operator; live scans fail closed on it`);
+      continue;
+    }
+    const target = v.record.terminal ? terminalFileName(parsed.key, v.record) : liveFileName(parsed.key);
+    if (existsSync4(join6(dir, target))) {
+      warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' not migrated \u2014 '${target}' already exists; never overwritten`);
+      continue;
+    }
+    try {
+      renameSync2(join6(dir, name), join6(dir, target));
+      migrated++;
+    } catch (e) {
+      warnStateFile(name, `sessionBoundarySweep: legacy record '${name}' could not be renamed to '${target}' (${e?.code ?? e?.message}) \u2014 left in place`);
+    }
+  }
+  if (migrated > 0) {
+    try {
+      names = readdirSync(dir);
+    } catch {
+      return unlistable();
+    }
   }
   let terminated = 0;
   let pruned = 0;
   let refused;
-  for (const name of names) {
-    if (!name.endsWith(".json")) {
-      if (name.includes(".json.tmp-")) {
-        const tmpFile = join6(dir, name);
-        try {
-          const ts = lstatSync(tmpFile);
-          if (ts.isFile() && !ts.isSymbolicLink()) {
-            rmSync(tmpFile, { force: true });
-            pruned++;
-          } else if (ts.isSymbolicLink()) {
-            if (!refused) {
-              refused = render(
-                disclosure("dispatch_state_poisoned", { file: name }, `sessionBoundarySweep: '${name}' looks like an orphan tmp file but is a SYMLINK \u2014 left in place for an operator to see, never removed through`)
-              );
-            }
-          }
-        } catch {
-        }
-      }
-      continue;
-    }
-    const file = join6(dir, name);
-    const classified = classifyRecordFile(file);
-    if (!classified.exists || classified.poisoned) continue;
-    const record = classified.record;
-    const key = name.slice(0, -".json".length);
-    if (!record.terminal) {
-      const updated = { ...record, prompt: null, terminal: { at: new Date(now).toISOString(), reason: "session-boundary" } };
-      writeRecordAtomic(root, key, updated);
-      terminated++;
-      continue;
-    }
-    if (record.prompt !== null) {
-      writeRecordAtomic(root, key, { ...record, prompt: null });
-    }
+  const pruneIfExpired = (fileName, record) => {
     const terminalAt = Date.parse(record.terminal.at);
-    if (!Number.isNaN(terminalAt) && now - terminalAt > SEVEN_DAYS_MS) {
+    if (Number.isNaN(terminalAt) || now - terminalAt <= SEVEN_DAYS_MS) return;
+    const file = join6(dir, fileName);
+    try {
+      const s2 = lstatSync(file);
+      if (s2.isFile() && !s2.isSymbolicLink()) {
+        rmSync(file, { force: true });
+        pruned++;
+      }
+    } catch {
+    }
+  };
+  for (const name of names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "tmp") {
+      const tmpFile = join6(dir, name);
       try {
-        const s2 = lstatSync(file);
-        if (s2.isFile() && !s2.isSymbolicLink()) {
-          rmSync(file, { force: true });
+        const ts = lstatSync(tmpFile);
+        if (ts.isFile() && !ts.isSymbolicLink()) {
+          rmSync(tmpFile, { force: true });
           pruned++;
+        } else if (ts.isSymbolicLink()) {
+          if (!refused) {
+            refused = render(
+              disclosure("dispatch_state_poisoned", { file: name }, `sessionBoundarySweep: '${name}' looks like an orphan tmp file but is a SYMLINK \u2014 left in place for an operator to see, never removed through`)
+            );
+          }
         }
       } catch {
       }
+      continue;
     }
+    if (parsed.kind === "malformed-live" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `sessionBoundarySweep: '${name}' is not a valid live-<key>.json or done-<key>~<ids>.json name \u2014 left in place for an operator${parsed.kind === "malformed-live" ? "; every Start is state-poisoned and every Post refuses until it is resolved" : ""}`);
+      continue;
+    }
+    if (parsed.kind !== "live" && parsed.kind !== "done") continue;
+    const v = validateNamedRecord(dir, name, parsed);
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(name, `sessionBoundarySweep: '${name}' failed validation (${v.reason}) \u2014 left in place for an operator, neither terminalized nor pruned`);
+      continue;
+    }
+    const record = v.record;
+    if (parsed.kind === "live") {
+      const doneTwins = names.filter((n) => {
+        const pn = parseStateFileName(n);
+        return pn.kind === "done" && pn.key === parsed.key;
+      });
+      if (doneTwins.length > 0) {
+        warnStateFile(name, `sessionBoundarySweep: live record '${name}' shares its key with ${doneTwins.join(", ")} (duplicate-key) \u2014 NOT terminalized, left for an operator`);
+        continue;
+      }
+      if (!record.terminal) {
+        const updated = { ...record, prompt: null, terminal: { at: new Date(now).toISOString(), reason: "session-boundary" } };
+        terminalizeLiveRecord(root, parsed.key, updated);
+        terminated++;
+        continue;
+      }
+      const clean = record.prompt !== null ? { ...record, prompt: null } : record;
+      if (clean !== record) writeRecordAtomic(root, name, clean);
+      const renamed = finishTerminalRename(root, parsed.key, clean);
+      pruneIfExpired(renamed, clean);
+      continue;
+    }
+    if (record.prompt !== null) {
+      rewriteTerminalRecord(root, name, parsed.key, { ...record, prompt: null });
+    }
+    pruneIfExpired(name, record);
   }
-  return { terminated, pruned, ...refused ? { refused } : {} };
+  return { terminated, pruned, migrated, ...refused ? { refused } : {} };
 }
 
 // scripts/hooks/lib/undeclared-source.mjs

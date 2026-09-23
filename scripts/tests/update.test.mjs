@@ -198,7 +198,7 @@ test('describe surfaces an annotated tag as the human-legible version; no tags s
 const HEAD_A = 'a'.repeat(40);
 const HEAD_B = 'b'.repeat(40);
 
-function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, contractStatus = 0, head = HEAD_A } = {}) {
+function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = null, syncStatus = () => 0, syncStdout = null, contractStatus = 0, head = HEAD_A } = {}) {
   const calls = [];
   let merged = false;
   const ok = (stdout = '') => ({ status: 0, stdout, stderr: '' });
@@ -232,7 +232,7 @@ function fakeExec({ behind = 0, ahead = 0, dirty = [], changed = [], failing = n
     // node <script> --target <dir>
     if (args[0]?.endsWith('sync-agents.mjs')) {
       const status = syncStatus(args[2]);
-      return { status, stdout: status === 0 ? 'up_to_date: coder\n' : 'coder: modified\n', stderr: status ? 'REFUSED' : '' };
+      return { status, stdout: syncStdout ?? (status === 0 ? 'up_to_date: coder\n' : 'coder: modified\n'), stderr: status ? 'REFUSED' : '' };
     }
     return ok('done');
   };
@@ -327,6 +327,26 @@ test('behind: fast-forward then build → build:tui → check → test, then the
     assert.deepEqual(report.projects.map((p) => p.name), ['Deepdots', 'comsoft']);
     // no dependency change → npm ci must NOT run (it is the one networked step)
     assert.equal(calls.filter((c) => c === 'npm ci').length, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// config_drift in the fan-out (decision 256d1059): a report, not a gate and not a
+// change — the project stays exit 0, the drift line reaches the log verbatim
+// (it carries the fix command), and it is not counted as a changed agent.
+test('fan-out: a config_drift line is logged loudly, never counted as a change, never a failure', async () => {
+  const cwd = scratchCwd();
+  try {
+    const driftLine = 'config_drift: implementor — installed model=a effort=low, config.models resolves model=b effort=high; NOT rewritten by sync — realize it with node scripts/install-agents.mjs (--target <dir> for a sibling), then restart the session';
+    const { exec } = fakeExec({ behind: 1, changed: ['packages/store/src/index.ts'], syncStdout: `up_to_date: scout\n${driftLine}\n` });
+    const lines = [];
+    const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: [{ name: 'Dome', repo_path: '/tmp/dome' }], opts: {} });
+    assert.equal(report.exit, 0, 'config_drift never fails the update');
+    assert.equal(report.projects[0].changed, 0, 'config_drift wrote nothing, so it is not a changed agent');
+    assert.equal(report.projects[0].config_drift, 1);
+    const log = lines.join('\n');
+    assert.ok(log.includes(driftLine), `the drift line is relayed verbatim:\n${log}`);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

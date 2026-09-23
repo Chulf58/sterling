@@ -2439,6 +2439,8 @@ test("an article claiming 'planned' over real code raises state_review", () => {
     assert.equal(items[0].feature_link, art.id);
     assert.match(items[0].text, /declares state 'planned' while the files it owns hold \d+ bytes/);
     assert.match(items[0].text, /Check the prose against the code before changing anything/, 'the fix is usually metadata, not a rewrite');
+    assert.doesNotMatch(items[0].text, /unverified|knowledge_edit/, 'no unverified entries, so no instruction to clear flags that do not exist');
+    assert.match(items[0].text, /Then knowledge_update the state\.$/, 'the text ends after the state-update instruction');
   } finally {
     cleanup();
   }
@@ -2505,6 +2507,43 @@ test('state_review is minted ONCE across repeated reads, and clearing the flag s
     // The state_review item is NOT auto-drained (that drain is scoped to the two
     // drift lanes), so it is still open — but nothing NEW is minted.
     assert.equal(stateReviews(tools).length, 1, 'no second item once the condition is gone');
+  } finally {
+    cleanup();
+  }
+});
+
+test('the unverified state_review item names the ONE targeted call that clears the flag, and that call preserves the file baseline (Dome Farmer issue #48)', () => {
+  const { dir, tools, cleanup } = stateProject();
+  try {
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 1;\n');
+    writeFileSync(join(dir, 'src', 'barn.ts'), 'export const y = 2;\n');
+    const art = shippedArticle(tools, {
+      state: 'active',
+      files: [
+        { path: 'src/housing.ts', role: 'not written yet', unverified: true },
+        { path: 'src/barn.ts', role: 'exports y' },
+      ],
+    });
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    const items = stateReviews(tools);
+    assert.equal(items.length, 1);
+    assert.match(
+      items[0].text,
+      /knowledge_edit\(id: '[^']+', field: 'files\[path=src\/housing\.ts\]\.unverified', find: 'true', replace: 'false'\)/,
+      'the item names the exact per-path call, not a whole-array knowledge_update'
+    );
+
+    const baselinesBefore = (tools.knowledgeGet(art.id) as unknown as { file_baselines: Record<string, string> }).file_baselines;
+    // Bytes change after the baseline was taken: an ordinary write must NOT advance it
+    // (decision baseline-advance-is-evidence-gated-ordinary-writes-preserve-baselines).
+    writeFileSync(join(dir, 'src', 'housing.ts'), 'export const x = 3;\n');
+    tools.knowledgeEdit(art.id, 'files[path=src/housing.ts].unverified', 'true', 'false');
+    const after = tools.knowledgeGet(art.id) as unknown as { files: { path: string; unverified?: boolean }[]; file_baselines: Record<string, string> };
+    assert.equal(after.files.find((f) => f.path === 'src/housing.ts')?.unverified, false, 'the flag is cleared');
+    assert.deepEqual(after.file_baselines, baselinesBefore, 'the flag clear advances no baseline');
+
+    tools.knowledgeQuery({ types: ['feature_article'] });
+    assert.equal(stateReviews(tools).length, 1, 'no second item once the flag is cleared');
   } finally {
     cleanup();
   }

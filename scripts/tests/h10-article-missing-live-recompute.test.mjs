@@ -248,6 +248,15 @@ test('TARGET-1: a file that gains an owning feature_article is DROPPED from the 
       'TARGET-1: the item is a LIVE view of the unowned set — the three still-unowned files, and only those'
     );
     assert.equal(demands(store).length, 1, 'TARGET-1: healed in place — the stale item is not left open beside a corrected new one (two items under one subject is worse than one wrong item)');
+
+    const text = String(demands(store)[0].text ?? '');
+    const claimed = [...text.matchAll(/(\d+)\s+(?:[a-z-]+\s+){0,3}files?\b/gi)].map((m) => Number(m[1]));
+    assert.ok(claimed.length >= 1, `TARGET-1: the healed item text states no file count at all. Text was: ${text}`);
+    assert.equal(
+      Math.max(...claimed),
+      demands(store)[0].file_keys.length,
+      `TARGET-1: the healed item's text must claim the same count as the file_keys it now carries (${demands(store)[0].file_keys.length}) — a heal that rewrites file_keys but leaves the old count text is the Dome Farmer #45 defect. Text was: ${text}`
+    );
   } finally {
     cleanup();
   }
@@ -276,6 +285,58 @@ test("TARGET-2 (the reproduced sequence, both arms at once): the re-minted item 
       [...open[0].file_keys].sort(),
       ['src/B.mjs', 'src/C.mjs', 'src/D.mjs'],
       'TARGET-2: the item must name exactly the LIVE unowned set {B, C, D}. Today it names the stale snapshot {A, B, C}: a FALSE demand for the owned A (corrupting — its remedy writes a duplicate article) and a SILENT LOSS of the genuinely unowned D (under-report — worse, because nothing else will ever raise it). Both halves come off the same line, and a fix that answers only one of them is a suppression'
+    );
+
+    const text = String(open[0].text ?? '');
+    const claimed = [...text.matchAll(/(\d+)\s+(?:[a-z-]+\s+){0,3}files?\b/gi)].map((m) => Number(m[1]));
+    assert.ok(claimed.length >= 1, `TARGET-2: the healed item text states no file count at all. Text was: ${text}`);
+    assert.equal(
+      Math.max(...claimed),
+      open[0].file_keys.length,
+      `TARGET-2: the healed item's text must claim the same count as the file_keys it now carries (${open[0].file_keys.length}) — a heal that rewrites file_keys but leaves the old count text is the Dome Farmer #45 defect. Text was: ${text}`
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test('TARGET-3 (Dome Farmer #45, the untouched-carry case): a heal that shrinks file_keys because a CARRIED (not re-touched) file gained an owner must also shrink the text — the mint block only fires for THIS session\'s touched files, so relying on it to correct the text leaves a carried-only shrink stale forever', () => {
+  const { dir, store, cleanup } = makeH10Project();
+  try {
+    // Session 1 — a, b, c, x all unowned; one item names all four. "16 file(s)"
+    // in the Dome Farmer report is this same shape at larger scale.
+    encounterTolerant(dir, store, ['src/a.mjs', 'src/b.mjs', 'src/c.mjs', 'src/x.mjs'], '2026-08-28T09:00:00.000Z');
+    const first = demands(store);
+    assert.equal(first.length, 1, 'baseline: one item after session 1');
+    assert.deepEqual([...first[0].file_keys].sort(), ['src/a.mjs', 'src/b.mjs', 'src/c.mjs', 'src/x.mjs']);
+
+    // a gains its owning article.
+    article(store, 'feat-a', ['src/a.mjs'], '2026-08-28T09:30:00.000Z');
+
+    // Session 2 touches b and c only — NOT x, and not a. x remains genuinely
+    // unowned but carried; the mint block's own demand set is {b, c}, which
+    // never equals the healed {b, c, x}, so it can never dedup-match and
+    // correct this item's text as a side effect.
+    encounterTolerant(dir, store, ['src/b.mjs', 'src/c.mjs'], '2026-08-28T10:00:00.000Z');
+
+    const open = demands(store);
+    assert.ok(
+      [...open.flatMap((t) => t.file_keys ?? [])].includes('src/x.mjs'),
+      'TARGET-3: src/x.mjs is still genuinely unowned and untouched this session — it must still be named SOMEWHERE, not silently dropped'
+    );
+    const healedItem = open.find((t) => (t.file_keys ?? []).includes('src/x.mjs'));
+    assert.ok(healedItem, 'TARGET-3: an open item carries src/x.mjs');
+    assert.ok(
+      !(healedItem.file_keys ?? []).includes('src/a.mjs'),
+      'TARGET-3: the item carrying src/x.mjs must not still name the now-owned src/a.mjs'
+    );
+    const text = String(healedItem.text ?? '');
+    const claimed = [...text.matchAll(/(\d+)\s+(?:[a-z-]+\s+){0,3}files?\b/gi)].map((m) => Number(m[1]));
+    assert.ok(claimed.length >= 1, `TARGET-3: the healed item text states no file count at all. Text was: ${text}`);
+    assert.equal(
+      Math.max(...claimed),
+      healedItem.file_keys.length,
+      `TARGET-3: the healed item's text must claim the same count as the file_keys it now carries (${healedItem.file_keys.length}) — this is the exact Dome Farmer #45 shape ("16 file(s)" text vs 10 file_keys): the heal at h10-direct-capture.mjs's updateTodo call spreads the survivor's stale text forward, and nothing downstream corrects it because this session's own mint never re-touches this item. Text was: ${text}`
     );
   } finally {
     cleanup();

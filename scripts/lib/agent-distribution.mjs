@@ -189,6 +189,19 @@ export function extractBakedCommandPaths(content) {
   return [...paths];
 }
 
+// The frontmatter model:/effort: values of an agent file (null where the header
+// carries no such line) — the surface config_drift compares (256d1059).
+export function extractModelEffort(content) {
+  const m = normalize(content).match(/^---\n([\s\S]*?)\n---\n/);
+  const fm = m ? m[1] : '';
+  return {
+    model: fm.match(/^model:\s*(\S+)\s*$/m)?.[1] ?? null,
+    effort: fm.match(/^effort:\s*(\S+)\s*$/m)?.[1] ?? null,
+  };
+}
+
+export const CONFIG_DRIFT_FIX = 'node scripts/install-agents.mjs (--target <dir> for a sibling)';
+
 // Surgical model/effort swap (design 98064d77 §b): the TUI System tab's write
 // projection. Given an ALREADY-INSTALLED agent file, rewrite ONLY the frontmatter
 // model:/effort: lines and re-stamp the generated header's content_hash, reusing
@@ -437,9 +450,18 @@ export function refuseInstruction(name) {
 // baked hook command lines differ from a fresh render with THIS machine's vars
 // is a machine-context flip (invisible to hash bookkeeping — anti_pattern
 // 60e8463d) — re-baked loudly as machine_rebaked, never reported up_to_date.
+// An unmodified, template-current, machine-current install whose frontmatter
+// model/effort differs from the resolved config.models entry reports
+// config_drift (decision sync-agents-reports-config-models-drift-loudly-without-rewriting,
+// 256d1059) and is NOT written: install/refresh/swap stay the only surfaces that
+// realize config authority. Precedence: every writing or refusing status wins
+// over config_drift — refreshed / header_repaired / machine_rebaked write a fresh
+// render that already carries the configured values, and a locally modified file
+// (locally_modified_up_to_date, refused_local_modification) is the user's, so its
+// model line is not ours to call drift. config_drift replaces only up_to_date.
 // Statuses: installed | refreshed | header_repaired | machine_rebaked |
-// up_to_date | locally_modified_up_to_date | refused_local_modification |
-// foreign_file.
+// config_drift | up_to_date | locally_modified_up_to_date |
+// refused_local_modification | foreign_file.
 export function syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion, now, vars = {}, config, retirementFs }) {
   const prepared = prepareRegisteredAgents({ templatesDir, registryPath, pluginVersion, now, vars, config });
   mkdirSync(targetAgentsDir, { recursive: true });
@@ -487,15 +509,21 @@ export function syncAgents({ templatesDir, registryPath, targetAgentsDir, plugin
       // baked hook command lines against a fresh render with THIS machine's
       // vars: command drift on an UNMODIFIED install is provably baked-var
       // drift (the body hash matches the header, so no human edited it) →
-      // re-bake loudly. Body-only divergence (config.models values) stays
-      // up_to_date: config authority is realized at install/refresh/swap
-      // (98064d77) and the System tab's drift marker owns its visibility.
+      // re-bake loudly. A frontmatter model/effort divergence from config.models
+      // is reported loudly as config_drift and NOT written: config authority is
+      // realized at install/refresh/swap (98064d77), and sync only reports it
+      // (256d1059 — an all-green up_to_date over a dead config bump is the
+      // silent failure of anti_pattern 85d15143).
       const candidate = renderCandidate();
       const sameCommands =
         JSON.stringify(extractHookCommandLines(installed)) === JSON.stringify(extractHookCommandLines(candidate));
+      const installedModel = extractModelEffort(installed);
+      const configuredModel = extractModelEffort(candidate);
       if (!sameCommands) {
         writeFileSync(installedPath, candidate);
         report.push({ name: entry.name, status: 'machine_rebaked' });
+      } else if (installedModel.model !== configuredModel.model || installedModel.effort !== configuredModel.effort) {
+        report.push({ name: entry.name, status: 'config_drift', installed: installedModel, configured: configuredModel, fix: CONFIG_DRIFT_FIX });
       } else {
         report.push({ name: entry.name, status: 'up_to_date' });
       }

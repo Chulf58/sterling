@@ -4138,7 +4138,12 @@ export class SterlingTools {
             text:
               `review article '${a.slug}' metadata against reality: ${reasons.join('; and ')}. ` +
               `Check the prose against the code before changing anything — in the reported case every acceptance criterion HELD and only the metadata was wrong, so the fix was a state change and a files[] role pass, not a rewrite. ` +
-              `Then knowledge_update the state (and clear the unverified flags you have written from the file).`,
+              `Then knowledge_update the state` +
+              (unverifiedPaths.length
+                ? `, and clear each unverified flag once its role is written from the file — one targeted call per path, never a whole-array files[] update: ` +
+                  unverifiedPaths.map((p) => `knowledge_edit(id: '${a.id}', field: 'files[path=${p}].unverified', find: 'true', replace: 'false')`).join('; ')
+                : '') +
+              `.`,
             file_keys: unverifiedPaths.length ? unverifiedPaths : (a.files ?? []).map((f) => f.path).slice(0, DRIFT_ITEMS_PER_READ),
             feature_link: a.id,
           });
@@ -4414,6 +4419,33 @@ export class SterlingTools {
       }
       const el = hits[0] as Record<string, unknown>;
       const cur = el[sub];
+      // BOOLEAN SUB-FIELD (Dome Farmer issue #48): a state_review item directs
+      // clearing files[].unverified, and refusing every non-string left only a
+      // whole-array knowledge_update. The exactly-once contract maps onto the
+      // value: `find` must spell the CURRENT value, `replace` the new one.
+      if (typeof cur === 'boolean') {
+        if (find !== String(cur)) {
+          throw new Error(
+            `knowledge_edit: '${sub}' on the selected ${base} element is ${cur}, not '${find}' — for a boolean sub-field 'find' must be its current value ('${cur}'); nothing was written.`
+          );
+        }
+        if (replace !== 'true' && replace !== 'false') {
+          throw new Error(`knowledge_edit: '${sub}' on the selected ${base} element is boolean — 'replace' must be 'true' or 'false'; nothing was written.`);
+        }
+        const nextEl = { ...el, [sub]: replace === 'true' };
+        const nextArr = arr.map((e) => (e === el ? nextEl : e));
+        const { record, claims_check } = this.splitSameSubject(this.knowledgeUpdate(old.id, { [base]: nextArr }, resolves, undefined, 'knowledge_edit'));
+        return {
+          record,
+          ...(claims_check ? { claims_check } : {}),
+          replaced: { field, chars_before: find.length, chars_after: replace.length },
+          warnings: [
+            ...this.historyRotationWarnings(this.attemptedHistoryLen(old, { [base]: nextArr }), record),
+            ...this.articleOversizeWarnings(record),
+            ...this.openReconcileLaneWarnings(this.supersedeChain(old)),
+          ],
+        };
+      }
       if (typeof cur !== 'string') {
         throw new Error(
           `knowledge_edit: '${sub}' on the selected ${base} element is ${cur === undefined ? 'absent' : typeof cur}, not a string — edit replaces text inside a string`

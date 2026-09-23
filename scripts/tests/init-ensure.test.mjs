@@ -867,6 +867,33 @@ test('init notes the project in the shared registry (decision foreign_8f9e6db2)'
 // shipped-default coder model — proving config.models is authoritative at install.
 // =============================================================================
 
+// config_drift through init's re-run (decision 256d1059): init shares syncAgents,
+// so a config.models bump the installed agent does not carry is reported as a
+// differs row naming both values and the fix — never a crash on an unmapped
+// status, never a rewrite.
+test('config_drift on re-init: a config.models bump is reported differs with both values and the fix; the agent is untouched', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
+  try {
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    const configPath = join(dir, '.sterling', 'config.json');
+    const tuned = JSON.parse(readFileSync(configPath, 'utf8'));
+    tuned.models.librarian = { model: 'claude-drift-probe-9', effort: 'high' };
+    writeFileSync(configPath, JSON.stringify(tuned, null, 2));
+    const agentPath = join(dir, '.claude', 'agents', 'librarian.md');
+    const agentBefore = readFileSync(agentPath, 'utf8');
+
+    const rerun = init(dir);
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(
+      rerun.stdout,
+      /^\.claude\/agents\/librarian\.md\s+differs\s+model\/effort drift — installed model=claude-sonnet-5 effort=low, config\.models resolves model=claude-drift-probe-9 effort=high; not rewritten — realize it with node scripts\/install-agents\.mjs \(--target <dir> for a sibling\)/m
+    );
+    assert.equal(readFileSync(agentPath, 'utf8'), agentBefore, 'config_drift writes nothing');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test('phase-2 wiring: fresh init resolves {{MODEL}}/{{EFFORT}} in the installed agents from its own config.models (no token survives; concrete pinned ids)', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-ensure-'));
   try {

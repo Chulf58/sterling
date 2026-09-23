@@ -678,17 +678,91 @@ test('syncAgents: a LOCALLY MODIFIED install is never machine-rebaked — modifi
   }
 });
 
-test('syncAgents: config-only divergence on an unmodified install stays up_to_date — the phase-4 drift marker owns it (98064d77)', () => {
+// config_drift (decision sync-agents-reports-config-models-drift-loudly-without-rewriting,
+// 256d1059; Dome Farmer #47; closes the silent half of anti_pattern 85d15143):
+// an unmodified, template-current install whose frontmatter model/effort differs
+// from the resolved config.models entry is reported LOUDLY as config_drift —
+// never up_to_date — and sync writes nothing (install/refresh/swap stay the only
+// realizing surfaces). Superseded the earlier 'stays up_to_date' pin (98064d77).
+test('syncAgents: config-only MODEL divergence on an unmodified install -> config_drift naming both values and the fix, file untouched', () => {
   const dir = scratch();
   try {
     const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
     const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
     installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth({ librarian: { model: 'claude-sonnet-4-6', effort: 'high' } }) });
+    const installedPath = join(targetAgentsDir, 'librarian.md');
+    const before = readFileSync(installedPath, 'utf8');
     const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth({ librarian: { model: 'claude-opus-4-8', effort: 'high' } }) });
-    assert.deepEqual(report, [{ name: 'librarian', status: 'up_to_date' }]);
-    assert.match(frontmatter(readFileSync(join(targetAgentsDir, 'librarian.md'), 'utf8')), /^model: claude-sonnet-4-6$/m, 'installed model untouched by sync — config authority realizes at install/refresh/swap');
+    assert.equal(report.length, 1);
+    assert.equal(report[0].name, 'librarian');
+    assert.equal(report[0].status, 'config_drift', 'a config.models bump sync did not realize is never reported up_to_date');
+    assert.deepEqual(report[0].installed, { model: 'claude-sonnet-4-6', effort: 'high' });
+    assert.deepEqual(report[0].configured, { model: 'claude-opus-4-8', effort: 'high' });
+    assert.equal(report[0].refused, undefined, 'config_drift is a report, not a refusal');
+    assert.equal(readFileSync(installedPath, 'utf8'), before, 'sync writes nothing for config_drift — config authority realizes at install/refresh/swap');
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncAgents: config-only EFFORT divergence -> config_drift; matching config -> up_to_date', () => {
+  const dir = scratch();
+  try {
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    const models = { librarian: { model: 'claude-sonnet-4-6', effort: 'low' } };
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth(models) });
+    const same = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth(models) });
+    assert.deepEqual(same.report, [{ name: 'librarian', status: 'up_to_date' }]);
+    const { report } = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, ...cfgBoth({ librarian: { model: 'claude-sonnet-4-6', effort: 'high' } }) });
+    assert.equal(report[0].status, 'config_drift');
+    assert.deepEqual(report[0].installed, { model: 'claude-sonnet-4-6', effort: 'low' });
+    assert.deepEqual(report[0].configured, { model: 'claude-sonnet-4-6', effort: 'high' });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('syncAgents: config_drift never masks the writing/refusing statuses — refreshed, machine_rebaked, locally_modified_up_to_date and refused_local_modification win', () => {
+  const dir = scratch();
+  try {
+    const modelsA = { librarian: { model: 'claude-sonnet-4-6', effort: 'low' } };
+    const modelsB = { librarian: { model: 'claude-opus-4-8', effort: 'high' } };
+    const { templatesDir, registryPath } = makePluginSide(dir, { 'coder.md': CODER_TOKEN_TEMPLATE });
+    const targetAgentsDir = join(dir, 'target', '.claude', 'agents');
+    const installedPath = join(targetAgentsDir, 'librarian.md');
+
+    // template changed + config changed -> refreshed (the fresh render realizes config B)
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, ...cfgBoth(modelsA) });
+    writeFileSync(join(templatesDir, 'coder.md'), CODER_TOKEN_TEMPLATE.replace('Coder fixture body one.', 'Coder fixture body two.'));
+    let r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1, ...cfgBoth(modelsB) });
+    assert.deepEqual(r.report, [{ name: 'librarian', status: 'refreshed' }]);
+    assert.match(frontmatter(readFileSync(installedPath, 'utf8')), /^model: claude-opus-4-8$/m);
+
+    // locally modified, template current, config changed -> locally_modified_up_to_date (hand edits are the user's)
+    writeFileSync(installedPath, readFileSync(installedPath, 'utf8') + 'local edit\n');
+    r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.2.0', now: T1, ...cfgBoth(modelsA) });
+    assert.deepEqual(r.report, [{ name: 'librarian', status: 'locally_modified_up_to_date' }]);
+
+    // locally modified + template stale + config changed -> refused_local_modification (exit-2 path intact)
+    writeFileSync(join(templatesDir, 'coder.md'), CODER_TOKEN_TEMPLATE.replace('Coder fixture body one.', 'Coder fixture body three.'));
+    r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.3.0', now: T1, ...cfgBoth(modelsA) });
+    assert.equal(r.report[0].status, 'refused_local_modification');
+    assert.equal(r.report[0].refused, true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const dir2 = scratch();
+  try {
+    // machine flip + config changed -> machine_rebaked (the re-bake writes config B too)
+    const MACHINE_MODEL_TEMPLATE = CODER_TOKEN_TEMPLATE.replace(`'"C:/tools/node.exe" "C:/proj/hooks/h.mjs"'`, `'{{NODE}} "{{HOOKS_DIR}}/h.mjs"'`);
+    const { templatesDir, registryPath } = makePluginSide(dir2, { 'coder.md': MACHINE_MODEL_TEMPLATE });
+    const targetAgentsDir = join(dir2, 'target', '.claude', 'agents');
+    installAgents({ templatesDir, registryPath, targetAgentsDir, ...OPTS, vars: MACHINE_A, ...cfgBoth({ librarian: { model: 'claude-sonnet-4-6', effort: 'low' } }) });
+    const r = syncAgents({ templatesDir, registryPath, targetAgentsDir, pluginVersion: '0.1.0', now: T1, vars: MACHINE_B, ...cfgBoth({ librarian: { model: 'claude-opus-4-8', effort: 'high' } }) });
+    assert.deepEqual(r.report, [{ name: 'librarian', status: 'machine_rebaked' }]);
+  } finally {
+    rmSync(dir2, { recursive: true, force: true });
   }
 });
 
@@ -1116,6 +1190,36 @@ test('ensureConductorActivation: "installed" / "up_to_date" / "refreshed" all co
 // update-complete.json while the agent stayed stale. The CLI contract is exit 2.
 const SYNC_CLI = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'sync-agents.mjs');
 const runSyncCli = (target) => spawnSync(process.execPath, [SYNC_CLI, '--target', target], { encoding: 'utf8' });
+
+// config_drift through the CLI (decision 256d1059): a sparse project config that
+// bumps one model (other keys filled from the zod defaults, as install-agents
+// resolves it) prints a status line naming agent, installed + configured
+// model/effort and the fix command; exit 0 (a report, not a gate); nothing written.
+test('sync-agents CLI reports config_drift loudly, exits 0, and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-sync-cli-'));
+  try {
+    const first = runSyncCli(dir);
+    assert.equal(first.status, 0, `clean install must exit 0:\n${first.stdout}${first.stderr}`);
+    const agentPath = join(dir, '.claude', 'agents', 'implementor.md');
+    const before = readFileSync(agentPath, 'utf8');
+    const installedModel = frontmatter(before).match(/^model:\s*(\S+)$/m)[1];
+    const installedEffort = frontmatter(before).match(/^effort:\s*(\S+)$/m)[1];
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ models: { implementor: { model: 'claude-drift-probe-9', effort: 'xhigh' } } }));
+    const r = runSyncCli(dir);
+    assert.equal(r.status, 0, `config_drift is a report, not a refusal:\n${r.stdout}${r.stderr}`);
+    const line = r.stdout.split('\n').find((l) => l.startsWith('config_drift: implementor'));
+    assert.ok(line, `a config_drift status line for implementor:\n${r.stdout}`);
+    assert.ok(line.includes(`model=${installedModel}`) && line.includes(`effort=${installedEffort}`), `names the installed model/effort: ${line}`);
+    assert.ok(line.includes('model=claude-drift-probe-9') && line.includes('effort=xhigh'), `names the configured model/effort: ${line}`);
+    assert.ok(line.includes('node scripts/install-agents.mjs') && line.includes('--target <dir>'), `names the fix command: ${line}`);
+    assert.doesNotMatch(r.stdout, /^up_to_date: implementor$/m, 'never up_to_date over a dead config bump');
+    assert.doesNotMatch(r.stdout, /^config_drift: (?!implementor)/m, 'agents whose config was not bumped do not drift');
+    assert.equal(readFileSync(agentPath, 'utf8'), before, 'sync writes nothing for config_drift');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 for (const [label, tamper, status] of [
   [

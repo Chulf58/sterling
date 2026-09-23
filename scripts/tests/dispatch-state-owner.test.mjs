@@ -90,20 +90,50 @@ function writeStateRaw(dir, fileName, content) {
 function readStateRaw(dir, fileName) {
   return JSON.parse(readFileSync(join(stateDir(dir), fileName), 'utf8'));
 }
-async function recordsOf(dir) {
-  const r = await DS.readDispatchState(dir);
-  return r;
+// STATUS IN THE FILENAME (decision `dispatch-state-status-in-filename-live-
+// scan-parses-only-live-records`): a planted fixture lands on the name the
+// owner itself would give it — live-<key>.json, or done-<key>~<ids>.json for
+// a terminal body — so a fixture pins behaviour, not a pre-migration name.
+function writeStateRecord(dir, record) {
+  const key = DS.dispatchStateKey(record.tool_use_id);
+  return writeStateRaw(dir, record.terminal ? DS.terminalFileName(key, record) : `live-${key}.json`, record);
+}
+// ON-DISK TRUTH for assertions: every live-* AND done-* record, read directly.
+// readDispatchState is the HOT scan and deliberately never opens terminal
+// history, so a pin that reads back a tombstone must not go through it.
+function allStateRecords(dir) {
+  const records = [];
+  for (const file of stateFiles(dir)) {
+    const m = /^(?:live-(.+)|done-([^~]+)~[^~]+)\.json$/.exec(file);
+    if (!m || !lstatSync(join(stateDir(dir), file)).isFile()) continue;
+    // A deliberately poisoned fixture (unparseable bytes) is not a record —
+    // the same exclusion readDispatchState applies; the poison pins assert
+    // it through the owner, not through this helper.
+    let record;
+    try {
+      record = readStateRaw(dir, file);
+    } catch {
+      continue;
+    }
+    // CANONICAL ONLY: the body must derive the key its name carries, and a
+    // done- name must be exactly the one the owner computes for that body —
+    // a misfiled or non-canonical file is not a record, as in the owner.
+    const key = m[1] ?? m[2];
+    if (DS.dispatchStateKey(record?.tool_use_id) !== key) continue;
+    if (m[2] !== undefined && (!record.terminal || DS.terminalFileName(key, record) !== file)) continue;
+    records.push({ key, file, record });
+  }
+  return { availability: existsSync(stateDir(dir)) ? 'ok' : 'absent', records };
 }
 async function soleRecord(dir) {
-  const r = await DS.readDispatchState(dir);
+  const r = allStateRecords(dir);
   assert.equal(r.availability, 'ok', `expected a readable state dir, got ${JSON.stringify(r.availability)}`);
   assert.equal(r.records.length, 1, `expected exactly one state record, got ${r.records.length}`);
   return r.records[0].record;
 }
 async function recordFor(dir, toolUseId) {
   const key = DS.dispatchStateKey(toolUseId);
-  const r = await DS.readDispatchState(dir);
-  const hit = r.records.find((x) => x.key === key);
+  const hit = allStateRecords(dir).records.find((x) => x.key === key);
   return hit?.record ?? null;
 }
 
@@ -184,7 +214,10 @@ function holdLiveLock(dir) {
 }
 
 // A deterministic injected clock: every read advances 10 ms, so the resolver's
-// 150 ms budget is spent in at most 15 sleeps and NO real time passes.
+// siblings-retry budget (3000 ms since the budget widening — decision
+// dispatch-state-status-in-filename-live-scan-parses-only-live-records,
+// follow-on; finding aa3b4a4c: background Post lands 0.34-2.24 s after
+// Start) is spent in at most 300 sleeps and NO real time passes.
 function fakeClock(startMs = 1_800_000_000_000, stepMs = 10) {
   let t = startMs;
   return { now: () => (t += stepMs) - stepMs, at: () => t };
@@ -706,7 +739,7 @@ test('DS-R03: a record whose derived_binding is MINE resolves source "derived-ty
   const { dir, cleanup } = project();
   try {
     const prompt = 'derived brief';
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_d')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_d',
       session_id: 's1',
@@ -735,7 +768,7 @@ test('DS-R04: RESUME GUARD — a record from ANOTHER session_id carrying my agen
   const { dir, cleanup } = project();
   try {
     const old = 'the previous session brief';
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_old')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_old',
       session_id: 's0',
@@ -824,7 +857,10 @@ test('DS-R07: ZERO pending records of my type is "unattributable" with case "no-
 // go red. This is the 4-of-6-wrong-territory defect the decision exists to
 // remove.
 
-test('DS-R08: two pending same-type slots + a Post landing DURING the bounded wait resolves "post" inside the 150 ms budget', async () => {
+// BUDGET VALUE CHANGED 150 ms -> 3000 ms (siblings-retry verdict only): the
+// bound this pin guards is unchanged in kind — finite, on the injected clock —
+// only its figure moved, so the ceiling below is 300 ticks, not 15.
+test('DS-R08: two pending same-type slots + a Post landing DURING the bounded wait resolves "post" inside the 3000 ms siblings-retry budget', async () => {
   requireOwner('recordDispatchPre', 'recordDispatchPost', 'resolveDispatchStart');
   const { dir, cleanup } = project();
   try {
@@ -845,7 +881,7 @@ test('DS-R08: two pending same-type slots + a Post landing DURING the bounded wa
     assert.equal(res.source, 'post', 'the bounded wait exists precisely so a Post landing microseconds after Start still attributes');
     assert.equal(res.prompt, 'TWIN B');
     assert.ok(sleeps >= 1, 'the ambiguous case genuinely went through the wait path');
-    assert.ok(sleeps <= 15, `the wait is bounded at 150 ms of the INJECTED clock (10 ms/tick) — ${sleeps} sleeps is past the budget`);
+    assert.ok(sleeps <= 300, `the wait is bounded at 3000 ms of the INJECTED clock (10 ms/tick) — ${sleeps} sleeps is past the budget`);
     assert.equal(DS.dispatchState(await recordFor(dir, 'toolu_twinA')), 'pending', "the twin's slot is never consumed by my Start");
   } finally {
     cleanup();
@@ -874,13 +910,85 @@ test('DS-R09: two pending same-type slots and NO Post is "same-type-siblings-in-
     assert.equal(res.case, 'same-type-siblings-in-flight');
     assert.equal(res.count, 2, 'the case CARRIES the count — this is the instrumentation §7(a) requires before the deny hooks are coupled');
     assert.equal(res.prompt, null);
-    assert.ok(sleeps <= 15, `bounded by the injected clock: ${sleeps} sleeps`);
+    // BUDGET VALUE CHANGED 150 -> 3000 ms: still bounded, now at 300 ticks.
+    assert.ok(sleeps <= 300, `bounded by the injected clock: ${sleeps} sleeps`);
+    assert.ok(sleeps > 15, `the siblings-retry wait now outlasts the old 150 ms figure: ${sleeps} sleeps`);
     assert.ok(elapsed < 1000, `an injected sleep must not spend real time: ${elapsed}ms`);
     assert.deepEqual(stateFiles(dir).map((f) => readFileSync(join(stateDir(dir), f), 'utf8')), before, 'an ambiguous Start writes NOTHING — both slots stay byte-identical and derivable');
   } finally {
     cleanup();
   }
 });
+test('DS-R09b: two same-type pending dispatches BOTH bind through their Posts landing ~1 s after Start — well past the old 150 ms, inside the 3000 ms budget', async () => {
+  requireOwner('recordDispatchPre', 'recordDispatchPost', 'resolveDispatchStart');
+  const { dir, cleanup } = project();
+  try {
+    await DS.recordDispatchPre(dir, PRE({ tool_use_id: 'toolu_bgA', tool_input: { subagent_type: 'coder', prompt: 'BG A', description: 'a' } }));
+    await DS.recordDispatchPre(dir, PRE({ tool_use_id: 'toolu_bgB', tool_input: { subagent_type: 'coder', prompt: 'BG B', description: 'b' } }));
+    const clockA = fakeClock();
+    const clockB = fakeClock();
+    let sleepsA = 0;
+    const sleepA = async () => {
+      sleepsA += 1;
+      if (sleepsA === 100) {
+        // Both background Posts land ~1 s (100 ticks) after the Starts, each
+        // carrying its exact agentId.
+        await DS.recordDispatchPost(dir, POST({ tool_use_id: 'toolu_bgA', prompt: 'BG A', responsePrompt: 'BG A', agentId: 'agent-A' }));
+        await DS.recordDispatchPost(dir, POST({ tool_use_id: 'toolu_bgB', prompt: 'BG B', responsePrompt: 'BG B', agentId: 'agent-B' }));
+      }
+    };
+    const [resA, resB] = await Promise.all([
+      DS.resolveDispatchStart(dir, START({ agent_id: 'agent-A' }), { consumer: 'h22', now: clockA.now, sleep: sleepA }),
+      DS.resolveDispatchStart(dir, START({ agent_id: 'agent-B' }), { consumer: 'h22', now: clockB.now, sleep: async () => {} }),
+    ]);
+    assert.equal(resA.source, 'post');
+    assert.equal(resA.prompt, 'BG A');
+    assert.equal(resB.source, 'post', 'the sibling binds through ITS OWN Post agentId, never by elimination or a guess');
+    assert.equal(resB.prompt, 'BG B');
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: keep the 150 ms budget — both Starts give up at tick 15, long
+// before the Posts land at tick 100, and both source assertions go red.
+
+test('DS-R09c: a LOCK-HELD retry keeps the old 150 ms bound — the widened budget applies to the siblings-retry verdict only', async () => {
+  requireOwner('recordDispatchPre', 'resolveDispatchStart');
+  const { dir, cleanup } = project();
+  let release = null;
+  try {
+    await DS.recordDispatchPre(dir, PRE({ tool_use_id: 'toolu_l1', tool_input: { subagent_type: 'coder', prompt: 'L1', description: 'a' } }));
+    await DS.recordDispatchPre(dir, PRE({ tool_use_id: 'toolu_l2', tool_input: { subagent_type: 'coder', prompt: 'L2', description: 'b' } }));
+    const clock = fakeClock();
+    let sleeps = 0;
+    let lockHeldObserved = false;
+    const sleep = async () => {
+      sleeps += 1;
+      if (sleeps === 1) release = holdLiveLock(dir); // every retry from here on is lock-held
+      if (sleeps === 2) {
+        // Prove the retries really ran against a HELD lock, not a free one.
+        try {
+          await DS.withRegisterLock(dir, () => null, { timeoutMs: 1, retryMs: 1 });
+        } catch (e) {
+          lockHeldObserved = e?.code === 'register_lock_held';
+        }
+      }
+    };
+    const res = await DS.resolveDispatchStart(dir, START({ agent_id: 'agent-1' }), { consumer: 'h22', now: clock.now, sleep });
+    assert.equal(res.source, 'unattributable');
+    assert.equal(res.case, 'same-type-siblings-in-flight');
+    assert.equal(res.count, 2, 'the count survives lock-held retries');
+    assert.ok(lockHeldObserved, 'the in-loop retries ran against a genuinely held lock');
+    assert.ok(sleeps > 1, `the lock-held path RETRIED rather than giving up on its first lock-held result: ${sleeps} sleeps`);
+    assert.ok(sleeps <= 15, `a lock-held retry is bounded at the unchanged 150 ms: ${sleeps} sleeps`);
+  } finally {
+    if (release) release();
+    cleanup();
+  }
+});
+// SABOTAGE: apply the 3000 ms budget to every in-loop verdict — the
+// sleeps<=15 assertion goes red and a held lock stalls a Start for 3 s.
+
 // SABOTAGE: pick the first/oldest candidate when several match ("close
 // enough") — the case and count assertions go red and 4-of-6-wrong-territory
 // returns under a new name. Second sabotage: mark the candidates consumed
@@ -976,15 +1084,15 @@ test('DS-R13 CONTROL: a Post CONFIRMING its own derivation records confirmed_der
 const POISON_SHAPES = [
   {
     name: 'unparseable JSON',
-    plant: (dir) => writeStateRaw(dir, `${DS.dispatchStateKey('toolu_bad')}.json`, '{ this is not json'),
+    plant: (dir) => writeStateRaw(dir, `live-${DS.dispatchStateKey('toolu_bad')}.json`, '{ this is not json'),
   },
   {
     name: 'unknown schema version',
-    plant: (dir) => writeStateRaw(dir, `${DS.dispatchStateKey('toolu_v9')}.json`, { schema: 99, tool_use_id: 'toolu_v9', session_id: 's1', subagent_type: 'coder', prompt: 'x' }),
+    plant: (dir) => writeStateRecord(dir, { schema: 99, tool_use_id: 'toolu_v9', session_id: 's1', subagent_type: 'coder', prompt: 'x' }),
   },
   {
     name: 'prompt_sha256 disagreeing with prompt',
-    plant: (dir) => writeStateRaw(dir, `${DS.dispatchStateKey('toolu_hash')}.json`, {
+    plant: (dir) => writeStateRecord(dir, {
       schema: 1, tool_use_id: 'toolu_hash', session_id: 's1', subagent_type: 'coder', origin: 'pre',
       prompt: 'the real prompt', prompt_bytes: Buffer.byteLength('the real prompt', 'utf8'), prompt_sha256: sha256('SOMETHING ELSE'),
     }),
@@ -996,7 +1104,7 @@ const POISON_SHAPES = [
   {
     name: 'a non-regular entry (a directory where a record belongs)',
     plant: (dir) => {
-      mkdirSync(join(stateDir(dir), `${DS.dispatchStateKey('toolu_dir')}.json`), { recursive: true });
+      mkdirSync(join(stateDir(dir), `live-${DS.dispatchStateKey('toolu_dir')}.json`), { recursive: true });
     },
   },
 ];
@@ -1040,7 +1148,7 @@ test('DS-R15 (POSIX): a SYMLINK entry in the state dir is poison — it is never
     await DS.recordDispatchPre(dir, PRE({ tool_use_id: 'toolu_good' }));
     const target = join(dir, 'outside-target.json');
     writeFileSync(target, JSON.stringify({ schema: 1, tool_use_id: 'toolu_link', session_id: 's1', subagent_type: 'coder', prompt: 'PLANTED' }));
-    symlinkSync(target, join(stateDir(dir), `${DS.dispatchStateKey('toolu_link')}.json`));
+    symlinkSync(target, join(stateDir(dir), `live-${DS.dispatchStateKey('toolu_link')}.json`));
 
     const st = await DS.readDispatchState(dir);
     assert.ok(st.poisoned.some((p) => /link/i.test(p.file) || /symlink/i.test(p.reason ?? '')), 'the symlink is reported as poison');
@@ -1352,7 +1460,7 @@ test('DS-SW02: the sweep PRUNES tombstones older than 7 days and KEEPS younger o
   const { dir, cleanup } = project();
   try {
     const now = Date.parse('2026-09-08T12:00:00.000Z');
-    const tomb = (id, at) => writeStateRaw(dir, `${DS.dispatchStateKey(id)}.json`, {
+    const tomb = (id, at) => writeStateRecord(dir, {
       schema: 1, tool_use_id: id, session_id: 's0', subagent_type: 'coder', origin: 'pre',
       prompt: null, prompt_bytes: 3, prompt_sha256: sha256('old'),
       post_binding: { agent_id: `a-${id}`, at: new Date(at).toISOString() },
@@ -1466,7 +1574,7 @@ test('DS-T03: the sweep NULLS the prompt of an ALREADY-terminal record that stil
   try {
     const prompt = 'a brief left behind on an older tombstone';
     const now = Date.parse('2026-09-08T12:00:00.000Z');
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_stale')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_stale',
       session_id: 's0',
@@ -1573,7 +1681,7 @@ test('DS-T05: a pre-planted `<key>.json.tmp-deadbeef` is left completely untouch
       orphanBytes,
       'the writer mints its OWN random tmp name — it never reuses or truncates a name that already exists'
     );
-    const real = join(stateDir(dir), `${key}.json`);
+    const real = join(stateDir(dir), `live-${key}.json`);
     assert.equal(existsSync(real), true, 'the real record landed at <key>.json');
     if (!IS_WIN) {
       assert.equal(statSync(real).mode & 0o777, 0o600, 'and it is private: 0o600, so a planted-file reuse could not have widened it either');
@@ -1608,8 +1716,8 @@ test('DS-T06: the sweep REMOVES orphan `*.json.tmp-*` regular files and REPORTS 
     const files = readdirSync(stateDir(dir));
     assert.ok(!files.some((f) => /\.tmp-/.test(f)), `every orphan tmp file is gone: ${JSON.stringify(files)}`);
     assert.ok(
-      files.includes(`${DS.dispatchStateKey('toolu_live')}.json`),
-      'the real record is NOT swept away with them — it is terminated in place (DS-SW01)'
+      files.includes(`done-${DS.dispatchStateKey('toolu_live')}~none.json`),
+      'the real record is NOT swept away with them — it is terminated (DS-SW01) and now lives under its done- name (decision dispatch-state-status-in-filename-live-scan-parses-only-live-records)'
     );
     // FIELD NAME DISCLOSED, NOT INVENTED: the contract sheet's return shape is
     // {terminated, pruned, refused?} and names no orphan counter, so this
@@ -1682,7 +1790,7 @@ test('DS-T08: a TERMINAL tombstone carrying agent X does not block a fresh pendi
   requireOwner('recordDispatchPre', 'recordDispatchPost', 'dispatchStateKey');
   const { dir, cleanup } = project();
   try {
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_tomb')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_tomb',
       session_id: 's1',
@@ -1721,7 +1829,7 @@ test('DS-T09: a record from ANOTHER session_id carrying agent X does not block e
   requireOwner('recordDispatchPre', 'recordDispatchPost', 'dispatchStateKey');
   const { dir, cleanup } = project();
   try {
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_foreign')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_foreign',
       session_id: 's0', // a DIFFERENT session, still non-terminal
@@ -1762,7 +1870,7 @@ test('DS-T10: with a terminal tombstone naming X AND a live started record for X
     await DS.resolveAndRegisterStart(dir, START({ agent_id: 'agent-X' }), (resolution) => startEntry(resolution, { agent_id: 'agent-X' }));
     assert.equal(DS.dispatchState(await recordFor(dir, 'toolu_live')), 'started', 'sanity: the live round is started');
 
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_old')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_old',
       session_id: 's1',
@@ -1869,7 +1977,9 @@ for (const [label, broken] of BROKEN_SHAPES) {
     const { dir, cleanup } = project();
     try {
       const prompt = 'a structurally broken record';
-      writeStateRaw(dir, `${DS.dispatchStateKey('toolu_broken')}.json`, {
+      // Planted under the LIVE name: the hot scan parses live-* only, and a
+      // broken body under a live name is exactly what it must catch.
+      writeStateRaw(dir, `live-${DS.dispatchStateKey('toolu_broken')}.json`, {
         schema: 1,
         tool_use_id: 'toolu_broken',
         session_id: 's1',
@@ -1921,7 +2031,7 @@ test('DS-T13: a NON-TERMINAL record from ANOTHER session carrying my agent_id in
   const { dir, cleanup } = project();
   try {
     const foreignPrompt = 'a brief from a session that never swept';
-    writeStateRaw(dir, `${DS.dispatchStateKey('toolu_prev')}.json`, {
+    writeStateRecord(dir, {
       schema: 1,
       tool_use_id: 'toolu_prev',
       session_id: 's0', // NOT my session, and NOT terminal
@@ -2021,7 +2131,7 @@ test('DS-T16: a file whose NAME does not match its record\'s tool_use_id is pois
   try {
     const prompt = 'a planted record under the wrong name';
     // Name says `victim`; the record inside says `toolu_other`.
-    writeStateRaw(dir, 'raw-victim.json', {
+    writeStateRaw(dir, 'live-raw-victim.json', {
       schema: 1,
       tool_use_id: 'toolu_other',
       session_id: 's1',
@@ -2053,7 +2163,7 @@ test('DS-T17: a sha256-named file whose hash does not match its own tool_use_id 
     // 'toolu_ok' is a SAFE id, so its key would be `raw-toolu_ok` — a
     // sha256-named file claiming it is doubly wrong: wrong namespace AND a
     // hash of nothing.
-    writeStateRaw(dir, `sha256-${'0'.repeat(64)}.json`, {
+    writeStateRaw(dir, `live-sha256-${'0'.repeat(64)}.json`, {
       schema: 1,
       tool_use_id: 'toolu_ok',
       session_id: 's1',

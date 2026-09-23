@@ -41,10 +41,12 @@ import { test, before } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync, renameSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
+import { registerLockPath, terminalFileName, dispatchStateKey } from '../lib/dispatch-register.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const HOOKS = join(root, 'scripts', 'hooks');
@@ -957,6 +959,346 @@ test("DSH-18: a TaskStop from ANOTHER session naming the same agent_id ends neit
     assert.equal(h22(taskStopInput(dir, { task_id: 'agent-cross' }), dir).code, 0);
     assert.equal(entryFor(dir, 'agent-cross').ended?.event, 'task-stop');
     assert.equal(stateFor(dir, 'toolu_cross').terminal?.reason, 'task-stop');
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// PIN H19 — THE CHILD IS TOLD ITS KNOWLEDGE WAS NOT STAGED (decision
+// h22-start-staging-only-when-attribution-is-unambiguous-no-sidecar, points
+// (2) and (3)). The disclosure lands in the child's own additionalContext, not
+// only in the register row, and it says two things: nothing was staged, and
+// the brief is what to rely on. The prefix (STAGING_DISCLOSURE) is pinned by
+// DSH-3/DSH-4; these pins cover the child-facing instruction that follows it.
+// ===========================================================================
+
+const NOT_STAGED = /YOUR KNOWLEDGE WAS NOT STAGED/;
+const RELY_ON_BRIEF = /rely on your dispatch brief/;
+
+function assertNotStagedDisclosure(ctx, kase) {
+  assert.ok(ctx.includes(STAGING_DISCLOSURE(kase)), `the [${kase}] case is named; got: ${ctx}`);
+  assert.match(ctx, NOT_STAGED, `the child is told, loudly, that its knowledge was not staged; got: ${ctx}`);
+  assert.match(ctx, RELY_ON_BRIEF, `the child is told to rely on its brief; got: ${ctx}`);
+  assert.match(ctx, /STERLING DEFAULT RETURN CONTRACT/, 'the disclosure rides BESIDE the return contract, never instead of it');
+}
+
+test('DSH-19 CONTROL (placed FIRST): exactly ONE same-type pending dispatch stages its own knowledge and carries no not-staged disclosure', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('solo', ['src/solo.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_solo', subagent_type: 'coder', prompt: 'work on src/solo.mjs' }), dir).code, 0);
+    const a = h19(startInput(dir, { agent_id: 'agent-solo', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    const ctx = ctxOf(a);
+    assert.match(ctx, /solo does the solo thing/, `the unambiguous Start is staged; got: ${ctx}`);
+    assert.doesNotMatch(ctx, /could not be attributed at Start/);
+    assert.doesNotMatch(ctx, NOT_STAGED);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-19: two SAME-TYPE pending dispatches — the child is told its knowledge was NOT staged and to rely on its brief; neither sibling is guessed', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('twinA', ['src/twin-a.mjs']));
+    store.create(article('twinB', ['src/twin-b.mjs']));
+    for (const [id, file] of [['toolu_nsa', 'src/twin-a.mjs'], ['toolu_nsb', 'src/twin-b.mjs']]) {
+      assert.equal(h22(preInput(dir, { tool_use_id: id, subagent_type: 'coder', prompt: `work on ${file}` }), dir).code, 0);
+    }
+    const a = h19(startInput(dir, { agent_id: 'agent-ns', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    const ctx = ctxOf(a);
+    assertNotStagedDisclosure(ctx, 'same-type-siblings-in-flight');
+    assert.doesNotMatch(ctx, /twinA does the twinA thing|twinB does the twinB thing/, 'no sibling is staged on a guess');
+  } finally {
+    cleanup();
+  }
+});
+// SABOTAGE: restore the old tail ("no territory was staged; file-touch
+// delivery still fires ...") — NOT_STAGED and RELY_ON_BRIEF go red while
+// DSH-3's prefix pin stays green, which is exactly the gap this pin closes.
+
+test('DSH-20: a lock-held Start (another live writer holds the register lock past the bound) gets the same not-staged disclosure in the child context', () => {
+  const { dir, store, cleanup } = makeProject();
+  let db = null;
+  try {
+    store.create(article('held', ['src/held.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_held', subagent_type: 'coder', prompt: 'work on src/held.mjs' }), dir).code, 0);
+    db = new DatabaseSync(registerLockPath(dir));
+    db.exec('BEGIN IMMEDIATE');
+    const a = h19(startInput(dir, { agent_id: 'agent-held', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    const ctx = ctxOf(a);
+    assertNotStagedDisclosure(ctx, 'lock-held');
+    assert.doesNotMatch(ctx, /held does the held thing/, 'a lock-held Start stages nothing — it never proceeds unlocked');
+  } finally {
+    if (db) {
+      db.exec('ROLLBACK');
+      db.close();
+    }
+    rmSync(registerLockPath(dir), { force: true });
+    cleanup();
+  }
+});
+
+test('DSH-21: a Start whose dispatch resolution THROWS is disclosed to the child as not staged [resolution-failed], never left silent', () => {
+  const { dir, store, cleanup } = makeProject();
+  const lockPath = registerLockPath(dir);
+  try {
+    store.create(article('broken', ['src/broken.mjs']));
+    // A DIRECTORY where the lock database must be: opening it throws a
+    // non-busy error, which resolveDispatchStart rethrows.
+    mkdirSync(lockPath, { recursive: true });
+    const a = h19(startInput(dir, { agent_id: 'agent-broken', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, /H19: dispatch staging failed/, 'the internal failure is still reported on stderr');
+    assertNotStagedDisclosure(ctxOf(a), 'resolution-failed');
+  } finally {
+    rmSync(lockPath, { recursive: true, force: true });
+    cleanup();
+  }
+});
+// SABOTAGE: drop the catch-path disclosure — the child gets only the return
+// contract, and NOT_STAGED goes red.
+
+test('DSH-22: a Start whose store cannot OPEN (garbage bytes at sterling.db) is disclosed as not staged [store-unavailable] — never as [resolution-failed], because attribution was never attempted', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-dispatch-state-hooks-'));
+  try {
+    mkdirSync(join(dir, '.sterling', 'transient'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(CONFIG));
+    writeFileSync(join(dir, '.sterling', 'sterling.db'), 'this is not a sqlite database, it is garbage bytes '.repeat(200));
+    const a = h19(startInput(dir, { agent_id: 'agent-nostore', agent_type: 'coder' }), dir);
+    assert.equal(a.code, 0, a.stderr);
+    assert.match(a.stderr, /H19: dispatch staging failed/, 'the store-open failure is still reported on stderr');
+    const ctx = ctxOf(a);
+    assertNotStagedDisclosure(ctx, 'store-unavailable');
+    assert.doesNotMatch(ctx, /\[resolution-failed\]/, 'resolution was never attempted, so it cannot be named as the failure');
+    assert.equal(readStateRecords(dir).length, 0, 'no dispatch state was touched');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+// SABOTAGE: collapse the two pre-resolution failures back into one flag —
+// the [store-unavailable] prefix assertion and the doesNotMatch go red.
+
+// FIX ROUND (Sol review, thread 01a0ce05): a Stop that ends the round but
+// cannot terminalize its state record — here a live record whose key already
+// has a done- file (duplicate-key) — must SAY so on stderr, mirroring the
+// degraded-Stop disclosure, never drop it silently.
+test('DSH-23: SubagentStop discloses a state record it could not terminalize (duplicate-key) — the round is ended, the record is named', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('dupstop', ['src/dup.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_dupstop', file: 'src/dup.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-dup' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-dup', agent_type: d.type }), dir).code, 0);
+    const live = readdirSync(stateDir(dir)).find((f) => f.startsWith('live-') && f.includes('toolu_dupstop'));
+    assert.ok(live, 'harness: the live record exists');
+    const body = JSON.parse(readFileSync(join(stateDir(dir), live), 'utf8'));
+    const tomb = { ...body, prompt: null, terminal: { at: new Date().toISOString(), reason: 'stop' } };
+    writeFileSync(join(stateDir(dir), terminalFileName(dispatchStateKey('toolu_dupstop'), tomb)), JSON.stringify(tomb));
+
+    const r = h22(stopInput(dir, { agent_id: 'agent-dup', agent_type: d.type }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-dup').ended?.event, 'subagent-stop', 'the round is still ended');
+    assert.match(r.stderr, /dispatch_state_poisoned/);
+    assert.match(r.stderr, /duplicate-key/);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-24: a TaskStop that cannot terminalize its state record (duplicate-key) discloses it — the round is ended, the record is named', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('dupkill', ['src/dupkill.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_dupkill', file: 'src/dupkill.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-dupkill' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-dupkill', agent_type: d.type }), dir).code, 0);
+    const live = readdirSync(stateDir(dir)).find((f) => f.startsWith('live-') && f.includes('toolu_dupkill'));
+    const body = JSON.parse(readFileSync(join(stateDir(dir), live), 'utf8'));
+    const tomb = { ...body, prompt: null, terminal: { at: new Date().toISOString(), reason: 'stop' } };
+    writeFileSync(join(stateDir(dir), terminalFileName(dispatchStateKey('toolu_dupkill'), tomb)), JSON.stringify(tomb));
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-dupkill' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-dupkill').ended?.event, 'task-stop');
+    assert.match(r.stderr, /duplicate-key/);
+    assert.ok(r.stderr.includes(live), 'the undisposed live record is named');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-25: a Start made state-poisoned by a stray live-!!bad.json NAMES the file on H22 stderr', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('poisonstart', ['src/poison.mjs']));
+    stageOne(dir, { tool_use_id: 'toolu_poison', file: 'src/poison.mjs' });
+    writeFileSync(join(stateDir(dir), 'live-!!bad.json'), '{}');
+    const r = h22(startInput(dir, { agent_id: 'agent-poison', agent_type: 'coder' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, /state-poisoned/);
+    assert.ok(r.stderr.includes('live-!!bad.json'), `the Start output names the file: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+// ===========================================================================
+// TaskStop of an UNATTRIBUTED dispatch (board 138c05b3, research_finding
+// h22-sendmessage-resume-stale-sidecar-is-a-no-op-at-stop-september-2026 repro
+// D3). No record carries the killed agent's id, so TaskStop falls back to the
+// SAME keyed sidecar lookup SubagentStop uses: the killed agent's
+// <session>/subagents/agent-<task_id>.meta.json, derived from the PostToolUse
+// transcript_path, names the toolUseId of the Agent call that spawned it. The
+// record under that exact key is terminalized as task-stop if it is live; a
+// terminal hit is a no-op; nothing is ever type-matched.
+// ===========================================================================
+
+function writeSidecar(dir, agentId, toolUseId) {
+  const subagents = join(dir, 't', 'parent', 'subagents');
+  mkdirSync(subagents, { recursive: true });
+  const path = join(subagents, `agent-${agentId}.meta.json`);
+  writeFileSync(path, JSON.stringify({ agentType: 'coder', description: 'a lane', toolUseId }));
+  return path;
+}
+function snapshotStateDir(dir) {
+  return Object.fromEntries(readdirSync(stateDir(dir)).sort().map((f) => [f, readFileSync(join(stateDir(dir), f), 'utf8')]));
+}
+
+test('DSH-26: a TaskStop of an UNATTRIBUTED dispatch terminalizes the record its sidecar names (task-stop), and the next same-type Start binds type-unique without waiting', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('killed-unattr', ['src/killed-unattr.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_T1', subagent_type: 'coder', prompt: 'work on src/killed-unattr.mjs' }), dir).code, 0);
+    assert.equal(derivedState(stateFor(dir, 'toolu_T1')), 'pending', 'sanity: no Post, no Start bound it — no record carries the agent id');
+    writeSidecar(dir, 'agent-x', 'toolu_T1');
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-x' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const rec = stateFor(dir, 'toolu_T1');
+    assert.equal(derivedState(rec), 'terminal', `the killed dispatch is located through its sidecar: ${r.stderr}`);
+    assert.equal(rec.terminal.reason, 'task-stop');
+    assert.equal(rec.prompt, null);
+    assert.ok(readdirSync(stateDir(dir)).some((f) => f.startsWith('done-') && f.includes('toolu_T1')), 'the record is renamed onto its done- name');
+
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_T2', subagent_type: 'coder', prompt: 'work on src/killed-unattr.mjs' }), dir).code, 0);
+    const t0 = Date.now();
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-y', agent_type: 'coder' }), dir).code, 0);
+    const elapsed = Date.now() - t0;
+    assert.equal(entryFor(dir, 'agent-y').attribution_case, 'derived-type-unique', 'the killed sibling no longer makes the new Start ambiguous');
+    assert.ok(elapsed < 2500, `no sibling wait: the Start took ${elapsed} ms`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-27: a TaskStop whose sidecar names an ALREADY-TERMINAL record changes nothing — the state directory is byte-identical', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('already', ['src/already.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_done', file: 'src/already.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-done' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-done', agent_type: d.type }), dir).code, 0);
+    assert.equal(h22(stopInput(dir, { agent_id: 'agent-done', agent_type: d.type }), dir).code, 0);
+    assert.equal(stateFor(dir, 'toolu_done').terminal?.reason, 'stop', 'sanity: the record is terminal before the kill');
+    writeSidecar(dir, 'agent-done', 'toolu_done');
+    const before = snapshotStateDir(dir);
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-done' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'a terminal hit is a no-op, as at Stop');
+    assert.doesNotMatch(r.stderr, /dispatch_unattributable/, `the sidecar was found and read, so nothing is reported as unlocated: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-28: a TaskStop of an unattributed dispatch with NO sidecar changes nothing and discloses that the killed dispatch could not be located', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('nosidecar', ['src/nosidecar.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_lost', subagent_type: 'coder', prompt: 'work on src/nosidecar.mjs' }), dir).code, 0);
+    const before = snapshotStateDir(dir);
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-lost' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'no sidecar, no guess: the record stays pending until the boundary sweep');
+    assert.match(r.stderr, /\[dispatch_unattributable\]/, `disclosed: ${r.stderr}`);
+    assert.match(r.stderr, /agent-lost/);
+    assert.match(r.stderr, /could not be located/);
+    assert.match(r.stderr, /sidecar .*absent or unreadable/, `the reason is named: ${r.stderr}`);
+    assert.match(r.stderr, /no open register round matched/, `whether the round was ended is stated: ${r.stderr}`);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-29: a RESUMED SubagentStop whose stale sidecar still names the original tool_use_id leaves done-T1 byte-identical', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('resumed', ['src/resumed.mjs']));
+    const d = stageOne(dir, { tool_use_id: 'toolu_R1', file: 'src/resumed.mjs' });
+    assert.equal(h22(postInput(dir, { ...d, agentId: 'agent-r' }), dir).code, 0);
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-r', agent_type: d.type }), dir).code, 0);
+    assert.equal(h22(stopInput(dir, { agent_id: 'agent-r', agent_type: d.type }), dir).code, 0);
+    assert.equal(stateFor(dir, 'toolu_R1').terminal?.reason, 'stop', 'sanity: done-R1 exists');
+    const sidecar = writeSidecar(dir, 'agent-r', 'toolu_R1');
+
+    assert.equal(h22(startInput(dir, { agent_id: 'agent-r', agent_type: d.type }), dir).code, 0);
+    assert.equal(entryFor(dir, 'agent-r').attribution_case, 'resume', 'sanity: the second Start is classified resume');
+    const before = snapshotStateDir(dir);
+
+    const r = h22({ ...stopInput(dir, { agent_id: 'agent-r', agent_type: d.type }), agent_transcript_path: sidecar.replace(/\.meta\.json$/, '.jsonl') }, dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'the stale sidecar hits a terminal record: nothing is rewritten or renamed');
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-30: a TaskStop whose dispatch-state directory is UNAVAILABLE (a symlink) says so — never that no record exists — and states that the register round was ended', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('unavail', ['src/unavail.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_U1', subagent_type: 'coder', prompt: 'work on src/unavail.mjs' }), dir).code, 0);
+    writeRegisterRaw(dir, [{ agent_id: 'agent-u', agent_type: 'coder', session_id: 's1', files: [], attribution: 'none', at: new Date().toISOString() }]);
+    writeSidecar(dir, 'agent-u', 'toolu_U1');
+    const real = join(dir, 'real-state');
+    renameSync(stateDir(dir), real);
+    symlinkSync(real, stateDir(dir), 'dir');
+
+    const r = h22(taskStopInput(dir, { task_id: 'agent-u' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.equal(entryFor(dir, 'agent-u').ended?.event, 'task-stop', 'sanity: the round is ended (write one)');
+    assert.match(r.stderr, /could not be located/, r.stderr);
+    assert.match(r.stderr, /unavailable/, `the unavailable state directory is named: ${r.stderr}`);
+    assert.match(r.stderr, /containment/, `with its reason: ${r.stderr}`);
+    assert.doesNotMatch(r.stderr, /no dispatch-state record exists/, 'nobody checked, so it is not claimed');
+    assert.match(r.stderr, /register round was ended/, r.stderr);
+  } finally {
+    cleanup();
+  }
+});
+
+test('DSH-31: a TaskStop whose task_id is not a plain id (path characters) never reaches the filesystem as a sidecar path — nothing terminalized, the reason disclosed', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(article('traverse', ['src/traverse.mjs']));
+    assert.equal(h22(preInput(dir, { tool_use_id: 'toolu_V1', subagent_type: 'coder', prompt: 'work on src/traverse.mjs' }), dir).code, 0);
+    // 'x/../../y' would resolve <session>/subagents/agent-x/../../y.meta.json = <session>/y.meta.json
+    mkdirSync(join(dir, 't', 'parent', 'subagents', 'agent-x'), { recursive: true });
+    writeFileSync(join(dir, 't', 'parent', 'y.meta.json'), JSON.stringify({ toolUseId: 'toolu_V1' }));
+    const before = snapshotStateDir(dir);
+
+    const r = h22(taskStopInput(dir, { task_id: 'x/../../y' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.deepEqual(snapshotStateDir(dir), before, 'an unsafe task_id is never turned into a sidecar path');
+    assert.match(r.stderr, /\[dispatch_unattributable\]/, r.stderr);
+    assert.match(r.stderr, /not a plain id/, `the reason is named: ${r.stderr}`);
   } finally {
     cleanup();
   }

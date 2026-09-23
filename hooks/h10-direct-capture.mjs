@@ -8309,6 +8309,9 @@ var GAP_EVIDENCE_CHAR_CAP = 400;
 var FIRST_SENTENCE_SCAN_CAP = GAP_EVIDENCE_CHAR_CAP * 4;
 
 // scripts/hooks/h10-direct-capture.mjs
+function articleMissingText(fileKeys, { newlyCreated = 0 } = {}) {
+  return `article missing: ${fileKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newlyCreated ? ` (${newlyCreated} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`;
+}
 async function computeDeadDispatchResidue(cwd, sessionId) {
   const registerPath2 = registerPath(cwd);
   const nowIso = (/* @__PURE__ */ new Date()).toISOString();
@@ -8946,7 +8949,11 @@ try {
           for (const t of others) store.remove(t.id, now);
           const prior = [...survivor.file_keys ?? []].sort();
           if (JSON.stringify(prior) === JSON.stringify(healed)) return;
-          store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
+          store.updateTodo(
+            survivor.id,
+            { ...survivor, file_keys: healed, text: articleMissingText(healed), updated_at: now },
+            { expected_version: survivor.version }
+          );
         })
       );
     } catch (e) {
@@ -9207,7 +9214,7 @@ ${parts.join("\n\n")}`;
         links: [],
         scope: "project",
         stack_tags: [],
-        text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ""} \u2014 create the owning article(s) (\xA76 H10 / \xA712 accretion)`,
+        text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }),
         source: "system",
         system_reason: "article_missing",
         file_keys: demandKeys

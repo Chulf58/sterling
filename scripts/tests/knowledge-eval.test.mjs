@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, mrrFromHistogram, parseCaseDirectives, resolveProjects, scoreEventIndexes, scorePull, scorePush } from '../knowledge-eval.mjs';
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { addWorktree, aggregateMetricValues, DEFAULT_PROJECTS, emittedLevel, mrrFromHistogram, parseCaseDirectives, resolveProjects, scoreEventIndexes, caseProject, pluginTree, removeWorktrees, replayCommit, runWithCleanup, scorePull, scorePush, withWorktreeLedger } from '../knowledge-eval.mjs';
 const id = '11111111-1111-4111-8111-111111111111';
 const r = { id, title: 'Hazard', trigger: 'exact trigger text', right_way: 'exact right way text', guidance: 'distinctive guidance passage' };
 test('pointer-only is not substance', () => assert.deepEqual(emittedLevel(id, r), { pointer: true, substance: false, whole: false, clipped: false, withheldOversize: false }));
@@ -120,4 +123,122 @@ test('real H19 push-read capture is discovery and substance despite delivery cli
   assert.deepEqual(score.timely.discovery, [0, 0]);
   assert.deepEqual(score.timely.substance, [1, 1]);
   assert.equal(score.falseSubstanceMarks, 0);
+});
+
+function worktreeFixture() {
+  const base = mkdtempSync(join(tmpdir(), 'knowledge-eval-wt-'));
+  const repo = join(base, 'repo');
+  mkdirSync(repo);
+  const git = (...args) => { const r = spawnSync('git', args, { cwd: repo, encoding: 'utf8' }); assert.equal(r.status, 0, r.stderr); return r.stdout; };
+  git('init', '-q'); writeFileSync(join(repo, 'a.txt'), 'a');
+  git('add', '.'); git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'init');
+  const shared = join(base, 'shared'); mkdirSync(shared); writeFileSync(join(shared, 'sentinel'), 'keep');
+  const worktrees = () => git('worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree '));
+  return { base, repo, head: git('rev-parse', 'HEAD').trim(), shared, worktrees };
+}
+test('every worktree a run creates is removed when the run throws, without following symlinks out of it', async () => {
+  const f = worktreeFixture();
+  try {
+    assert.equal(f.worktrees().length, 1);
+    await assert.rejects(withWorktreeLedger(async (ledger) => {
+      for (const id of ['case-a', 'case-b']) {
+        const tree = join(f.base, 'work', 'projects', f.head, id);
+        addWorktree(ledger, f.repo, tree, f.head);
+        symlinkSync(f.shared, join(tree, 'node_modules'), 'dir');
+      }
+      assert.equal(f.worktrees().length, 3);
+      throw new Error('case exploded');
+    }), /case exploded/);
+    assert.equal(f.worktrees().length, 1);
+    assert.equal(existsSync(join(f.base, 'work', 'projects', f.head, 'case-a')), false);
+    assert.equal(readFileSync(join(f.shared, 'sentinel'), 'utf8'), 'keep');
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+test('a completed run removes its worktrees and returns the run result', async () => {
+  const f = worktreeFixture();
+  try {
+    const result = await withWorktreeLedger(async (ledger) => { addWorktree(ledger, f.repo, join(f.base, 'work', 'worktrees', f.head), f.head); return 'summary'; });
+    assert.equal(result, 'summary');
+    assert.equal(f.worktrees().length, 1);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+test('removeWorktrees releases one case worktree mid-run and leaves the ledger empty', () => {
+  const f = worktreeFixture();
+  try {
+    const ledger = [];
+    addWorktree(ledger, f.repo, join(f.base, 'case'), f.head);
+    removeWorktrees(ledger);
+    assert.deepEqual(ledger, []);
+    assert.equal(f.worktrees().length, 1);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+function replayFixture(f) {
+  const workDir = join(f.base, 'work'); const snap = join(f.base, 'snap');
+  mkdirSync(join(snap, 'projects', 'sterling-main'), { recursive: true }); writeFileSync(join(snap, 'projects', 'sterling-main', 'project.db'), 'db');
+  const projectSnapshot = { root: f.repo, head: f.head };
+  const openCase = (c, ledger) => caseProject(f.head, workDir, c.id, snap, 'sterling-main', projectSnapshot, {}, false, ledger);
+  return { workDir, openCase, onCaseError: (c, error) => ({ id: c.id, error }) };
+}
+test('replayCommit removes each case worktree at case end and the plugin tree at commit end, even when a case throws', async () => {
+  const f = worktreeFixture(); const r = replayFixture(f);
+  try {
+    const seen = [];
+    const summary = await replayCommit({ workDir: r.workDir, repos: [f.repo], cases: [{ id: 'c1' }, { id: 'c2', boom: true }, { id: 'c3' }],
+      setup: (ledger) => pluginTree(f.repo, f.head, r.workDir, ledger),
+      runCase: async (c, tree, { ledger }) => { seen.push(f.worktrees().length); assert.ok(existsSync(tree)); r.openCase(c, ledger); if (c.boom) throw new Error('case exploded'); return { id: c.id }; },
+      onCaseError: r.onCaseError, finish: (tree, scored) => scored });
+    assert.deepEqual(seen, [2, 2, 2]);
+    assert.equal(summary[1].error.message, 'case exploded');
+    assert.equal(f.worktrees().length, 1);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+test('replayCommit reaps a killed prior run\'s plugin and case worktrees under this work-dir only', async () => {
+  const f = worktreeFixture(); const r = replayFixture(f);
+  const git = (...args) => { const x = spawnSync('git', args, { cwd: f.repo, encoding: 'utf8' }); assert.equal(x.status, 0, x.stderr); };
+  try {
+    git('worktree', 'add', '--detach', join(r.workDir, 'worktrees', f.head), f.head);
+    git('worktree', 'add', '--detach', join(r.workDir, 'projects', f.head, 'sterling-main', 'c1'), f.head);
+    git('worktree', 'lock', join(r.workDir, 'projects', f.head, 'sterling-main', 'c1'));
+    const outside = [join(`${r.workDir}-sibling`, 'projects', 'x'), join(f.base, 'elsewhere')];
+    for (const p of outside) git('worktree', 'add', '--detach', p, f.head);
+    assert.equal(f.worktrees().length, 5);
+    await replayCommit({ workDir: r.workDir, repos: [f.repo], cases: [{ id: 'c1' }],
+      setup: (ledger) => pluginTree(f.repo, f.head, r.workDir, ledger),
+      runCase: async (c, tree, { ledger }) => { r.openCase(c, ledger); return { id: c.id }; },
+      onCaseError: (c, error) => { throw error; }, finish: (tree, scored) => scored });
+    assert.equal(f.worktrees().length, 3);
+    for (const p of outside) assert.ok(existsSync(join(p, 'a.txt')), p);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+test('a failing store close still removes the case worktree, and both errors are recorded, never replaced', async () => {
+  const f = worktreeFixture(); const r = replayFixture(f);
+  try {
+    const summary = await replayCommit({ workDir: r.workDir, repos: [f.repo], cases: [{ id: 'c1' }],
+      setup: (ledger) => pluginTree(f.repo, f.head, r.workDir, ledger),
+      runCase: async (c, tree, { ledger, onClose }) => { r.openCase(c, ledger); onClose(() => { throw new Error('close broke'); }); throw new Error('case broke'); },
+      onCaseError: r.onCaseError, finish: (tree, scored) => scored });
+    assert.ok(summary[0].error instanceof AggregateError);
+    assert.deepEqual(summary[0].error.errors.map((e) => e.message), ['case broke', 'close broke']);
+    assert.match(String(summary[0].error), /case broke.*close broke/);
+    assert.equal(f.worktrees().length, 1);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+test('removeWorktrees keeps a failed entry in the ledger for retry and still removes the rest', () => {
+  const f = worktreeFixture();
+  try {
+    const ledger = [];
+    addWorktree(ledger, f.repo, join(f.base, 'good'), f.head);
+    const bogus = { repo: f.repo, path: join(f.base, 'never-a-worktree') };
+    ledger.unshift(bogus);
+    assert.throws(() => removeWorktrees(ledger), /never-a-worktree/);
+    assert.deepEqual(ledger, [bogus]);
+    assert.equal(f.worktrees().length, 1);
+  } finally { rmSync(f.base, { recursive: true, force: true }); }
+});
+test('runWithCleanup aggregates an execution failure with a cleanup failure and runs every cleanup step', async () => {
+  let ran = false;
+  const err = await runWithCleanup(async () => { throw new Error('run broke'); }, () => [() => { throw new Error('remove broke'); }, () => { ran = true; }]).catch((e) => e);
+  assert.ok(err instanceof AggregateError);
+  assert.deepEqual(err.errors.map((e) => e.message), ['run broke', 'remove broke']);
+  assert.equal(ran, true);
 });

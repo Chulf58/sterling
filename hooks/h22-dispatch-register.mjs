@@ -6,7 +6,7 @@ var __export = (target, all) => {
 };
 
 // scripts/hooks/h22-dispatch-register.mjs
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync4, mkdirSync as mkdirSync2, readFileSync as readFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 
 // scripts/hooks/lib/common.mjs
@@ -5183,6 +5183,24 @@ function extractPathCandidates(text) {
   return [...new Set(found)];
 }
 
+// scripts/hooks/lib/transcript.mjs
+import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync2, statSync, readdirSync } from "node:fs";
+var TAIL_BYTES = 1024 * 1024;
+function deriveAgentTranscript(parentTranscriptPath, agentId) {
+  const sessionDir = parentTranscriptPath.replace(/\.jsonl$/, "");
+  const flat = `${sessionDir}/subagents/agent-${agentId}.jsonl`;
+  if (existsSync2(flat)) return flat;
+  const wfRoot = `${sessionDir}/subagents/workflows`;
+  try {
+    for (const d of readdirSync(wfRoot)) {
+      const candidate = `${wfRoot}/${d}/agent-${agentId}.jsonl`;
+      if (existsSync2(candidate)) return candidate;
+    }
+  } catch {
+  }
+  return flat;
+}
+
 // scripts/hooks/lib/dispatch-advisory.mjs
 var HARD_BOUNDARY_RE = /(\r?\n[ \t]*\r?\n)|([!?;])|(\.(?=\s|$))|([–—]|\r?\n)/g;
 var TERRITORY_VERB_RE = String.raw`(?:touch(?:es|ed|ing)?|edit(?:s|ed|ing)?|modif(?:y|ies|ied|ying)|change(?:s|d|ing)?|writ(?:e|es|ing|ten)|alter(?:s|ed|ing)?)`;
@@ -5349,7 +5367,7 @@ function claimedResources(promptText, configuredNames) {
 }
 
 // scripts/lib/dispatch-register.mjs
-import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync2, lstatSync, readdirSync, realpathSync, chmodSync } from "node:fs";
+import { mkdirSync, readFileSync as readFileSync2, writeFileSync, rmSync, rmdirSync, renameSync, existsSync as existsSync3, lstatSync, readdirSync as readdirSync2, realpathSync, chmodSync } from "node:fs";
 import { join as join2, resolve as resolve2, dirname as dirname2, isAbsolute } from "node:path";
 import { hostname } from "node:os";
 import { DatabaseSync as DatabaseSync3 } from "node:sqlite";
@@ -5497,7 +5515,7 @@ function parseRegisterEntry(raw) {
 }
 function readRawArray(root) {
   const p = registerPath(root);
-  if (!existsSync2(p)) return { availability: "absent", arr: [] };
+  if (!existsSync3(p)) return { availability: "absent", arr: [] };
   let raw;
   try {
     raw = readFileSync2(p, "utf8");
@@ -5602,7 +5620,7 @@ function legacyLockHolder(root) {
   const legacy = legacyRegisterLockDir(root);
   let entries;
   try {
-    entries = readdirSync(legacy);
+    entries = readdirSync2(legacy);
   } catch (e) {
     if (e?.code === "ENOENT") return null;
     warnLegacyOnce(legacy, `exists but could not be listed (${e?.code ?? e}) \u2014 no live pre-rebuild owner can be verified in it; left in place, proceeding`);
@@ -5725,12 +5743,62 @@ var ORIGINS = /* @__PURE__ */ new Set(["pre", "post-only", "failure-only"]);
 var SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1e3;
 var DERIVE_RETRY_INTERVAL_MS = 10;
 var DERIVE_PER_ATTEMPT_LOCK_MS = 30;
-var DERIVE_TOTAL_BUDGET_MS = 150;
+var DERIVE_SIBLINGS_BUDGET_MS = 3e3;
+var DERIVE_LOCK_HELD_BUDGET_MS = 150;
+function retryBudgetFor(verdict) {
+  return verdict === "siblings-retry" ? DERIVE_SIBLINGS_BUDGET_MS : DERIVE_LOCK_HELD_BUDGET_MS;
+}
 function dispatchStateDir(root) {
   return join2(root, ".sterling", "transient", "dispatch-state");
 }
-function dispatchStateFile(root, key) {
-  return join2(dispatchStateDir(root), `${key}.json`);
+var LIVE_PREFIX = "live-";
+var DONE_PREFIX = "done-";
+var IDS_DELIMITER = "~";
+var ID_SEPARATOR = ".";
+var EMPTY_IDS = "none";
+var MAX_FILENAME_LENGTH = 254;
+var STATE_KEY_RE = /^(?:raw-[A-Za-z0-9_-]{1,80}|sha256-[0-9a-f]{64})$/;
+var ID_HASH_RE = /^[A-Za-z0-9_-]{43}$/;
+function liveFileName(key) {
+  return `${LIVE_PREFIX}${key}.json`;
+}
+function agentIdHash(agentId) {
+  return createHash("sha256").update(String(agentId), "utf8").digest("base64url");
+}
+function recordAgentIds(record) {
+  return [record?.started?.agent_id, record?.derived_binding?.agent_id, record?.post_binding?.agent_id].filter(isNonEmptyString);
+}
+function terminalFileName(key, record) {
+  const hashes = [...new Set(recordAgentIds(record).map(agentIdHash))].sort();
+  const name = `${DONE_PREFIX}${key}${IDS_DELIMITER}${hashes.length ? hashes.join(ID_SEPARATOR) : EMPTY_IDS}.json`;
+  if (name.length > MAX_FILENAME_LENGTH) throw new Error(`dispatch-state: terminal filename for ${key} is ${name.length} characters \u2014 over the ${MAX_FILENAME_LENGTH} limit`);
+  return name;
+}
+function parseStateFileName(name) {
+  if (name.includes(".json.tmp-")) return { kind: "tmp" };
+  if (!name.endsWith(".json")) return { kind: "other" };
+  const stem = name.slice(0, -".json".length);
+  if (stem.startsWith(LIVE_PREFIX)) {
+    const key = stem.slice(LIVE_PREFIX.length);
+    return STATE_KEY_RE.test(key) ? { kind: "live", key } : { kind: "malformed-live" };
+  }
+  if (stem.startsWith(DONE_PREFIX)) {
+    const parts = stem.slice(DONE_PREFIX.length).split(IDS_DELIMITER);
+    const malformed = STATE_KEY_RE.test(parts[0]) ? { kind: "malformed-done", key: parts[0] } : { kind: "malformed-done" };
+    if (parts.length !== 2 || !STATE_KEY_RE.test(parts[0])) return malformed;
+    const idHashes = parts[1] === EMPTY_IDS ? [] : parts[1].split(ID_SEPARATOR);
+    const canonical = idHashes.every((h, i) => ID_HASH_RE.test(h) && (i === 0 || idHashes[i - 1] < h));
+    return canonical ? { kind: "done", key: parts[0], idHashes } : malformed;
+  }
+  return STATE_KEY_RE.test(stem) ? { kind: "legacy", key: stem } : { kind: "unknown-json" };
+}
+var warnedStateFiles = /* @__PURE__ */ new Set();
+function warnStateFile(file, text) {
+  const tag = `${file}\0${text}`;
+  if (warnedStateFiles.has(tag)) return;
+  warnedStateFiles.add(tag);
+  process.stderr.write(`${render(disclosure("dispatch_state_poisoned", { file }, text))}
+`);
 }
 function dispatchStateKey(toolUseId) {
   if (typeof toolUseId === "string" && TOOL_USE_ID_SHAPE_RE.test(toolUseId)) return `raw-${toolUseId}`;
@@ -5835,7 +5903,7 @@ function checkDispatchStateContainment(root, { create }) {
   }
   return { ok: true, availability: "ok" };
 }
-function writeRecordAtomic(root, key, record) {
+function writeRecordAtomic(root, fileName, record) {
   const dir = dispatchStateDir(root);
   const containment = checkDispatchStateContainment(root, { create: true });
   if (!containment.ok) {
@@ -5845,43 +5913,171 @@ function writeRecordAtomic(root, key, record) {
       `dispatch-state write refused \u2014 ${dir} is ${containment.reason === "symlink" ? "a SYMLINK" : "not a real directory"}, never mkdir'd or written through`
     );
   }
-  const file = dispatchStateFile(root, key);
-  const tmp = join2(dir, `${key}.json.tmp-${randomBytes(4).toString("hex")}`);
+  const file = join2(dir, fileName);
+  const tmp = join2(dir, `${fileName}.tmp-${randomBytes(4).toString("hex")}`);
   writeFileSync(tmp, JSON.stringify(record), { mode: 384, flag: "wx" });
   renameSync(tmp, file);
 }
-function readDispatchState(root) {
+function writeLiveRecord(root, key, record) {
+  if (record.terminal) throw new Error(`dispatch-state: a terminal record for ${key} must go through terminalizeLiveRecord, never under a live name`);
+  writeRecordAtomic(root, liveFileName(key), record);
+}
+function finishTerminalRename(root, key, record) {
   const dir = dispatchStateDir(root);
-  const containment = checkDispatchStateContainment(root, { create: false });
-  if (!containment.ok) return { availability: "unavailable", records: [], poisoned: [] };
-  if (containment.availability === "absent") return { availability: "absent", records: [], poisoned: [] };
-  let names;
+  const from = liveFileName(key);
+  const to = terminalFileName(key, record);
+  let occupied = false;
   try {
-    names = readdirSync(dir);
-  } catch {
-    return { availability: "unavailable", records: [], poisoned: [] };
+    lstatSync(join2(dir, to));
+    occupied = true;
+  } catch (e) {
+    if (e?.code !== "ENOENT") occupied = true;
   }
+  if (occupied) {
+    warnStateFile(from, `dispatch-state: terminal record ${from} NOT renamed \u2014 ${to} already exists; never overwritten, the live source is kept for an operator`);
+    return from;
+  }
+  try {
+    renameSync(join2(dir, from), join2(dir, to));
+    return to;
+  } catch (e) {
+    warnStateFile(from, `dispatch-state: could not rename terminal record ${from} to ${to} (${e?.code ?? e?.message}) \u2014 kept under its live name, excluded from candidates, retried on the next locked scan`);
+    return from;
+  }
+}
+function terminalizeLiveRecord(root, key, record) {
+  writeRecordAtomic(root, liveFileName(key), record);
+  return finishTerminalRename(root, key, record);
+}
+function rewriteTerminalRecord(root, fileName, key, record) {
+  const expected = terminalFileName(key, record);
+  if (fileName !== expected && fileName !== liveFileName(key)) throw new Error(`dispatch-state: rewriting ${fileName} would change its agent ids (expected ${expected})`);
+  writeRecordAtomic(root, fileName, record);
+}
+function listStateDir(root) {
+  const containment = checkDispatchStateContainment(root, { create: false });
+  if (!containment.ok) return { availability: "unavailable", reason: "containment", names: [] };
+  if (containment.availability === "absent") return { availability: "absent", names: [] };
+  try {
+    return { availability: "ok", names: readdirSync2(dispatchStateDir(root)) };
+  } catch (e) {
+    return { availability: "unavailable", reason: "unlistable", code: e?.code, names: [] };
+  }
+}
+function validateNamedRecord(dir, name, parsed) {
+  const classified = classifyRecordFile(join2(dir, name));
+  if (!classified.exists || classified.poisoned) return classified;
+  const record = classified.record;
+  if (dispatchStateKey(record.tool_use_id) !== parsed.key) return { exists: true, poisoned: true, reason: "key-mismatch" };
+  if (parsed.kind === "done") {
+    if (!record.terminal) return { exists: true, poisoned: true, reason: "done-name-not-terminal" };
+    if (terminalFileName(parsed.key, record) !== name) return { exists: true, poisoned: true, reason: "ids-mismatch" };
+  }
+  return classified;
+}
+function findKeyedRecord(root, key) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability === "absent") return { exists: false };
+  if (listing.availability !== "ok") {
+    return listing.reason === "containment" ? { exists: false } : { exists: true, poisoned: true, reason: "unlistable-dir", file: dir };
+  }
+  const hits = [];
+  for (const name2 of listing.names) {
+    const parsed2 = parseStateFileName(name2);
+    if (parsed2.kind === "legacy" && parsed2.key === key) return { exists: true, poisoned: true, reason: "legacy-unmigrated", file: name2 };
+    if (parsed2.kind === "malformed-done" && parsed2.key === key) return { exists: true, poisoned: true, reason: "malformed-filename", file: name2 };
+    if ((parsed2.kind === "live" || parsed2.kind === "done") && parsed2.key === key) hits.push({ name: name2, parsed: parsed2 });
+  }
+  if (hits.length === 0) return { exists: false };
+  if (hits.length > 1) return { exists: true, poisoned: true, reason: "duplicate-key", file: hits.map((h) => h.name).join(", ") };
+  const { name, parsed } = hits[0];
+  const v = validateNamedRecord(dir, name, parsed);
+  if (!v.exists || v.poisoned) return { ...v, file: name };
+  if (parsed.kind === "live" && v.record.terminal) {
+    return { ...v, file: finishTerminalRename(root, key, v.record) };
+  }
+  return { ...v, file: name };
+}
+function readDispatchStateLocked(root) {
+  return scanLiveState(root, { repair: true });
+}
+function scanLiveState(root, { repair }) {
+  const dir = dispatchStateDir(root);
+  const listing = listStateDir(root);
+  if (listing.availability !== "ok") return { availability: listing.availability, ...listing.reason ? { reason: listing.reason } : {}, records: [], poisoned: [], done: [] };
   const records = [];
   const poisoned = [];
-  for (const name of names) {
-    if (!name.endsWith(".json")) {
-      if (name.includes(".json.tmp-")) poisoned.push({ file: name, reason: "orphan-tmp-file" });
+  const done = [];
+  for (const name of listing.names) {
+    const parsed = parseStateFileName(name);
+    if (parsed.kind === "other") continue;
+    if (parsed.kind === "tmp") {
+      poisoned.push({ file: name, reason: "orphan-tmp-file" });
       continue;
     }
-    const key = name.slice(0, -".json".length);
+    if (parsed.kind === "legacy") {
+      poisoned.push({ file: name, reason: "legacy-unmigrated" });
+      continue;
+    }
+    if (parsed.kind === "malformed-live") {
+      poisoned.push({ file: name, reason: "malformed-filename" });
+      continue;
+    }
+    if (parsed.kind === "malformed-done" || parsed.kind === "unknown-json") {
+      warnStateFile(name, `dispatch-state: '${name}' is not a live-<key>.json or done-<key>~<ids>.json name \u2014 ignored by the live scan, never read as a record`);
+      continue;
+    }
+    if (parsed.kind === "done") {
+      done.push({ file: name, key: parsed.key, idHashes: parsed.idHashes });
+      continue;
+    }
     const classified = classifyRecordFile(join2(dir, name));
     if (!classified.exists) continue;
     if (classified.poisoned) {
       poisoned.push({ file: name, reason: classified.reason });
       continue;
     }
-    if (dispatchStateKey(classified.record.tool_use_id) !== key) {
+    if (dispatchStateKey(classified.record.tool_use_id) !== parsed.key) {
       poisoned.push({ file: name, reason: "key-mismatch" });
       continue;
     }
-    records.push({ key, file: name, record: classified.record });
+    records.push({ key: parsed.key, file: name, record: classified.record });
   }
-  return { availability: "ok", records, poisoned };
+  const doneKeys = new Set(done.map((d) => d.key));
+  const kept = [];
+  for (const entry of records) {
+    if (doneKeys.has(entry.key)) {
+      if (!entry.record.terminal) {
+        poisoned.push({ file: entry.file, reason: "duplicate-key" });
+        continue;
+      }
+      warnStateFile(entry.file, `dispatch-state: terminal record ${entry.file} cannot be renamed: a done- file for the same key already exists \u2014 left under its live name for an operator, never renamed over it`);
+      kept.push(entry);
+      continue;
+    }
+    if (repair && entry.record.terminal) entry.file = finishTerminalRename(root, entry.key, entry.record);
+    kept.push(entry);
+  }
+  return { availability: "ok", records: kept, poisoned, done };
+}
+function terminalResumeHit(root, scan, agentId) {
+  const h = agentIdHash(agentId);
+  const dir = dispatchStateDir(root);
+  for (const entry of scan.done) {
+    if (!entry.idHashes.includes(h)) continue;
+    const v = validateNamedRecord(dir, entry.file, { kind: "done", key: entry.key });
+    if (!v.exists) continue;
+    if (v.poisoned) {
+      warnStateFile(entry.file, `dispatch-state: '${entry.file}' names agent id hash ${h} but failed validation (${v.reason}) \u2014 not taken as resume evidence`);
+      continue;
+    }
+    if (recordAgentIds(v.record).includes(agentId)) return true;
+  }
+  return false;
+}
+function poisonedFileList(scan) {
+  return scan.poisoned.map((p) => `${p.file} (${p.reason})`);
 }
 function hasRegisterRound(root, sessionId, agentId) {
   const { availability, entries } = readRegister(root);
@@ -5928,12 +6124,12 @@ function recordDispatchPre(root, stdin) {
       };
     }
     const key = dispatchStateKey(toolUseId);
-    const existing = classifyRecordFile(dispatchStateFile(root, key));
+    const existing = findKeyedRecord(root, key);
     if (existing.exists && existing.poisoned) {
       return {
         ok: false,
         action: "poisoned",
-        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason }, `Pre for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}) \u2014 left untouched`))]
+        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Pre for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? "(unnamed)"}) \u2014 left untouched`))]
       };
     }
     const { prompt, prompt_bytes, prompt_sha256, oversize } = promptFacts(stdin?.tool_input?.prompt);
@@ -5956,7 +6152,7 @@ function recordDispatchPre(root, stdin) {
         origin: "pre",
         pre_at: (/* @__PURE__ */ new Date()).toISOString()
       };
-      writeRecordAtomic(root, key, record);
+      writeLiveRecord(root, key, record);
       return { ok: true, action: "created-pending", disclosures: [], record };
     }
     const r = existing.record;
@@ -5975,7 +6171,7 @@ function recordDispatchPre(root, stdin) {
           changed = true;
         }
       }
-      if (changed) writeRecordAtomic(root, key, filled);
+      if (changed) rewriteTerminalRecord(root, existing.file, key, filled);
       return { ok: true, action: "terminal-absorbed", disclosures: [], record: filled };
     }
     const identical = r.session_id === session_id && r.prompt_sha256 === prompt_sha256 && r.subagent_type === subagent_type && r.description === description;
@@ -6015,12 +6211,12 @@ function recordDispatchPost(root, stdin) {
       };
     }
     const key = dispatchStateKey(toolUseId);
-    const existing = classifyRecordFile(dispatchStateFile(root, key));
+    const existing = findKeyedRecord(root, key);
     if (existing.exists && existing.poisoned) {
       return {
         ok: false,
         action: "poisoned",
-        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason }, `Post for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}) \u2014 not bound`))]
+        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Post for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? "(unnamed)"}) \u2014 not bound`))]
       };
     }
     const sessionId = stringField(stdin?.session_id);
@@ -6031,12 +6227,12 @@ function recordDispatchPost(root, stdin) {
         disclosures: [render(disclosure("dispatch_post_refused", { tool_use_id: toolUseId, agent_id: agentId }, `Post for tool_use_id '${toolUseId}' carries no usable session_id \u2014 refusing to bind agentId '${agentId}'`))]
       };
     }
-    const scan = readDispatchState(root);
+    const scan = readDispatchStateLocked(root);
     if (scan.availability === "unavailable" || scan.availability === "ok" && scan.poisoned.length > 0) {
       return {
         ok: false,
         action: "refused-poisoned-scan",
-        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, availability: scan.availability, poisoned: scan.poisoned.length }, `Post for tool_use_id '${toolUseId}' refused to bind \u2014 the dispatch-state scan is ${scan.availability !== "ok" ? scan.availability : `carrying ${scan.poisoned.length} poisoned entr${scan.poisoned.length === 1 ? "y" : "ies"}`}, so the one-to-one check cannot be trusted`))]
+        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, availability: scan.availability, poisoned: scan.poisoned.length, files: poisonedFileList(scan) }, `Post for tool_use_id '${toolUseId}' refused to bind \u2014 the dispatch-state scan is ${scan.availability !== "ok" ? scan.availability : `carrying ${scan.poisoned.length} poisoned entr${scan.poisoned.length === 1 ? "y" : "ies"} (${poisonedFileList(scan).join(", ")})`}, so the one-to-one check cannot be trusted`))]
       };
     }
     for (const { key: otherKey, record: other } of scan.records) {
@@ -6070,7 +6266,7 @@ function recordDispatchPost(root, stdin) {
         origin: "post-only",
         post_binding: { agent_id: agentId, at: (/* @__PURE__ */ new Date()).toISOString() }
       };
-      writeRecordAtomic(root, key, record);
+      writeLiveRecord(root, key, record);
       return {
         ok: true,
         action: "created-post-only",
@@ -6096,7 +6292,7 @@ function recordDispatchPost(root, stdin) {
     }
     if (r.session_id !== null && sessionId !== null && r.session_id !== sessionId) {
       const updated2 = { ...r, prompt: null, terminal: { at: (/* @__PURE__ */ new Date()).toISOString(), reason: "post-collision" } };
-      writeRecordAtomic(root, key, updated2);
+      terminalizeLiveRecord(root, key, updated2);
       return {
         ok: false,
         action: "post-collision-terminal",
@@ -6107,12 +6303,12 @@ function recordDispatchPost(root, stdin) {
     const at = (/* @__PURE__ */ new Date()).toISOString();
     if (!r.started) {
       const updated2 = { ...r, post_binding: { agent_id: agentId, at } };
-      writeRecordAtomic(root, key, updated2);
+      writeLiveRecord(root, key, updated2);
       return { ok: true, action: "post-bound", disclosures: [], record: updated2 };
     }
     if (r.started.agent_id === agentId) {
       const updated2 = { ...r, post_binding: { agent_id: agentId, at, confirmed_derived: true } };
-      writeRecordAtomic(root, key, updated2);
+      writeLiveRecord(root, key, updated2);
       return { ok: true, action: "post-confirmed-derived", disclosures: [], record: updated2 };
     }
     const updated = {
@@ -6120,7 +6316,7 @@ function recordDispatchPost(root, stdin) {
       post_binding: { agent_id: agentId, at },
       derived_post_mismatch: { derived_agent_id: r.started.agent_id, post_agent_id: agentId, at }
     };
-    writeRecordAtomic(root, key, updated);
+    writeLiveRecord(root, key, updated);
     return {
       ok: true,
       action: "post-mismatch-recorded",
@@ -6144,13 +6340,13 @@ function recordDispatchFailure(root, stdin) {
       return { ok: true, action: "skipped-no-tool-use-id", disclosures: [] };
     }
     const key = dispatchStateKey(toolUseId);
-    const existing = classifyRecordFile(dispatchStateFile(root, key));
+    const existing = findKeyedRecord(root, key);
     const at = (/* @__PURE__ */ new Date()).toISOString();
     if (existing.exists && existing.poisoned) {
       return {
         ok: false,
         action: "poisoned",
-        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason }, `Failure for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}) \u2014 left untouched`))]
+        disclosures: [render(disclosure("dispatch_state_poisoned", { tool_use_id: toolUseId, reason: existing.reason, file: existing.file }, `Failure for tool_use_id '${toolUseId}' found a poisoned dispatch-state record (${existing.reason}: ${existing.file ?? "(unnamed)"}) \u2014 left untouched`))]
       };
     }
     if (!existing.exists) {
@@ -6169,7 +6365,7 @@ function recordDispatchFailure(root, stdin) {
         origin: "failure-only",
         terminal: { at, reason: "tool-failure" }
       };
-      writeRecordAtomic(root, key, record);
+      writeRecordAtomic(root, terminalFileName(key, record), record);
       return { ok: true, action: "created-terminal", disclosures: [], record };
     }
     const r = existing.record;
@@ -6177,7 +6373,7 @@ function recordDispatchFailure(root, stdin) {
       return { ok: true, action: "already-terminal", disclosures: [], record: r };
     }
     const updated = { ...r, prompt: null, terminal: { at, reason: "tool-failure" } };
-    writeRecordAtomic(root, key, updated);
+    terminalizeLiveRecord(root, key, updated);
     return { ok: true, action: "terminated", disclosures: [], record: updated };
   }));
 }
@@ -6185,21 +6381,21 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
   if (typeof agent_id !== "string" || agent_id === "") {
     return { verdict: "resolved", value: unattributable("no-agent-id", agent_type) };
   }
-  const scan = readDispatchState(root);
+  const scan = readDispatchStateLocked(root);
   if (scan.availability === "ok") {
     for (const { key, record } of scan.records) {
       const boundId = record.post_binding?.agent_id ?? record.derived_binding?.agent_id;
       if (boundId === agent_id && record.session_id === session_id && !record.terminal) {
         const updated = appendStartedBy(record, consumer);
-        writeRecordAtomic(root, key, updated);
+        writeLiveRecord(root, key, updated);
         const source = record.post_binding ? "post" : "derived-type-unique";
         return { verdict: "resolved", value: buildResolution(source, source, updated) };
       }
     }
   }
-  const resumeHit = scan.availability === "ok" && scan.records.some(
+  const resumeHit = scan.availability === "ok" && (scan.records.some(
     ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
-  );
+  ) || terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
     return { verdict: "resolved", value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
   }
@@ -6210,7 +6406,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     return { verdict: "resolved", value: unattributable("state-unavailable", agent_type) };
   }
   if (scan.poisoned.length > 0) {
-    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type) };
+    return { verdict: "resolved", value: unattributable("state-poisoned", agent_type, { poisoned_files: poisonedFileList(scan) }) };
   }
   const candidates = scan.records.filter(
     ({ record }) => dispatchState(record) === "pending" && record.session_id === session_id && typeof record.subagent_type === "string" && record.subagent_type === agent_type
@@ -6225,7 +6421,7 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     }
     const at = (/* @__PURE__ */ new Date()).toISOString();
     const updated = { ...record, derived_binding: { agent_id, at, by: consumer }, started: { agent_id, at, by: consumer ? [consumer] : [] } };
-    writeRecordAtomic(root, key, updated);
+    writeLiveRecord(root, key, updated);
     return { verdict: "resolved", value: buildResolution("derived-type-unique", "derived-type-unique", updated) };
   }
   return { verdict: "siblings-retry", count: candidates.length };
@@ -6271,20 +6467,23 @@ async function resolveAndRegisterStart(root, startStdin, entryBuilder) {
     return finalizeUnattributable(unattributable("lock-held", agent_type));
   }
   const retryStart = Date.now();
+  let count = result.count;
   for (; ; ) {
-    if (Date.now() - retryStart >= DERIVE_TOTAL_BUDGET_MS) {
-      return finalizeUnattributable(unattributable("same-type-siblings-in-flight", agent_type, { count: result.count }));
+    if (Date.now() - retryStart >= retryBudgetFor(result.verdict)) {
+      return finalizeUnattributable(unattributable("same-type-siblings-in-flight", agent_type, { count }));
     }
     await sleepAsync(DERIVE_RETRY_INTERVAL_MS);
     result = await attemptAndRegister(DERIVE_PER_ATTEMPT_LOCK_MS, 5);
     if (result.verdict === "resolved") return asResult(result);
+    if (result.verdict === "siblings-retry") count = result.count;
   }
 }
 async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sidecarToolUseId, event }) {
   return withRegisterLock(root, () => {
     const ended = registerEndLocked(root, agent_id, event ?? "subagent-stop", { sessionId: session_id });
-    const scan = readDispatchState(root);
+    const scan = readDispatchStateLocked(root);
     let record = null;
+    const disclosures = [];
     if (scan.availability === "ok") {
       let hit = scan.records.find(({ record: r }) => {
         const boundId = r.post_binding?.agent_id ?? r.derived_binding?.agent_id ?? r.started?.agent_id;
@@ -6292,19 +6491,52 @@ async function finishDispatchAndRegisterEnd(root, { session_id, agent_id, sideca
       });
       if (!hit && typeof sidecarToolUseId === "string" && sidecarToolUseId !== "") {
         const key = dispatchStateKey(sidecarToolUseId);
-        hit = scan.records.find((x) => x.key === key);
+        const keyed = findKeyedRecord(root, key);
+        if (keyed.exists && !keyed.poisoned) hit = { key, file: keyed.file, record: keyed.record };
+        if (keyed.exists && keyed.poisoned) {
+          disclosures.push(
+            render(
+              disclosure(
+                "dispatch_state_poisoned",
+                { tool_use_id: sidecarToolUseId, reason: keyed.reason, file: keyed.file },
+                `Stop for agent '${agent_id}': the dispatch-state record for sidecar tool_use_id '${sidecarToolUseId}' is poisoned (${keyed.reason}, ${keyed.file}) \u2014 the round is ended but that record was NOT terminalized; left for an operator`
+              )
+            )
+          );
+        }
+      }
+      if (!hit) {
+        for (const p of scan.poisoned) {
+          if (p.reason !== "duplicate-key") continue;
+          disclosures.push(
+            render(
+              disclosure(
+                "dispatch_state_poisoned",
+                { file: p.file, reason: p.reason },
+                `Stop for agent '${agent_id}': live record ${p.file} shares its key with a done- file (duplicate-key) \u2014 excluded from selection, NOT terminalized; left for an operator`
+              )
+            )
+          );
+        }
       }
       if (hit) {
         if (hit.record.terminal) {
           record = hit.record;
         } else {
           const updated = { ...hit.record, prompt: null, terminal: { at: (/* @__PURE__ */ new Date()).toISOString(), reason: event === "task-stop" ? "task-stop" : "stop" } };
-          writeRecordAtomic(root, hit.key, updated);
+          terminalizeLiveRecord(root, hit.key, updated);
           record = updated;
         }
       }
     }
-    return { found: ended.found, entry: ended.found ? ended.entry : null, record };
+    return {
+      found: ended.found,
+      entry: ended.found ? ended.entry : null,
+      record,
+      disclosures,
+      state_availability: scan.availability,
+      ...scan.reason ? { state_reason: scan.reason } : {}
+    };
   });
 }
 
@@ -6328,7 +6560,7 @@ function normalizeRegisterPaths(cands, cwd) {
 function sidecarForChildTranscript(childPath) {
   if (!childPath.endsWith(".jsonl")) return { ok: false };
   const sidecarPath = `${childPath.slice(0, -".jsonl".length)}.meta.json`;
-  if (!existsSync3(sidecarPath)) return { ok: false };
+  if (!existsSync4(sidecarPath)) return { ok: false };
   let meta;
   try {
     meta = JSON.parse(readFileSync3(sidecarPath, "utf8"));
@@ -6360,9 +6592,41 @@ async function endTaskStoppedDispatch(input2, lines) {
     warnNonBlocking(`H22: TaskStop stopped local_agent task '${resp.task_id}' but the hook input carries no session_id \u2014 nothing was ended, because an agent_id alone could match another session's round; the dispatch stays presumed-active until its lease expires`);
     return;
   }
+  const plainTaskId = /^[A-Za-z0-9_-]+$/.test(resp.task_id);
+  let sidecar = { ok: false };
+  if (plainTaskId && typeof input2.transcript_path === "string" && input2.transcript_path.endsWith(".jsonl")) {
+    sidecar = sidecarForChildTranscript(deriveAgentTranscript(input2.transcript_path, resp.task_id));
+  }
   try {
-    const finished = await finishDispatchAndRegisterEnd(input2.cwd, { session_id: input2.session_id, agent_id: resp.task_id, event: "task-stop" });
+    const finished = await finishDispatchAndRegisterEnd(input2.cwd, {
+      session_id: input2.session_id,
+      agent_id: resp.task_id,
+      sidecarToolUseId: sidecar.ok ? sidecar.meta.toolUseId : void 0,
+      event: "task-stop"
+    });
     if (finished.found) lines.push(...residueLines(input2.cwd, finished.entry));
+    if (finished.disclosures?.length) lines.push(...finished.disclosures);
+    if (!finished.record && !finished.disclosures?.length) {
+      const stateOk = finished.state_availability === "ok" || finished.state_availability === "absent";
+      const why = !plainTaskId ? `its task_id is not a plain id (only [A-Za-z0-9_-] is turned into a sidecar path), so no sidecar was looked up` : !sidecar.ok ? `its subagent sidecar (agent-${resp.task_id}.meta.json beside the session transcript) is absent or unreadable` : stateOk ? `its sidecar names tool_use_id '${sidecar.meta.toolUseId}', for which no dispatch-state record was found` : `its sidecar names tool_use_id '${sidecar.meta.toolUseId}'`;
+      const stateNote = stateOk ? "" : `; the dispatch-state directory is unavailable (${finished.state_reason ?? finished.state_availability}), so it was not searched`;
+      const round = finished.found ? "its register round was ended" : "no open register round matched it";
+      lines.push(
+        render(
+          disclosure(
+            "dispatch_unattributable",
+            {
+              agent_id: resp.task_id,
+              sidecar_tool_use_id: sidecar.ok ? sidecar.meta.toolUseId : null,
+              state_availability: finished.state_availability ?? null,
+              state_reason: finished.state_reason ?? null,
+              round_ended: finished.found
+            },
+            `H22: the TaskStop-killed dispatch '${resp.task_id}' could not be located \u2014 no live record carries its agent id and ${why}${stateNote}; ${round}; no dispatch-state record was terminalized, so a pending one stays pending until the session-boundary sweep and a later same-type Start may wait on it`
+          )
+        )
+      );
+    }
   } catch (e) {
     if (e?.code !== "register_lock_held") throw e;
     lines.push(
@@ -6378,7 +6642,7 @@ async function endTaskStoppedDispatch(input2, lines) {
 }
 var input = readStdin();
 try {
-  if (!existsSync3(`${input.cwd}/.sterling/config.json`)) allow();
+  if (!existsSync4(`${input.cwd}/.sterling/config.json`)) allow();
   mkdirSync2(join3(input.cwd, ".sterling", "transient"), { recursive: true });
   const event = input.hook_event_name;
   const consequence = event === "SubagentStop" ? `the entry for '${input.agent_id}' stays live and over-defers H10's file duties until the lease expires or H1's next session-boundary wipe` : `this dispatch is absent from the register, so H10 will not defer the duties for the files it owns`;
@@ -6410,6 +6674,17 @@ try {
     const { entry: registeredEntry, refusal: startRefusal } = await resolveAndRegisterStart(input.cwd, input, (res) => {
       const matchedBlocks = typeof res.prompt === "string" ? [{ subagent_type: res.subagent_type, prompt: res.prompt }] : [];
       const positionalSafe = res.source === "post" || res.source === "derived-type-unique";
+      if (res.case === "state-poisoned") {
+        lines.push(
+          render(
+            disclosure(
+              "dispatch_state_poisoned",
+              { case: res.case, files: res.poisoned_files ?? [] },
+              `H22: dispatch '${input.agent_id}' (${input.agent_type}) is unattributable [state-poisoned] \u2014 poisoned dispatch-state file(s): ${(res.poisoned_files ?? []).join(", ") || "(none named)"}`
+            )
+          )
+        );
+      }
       if (reviewerStart && !positionalSafe) {
         lines.push(
           render(
@@ -6496,6 +6771,7 @@ try {
         event: "subagent-stop"
       });
       departing = finished.found ? finished.entry : void 0;
+      if (finished.disclosures?.length) lines.push(...finished.disclosures);
     } catch (e) {
       if (e?.code === "register_lock_held") {
         lines.push(

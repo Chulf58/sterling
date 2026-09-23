@@ -44,6 +44,18 @@ import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
 
 /**
+ * ARTICLE_MISSING TEXT (shared by the §6 mint and the live-recompute heal —
+ * Dome Farmer #45: the heal used to rewrite file_keys via a `...survivor`
+ * spread that carried the OLD text forward, so the item's stated count went
+ * stale the moment a carried, untouched file dropped out of the healed set.
+ * Both call sites now derive the count from the same file_keys list they
+ * write, so the two can never disagree.
+ */
+function articleMissingText(fileKeys, { newlyCreated = 0 } = {}) {
+  return `article missing: ${fileKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newlyCreated ? ` (${newlyCreated} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`;
+}
+
+/**
  * DEAD-DISPATCH RESIDUE (SPEC A, boards 03ed9d35/31565253; shared lib
  * scripts/hooks/lib/dispatch-residue.mjs). A pure filesystem+git fact about
  * the H22 register — deliberately independent of the knowledge store (a
@@ -1818,7 +1830,11 @@ try {
           // able to match this same item: the choke keys on {system_reason, sorted
           // file_keys}, so a corrected set supplied only at the mint would miss the
           // stale item and insert a second one beside it.
-          store.updateTodo(survivor.id, { ...survivor, file_keys: healed, updated_at: now }, { expected_version: survivor.version });
+          store.updateTodo(
+            survivor.id,
+            { ...survivor, file_keys: healed, text: articleMissingText(healed), updated_at: now },
+            { expected_version: survivor.version }
+          );
         })
       );
     } catch (e) {
@@ -2432,7 +2448,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text: `article missing: ${demandKeys.length} file(s) nothing owns (feature_article or repo-located reference doc)${newUnowned.length ? ` (${newUnowned.length} newly created)` : ''} — create the owning article(s) (§6 H10 / §12 accretion)`,
+        text: articleMissingText(demandKeys, { newlyCreated: newUnowned.length }),
         source: 'system',
         system_reason: 'article_missing',
         file_keys: demandKeys,

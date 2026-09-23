@@ -692,8 +692,11 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
-      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date'));
-      report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, changed: changedAgents.length });
+      // config_drift (decision 256d1059) wrote nothing, so it is not a change; it is
+      // relayed verbatim below (the line carries the fix command), never a failure.
+      const driftedAgents = statuses.filter((l) => l.startsWith('config_drift: '));
+      const changedAgents = statuses.filter((l) => !l.startsWith('up_to_date') && !l.startsWith('locally_modified_up_to_date') && !l.startsWith('config_drift: '));
+      report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, changed: changedAgents.length, config_drift: driftedAgents.length });
       if (r.status === 2) {
         log(`  ✗ ${p.name}: REFUSED — a locally modified agent. Output verbatim:\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         report.exit = 2;
@@ -701,7 +704,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         log(`  ✗ ${p.name}: sync failed (exit ${r.status}):\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
         report.exit = report.exit === 0 ? 1 : report.exit;
       } else {
-        log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : 'up to date'}`);
+        log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
+        for (const line of driftedAgents) log(`      ⚠ ${line}`);
       }
       // Deliver the double-click updater to every registered project — the
       // update event is how a machine receives new artifacts, so a project
