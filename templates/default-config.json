@@ -12,7 +12,7 @@
     "conductor": { "soft_pct": 35, "hard_pct": 50 }
   },
   "models": {
-    "implementor": { "model": "claude-sonnet-5", "effort": "high" },
+    "implementor": { "model": "claude-opus-5-5", "effort": "medium" },
     "researcher": { "model": "claude-sonnet-5", "effort": "medium" },
     "scout": { "model": "claude-sonnet-5", "effort": "low" },
     "classifiers": { "model": "claude-haiku-4-5", "effort": "low" },

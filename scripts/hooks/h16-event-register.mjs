@@ -27,10 +27,32 @@ try {
     detail = String(input.tool_input?.subagent_type ?? '');
   }
 
+  const event = { kind, detail, at: new Date().toISOString() };
+  // Board d33d8ac4: an agent_dispatch event's OWN H22 register entry is only
+  // joinable if the event carries the id that entry is keyed by. PostToolUse
+  // on a background Task|Agent dispatch returns it at launch as
+  // tool_response.agentId — the same field H22 itself reads authoritatively
+  // (scripts/lib/dispatch-register.mjs recordDispatchPost, `tr.agentId`).
+  // WebSearch/WebFetch have no dispatch to join and never carry this field.
+  if (kind === 'agent_dispatch') {
+    const agentId = input.tool_response?.agentId;
+    if (typeof agentId === 'string' && agentId !== '') event.agent_id = agentId;
+    // Sol review HIGH (board d33d8ac4): agent_id alone recurs across ROUNDS
+    // of the SAME dispatch (a resumed agent keeps its id) and across
+    // sessions, so it is not a unique join key on its own. tool_use_id IS
+    // unique per launch — the same id H22 records on its dispatch-state
+    // record (recordDispatchPre/Post, scripts/lib/dispatch-register.mjs) and,
+    // via the state-machine resolver, on the register entry itself
+    // (h22-dispatch-register.mjs SubagentStart). PostToolUse's own
+    // tool_use_id is the exact join key H10 prefers; agent_id (+ session)
+    // stays as the fallback when a round carries no tool_use_id at all.
+    if (typeof input.tool_use_id === 'string' && input.tool_use_id !== '') event.tool_use_id = input.tool_use_id;
+  }
+
   const eventsPath = join(input.cwd, '.sterling', 'transient', 'session-events.json');
   mkdirSync(dirname(eventsPath), { recursive: true });
   const events = existsSync(eventsPath) ? JSON.parse(readFileSync(eventsPath, 'utf8')) : [];
-  events.push({ kind, detail, at: new Date().toISOString() });
+  events.push(event);
   writeFileSync(eventsPath, JSON.stringify(events));
   allow();
 } catch (e) {

@@ -290,8 +290,15 @@ test('git touches (6): an EMPTY_TREE snapshot from an unborn repository becomes 
   const { dir, store, g, cleanup } = makeGitProject();
   try {
     assert.equal(runStop(dir).code, 0, 'unborn Stop persists the empty-tree baseline');
-    writeFile(dir, 'src/first.mjs', 'export const first = 1;\n');
+    const firstContent = 'export const first = 1;\n';
+    writeFile(dir, 'src/first.mjs', firstContent);
     commitAll(g, 'first');
+    // Owned (board 4e624c1a fix): src/first.mjs is absent from the settled
+    // EMPTY_TREE base, so the article-demand newness probe now correctly
+    // reads it as new — orthogonal to what THIS test pins (the
+    // settlement-history-rewrite guard). Owning it isolates that unrelated,
+    // now-correctly-firing lane so this test's own assertions stay exact.
+    articleWithBaseline(store, 'feat-first', [{ path: 'src/first.mjs', content: firstContent }]);
     captureNow(store);
     const settled = runStop(dir);
     assert.equal(settled.code, 0, settled.stderr);

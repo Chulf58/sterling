@@ -556,36 +556,56 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   if (!step('build server + packages (npm run build)', 'npm', ['run', 'build']).ok) return report;
   if (!step('build TUI bundle (npm run build:tui)', 'npm', ['run', 'build:tui']).ok) return report;
   if (!step('consistency checks (npm run check)', 'npm', ['run', 'check'], { show: true }).ok) return report;
+  // A red test battery is the ONE failure in this sequence that does not stop
+  // it (decision update-red-test-battery-still-syncs-agents-skips-store-migration):
+  // by the time the battery runs the fast-forward already landed, and every
+  // project launches with --plugin-dir against THIS clone, so the new hooks
+  // are already live everywhere — stopping before agent sync protects
+  // nothing, it only leaves installed agent templates (low-risk text) out of
+  // step with hooks already running. A store schema migration is different:
+  // it is run by code the battery just called suspect, so it is the one step
+  // held back. `step()` already sets report.exit=1 on this failure — never
+  // swallowed, never a `return`.
+  let testFailed = false;
   if (opts.test !== false) {
-    if (!step('test battery (npm test)', 'npm', ['test']).ok) return report;
+    if (!step('test battery (npm test)', 'npm', ['test']).ok) {
+      testFailed = true;
+      log(
+        '\n✗ TEST BATTERY FAILED — store migration is SKIPPED below (schema changes are the one irreversible step, and this is code the battery has just called suspect). Agent sync still runs, because the hooks from this pull are already live in every project via --plugin-dir. This run exits non-zero and will NOT write the completion marker — rerun after fixing the battery, or the next /sterling:update resumes from here instead of reporting "Already current".'
+      );
+    }
   } else {
     log('\n▸ test battery — SKIPPED (--no-test)');
   }
 
-  let stores;
-  try {
-    stores = machineStores(cwd);
-  } catch (err) {
-    log(`\n✗ store enumeration FAILED — stopping. The fast-forward stands; ${err?.message ?? err}`);
-    report.exit = 1;
-    return report;
-  }
-  for (const store of stores) {
-    let version;
+  if (!testFailed) {
+    let stores;
     try {
-      version = probeSchemaVersion(store);
+      stores = machineStores(cwd);
     } catch (err) {
-      log(`\n✗ store schema probe FAILED for '${store}' — stopping. The fast-forward stands; ${err?.message ?? err}`);
+      log(`\n✗ store enumeration FAILED — stopping. The fast-forward stands; ${err?.message ?? err}`);
       report.exit = 1;
       return report;
     }
-    if (version < 2) {
-      if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
-      // Review fix H2: an already-open MCP server keeps the schema verdict it
-      // read at open, so a session that was live during migration refuses
-      // writes until restarted — say so instead of leaving a mystery refusal.
-      log(`  ▸ migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough — MCP servers survive it) before it can write again`);
+    for (const store of stores) {
+      let version;
+      try {
+        version = probeSchemaVersion(store);
+      } catch (err) {
+        log(`\n✗ store schema probe FAILED for '${store}' — stopping. The fast-forward stands; ${err?.message ?? err}`);
+        report.exit = 1;
+        return report;
+      }
+      if (version < 2) {
+        if (!step(`migrate store schema v${version} → v2 (${store})`, nodeBin, [join(cwd, 'scripts', 'migrate-stores.mjs'), '--db', store, '--invoked-by', 'update-sweep'], { show: true }).ok) return report;
+        // Review fix H2: an already-open MCP server keeps the schema verdict it
+        // read at open, so a session that was live during migration refuses
+        // writes until restarted — say so instead of leaving a mystery refusal.
+        log(`  ▸ migrated: any Sterling session already open on this store must EXIT AND RELAUNCH the Claude Code CLI (a /clear is NOT enough — MCP servers survive it) before it can write again`);
+      }
     }
+  } else {
+    log('\n▸ store migration (this clone) — SKIPPED (red test battery)');
   }
 
   // Re-bake this machine's generated artifacts against the new templates. The
@@ -636,7 +656,11 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // report.exit or returning on our behalf, so we can log per-project, record
   // it in report.migrations, and move on — continue-on-failure must still
   // surface non-zero overall, never swallow it.
-  if (opts.projects !== false && projectList.length) {
+  if (testFailed) {
+    if (opts.projects !== false && projectList.length) {
+      log('\n▸ per-project store migration — SKIPPED (red test battery)');
+    }
+  } else if (opts.projects !== false && projectList.length) {
     for (const p of projectList) {
       const projStore = join(p.repo_path, '.sterling', 'sterling.db');
       if (!existsSync(projStore)) continue;

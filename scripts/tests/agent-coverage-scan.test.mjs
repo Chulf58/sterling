@@ -286,7 +286,18 @@ test('DEGRADE LOUD: an unreadable known root is reported as unreadable, and the 
 // #############################################################################
 
 import { chmodSync, symlinkSync } from 'node:fs';
-import { runUpdate } from '../lib/update.mjs';
+import { runUpdate, UPDATE_MARKER_RELATIVE_PATH } from '../lib/update.mjs';
+
+/** Seed a completed-update marker as if a prior run finished IN FULL at `sha` —
+ *  mirrors scripts/tests/update.test.mjs's helper of the same name. Since
+ *  decision already-current-requires-a-completion-marker-not-git-currency
+ *  (commit 4912d15), `before.behind === 0` alone is no longer sufficient to
+ *  reach the already-current shortcut — a matching marker is required too. */
+function seedUpdateMarker(cwd, sha) {
+  const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString() }));
+}
 
 /** chmod is advisory-to-absent as root and on some mounts. Probe rather than let
  *  an EACCES arm pass vacuously — a green that proves nothing is exactly what
@@ -618,6 +629,13 @@ test('F1: the agent-coverage report runs on the ALREADY-CURRENT path — a clone
   const { dir: rootDir, cleanup } = makeRoot('sterling-cov-update-');
   try {
     const registered = makeAgentProject(rootDir, 'project-registered');
+    // A matching completion marker is required to reach the already-current
+    // shortcut (decision already-current-requires-a-completion-marker-not-git-
+    // currency, commit 4912d15): `before.behind === 0` alone now falls through
+    // into the full resume sequence instead. 'a'.repeat(40) matches this local
+    // fakeExec's HEAD_A default (below) — the sha `rev-parse HEAD` reports when
+    // no merge has happened, which is exactly this already-current case.
+    seedUpdateMarker(cwd, 'a'.repeat(40));
     const { exec, calls } = fakeExec({ behind: 0 });
     const lines = [];
 

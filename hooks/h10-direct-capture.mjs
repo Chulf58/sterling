@@ -4944,7 +4944,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-opus-5-5", effort: "medium" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -8610,7 +8610,37 @@ try {
   const researchEvents = sessionEvents.filter(
     (e) => e.kind === "research_tool" || e.kind === "agent_dispatch" && researchAgents.has(e.detail)
   );
-  const researchDispatchLive = liveDispatches.some((e) => researchAgents.has(e.agent_type));
+  const registerRowsBySession = /* @__PURE__ */ new Map();
+  if (classified.availability === "ok") {
+    for (const row of classified.entries) {
+      const sid = row.entry.session_id;
+      if (typeof sid !== "string" || !sid) continue;
+      if (!registerRowsBySession.has(sid)) registerRowsBySession.set(sid, []);
+      registerRowsBySession.get(sid).push(row);
+    }
+  }
+  const ownRegisterRow = (e) => {
+    if (typeof input.session_id !== "string" || !input.session_id) return void 0;
+    const sessionRows = registerRowsBySession.get(input.session_id) ?? [];
+    if (!sessionRows.length) return void 0;
+    const hasEventToolUseId = typeof e.tool_use_id === "string" && e.tool_use_id !== "";
+    if (hasEventToolUseId) {
+      const exact = sessionRows.filter((r) => r.entry.tool_use_id === e.tool_use_id);
+      if (exact.length === 1) return exact[0];
+      if (exact.length >= 2) return void 0;
+    }
+    if (typeof e.agent_id === "string" && e.agent_id) {
+      const byAgent = sessionRows.filter((r) => r.entry.agent_id === e.agent_id);
+      if (byAgent.length === 1) {
+        const row = byAgent[0];
+        const rowHasUsableToolUseId = typeof row.entry.tool_use_id === "string" && row.entry.tool_use_id !== "";
+        if (hasEventToolUseId && rowHasUsableToolUseId) return void 0;
+        return row;
+      }
+    }
+    return void 0;
+  };
+  const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === "presumed-active";
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
   const deferredOwners = /* @__PURE__ */ new Map();
@@ -8777,23 +8807,26 @@ try {
   const activeTouches = touches.filter((t) => !dischargedOnCaptureLane(t.at)).filter((t) => !IMAGE_BINARY_EXT.test(t.path) && !isDeferred(t.path) && !coveredByTestRepair(t));
   const activePaths = [...new Set(activeTouches.map((t) => t.path))].filter((p) => existsSync6(join6(input.cwd, p)));
   const activeDebugEvents = debugEvents.filter((e) => !dischargedOnCaptureLane(e.at));
-  const endedResearchReturnAts = (classified.availability === "ok" ? classified.entries : []).filter((r) => r.status === "inactive-confirmed" && researchAgents.has(r.entry.agent_type) && isValidAt(r.entry.ended?.at)).map((r) => r.entry.ended.at);
-  const latestResearchReturnAt = endedResearchReturnAts.length ? endedResearchReturnAts.sort().at(-1) : null;
+  const dispatchEventReturnAt = (e) => {
+    const row = ownRegisterRow(e);
+    return row && row.status === "inactive-confirmed" && isValidAt(row.entry.ended?.at) ? row.entry.ended.at : null;
+  };
   const dischargedOnResearchLaneForDispatch = (e) => {
     if (e.kind !== "agent_dispatch") return dischargedOnResearchLane(e.at);
-    if (researchDispatchLive) return false;
-    if (!latestResearchReturnAt) return false;
-    return dischargedOnResearchLane(latestResearchReturnAt);
+    if (isDispatchEventLive(e)) return false;
+    const returnAt = dispatchEventReturnAt(e);
+    if (!returnAt) return false;
+    return dischargedOnResearchLane(returnAt);
   };
   const activeResearchEvents = researchEvents.filter((e) => {
-    if (e.kind === "agent_dispatch" && researchDispatchLive) return false;
+    if (e.kind === "agent_dispatch" && isDispatchEventLive(e)) return false;
     return !dischargedOnResearchLaneForDispatch(e);
   });
-  const hasLiveAgentDispatchEvents = researchDispatchLive && researchEvents.some((e) => e.kind === "agent_dispatch");
+  const hasLiveAgentDispatchEvents = researchEvents.some((e) => e.kind === "agent_dispatch" && isDispatchEventLive(e));
   const researchSatisfyingRecords = hasLiveAgentDispatchEvents ? store.query({ types: ["research_finding", "decision", "anti_pattern"], cap: 1e3 }) : [];
   const individuallyResearchSatisfied = (at) => isValidAt(at) && researchSatisfyingRecords.some((r) => r.created_at >= at || r.updated_at >= at);
   const outstandingDeferredResearchEvents = researchEvents.filter(
-    (e) => e.kind === "agent_dispatch" && researchDispatchLive && !dischargedOnResearchLaneForDispatch(e) && !individuallyResearchSatisfied(e.at)
+    (e) => e.kind === "agent_dispatch" && isDispatchEventLive(e) && !dischargedOnResearchLaneForDispatch(e) && !individuallyResearchSatisfied(e.at)
   );
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);
@@ -8920,9 +8953,10 @@ try {
       recomputeDegraded(e);
     }
   }
+  const newnessBase = git.ok && git.settled && !git.base_lost ? git.settled.sha : "HEAD";
   let newUnowned = [];
   if (unowned.length) {
-    const head = spawnSync5("git", ["ls-tree", "-r", "HEAD", "--name-only", "--", ...unowned], {
+    const head = spawnSync5("git", ["ls-tree", "-r", newnessBase, "--name-only", "--", ...unowned], {
       cwd: input.cwd,
       encoding: "utf8",
       timeout: 3e4

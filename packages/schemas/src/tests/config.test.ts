@@ -14,7 +14,15 @@ test('shipped default config parses and carries the spec defaults (§12, §7.2)'
   // (738253b2) — bumped 4.x -> 5 on 2026-07-26, so this pair is expected to change
   // on each generational bump; the assertion exists to catch an accidental drift to
   // an alias or a stale pin, not to freeze a version.
-  assert.equal(shipped.models.implementor.model, 'claude-sonnet-5');
+  // implementor -> claude-opus-5-5 per decision implementor-default-model-opus-5-5;
+  // researcher, scout and librarian stay on claude-sonnet-5.
+  assert.equal(shipped.models.implementor.model, 'claude-opus-5-5');
+  // medium: Anthropic's Opus 5.5 launch default effort (finding 6a9b16a1).
+  assert.equal(shipped.models.implementor.effort, 'medium');
+  // The schema's per-key defaults are the effective default for every project
+  // whose config omits a models key; they must match the shipped file, or a bump
+  // to one silently misses projects that inherit from the other.
+  assert.deepEqual(parseConfig({}).models, shipped.models, 'schema models defaults match templates/default-config.json');
   for (const [role, v] of Object.entries(shipped.models)) {
     assert.match(v.model, /^claude-(opus|sonnet|haiku)-[0-9]/, `${role}: exact pinned id, never a bare tier alias (a127e6e1)`);
   }

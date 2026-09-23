@@ -275,6 +275,16 @@ try {
         files_source: filesSource,
         attribution,
         attribution_case: res.case,
+        // Board d33d8ac4 HIGH (Sol): a per-dispatch consumer (H10's research
+        // return gate) needs a key unique per ROUND, not per agent_id — the
+        // same agent_id recurs across resumed rounds (and, off this session
+        // alone, across sessions). The state-machine resolver already proves
+        // the tool_use_id that bound THIS round wherever real Pre/Post
+        // evidence exists (source 'post'/'derived-type-unique'); a 'resume'
+        // or 'unattributable' Start carries none by the resolver's own design
+        // (res.tool_use_id is null — no fresh binding to attribute), and this
+        // is copied through exactly rather than guessed.
+        tool_use_id: typeof res.tool_use_id === 'string' && res.tool_use_id ? res.tool_use_id : null,
         at: new Date().toISOString(),
       };
       if (claimed.length) entry.exclusive_resources = claimed;

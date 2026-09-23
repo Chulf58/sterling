@@ -4790,7 +4790,7 @@ var configSchema = external_exports.object({
   // longer needs an indirection layer between an agent's name and its config
   // key.
   models: external_exports.object({
-    implementor: modelEffort.default({ model: "claude-sonnet-5", effort: "high" }),
+    implementor: modelEffort.default({ model: "claude-opus-5-5", effort: "medium" }),
     researcher: modelEffort.default({ model: "claude-sonnet-5", effort: "medium" }),
     scout: modelEffort.default({ model: "claude-sonnet-5", effort: "low" }),
     classifiers: modelEffort.default({ model: "claude-haiku-4-5", effort: "low" }),
@@ -6450,6 +6450,16 @@ try {
         files_source: filesSource,
         attribution,
         attribution_case: res.case,
+        // Board d33d8ac4 HIGH (Sol): a per-dispatch consumer (H10's research
+        // return gate) needs a key unique per ROUND, not per agent_id — the
+        // same agent_id recurs across resumed rounds (and, off this session
+        // alone, across sessions). The state-machine resolver already proves
+        // the tool_use_id that bound THIS round wherever real Pre/Post
+        // evidence exists (source 'post'/'derived-type-unique'); a 'resume'
+        // or 'unattributable' Start carries none by the resolver's own design
+        // (res.tool_use_id is null — no fresh binding to attribute), and this
+        // is copied through exactly rather than guessed.
+        tool_use_id: typeof res.tool_use_id === "string" && res.tool_use_id ? res.tool_use_id : null,
         at: (/* @__PURE__ */ new Date()).toISOString()
       };
       if (claimed.length) entry.exclusive_resources = claimed;

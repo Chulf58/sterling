@@ -433,6 +433,95 @@ test('a failing step stops the sequence loudly (exit 1) — no half-update in si
   }
 });
 
+test('a failing check step still stops before the test battery and before sync (exit 1)', async () => {
+  const cwd = scratchCwd();
+  try {
+    const { exec, calls } = fakeExec({ behind: 1, failing: 'npm run check' });
+    const report = await runUpdate({ cwd, exec, log: () => {}, projects: [{ name: 'p', repo_path: '/tmp/p' }], opts: {} });
+
+    assert.equal(report.exit, 1);
+    assert.ok(calls.includes('npm run check'), 'the check step ran and failed');
+    assert.equal(calls.filter((c) => c === 'npm test').length, 0, 'a red check must never even start the test battery');
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 0, 'a red check must still stop before sync — unlike a red test battery');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// ── decision update-red-test-battery-still-syncs-agents-skips-store-migration:
+//    a RED test battery is the one failure that does NOT stop the sequence — it
+//    skips store migration (the one irreversible step) but still syncs agents,
+//    still exits non-zero, and never writes the completion marker ─────────────
+
+test('a red test battery skips store migration (machine + per-project), still syncs agents, exits non-zero, writes no completion marker, and says so loudly', async () => {
+  const cwd = scratchCwd();
+  const projA = mkdtempSync(join(tmpdir(), 'sterling-update-proj-'));
+  try {
+    // A legacy (pre-v2) store at BOTH the machine level and a registered
+    // project, so a passing run would migrate both.
+    const machineStore = join(cwd, '.sterling', 'sterling.db');
+    legacyStoreAt(machineStore);
+    const projStore = join(projA, '.sterling', 'sterling.db');
+    legacyStoreAt(projStore);
+
+    const { exec, calls } = fakeExec({ behind: 1, failing: 'npm test' });
+    const lines = [];
+    const report = await runUpdate({
+      cwd,
+      exec,
+      log: (m) => lines.push(m),
+      projects: [{ name: 'ProjA', repo_path: projA }],
+      opts: {},
+    });
+    const out = lines.join('\n');
+
+    assert.equal(report.exit, 1, 'a red battery must exit 1 — the same code `step()` already sets on any step failure, never left at some other nonzero value');
+    assert.ok(calls.includes('npm test'), 'the battery actually ran');
+    assert.equal(
+      calls.filter((c) => c.includes('migrate-stores.mjs')).length,
+      0,
+      'store migration (machine AND per-project) must be skipped on a red battery'
+    );
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1, 'agent sync must still run on a red battery');
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'no completion marker on a red battery');
+    assert.match(out, /test battery|TEST BATTERY/i, 'the failure names the red battery');
+    assert.match(out, /migration.*skip|skip.*migration/i, 'the loud line names the skipped migration');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(projA, { recursive: true, force: true });
+  }
+});
+
+test('a green test battery run is unchanged: migration still runs (machine + per-project), sync runs, marker is written', async () => {
+  const cwd = scratchCwd();
+  const projA = mkdtempSync(join(tmpdir(), 'sterling-update-proj-'));
+  try {
+    const machineStore = join(cwd, '.sterling', 'sterling.db');
+    legacyStoreAt(machineStore);
+    const projStore = join(projA, '.sterling', 'sterling.db');
+    legacyStoreAt(projStore);
+
+    const { exec, calls } = fakeExec({ behind: 1 });
+    const report = await runUpdate({
+      cwd,
+      exec,
+      log: () => {},
+      projects: [{ name: 'ProjA', repo_path: projA }],
+      opts: {},
+    });
+
+    assert.equal(report.exit, 0);
+    assert.ok(calls.includes('npm test'));
+    assert.ok(calls.some((c) => c.includes('migrate-stores.mjs') && c.includes(machineStore)), 'machine store migration still runs');
+    assert.ok(calls.some((c) => c.includes('migrate-stores.mjs') && c.includes(projStore)), 'project store migration still runs');
+    assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 1);
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), true, 'a green run still writes the completion marker');
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(projA, { recursive: true, force: true });
+  }
+});
+
 // The stamp-contract step is deliberately TOLERATED (a sibling's CLAUDE.md must
 // never abort this clone's update) — but tolerated used to mean its verdict lived
 // only in a block sandwiched between build/test/check output. The closing summary
@@ -484,6 +573,7 @@ test('a per-project sync refusal surfaces as exit 2 without stopping the other p
     assert.equal(report.exit, 2);
     assert.equal(calls.filter((c) => c.includes('sync-agents')).length, 2, 'the refusal must not abort the fan-out');
     assert.deepEqual(report.projects.map((p) => p.status), [2, 0]);
+    assert.equal(existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)), false, 'a sync refusal must not leave a completion marker');
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

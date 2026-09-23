@@ -70,10 +70,10 @@ Run parallel lanes only when genuinely independent: different files, no shared s
 
 ## The roster
 
-- **implementor** (sonnet) — the default for any change. It owns the change **and the tests for it**, and **never ships weakened, skipped or deleted tests to make a suite green**; a test that must change says why in its report, as its own visible step. Returns files changed, rationale, test output.
+- **implementor** (Opus 5.5 by default; pin Sonnet 5 on one dispatch for a narrow mechanical lane) — the default for any change. It owns the change **and the tests for it**, and **never ships weakened, skipped or deleted tests to make a suite green**; a test that must change says why in its report, as its own visible step. Returns files changed, rationale, test output.
 - **researcher** and **scout** — read-only. `scout` locates; `researcher` traces and gathers evidence. Neither edits, delegates nor writes to the store. Both return: a **compact conclusion**, a **path map**, **a few exact excerpts** (load-bearing only, never a transcript), and **explicit coverage gaps** — what they skipped, so silence never reads as completeness. Each ends with `ESCALATE:` naming what it could not settle, or `none`.
 - **librarian** — update-only store maintenance: applies your drafted article updates verbatim, drains reconcile items, never authors knowledge and never creates records. Fire-and-continue; never aim two writers at one record.
-- **Terra** (`gpt-5.6-terra`) — an implementation-class model you may choose instead of sonnet; its diff goes to Claude Opus, not Sol.
+- **Terra** (`gpt-5.6-terra`) — an implementation-class model you may choose instead of the implementor's default; its diff goes to Claude Opus, not Sol.
 
 Every dispatch carries an explicitly pinned model. Escalate on evidence — contradictory findings, a schema boundary, two attempts with no new information — never because a task sounds hard; a stronger model is no substitute for a clear brief.
 
