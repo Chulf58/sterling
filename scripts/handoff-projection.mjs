@@ -16,10 +16,11 @@
 //      'primary'; no store; the store yields no records while exports exist; or a
 //      target path holds a file Sterling did not generate
 //   1  failed part-way — the export may be INCOMPLETE; rerun after fixing
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openProject } from './lib/project.mjs';
+import { ContainmentError, existsContained, readContained, writeContained, unlinkContained } from './lib/contained-fs.mjs';
 import { buildHandoffFiles, planHandoff, registeredProjections, isSterlingClone } from './lib/handoff-projection.mjs';
 
 const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -52,13 +53,19 @@ try {
 }
 
 const { files, recordCount } = buildHandoffFiles(records);
-const plan = planHandoff(target, files);
+let plan;
+try {
+  plan = planHandoff(target, files);
+} catch (err) {
+  if (!(err instanceof ContainmentError)) throw err;
+  refuse(`${err.message} (every read, write and removal stays inside the project).`);
+}
 // An empty store may only CREATE the "No records yet" indexes (a genuinely new
 // project) or find them unchanged. If it would replace or remove ANY existing
 // export — record files or the root indexes alone — the store is empty or not
 // the one that produced them, so nothing is touched (Sol review HIGH).
 if (recordCount === 0) {
-  const replaced = [...plan.write.filter((rel) => existsSync(join(target, rel))), ...plan.remove];
+  const replaced = [...plan.write.filter((rel) => existsContained(target, rel, 'file')), ...plan.remove];
   if (replaced.length) {
     refuse(`the store holds no articles, decisions or anti-patterns, but existing exports would be replaced or removed (${replaced.join(', ')}) — refusing to wipe them from an empty or foreign store.`);
   }
@@ -70,21 +77,20 @@ if (plan.foreign.length) {
 const done = { written: [], removed: [] };
 try {
   for (const rel of plan.write) {
-    mkdirSync(dirname(join(target, rel)), { recursive: true });
-    writeFileSync(join(target, rel), files.get(rel));
+    writeContained(target, rel, files.get(rel));
     done.written.push(rel);
   }
   for (const rel of plan.remove) {
-    unlinkSync(join(target, rel));
+    unlinkContained(target, rel);
     done.removed.push(rel);
   }
-  const configPath = join(target, '.sterling', 'config.json');
-  const raw = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
+  const configRel = '.sterling/config.json';
+  const raw = existsContained(target, configRel, 'file') ? readContained(target, configRel) : '';
   const parsed = raw ? JSON.parse(raw) : {};
   const next = registeredProjections(parsed.generated_projections, files, done.removed);
   if (JSON.stringify(next) !== JSON.stringify(parsed.generated_projections ?? [])) {
     parsed.generated_projections = next;
-    writeFileSync(configPath, JSON.stringify(parsed, null, 2) + (raw.endsWith('\n') || !raw ? '\n' : ''));
+    writeContained(target, configRel, JSON.stringify(parsed, null, 2) + (raw.endsWith('\n') || !raw ? '\n' : ''));
     done.registered = true;
   }
 } catch (err) {

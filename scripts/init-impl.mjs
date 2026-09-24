@@ -969,6 +969,7 @@ if (isSterlingClone(target, pluginRoot)) {
     locally_modified_up_to_date: ['differs', 'locally modified, render unchanged — left untouched'],
     refused_local_modification: ['refused', 'locally modified AND render changed — overwrite refused (see guidance below)'],
     foreign_file: ['refused', 'not Sterling-generated — never overwritten (see guidance below)'],
+    refused_unsafe_path: ['refused', 'a symlink or non-directory on the way — nothing written (see guidance below)'],
   };
   for (const r of opencodeReport) {
     const [status, detail] = opencodeRows[r.status];

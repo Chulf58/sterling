@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -339,6 +339,36 @@ test('isSterlingClone (the skip sync-agents and init apply): this clone and any 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Sol review HIGH (symlink escape): a symlinked .opencode, .opencode/agents or
+// agent file must never let the sync read or write outside the project.
+for (const [label, link, toFile] of [
+  ['.opencode', '.opencode', false],
+  ['.opencode/agents', '.opencode/agents', false],
+  ['an agent file', '.opencode/agents/scout.md', true],
+]) {
+  test(`sync refuses a symlinked ${label}, writing nothing outside the project`, () => {
+    const dir = tempTarget();
+    const outside = mkdtempSync(join(tmpdir(), 'sterling-opencode-outside-'));
+    try {
+      writeFileSync(join(outside, 'scout.md'), 'outside content\n');
+      mkdirSync(dirname(join(dir, link)), { recursive: true });
+      symlinkSync(toFile ? join(outside, 'scout.md') : outside, join(dir, link));
+      const { report } = syncOpenCodeAgents({ registryPath, templatesDir, targetDir: dir });
+      const refused = report.filter((r) => r.status === 'refused_unsafe_path');
+      assert.ok(refused.length >= 1, JSON.stringify(report));
+      for (const r of refused) {
+        assert.equal(r.refused, true);
+        assert.match(r.instruction, /symlink/);
+      }
+      assert.deepEqual(readdirSync(outside), ['scout.md'], 'nothing new outside');
+      assert.equal(readFileSync(join(outside, 'scout.md'), 'utf8'), 'outside content\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+}
 
 test('sync treats a CRLF checkout of an unmodified agent as up_to_date', () => {
   const dir = tempTarget();

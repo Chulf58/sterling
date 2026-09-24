@@ -18,7 +18,8 @@
 // header's content hash with a fresh render's, so a renderer or permission-map
 // change invalidates exactly like a template change.
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
+import { ContainmentError, existsContained, readContained, writeContained } from './contained-fs.mjs';
 import { join } from 'node:path';
 import { sha256, loadRegistry, OPENCODE_PERMISSION_KEYS, OPENCODE_PERMISSION_VALUES } from './agent-distribution.mjs';
 import { renderPortableText } from './agent-fences.mjs';
@@ -88,8 +89,38 @@ export function opencodeRefuseInstruction(name, reason) {
   ].join('\n');
 }
 
+// One agent, every filesystem access through contained-fs: a symlinked
+// .opencode, .opencode/agents or agent file is refused (ContainmentError),
+// never followed out of the project (Sol review HIGH).
+function syncOne(targetDir, candidate) {
+  const { name } = candidate;
+  const rel = `${OPENCODE_AGENTS_DIR}/${name}.md`;
+  if (!existsContained(targetDir, rel, 'file')) {
+    writeContained(targetDir, rel, candidate.content);
+    return { name, status: 'installed' };
+  }
+  const installed = readContained(targetDir, rel);
+  const header = parseOpenCodeHeader(installed);
+  if (!header || header.template !== name) {
+    return { name, status: 'foreign_file', refused: true, instruction: opencodeRefuseInstruction(name, 'carries no Sterling portable-agent header (a file Sterling did not write)') };
+  }
+  if (normalize(installed) === candidate.content) return { name, status: 'up_to_date' };
+  const modified = sha256(stripHeader(installed, header)) !== header.contentHash;
+  if (!modified) {
+    writeContained(targetDir, rel, candidate.content);
+    return { name, status: 'refreshed' };
+  }
+  if (stripHeader(installed, header) === stripHeader(candidate.content, parseOpenCodeHeader(candidate.content))) {
+    writeContained(targetDir, rel, candidate.content);
+    return { name, status: 'header_repaired' };
+  }
+  if (header.contentHash === candidate.contentHash) return { name, status: 'locally_modified_up_to_date' };
+  return { name, status: 'refused_local_modification', refused: true, instruction: opencodeRefuseInstruction(name, 'was edited locally AND its fresh render changed') };
+}
+
 // Statuses: installed | up_to_date | refreshed | header_repaired |
-// locally_modified_up_to_date | refused_local_modification (refused) | foreign_file (refused).
+// locally_modified_up_to_date | refused_local_modification (refused) | foreign_file (refused) |
+// refused_unsafe_path (refused: a symlink or non-directory on the way).
 export function syncOpenCodeAgents({ registryPath, templatesDir, targetDir, renderer = OPENCODE_RENDERER }) {
   const entries = portableAgentEntries(loadRegistry(registryPath));
   // Render everything before writing anything: a bad template refuses the whole set.
@@ -98,38 +129,13 @@ export function syncOpenCodeAgents({ registryPath, templatesDir, targetDir, rend
     if (out.name !== entry.name) throw new Error(`registry/template name mismatch: registry says '${entry.name}', template says '${out.name}'`);
     return out;
   });
-  const dir = join(targetDir, OPENCODE_AGENTS_DIR);
-  mkdirSync(dir, { recursive: true });
   const report = [];
   for (const candidate of rendered) {
-    const { name } = candidate;
-    const path = join(dir, `${name}.md`);
-    if (!existsSync(path)) {
-      writeFileSync(path, candidate.content);
-      report.push({ name, status: 'installed' });
-      continue;
-    }
-    const installed = readFileSync(path, 'utf8');
-    const header = parseOpenCodeHeader(installed);
-    if (!header || header.template !== name) {
-      report.push({ name, status: 'foreign_file', refused: true, instruction: opencodeRefuseInstruction(name, 'carries no Sterling portable-agent header (a file Sterling did not write)') });
-      continue;
-    }
-    if (normalize(installed) === candidate.content) {
-      report.push({ name, status: 'up_to_date' });
-      continue;
-    }
-    const modified = sha256(stripHeader(installed, header)) !== header.contentHash;
-    if (!modified) {
-      writeFileSync(path, candidate.content);
-      report.push({ name, status: 'refreshed' });
-    } else if (stripHeader(installed, header) === stripHeader(candidate.content, parseOpenCodeHeader(candidate.content))) {
-      writeFileSync(path, candidate.content);
-      report.push({ name, status: 'header_repaired' });
-    } else if (header.contentHash === candidate.contentHash) {
-      report.push({ name, status: 'locally_modified_up_to_date' });
-    } else {
-      report.push({ name, status: 'refused_local_modification', refused: true, instruction: opencodeRefuseInstruction(name, 'was edited locally AND its fresh render changed') });
+    try {
+      report.push(syncOne(targetDir, candidate));
+    } catch (err) {
+      if (!(err instanceof ContainmentError)) throw err;
+      report.push({ name: candidate.name, status: 'refused_unsafe_path', refused: true, instruction: opencodeRefuseInstruction(candidate.name, `cannot be written safely: ${err.message}`) });
     }
   }
   return { report };

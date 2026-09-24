@@ -18,8 +18,9 @@
 // Deterministic: no timestamps, stable filenames and ordering, so an unchanged
 // store reproduces the same bytes and the CLI writes nothing.
 
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { existsContained, readContained, readdirContained } from './contained-fs.mjs';
 
 const fwd = (p) => p.replace(/\\/g, '/');
 
@@ -199,14 +200,15 @@ export function buildHandoffFiles(records) {
 const normalize = (s) => s.replace(/\r\n/g, '\n');
 
 // Every Sterling-generated record file already on disk under docs/sterling/.
+// All filesystem access goes through contained-fs: a symlinked or non-directory
+// component throws ContainmentError instead of being followed.
 export function existingRecordFiles(root) {
   const out = [];
   for (const dir of Object.values(TYPE_DIRS)) {
-    const abs = join(root, HANDOFF_DOCS_DIR, dir);
-    if (!existsSync(abs)) continue;
-    for (const name of readdirSync(abs).filter((n) => n.endsWith('.md')).sort(byText)) {
-      const rel = `${HANDOFF_DOCS_DIR}/${dir}/${name}`;
-      if (isHandoffOwned(readFileSync(join(root, rel), 'utf8'), rel)) out.push(rel);
+    const relDir = `${HANDOFF_DOCS_DIR}/${dir}`;
+    for (const name of readdirContained(root, relDir).filter((n) => n.endsWith('.md')).sort(byText)) {
+      const rel = `${relDir}/${name}`;
+      if (isHandoffOwned(readContained(root, rel), rel)) out.push(rel);
     }
   }
   return out;
@@ -216,12 +218,11 @@ export function existingRecordFiles(root) {
 export function planHandoff(root, files) {
   const plan = { write: [], unchanged: [], remove: [], foreign: [] };
   for (const [rel, content] of files) {
-    const abs = join(root, rel);
-    if (!existsSync(abs)) {
+    if (!existsContained(root, rel, 'file')) {
       plan.write.push(rel);
       continue;
     }
-    const current = readFileSync(abs, 'utf8');
+    const current = readContained(root, rel);
     if (!isHandoffOwned(current, rel)) plan.foreign.push(rel);
     else if (normalize(current) === content) plan.unchanged.push(rel);
     else plan.write.push(rel);
@@ -247,6 +248,5 @@ export function registeredProjections(existing, files, removed = []) {
 export function isOwnedExport(root, rel) {
   if (HANDOFF_ROOT_FILES.includes(rel)) return true;
   if (!isHandoffPath(rel)) return false;
-  const abs = join(root, rel);
-  return existsSync(abs) && isHandoffOwned(readFileSync(abs, 'utf8'), rel);
+  return existsContained(root, rel, 'file') && isHandoffOwned(readContained(root, rel), rel);
 }
