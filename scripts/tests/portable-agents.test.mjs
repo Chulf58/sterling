@@ -136,7 +136,8 @@ const EXPECTED_FRONTMATTER = {
   ].join('\n'),
   researcher: [
     '---',
-    `description: ${template('researcher').match(/^description: (.*)$/m)[1]}`,
+    // the registry's portable description override (the template's says 'holds no store-write grant')
+    `description: ${JSON.stringify('Read-only research and investigation. Traces how code works, maps dependencies, reads docs and git history, and reports evidence-backed findings. Cannot edit. The default investigator for "how does X work", "where is Y handled", or "trace this code path".')}`,
     'mode: subagent',
     'permission:',
     '  edit: deny',
@@ -164,6 +165,12 @@ for (const entry of portableAgentEntries(loadRegistry(registryPath))) {
     assert.doesNotMatch(content, /^model:|^effort:|^tools:|^disallowedTools:|^required_inputs:|^name:/m, 'Claude-only keys and the model pin are dropped');
   });
 
+  test(`portable frontmatter description of ${entry.name} carries no Sterling vocabulary`, () => {
+    const { content } = renderOpenCodeAgent(template(entry.name), entry.file, entry.opencode);
+    const description = content.match(/^description: (.*)$/m)[1];
+    assert.deepEqual(findPortableVocabulary(description), []);
+  });
+
   test(`portable body of ${entry.name} carries no Sterling vocabulary and no fence marker`, () => {
     const { content } = renderOpenCodeAgent(template(entry.name), entry.file, entry.opencode);
     const header = parseOpenCodeHeader(content);
@@ -184,6 +191,28 @@ for (const entry of portableAgentEntries(loadRegistry(registryPath))) {
     assert.match(header.contentHash, /^[0-9a-f]{64}$/);
   });
 }
+
+test('the vocabulary scan covers the portable description: a template description with Sterling vocabulary fails the lint unless the registry overrides it', () => {
+  const leaky = '---\nname: scout\ndescription: Holds no store-write grant.\n---\n\nPlain body.\n';
+  assert.deepEqual(lintAgentFences(leaky, 'scout.md', { 'scout.md': {} }).map((v) => v.kind), ['portable_vocabulary']);
+  assert.deepEqual(lintAgentFences(leaky, 'scout.md', { 'scout.md': { description: 'Finds files. Cannot edit.' } }), []);
+  assert.deepEqual(lintAgentFences(leaky, 'scout.md', { 'scout.md': { description: 'Uses knowledge_query.' } }).map((v) => v.kind), ['portable_vocabulary']);
+  assert.deepEqual(lintAgentFences('---\nname: librarian\ndescription: store-write clerk\n---\n', 'librarian.md'), [], 'a non-portable agent is not vocabulary-checked');
+});
+
+test('the registry refuses a portable description that is not one non-empty line', () => {
+  const dir = tempTarget();
+  try {
+    for (const bad of ['', 'two\nlines', 42]) {
+      const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
+      registry.agents.find((a) => a.name === 'scout').opencode.description = bad;
+      writeFileSync(join(dir, 'r.json'), JSON.stringify(registry));
+      assert.throws(() => loadRegistry(join(dir, 'r.json')), /opencode\.description/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('the portable render refuses a permission key or value OpenCode does not document', () => {
   assert.throws(() => renderOpenCodeAgent(template('scout'), 'scout.md', { permission: { edit: 'nope' } }), /permission/);

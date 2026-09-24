@@ -8773,8 +8773,11 @@ var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
 function validateOpenCodeEntry(entry, where) {
   const block = entry.opencode;
   if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error(`${where} must be an object`);
-  const unknown = Object.keys(block).find((key) => key !== "permission");
-  if (unknown !== void 0) throw new Error(`${where}: unknown key '${unknown}' \u2014 the only key is permission`);
+  const unknown = Object.keys(block).find((key) => key !== "permission" && key !== "description");
+  if (unknown !== void 0) throw new Error(`${where}: unknown key '${unknown}' \u2014 the keys are permission and description`);
+  if (block.description !== void 0 && (typeof block.description !== "string" || !block.description.trim() || /[\r\n]/.test(block.description))) {
+    throw new Error(`${where}.description must be one non-empty line of text`);
+  }
   if (block.permission === void 0) return;
   if (!block.permission || typeof block.permission !== "object" || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
   for (const [key, value] of Object.entries(block.permission)) {

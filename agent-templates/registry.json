@@ -2,7 +2,7 @@
   "version": 1,
   "agents": [
     { "name": "implementor", "file": "implementor.md", "opencode": {} },
-    { "name": "researcher", "file": "researcher.md", "opencode": { "permission": { "edit": "deny", "webfetch": "deny", "task": "deny" } } },
+    { "name": "researcher", "file": "researcher.md", "opencode": { "description": "Read-only research and investigation. Traces how code works, maps dependencies, reads docs and git history, and reports evidence-backed findings. Cannot edit. The default investigator for \"how does X work\", \"where is Y handled\", or \"trace this code path\".", "permission": { "edit": "deny", "webfetch": "deny", "task": "deny" } } },
     { "name": "scout", "file": "scout.md", "opencode": { "permission": { "edit": "deny", "bash": "deny", "webfetch": "deny", "task": "deny" } } },
     { "name": "librarian", "file": "librarian.md" },
     { "name": "conductor", "file": "conductor.md" }

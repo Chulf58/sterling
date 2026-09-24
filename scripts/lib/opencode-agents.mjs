@@ -46,14 +46,17 @@ function permissionLines(permission, label) {
   return lines;
 }
 
-export function renderOpenCodeAgent(templateContent, label, { permission } = {}, renderer = OPENCODE_RENDERER) {
+export function renderOpenCodeAgent(templateContent, label, { permission, description: portableDescription } = {}, renderer = OPENCODE_RENDERER) {
   const m = normalize(templateContent).match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
   if (!m) throw new Error(`template ${label}: missing frontmatter block`);
   const [, templateFrontmatter, templateBody] = m;
   const name = templateFrontmatter.match(/^name:\s*(\S+)\s*$/m)?.[1];
   const description = templateFrontmatter.match(/^description:\s*(.+)$/m)?.[1];
   if (!name || !description) throw new Error(`template ${label}: a portable agent needs name and description in its frontmatter`);
-  const frontmatter = ['---', `description: ${description}`, 'mode: subagent', ...permissionLines(permission, label), '---'].join('\n');
+  // The registry's override is emitted as a JSON string, which is a valid YAML
+  // double-quoted scalar whatever it contains; the template line is verbatim.
+  const descriptionLine = portableDescription !== undefined ? `description: ${JSON.stringify(portableDescription)}` : `description: ${description}`;
+  const frontmatter = ['---', descriptionLine, 'mode: subagent', ...permissionLines(permission, label), '---'].join('\n');
   const body = renderPortableText(templateBody, label);
   const unsubstituted = body.match(/\{\{[A-Z_]+\}\}/);
   if (unsubstituted) {

@@ -118,6 +118,7 @@ export const PORTABLE_VOCABULARY = [
   { term: 'mcp__ tool name', re: /mcp__/ },
   { term: 'H<n> hook name', re: /\bH\d+\b/ },
   { term: 'Sterling', re: /sterling/i },
+  { term: 'knowledge store', re: /knowledge[- ]store|store-write/i },
   { term: 'conductor', re: /\bconductor\b/i },
   { term: 'required-inputs manifest', re: /required[-_ ]inputs/i },
 ];

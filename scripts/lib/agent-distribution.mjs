@@ -336,8 +336,13 @@ export const OPENCODE_PERMISSION_VALUES = ['allow', 'ask', 'deny'];
 function validateOpenCodeEntry(entry, where) {
   const block = entry.opencode;
   if (!block || typeof block !== 'object' || Array.isArray(block)) throw new Error(`${where} must be an object`);
-  const unknown = Object.keys(block).find((key) => key !== 'permission');
-  if (unknown !== undefined) throw new Error(`${where}: unknown key '${unknown}' — the only key is permission`);
+  const unknown = Object.keys(block).find((key) => key !== 'permission' && key !== 'description');
+  if (unknown !== undefined) throw new Error(`${where}: unknown key '${unknown}' — the keys are permission and description`);
+  // description: the portable frontmatter description, for a template whose own
+  // description names something an engineer without Sterling does not have.
+  if (block.description !== undefined && (typeof block.description !== 'string' || !block.description.trim() || /[\r\n]/.test(block.description))) {
+    throw new Error(`${where}.description must be one non-empty line of text`);
+  }
   if (block.permission === undefined) return;
   if (!block.permission || typeof block.permission !== 'object' || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
   for (const [key, value] of Object.entries(block.permission)) {
