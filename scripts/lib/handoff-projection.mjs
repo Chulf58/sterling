@@ -47,6 +47,8 @@ const HEADER = `${HANDOFF_MARKER} from this project's knowledge store — DO NOT
      your commit message rather than editing it. -->`;
 
 const TYPE_DIRS = { feature_article: 'articles', decision: 'decisions', anti_pattern: 'anti-patterns' };
+// Every directory the projection may create — init's destructive-conflict preflight checks them.
+export const HANDOFF_DIRS = [HANDOFF_DOCS_DIR, ...Object.values(TYPE_DIRS).map((d) => `${HANDOFF_DOCS_DIR}/${d}`)];
 const TYPE_LABELS = { feature_article: 'Feature article', decision: 'Decision', anti_pattern: 'Anti-pattern' };
 const NO_PATHS = 'No file paths';
 const ROOT_AREA = '(repository root)';

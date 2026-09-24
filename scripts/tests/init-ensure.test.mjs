@@ -2543,6 +2543,26 @@ test('OpenCode handoff: fresh init writes committed .opencode/agents/ and the ha
   }
 });
 
+// Sol review MEDIUM: the destructive-conflict preflight runs before ANY write, so
+// a regular file where a handoff directory must be is refused before init creates
+// anything.
+for (const rel of ['.opencode', '.opencode/agents', 'docs/sterling', 'docs/sterling/articles', 'docs/sterling/decisions', 'docs/sterling/anti-patterns']) {
+  test(`preflight: a regular file at ${rel} is refused before anything is written`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-preflight-'));
+    try {
+      mkdirSync(join(dir, dirname(rel)), { recursive: true });
+      writeFileSync(join(dir, rel), 'a file, not a directory\n');
+      const r = init(dir, FRESH_FLAGS);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, new RegExp(`init REFUSED \\(destructive\\): '${rel.replace(/\./g, '\\.')}' exists as a file`));
+      assert.ok(!existsSync(join(dir, '.sterling')), 'nothing was written');
+      assert.equal(readFileSync(join(dir, rel), 'utf8'), 'a file, not a directory\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  });
+}
+
 // Sol review MEDIUM: a target that ALREADY ignores the handoff paths would never
 // commit them. Init refuses those rows loudly, naming the rule, and leaves the
 // user's ignore rules alone.

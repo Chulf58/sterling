@@ -30,7 +30,7 @@ import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS } from './lib/handoff-projection.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -86,7 +86,10 @@ if (!existsSync(mcpServerEntry)) fail('init REFUSED: MCP server not built — ru
 // not for the second shipped executable).
 const tuiBundleEntry = join(pluginRoot, 'packages', 'tui', 'bundle', 'sterling-tui.mjs');
 if (!existsSync(tuiBundleEntry)) fail('init REFUSED: TUI bundle not built — run `npm run build:tui` in the plugin first', 2);
-for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claude', '.claude/agents']) {
+// .opencode, .opencode/agents and the handoff projection's directories joined the
+// list with the OpenCode handoff (Sol review): a file sitting where one must be
+// is refused here, before anything is written, not half-way through init.
+for (const rel of ['.sterling', '.sterling/runs', 'docs', 'docs/briefs', '.claude', '.claude/agents', '.opencode', OPENCODE_AGENTS_DIR, ...HANDOFF_DIRS]) {
   const p = join(target, rel);
   if (existsSync(p) && !statSync(p).isDirectory()) {
     fail(`init REFUSED (destructive): '${rel}' exists as a file but the manifest requires a directory — refusing to replace it`, 2);
