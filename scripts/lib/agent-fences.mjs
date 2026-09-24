@@ -17,30 +17,48 @@ export const FENCE_KINDS = {
   'portable-only': { open: '<!-- portable-only -->', close: '<!-- /portable-only -->' },
 };
 
-// Any line that mentions a fence name inside an HTML comment is meant as a
-// marker; one that is not byte-exact is malformed rather than silently prose.
-const MARKER_LIKE_RE = /<!--.*\b(?:sterling|portable)-only\b/;
+// Any HTML comment that NAMES a fence (any case, any separator, on one line or
+// spread over several) is meant as a marker. Only the four byte-exact marker
+// lines are markers; every other spelling is malformed and refused, never read
+// as prose — prose would leak its block into the portable render (Sol review).
+const FENCE_WORD_RE = /(?:sterling|portable)[\s_-]*only/i;
+const COMMENT_RE = /<!--[\s\S]*?(?:-->|$)/g;
+const EXACT_MARKERS = new Set(Object.values(FENCE_KINDS).flatMap(({ open, close }) => [open, close]));
 
 function classify(line) {
   for (const [kind, { open, close }] of Object.entries(FENCE_KINDS)) {
     if (line === open) return { kind, role: 'open' };
     if (line === close) return { kind, role: 'close' };
   }
-  return MARKER_LIKE_RE.test(line) ? { role: 'malformed' } : null;
+  return null;
+}
+
+// Every fence-naming comment that is not a byte-exact marker occupying its whole line.
+function malformedMarkers(text, label) {
+  const lines = text.split('\n');
+  const out = [];
+  for (const m of text.matchAll(COMMENT_RE)) {
+    if (!FENCE_WORD_RE.test(m[0])) continue;
+    const lineIndex = text.slice(0, m.index).split('\n').length - 1;
+    if (EXACT_MARKERS.has(m[0]) && lines[lineIndex] === m[0]) continue;
+    out.push({
+      kind: 'fence_malformed',
+      detail: `${label}:${lineIndex + 1}: ${JSON.stringify(m[0].slice(0, 80))} names a fence but is not exactly a marker line (${Object.values(FENCE_KINDS).map((f) => `'${f.open}'/'${f.close}'`).join(', ')}) — case, spacing and line breaks must match`,
+    });
+  }
+  return out;
 }
 
 const splitLines = (text) => text.replace(/\r\n/g, '\n').split('\n');
 
 export function validateFences(text, label) {
-  const violations = [];
+  const violations = malformedMarkers(text.replace(/\r\n/g, '\n'), label);
   let openFence = null;
   splitLines(text).forEach((line, index) => {
     const at = `${label}:${index + 1}`;
     const marker = classify(line);
     if (!marker) return;
-    if (marker.role === 'malformed') {
-      violations.push({ kind: 'fence_malformed', detail: `${at}: '${line}' names a fence but is not exactly a marker line (${Object.values(FENCE_KINDS).map((f) => `'${f.open}'/'${f.close}'`).join(', ')})` });
-    } else if (marker.role === 'open') {
+    if (marker.role === 'open') {
       if (openFence) {
         violations.push({ kind: 'fence_nested', detail: `${at}: '${line}' opens inside the ${openFence.kind} fence opened at line ${openFence.line} — fences never nest` });
       } else {

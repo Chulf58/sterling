@@ -59,6 +59,15 @@ test('fences: unbalanced, nested, mismatched and malformed markers fail loudly',
     ['<!-- sterling-only -->\nx\n<!-- /portable-only -->\n', 'fence_mismatched'],
     ['<!-- sterling-only-->\nx\n', 'fence_malformed'],
     ['text <!-- sterling-only -->\n', 'fence_malformed'],
+    // Sol review (fence leak): a marker spelled in another case, or split across
+    // a multiline HTML comment, must be rejected — never ignored as prose, which
+    // would leak its block into the portable render.
+    ['<!-- STERLING-ONLY -->\nsecret\n<!-- /STERLING-ONLY -->\n', 'fence_malformed'],
+    ['<!-- Portable-Only -->\nx\n<!-- /Portable-Only -->\n', 'fence_malformed'],
+    ['<!--\nsterling-only\n-->\nsecret\n<!-- /sterling-only -->\n', 'fence_malformed'],
+    ['<!-- note:\n  /sterling-only -->\n', 'fence_malformed'],
+    ['<!-- sterling only -->\nsecret\n', 'fence_malformed'],
+    ['<!-- sterling-only\n', 'fence_malformed'],
   ];
   for (const [text, kind] of cases) {
     const kinds = validateFences(text, 'fixture.md').map((v) => v.kind);
