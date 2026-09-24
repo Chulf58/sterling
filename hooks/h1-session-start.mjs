@@ -8759,6 +8759,20 @@ function extractBakedCommandPaths(content) {
   }
   return [...paths];
 }
+var OPENCODE_PERMISSION_KEYS = ["edit", "bash", "webfetch", "task"];
+var OPENCODE_PERMISSION_VALUES = ["allow", "ask", "deny"];
+function validateOpenCodeEntry(entry, where) {
+  const block = entry.opencode;
+  if (!block || typeof block !== "object" || Array.isArray(block)) throw new Error(`${where} must be an object`);
+  const unknown = Object.keys(block).find((key) => key !== "permission");
+  if (unknown !== void 0) throw new Error(`${where}: unknown key '${unknown}' \u2014 the only key is permission`);
+  if (block.permission === void 0) return;
+  if (!block.permission || typeof block.permission !== "object" || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
+  for (const [key, value] of Object.entries(block.permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}.permission: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(", ")})`);
+    if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.permission.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(", ")}`);
+  }
+}
 function loadRegistry(registryPath2) {
   const registry = JSON.parse(readFileSync3(registryPath2, "utf8"));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
@@ -8776,6 +8790,7 @@ function loadRegistry(registryPath2) {
     if (typeof entry.file !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
       throw new Error(`agent registry ${registryPath2}: agents[${index}].file must be a template filename ending in .md`);
     }
+    if (entry.opencode !== void 0) validateOpenCodeEntry(entry, `agent registry ${registryPath2}: agents[${index}].opencode`);
     if (names.has(entry.name) || files.has(entry.file)) {
       throw new Error(`agent registry ${registryPath2}: duplicate agent name or template file at agents[${index}]`);
     }

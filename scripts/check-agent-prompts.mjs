@@ -6,15 +6,22 @@
 // rule rather than more conductor prose.
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { lintAgentPrompt, lintAbsenceDiscipline, collectAgentTemplates } from './lib/checks.mjs';
+// ALSO enforces the agent fences and the portable-vocabulary rule
+// (lintAgentFences: sterling-only / portable-only blocks, decision
+// init-prepares-opencode-portable-agents-and-target-handoff-projections).
+import { lintAgentPrompt, lintAbsenceDiscipline, lintAgentFences, collectAgentTemplates } from './lib/checks.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const templates = collectAgentTemplates(join(root, 'agent-templates')).filter((t) => t.file !== 'registry.json');
 
-const violations = templates.flatMap((t) => [...lintAgentPrompt(t.content, t.file), ...lintAbsenceDiscipline(t.content, t.file)]);
+const violations = templates.flatMap((t) => [
+  ...lintAgentPrompt(t.content, t.file),
+  ...lintAbsenceDiscipline(t.content, t.file),
+  ...lintAgentFences(t.content, t.file),
+]);
 if (violations.length) {
   console.error('prompt linter FAILED:');
   for (const v of violations) console.error(`  [${v.kind}] ${v.detail}`);
   process.exit(1);
 }
-console.log(`prompt linter: ok (${templates.length} template(s))`);
+console.log(`prompt linter: ok (${templates.length} template(s); fences ok, portable vocabulary ok)`);

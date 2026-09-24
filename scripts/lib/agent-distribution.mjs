@@ -11,6 +11,7 @@ import { readFileSync, writeFileSync, readdirSync, existsSync, mkdirSync, statSy
 import { join } from 'node:path';
 import { AGENT_MODEL_KEY, AGENT_TOOL_NAME_RE } from '@sterling/schemas';
 import { MCP_PREFIXES } from './checks.mjs';
+import { renderClaudeText } from './agent-fences.mjs';
 
 // Dead-term check (spec §0.4, CLAUDE.md conduct rules): no residue of the
 // predecessor's vocabulary in anything shipped, scaffolded, or generated.
@@ -172,7 +173,11 @@ export function renderInstalledAgent(templateContent, label, { pluginVersion, no
   // emission rule — the backslash check below guards the substituted result) and
   // {{MODEL}}/{{EFFORT}} tokens resolved per agent from config.models (98064d77).
   const allVars = { ...vars, ...resolveModelVars(templateContent, label, config) };
-  let substituted = templateContent;
+  // Fences (agent-fences.mjs): the Claude render keeps sterling-only content and
+  // drops only its marker lines, and drops portable-only blocks whole, so a fenced
+  // template installs byte-identically to its unfenced form. template_hash below
+  // stays the hash of the RAW template.
+  let substituted = renderClaudeText(templateContent, label);
   for (const [key, value] of Object.entries(allVars)) {
     substituted = substituted.split(`{{${key}}}`).join(value);
   }
@@ -318,6 +323,29 @@ export function setInstalledModelEffort(installedContent, { model, effort, plugi
   return `---\n${frontmatter}\n---\n${newHeader}\n${body}`;
 }
 
+// The portable (OpenCode) roster lives in the registry itself (decision
+// init-prepares-opencode-portable-agents-and-target-handoff-projections): an entry
+// with an `opencode` block is rendered to <target>/.opencode/agents/ by
+// scripts/lib/opencode-agents.mjs; an entry without one (librarian, conductor) is
+// not. The permission keys and values are the ones OpenCode documents
+// (opencode.ai/docs/agents, fetched 2026-09-24); anything else is refused, never
+// passed through.
+export const OPENCODE_PERMISSION_KEYS = ['edit', 'bash', 'webfetch', 'task'];
+export const OPENCODE_PERMISSION_VALUES = ['allow', 'ask', 'deny'];
+
+function validateOpenCodeEntry(entry, where) {
+  const block = entry.opencode;
+  if (!block || typeof block !== 'object' || Array.isArray(block)) throw new Error(`${where} must be an object`);
+  const unknown = Object.keys(block).find((key) => key !== 'permission');
+  if (unknown !== undefined) throw new Error(`${where}: unknown key '${unknown}' — the only key is permission`);
+  if (block.permission === undefined) return;
+  if (!block.permission || typeof block.permission !== 'object' || Array.isArray(block.permission)) throw new Error(`${where}.permission must be an object`);
+  for (const [key, value] of Object.entries(block.permission)) {
+    if (!OPENCODE_PERMISSION_KEYS.includes(key)) throw new Error(`${where}.permission: unknown key '${key}' (known: ${OPENCODE_PERMISSION_KEYS.join(', ')})`);
+    if (!OPENCODE_PERMISSION_VALUES.includes(value)) throw new Error(`${where}.permission.${key}: '${value}' is not one of ${OPENCODE_PERMISSION_VALUES.join(', ')}`);
+  }
+}
+
 export function loadRegistry(registryPath) {
   const registry = JSON.parse(readFileSync(registryPath, 'utf8'));
   if (registry.version !== 1 || !Array.isArray(registry.agents)) {
@@ -335,6 +363,7 @@ export function loadRegistry(registryPath) {
     if (typeof entry.file !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*\.md$/.test(entry.file)) {
       throw new Error(`agent registry ${registryPath}: agents[${index}].file must be a template filename ending in .md`);
     }
+    if (entry.opencode !== undefined) validateOpenCodeEntry(entry, `agent registry ${registryPath}: agents[${index}].opencode`);
     if (names.has(entry.name) || files.has(entry.file)) {
       throw new Error(`agent registry ${registryPath}: duplicate agent name or template file at agents[${index}]`);
     }

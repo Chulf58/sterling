@@ -1,9 +1,9 @@
 {
   "version": 1,
   "agents": [
-    { "name": "implementor", "file": "implementor.md" },
-    { "name": "researcher", "file": "researcher.md" },
-    { "name": "scout", "file": "scout.md" },
+    { "name": "implementor", "file": "implementor.md", "opencode": {} },
+    { "name": "researcher", "file": "researcher.md", "opencode": { "permission": { "edit": "deny", "webfetch": "deny", "task": "deny" } } },
+    { "name": "scout", "file": "scout.md", "opencode": { "permission": { "edit": "deny", "bash": "deny", "webfetch": "deny", "task": "deny" } } },
     { "name": "librarian", "file": "librarian.md" },
     { "name": "conductor", "file": "conductor.md" }
   ]
