@@ -478,3 +478,21 @@ test('h. parallel dispatch: a Start sees only ITS OWN prompt, so a long sibling 
 // SABOTAGE: keep the parallel-dispatch hedge in the header builder — the last
 // assertion goes red on its own, which is why it is separate from the content
 // arms.
+
+// --- subject-matched hazards are labelled as SUBJECT matches ----------------
+// Fix round 2026-09-24 (H20 decision crowd-out review): the subject channel
+// has no path, so its hazard header must not claim "for this path".
+test('i. a subject-matched hazard is labelled "for this subject", not "for this path"', () => {
+  const { dir, store, cleanup } = makeProject();
+  try {
+    store.create(antiPattern(CENTRAL_TITLE, CENTRAL_TRIGGER));
+    const transcript = stageDispatch(dir, CENTRAL_PROMPT);
+    const r = runHook(subagentStart(dir, transcript), dir);
+    assert.equal(r.code, 0, r.stderr);
+    const ctx = JSON.parse(r.stdout).hookSpecificOutput.additionalContext;
+    assert.match(ctx, new RegExp(`ANTI-PATTERN \\[[A-Z]+\\] for this subject — '${CENTRAL_TITLE}'`));
+    assert.doesNotMatch(ctx, /ANTI-PATTERN \[[A-Z]+\] for this path/);
+  } finally {
+    cleanup();
+  }
+});

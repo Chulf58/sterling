@@ -7973,17 +7973,17 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for this path" } = {}) {
   const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
-  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
+    (ap) => [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -7992,27 +7992,28 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
-  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map(
     (text, i) => i < shown.length ? {
       kind: "hazard",
       contentClass: "substance",
       identity: shown[i].id,
       revision: recordRevision(shown[i]),
+      name: shown[i].slug || shown[i].title,
       text,
       // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
       // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
       // the hard transport ceiling degrades to this bare notice — never a
       // partial trigger/right_way (the HAZARDS clause: "each whole") —
       // and the assembler then correctly withholds its substance mark.
-      pointer: hazardOverflowPointer(shown[i])
+      pointer: hazardOverflowPointer(shown[i], matchLabel)
     } : { kind: "hazard", contentClass: "chrome", text }
   );
 }
-function hazardOverflowPointer(record) {
-  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
+function hazardOverflowPointer(record, matchLabel = "for this path") {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 var ARTICLE_POINTER_CAP = 3;
 function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } = {}) {
@@ -8032,12 +8033,12 @@ function renderArticlePointers(articles, cap = ARTICLE_POINTER_CAP, { remedy } =
 var DECISION_POINTER_CAP = 8;
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed, matchLabel = "for this path" } = {}) {
   const shown = decisions.slice(0, cap);
   const fullTotal = total ?? decisions.length;
   const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `\u25B8 DECISIONS for this path (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
+    `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : "";
@@ -8091,7 +8092,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     contentClass: part.contentClass ?? "chrome",
     pinned: part.kind === "hazard" ? true : !!part.pinned
   }));
-  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision, name: part.name }] : []);
   const dedupeEntries = (entries) => {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
@@ -8125,35 +8126,47 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
   const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
   const totalBytes = () => bytes(output().join(sep));
   const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
-  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
-  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const ordinaryBytesUsed = () => Math.max(0, totalBytes() - hazardBytesUsed());
+  const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
+  const fitsTransport = (extra = 0) => totalBytes() + extra <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || "";
   const tryDegradeOrdinary = (part, fitsFn) => {
     selected.set(part, { text: part.text, full: true });
-    if (fitsFn()) return;
+    if (fitsFn("whole")) return;
     selected.delete(part);
-    const suffix = part.suffix || pointerFor(part);
+    const ptr = pointerFor(part);
+    const suffix = part.suffix || ptr;
     if (suffix) {
       const lines = part.text.split("\n");
+      const carriesSuffix = lines[0] === suffix;
+      const render = (candidate) => carriesSuffix ? candidate : `${candidate}
+${suffix}`;
       let clipped = "";
       let best = "";
+      let bestLines = 0;
       for (const line of lines) {
         const candidate = clipped ? `${clipped}
 ${line}` : line;
-        selected.set(part, { text: `${candidate}
-${suffix}`, full: false });
-        if (!fitsFn()) break;
+        selected.set(part, { text: render(candidate), full: false });
+        if (!fitsFn("excerpt")) break;
         clipped = candidate;
-        best = `${candidate}
-${suffix}`;
+        best = render(candidate);
+        bestLines += 1;
+      }
+      if (best && bestLines === 1 && lines.length > 1 && part.suffix && part.suffix !== ptr) {
+        selected.set(part, { text: ptr, full: false });
+        if (ptr && fitsFn("pointer")) return;
+        selected.delete(part);
+        omitted.push(part);
+        return;
       }
       if (best) {
         selected.set(part, { text: best, full: false });
         return;
       }
       selected.delete(part);
-      selected.set(part, { text: pointerFor(part), full: false });
-      if (pointerFor(part) && fitsFn()) return;
+      selected.set(part, { text: ptr, full: false });
+      if (ptr && fitsFn("pointer")) return;
       selected.delete(part);
     }
     omitted.push(part);
@@ -8172,19 +8185,74 @@ ${suffix}`;
   };
   for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
-  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  const idsForDisclosure = (part) => {
+    const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+    if (tagged.length) return tagged;
+    return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+  };
+  const disclosureEntries = (list) => {
+    const names = /* @__PURE__ */ new Map();
+    for (const e of list.flatMap(idsOf)) {
+      if (e?.identity && typeof e.name === "string" && e.name.trim() && !names.has(e.identity)) {
+        names.set(e.identity, clipToBytes(e.name.replace(/\s+/g, " ").trim(), 80));
+      }
+    }
+    return [...new Set(list.flatMap(idsForDisclosure))].map((id) => ({ id8: id.slice(0, 8), name: names.get(id) }));
+  };
+  const disclosureCount = (list) => dedupeEntries(list.flatMap(idsOf)).length || list.length;
+  const renderDisclosure = (count, entries) => {
+    const prefix = `+${count} more records: knowledge_query`;
+    return entries.length ? `${prefix}; knowledge_get ${entries.map((e) => e.name ? `${e.name} (${e.id8})` : e.id8).join(" ")}` : `${prefix}; knowledge_get`;
+  };
+  const disclosureSize = (list, named) => aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
+  const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
+  const baseOmitted = [...omitted];
+  const reserved = /* @__PURE__ */ new Map();
+  const placeOrdinary = (disclosure) => {
+    for (const part of ordinaryParts) selected.delete(part);
+    omitted.length = 0;
+    omitted.push(...baseOmitted);
+    reserved.clear();
+    let rendered = selected.size;
+    let room = Math.min(ordinaryCeiling - ordinaryBytesUsed(), DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes());
+    for (const part of ordinaryParts) {
+      const ptr = pointerFor(part);
+      if (!ptr) continue;
+      const cost = bytes(ptr) + sepCost(rendered);
+      if (cost > room) continue;
+      reserved.set(part, cost);
+      rendered += 1;
+      room -= cost;
+    }
+    const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
+    const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(disclosure.named), pointer: 0 };
+    ordinaryParts.forEach((part, i) => {
+      const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
+      tryDegradeOrdinary(part, (stage) => {
+        const extra = later + disclosureRoom[stage];
+        return fitsOrdinaryCap(extra) && fitsTransport(extra);
+      });
+    });
+  };
+  {
+    let wanted = { ids: 0, named: 0 };
+    placeOrdinary(wanted);
+    for (let pass = 0; pass < 3 && omitted.length; pass++) {
+      const need = { ids: disclosureSize(omitted, false), named: disclosureSize(omitted, true) };
+      if (need.ids <= wanted.ids && need.named <= wanted.named) break;
+      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named) };
+      placeOrdinary(wanted);
+    }
+  }
   if (omitted.length) {
     const aggregatePart = { kind: "ordinary", contentClass: "chrome", text: "" };
     items.push(aggregatePart);
-    const idsForDisclosure = (part) => {
-      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
-      if (tagged.length) return tagged;
-      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
-    };
     const aggregate = () => {
-      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
-      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      const count = disclosureCount(omitted);
+      const entries = disclosureEntries(omitted);
       if (aggregateLabel) {
+        const ids = entries.map((e) => e.id8);
         let line2 = aggregateLabel(count, ids);
         while (ids.length && bytes(line2) > ordinaryCeiling) {
           ids.pop();
@@ -8192,11 +8260,17 @@ ${suffix}`;
         }
         return line2;
       }
-      const prefix = `+${count} more records: knowledge_query`;
-      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
-      while (ids.length && bytes(line) > ordinaryCeiling) {
-        ids.pop();
-        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
+      const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
+      let line = renderDisclosure(count, entries);
+      for (let i = entries.length - 1; i >= 0 && bytes(line) > room; i--) {
+        if (!entries[i].name) continue;
+        entries[i].name = void 0;
+        line = renderDisclosure(count, entries);
+      }
+      while (entries.length && bytes(line) > ordinaryCeiling) {
+        entries.pop();
+        line = renderDisclosure(count, entries);
       }
       return line;
     };
@@ -8208,7 +8282,8 @@ ${suffix}`;
       const transportOk = fitsTransport();
       if (ordinaryOk && transportOk) break;
       selected.delete(aggregatePart);
-      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      const evictable = [...items].reverse().filter((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      const last = evictable.find((part) => !isChrome(part) && !reserved.has(part)) ?? evictable.find((part) => !isChrome(part)) ?? evictable[0];
       if (last) {
         selected.delete(last);
         omitted.push(last);
@@ -8236,12 +8311,15 @@ ${suffix}`;
     degraded: omitted.length > 0 || partial
   };
 }
-function decisionBlockPointer(count, widen) {
-  return `\u25B8 DECISIONS (${count}) held back by the delivery cap \u2014 ${widen}`;
+function decisionBlockPointer(count, widen, top) {
+  const name = top ? clipToBytes(String(top.slug || top.title || "").replace(/\s+/g, " ").trim(), 120) : "";
+  const lead = top?.id ? ` \u2014 top: ${name ? `'${name}' ` : ""}(knowledge_get ${top.id})` : "";
+  return `\u25B8 DECISIONS (${count}) held back by the delivery cap${lead} \u2014 ${widen}`;
 }
 
 // scripts/hooks/h20-mechanism-axis.mjs
 var MAX_DECISIONS = 5;
+var HEADER_CENTRAL_TERM_CAP = 6;
 var QUESTION_WORDS_RE = /\b(where|what|which|who|whom|whose|when|why|how|does|do|did|is|are|was|were|can|could|would|will|should)\b/i;
 function isQuestionShapedPrompt(text) {
   const t = String(text ?? "");
@@ -8389,7 +8467,8 @@ function main(input2) {
     );
     if (!hazards.length && !decisions.length && !articles.length && !priorAnswers.length) return finish();
     const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(", ");
-    const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(", ");
+    const centralAll = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))];
+    const centralCovered = centralAll.slice(0, HEADER_CENTRAL_TERM_CAP).join(", ") + (centralAll.length > HEADER_CENTRAL_TERM_CAP ? ` (+${centralAll.length - HEADER_CENTRAL_TERM_CAP} more)` : "");
     const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
     const header = isQuestion ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you have just put a CHOICE TO THE USER. The store already governs this subject (${matchedClause}) and no file you touched would have surfaced it. THIS IS A POST-ANSWER AUDIT, NOT A GATE \u2014 it reaches you with the answer, never before the ask (probed 2026-08-11). Before treating the answer as a ruling, check these records: a user's answer becomes authoritative, so if one of them already decides the question, the pick just manufactured a contradiction with a settled ruling \u2014 disclose the record to the user and re-affirm before acting on the answer.` : isConsult ? `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to CONSULT the sparring partner (codex). The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the consult goes out \u2014 a bad premise sent to an external model is still a bad premise.` : `STERLING MECHANISM-AXIS DELIVERY (H20) \u2014 you are about to dispatch '${input2.tool_input?.subagent_type ?? "an agent"}'. The store holds records matching this prompt's SUBJECT (${matchedClause}) rather than any file you touched. Path-scoped delivery cannot find these. Check them BEFORE the brief goes out \u2014 a fan-out multiplies a bad premise by N.`;
     const hazardTerms = [...new Set(hazards.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
@@ -8397,17 +8476,21 @@ function main(input2) {
     const articleTerms = [...new Set(articles.flatMap((x) => x.hits))].map((t) => `"${t}"`).join(",");
     const decisionRemedy = `knowledge_query types:["decision"] rank_terms:[${decisionTerms}] cap:${decisions.length}`;
     const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
-    const hazardDecisionBlocks = [
+    const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
-        remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`
-      }),
+        remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
+        // Matched on the prompt's SUBJECT, not a file path (the H19 label).
+        matchLabel: "for this subject"
+      })
+    ];
+    const decisionBlocks = [
       ...decisions.length ? [
         {
           kind: "ordinary",
           contentClass: "discovery",
-          identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-          text: renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
-          pointer: decisionBlockPointer(decisions.length, decisionRemedy),
+          identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title })),
+          text: renderDecisionPointers("(subject match)", decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: "for this subject" }),
+          pointer: decisionBlockPointer(decisions.length, decisionRemedy, shownDecisions[0]),
           suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
         }
       ] : []
@@ -8449,14 +8532,14 @@ function main(input2) {
       (t) => asPart(
         t,
         `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
-        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a) }))
+        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a), name: a.slug || a.title }))
       )
     );
     const priorParts = priorBlocks.map(
       (t) => asPart(
         t,
         `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(",")}] cap:${priorAnswers.length}`,
-        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record) }))
+        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record), name: x.record.slug || clip2(x.record.question, 60) }))
       )
     );
     const pin = modelPin();
@@ -8466,7 +8549,11 @@ function main(input2) {
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
-      ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...hazardDecisionBlocks] : [...hazardDecisionBlocks, ...priorParts, ...articleParts]
+      // Decisions come BEFORE hazards on a question-shaped prompt (user ruling
+      // 2026-09-24): a standing decision can answer the question outright,
+      // while a hazard only warns against a mistake the question is not yet
+      // making. On a change-shaped prompt the order is unchanged.
+      ...promptIsQuestionShaped ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks] : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts]
     ];
     const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input2.cwd));
     const carriage = assembled.text;

@@ -94,6 +94,9 @@ import {
 // since board a470046d slice 1, H19's path-scoped hazard block caps at the
 // same count, so the two channels share the bound.
 const MAX_DECISIONS = 5;
+/** How many "central to the record" terms the header names before counting
+ *  the rest (user ruling 2026-09-24: trim the header's term list). */
+const HEADER_CENTRAL_TERM_CAP = 6;
 const NARROW_CLIP = 700;
 
 // PROMPT-SHAPE RANKING (consuming-project retro 2026-08-17-2111): a QUESTION
@@ -462,7 +465,14 @@ function main(input) {
     const matched = [...new Set(fresh.flatMap((x) => x.hits))].join(', ');
     // Name the covered CENTRAL terms too, so the reader can see at a glance that
     // the match is about the record's subject, not a passing mention.
-    const centralCovered = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))].join(', ');
+    // BOUNDED (user ruling 2026-09-24, H20 decision crowd-out): the union of
+    // every record's central terms ran to ~50 words and ~400 bytes of the
+    // capped budget, crowding out the records themselves. The first few are
+    // named and the rest counted, so the clause stays honest about its size.
+    const centralAll = [...new Set(fresh.flatMap((x) => recordCentralityHits(x.record, outgoing)))];
+    const centralCovered =
+      centralAll.slice(0, HEADER_CENTRAL_TERM_CAP).join(', ') +
+      (centralAll.length > HEADER_CENTRAL_TERM_CAP ? ` (+${centralAll.length - HEADER_CENTRAL_TERM_CAP} more)` : '');
     const matchedClause = `matched on: ${matched}; central to the record: ${centralCovered}`;
     // The header names the SURFACE, because the stakes differ and the reader should
     // feel which one they are on. A bad dispatch wastes agent work; a bad choice put
@@ -495,17 +505,21 @@ function main(input) {
     // renders one (decision 92088a62 item 4). Decisions stay pointer-only —
     // discovery.
     const shownDecisions = decisions.slice(0, MAX_DECISIONS).map((x) => x.record);
-    const hazardDecisionBlocks = [
+    const hazardBlocks = [
       ...hazardParts(hazards.map((x) => x.record), {
         remedy: `knowledge_query types:["anti_pattern"] rank_terms:[${hazardTerms}] cap:${hazards.length || 1}`,
+        // Matched on the prompt's SUBJECT, not a file path (the H19 label).
+        matchLabel: 'for this subject',
       }),
+    ];
+    const decisionBlocks = [
       ...(decisions.length
         ? [
             {
               kind: 'ordinary', contentClass: 'discovery',
-              identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-              text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy }),
-              pointer: decisionBlockPointer(decisions.length, decisionRemedy),
+              identities: shownDecisions.map((d) => ({ identity: d.id, revision: recordRevision(d), name: d.slug || d.title })),
+              text: renderDecisionPointers('(subject match)', decisions.map((x) => x.record), MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: 'for this subject' }),
+              pointer: decisionBlockPointer(decisions.length, decisionRemedy, shownDecisions[0]),
               suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
             },
           ]
@@ -577,14 +591,14 @@ function main(input) {
       asPart(
         t,
         `knowledge_query types:["feature_article"] rank_terms:[${articleTerms}] cap:${articles.length}`,
-        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a) }))
+        shownArticles.map((a) => ({ identity: a.id, revision: recordRevision(a), name: a.slug || a.title }))
       )
     );
     const priorParts = priorBlocks.map((t) =>
       asPart(
         t,
         `knowledge_query types:["research_finding","disconfirmed_hypothesis","open_question"] rank_terms:[${[...new Set(priorAnswers.flatMap((x) => x.hits))].map((t2) => `"${t2}"`).join(',')}] cap:${priorAnswers.length}`,
-        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record) }))
+        shownPrior.map((x) => ({ identity: x.record.id, revision: recordRevision(x.record), name: x.record.slug || clip(x.record.question, 60) }))
       )
     );
     // PER-DELIVERY TOTAL CAP (scale-down Slice 3c, assembleDelivery — decision
@@ -603,9 +617,13 @@ function main(input) {
       // A prior ANSWER outranks everything on a question-shaped prompt — it is
       // the direct "don't re-derive" signal; on a change-shaped prompt hazards
       // still lead (stop the mistake), answers ride with the article pointers.
+      // Decisions come BEFORE hazards on a question-shaped prompt (user ruling
+      // 2026-09-24): a standing decision can answer the question outright,
+      // while a hazard only warns against a mistake the question is not yet
+      // making. On a change-shaped prompt the order is unchanged.
       ...(promptIsQuestionShaped
-        ? [...priorParts, ...articleParts, ...hazardDecisionBlocks]
-        : [...hazardDecisionBlocks, ...priorParts, ...articleParts]),
+        ? [...priorParts, ...articleParts, ...decisionBlocks, ...hazardBlocks]
+        : [...hazardBlocks, ...decisionBlocks, ...priorParts, ...articleParts]),
     ];
     const assembled = assembleDelivery([...pinPart, ...blocks], resolveTotalCap(input.cwd));
     const carriage = assembled.text;

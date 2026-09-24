@@ -8890,17 +8890,17 @@ var HAZARD_CAP = 3;
 function cappedHazards(hazards, cap = HAZARD_CAP) {
   return [...hazards].sort((a, b) => (HAZARD_RANK[a.severity ?? "warn"] ?? 1) - (HAZARD_RANK[b.severity ?? "warn"] ?? 1)).slice(0, cap);
 }
-function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = "for this path" } = {}) {
   const title = typeof clipTitleBytes === "number" ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
   const slug = ap?.slug ? typeof clipSlugBytes === "number" ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug : "";
-  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] for this path \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+  return `\u26A0 ANTI-PATTERN [${(ap?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 '${title}'${slug ? ` [${slug}]` : ""} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
-function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map(
-    (ap) => [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
+    (ap) => [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join("\n")
   );
   if (dropped > 0) {
     const keys = fileKeys.map((k) => `"${k}"`).join(",");
@@ -8909,27 +8909,28 @@ function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], reme
   }
   return blocks;
 }
-function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
-  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map(
     (text, i) => i < shown.length ? {
       kind: "hazard",
       contentClass: "substance",
       identity: shown[i].id,
       revision: recordRevision(shown[i]),
+      name: shown[i].slug || shown[i].title,
       text,
       // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
       // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
       // the hard transport ceiling degrades to this bare notice — never a
       // partial trigger/right_way (the HAZARDS clause: "each whole") —
       // and the assembler then correctly withholds its substance mark.
-      pointer: hazardOverflowPointer(shown[i])
+      pointer: hazardOverflowPointer(shown[i], matchLabel)
     } : { kind: "hazard", contentClass: "chrome", text }
   );
 }
-function hazardOverflowPointer(record) {
-  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] for this path \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
+function hazardOverflowPointer(record, matchLabel = "for this path") {
+  return `\u26A0 ANTI-PATTERN [${(record?.severity ?? "warn").toUpperCase()}] ${matchLabel} \u2014 TOO LARGE to show in full (exceeds the transport limit) \xB7 knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 var DECISION_POINTER_CAP = 8;
 var DECISION_AUTHORITY_RANK = { standing: 0, session_scoped: 2, one_off: 3 };
@@ -8950,12 +8951,12 @@ function rankFileDecisionPointers(decisions) {
 }
 var DECISION_STATEMENT_CLIP = 120;
 var DECISION_REJECTED_CLIP = 140;
-function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
+function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed, matchLabel = "for this path" } = {}) {
   const shown = decisions.slice(0, cap);
   const fullTotal = total ?? decisions.length;
   const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `\u25B8 DECISIONS for this path (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
+    `\u25B8 DECISIONS ${matchLabel} (${fullTotal}) \u2014 why it is this way and what was rejected. Pointers only; follow one before contradicting it:`
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : "";
@@ -9009,7 +9010,7 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
     contentClass: part.contentClass ?? "chrome",
     pinned: part.kind === "hazard" ? true : !!part.pinned
   }));
-  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision, name: part.name }] : []);
   const dedupeEntries = (entries) => {
     const seen = /* @__PURE__ */ new Set();
     const out = [];
@@ -9043,35 +9044,47 @@ function assembleDelivery(parts, capBytes, { sep = "\n\n", aggregateLabel } = {}
   const output = () => items.flatMap((part) => selected.has(part) ? [selected.get(part).text] : []);
   const totalBytes = () => bytes(output().join(sep));
   const hazardBytesUsed = () => [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
-  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
-  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const ordinaryBytesUsed = () => Math.max(0, totalBytes() - hazardBytesUsed());
+  const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
+  const fitsTransport = (extra = 0) => totalBytes() + extra <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || "";
   const tryDegradeOrdinary = (part, fitsFn) => {
     selected.set(part, { text: part.text, full: true });
-    if (fitsFn()) return;
+    if (fitsFn("whole")) return;
     selected.delete(part);
-    const suffix = part.suffix || pointerFor(part);
+    const ptr = pointerFor(part);
+    const suffix = part.suffix || ptr;
     if (suffix) {
       const lines = part.text.split("\n");
+      const carriesSuffix = lines[0] === suffix;
+      const render2 = (candidate) => carriesSuffix ? candidate : `${candidate}
+${suffix}`;
       let clipped = "";
       let best = "";
+      let bestLines = 0;
       for (const line of lines) {
         const candidate = clipped ? `${clipped}
 ${line}` : line;
-        selected.set(part, { text: `${candidate}
-${suffix}`, full: false });
-        if (!fitsFn()) break;
+        selected.set(part, { text: render2(candidate), full: false });
+        if (!fitsFn("excerpt")) break;
         clipped = candidate;
-        best = `${candidate}
-${suffix}`;
+        best = render2(candidate);
+        bestLines += 1;
+      }
+      if (best && bestLines === 1 && lines.length > 1 && part.suffix && part.suffix !== ptr) {
+        selected.set(part, { text: ptr, full: false });
+        if (ptr && fitsFn("pointer")) return;
+        selected.delete(part);
+        omitted.push(part);
+        return;
       }
       if (best) {
         selected.set(part, { text: best, full: false });
         return;
       }
       selected.delete(part);
-      selected.set(part, { text: pointerFor(part), full: false });
-      if (pointerFor(part) && fitsFn()) return;
+      selected.set(part, { text: ptr, full: false });
+      if (ptr && fitsFn("pointer")) return;
       selected.delete(part);
     }
     omitted.push(part);
@@ -9090,19 +9103,74 @@ ${suffix}`;
   };
   for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
-  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+  const idsForDisclosure = (part) => {
+    const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+    if (tagged.length) return tagged;
+    return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+  };
+  const disclosureEntries = (list) => {
+    const names = /* @__PURE__ */ new Map();
+    for (const e of list.flatMap(idsOf)) {
+      if (e?.identity && typeof e.name === "string" && e.name.trim() && !names.has(e.identity)) {
+        names.set(e.identity, clipToBytes(e.name.replace(/\s+/g, " ").trim(), 80));
+      }
+    }
+    return [...new Set(list.flatMap(idsForDisclosure))].map((id) => ({ id8: id.slice(0, 8), name: names.get(id) }));
+  };
+  const disclosureCount = (list) => dedupeEntries(list.flatMap(idsOf)).length || list.length;
+  const renderDisclosure = (count, entries) => {
+    const prefix = `+${count} more records: knowledge_query`;
+    return entries.length ? `${prefix}; knowledge_get ${entries.map((e) => e.name ? `${e.name} (${e.id8})` : e.id8).join(" ")}` : `${prefix}; knowledge_get`;
+  };
+  const disclosureSize = (list, named) => aggregateLabel ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8))) : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => named ? e : { id8: e.id8 })));
+  const sepCost = (renderedBefore) => renderedBefore > 0 ? bytes(sep) : 0;
+  const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
+  const baseOmitted = [...omitted];
+  const reserved = /* @__PURE__ */ new Map();
+  const placeOrdinary = (disclosure2) => {
+    for (const part of ordinaryParts) selected.delete(part);
+    omitted.length = 0;
+    omitted.push(...baseOmitted);
+    reserved.clear();
+    let rendered = selected.size;
+    let room = Math.min(ordinaryCeiling - ordinaryBytesUsed(), DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes());
+    for (const part of ordinaryParts) {
+      const ptr = pointerFor(part);
+      if (!ptr) continue;
+      const cost = bytes(ptr) + sepCost(rendered);
+      if (cost > room) continue;
+      reserved.set(part, cost);
+      rendered += 1;
+      room -= cost;
+    }
+    const roomFor = (size) => size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0;
+    const disclosureRoom = { whole: roomFor(disclosure2.ids), excerpt: roomFor(disclosure2.named), pointer: 0 };
+    ordinaryParts.forEach((part, i) => {
+      const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
+      tryDegradeOrdinary(part, (stage) => {
+        const extra = later + disclosureRoom[stage];
+        return fitsOrdinaryCap(extra) && fitsTransport(extra);
+      });
+    });
+  };
+  {
+    let wanted = { ids: 0, named: 0 };
+    placeOrdinary(wanted);
+    for (let pass = 0; pass < 3 && omitted.length; pass++) {
+      const need = { ids: disclosureSize(omitted, false), named: disclosureSize(omitted, true) };
+      if (need.ids <= wanted.ids && need.named <= wanted.named) break;
+      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named) };
+      placeOrdinary(wanted);
+    }
+  }
   if (omitted.length) {
     const aggregatePart = { kind: "ordinary", contentClass: "chrome", text: "" };
     items.push(aggregatePart);
-    const idsForDisclosure = (part) => {
-      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
-      if (tagged.length) return tagged;
-      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
-    };
     const aggregate = () => {
-      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
-      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      const count = disclosureCount(omitted);
+      const entries = disclosureEntries(omitted);
       if (aggregateLabel) {
+        const ids = entries.map((e) => e.id8);
         let line2 = aggregateLabel(count, ids);
         while (ids.length && bytes(line2) > ordinaryCeiling) {
           ids.pop();
@@ -9110,11 +9178,17 @@ ${suffix}`;
         }
         return line2;
       }
-      const prefix = `+${count} more records: knowledge_query`;
-      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
-      while (ids.length && bytes(line) > ordinaryCeiling) {
-        ids.pop();
-        line = ids.length ? `${prefix}; knowledge_get ${ids.join(" ")}` : `${prefix}; knowledge_get`;
+      const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
+      const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
+      let line = renderDisclosure(count, entries);
+      for (let i = entries.length - 1; i >= 0 && bytes(line) > room; i--) {
+        if (!entries[i].name) continue;
+        entries[i].name = void 0;
+        line = renderDisclosure(count, entries);
+      }
+      while (entries.length && bytes(line) > ordinaryCeiling) {
+        entries.pop();
+        line = renderDisclosure(count, entries);
       }
       return line;
     };
@@ -9126,7 +9200,8 @@ ${suffix}`;
       const transportOk = fitsTransport();
       if (ordinaryOk && transportOk) break;
       selected.delete(aggregatePart);
-      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      const evictable = [...items].reverse().filter((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      const last = evictable.find((part) => !isChrome(part) && !reserved.has(part)) ?? evictable.find((part) => !isChrome(part)) ?? evictable[0];
       if (last) {
         selected.delete(last);
         omitted.push(last);
@@ -9162,8 +9237,10 @@ function ownerPointer(rendered, record) {
 function ownerSuffix(record) {
   return `\u25B8 FULL RECORD (clipped at the delivery cap): knowledge_get ${record.id}`;
 }
-function decisionBlockPointer(count, widen) {
-  return `\u25B8 DECISIONS (${count}) held back by the delivery cap \u2014 ${widen}`;
+function decisionBlockPointer(count, widen, top) {
+  const name = top ? clipToBytes(String(top.slug || top.title || "").replace(/\s+/g, " ").trim(), 120) : "";
+  const lead = top?.id ? ` \u2014 top: ${name ? `'${name}' ` : ""}(knowledge_get ${top.id})` : "";
+  return `\u25B8 DECISIONS (${count}) held back by the delivery cap${lead} \u2014 ${widen}`;
 }
 function payloadHeaderLine(rel) {
   return `STERLING KNOWLEDGE DELIVERY (H19) \u2014 owning knowledge for '${rel}'. Consult before designing or editing in this territory; the store is current reality AND rationale, the code is only the implementation.`;
@@ -9337,13 +9414,13 @@ async function main(input2) {
             kind: "ordinary",
             contentClass: "chrome"
           },
-          ...hazardParts(subjectHazards, { remedy }),
+          ...hazardParts(subjectHazards, { remedy, matchLabel: "for this subject" }),
           ...subjectDecisions.length ? [
             {
               kind: "ordinary",
               contentClass: "discovery",
               identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-              text: renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy }),
+              text: renderDecisionPointers("(subject match)", subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: "for this subject" }),
               pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
               suffix: `  \u2026 the rest held back by the delivery cap \u2014 ${decisionRemedy}`
             }

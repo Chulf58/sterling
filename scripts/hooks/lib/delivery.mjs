@@ -856,11 +856,11 @@ export function cappedHazards(hazards, cap = HAZARD_CAP) {
  *  `clipTitleBytes`/`clipSlugBytes`, when given, apply a byte-safe clip.
  *  Omitted (renderHazards' own call), title/slug render exactly as stored,
  *  unclipped — byte-for-byte today's behavior. */
-export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
+export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes, matchLabel = 'for this path' } = {}) {
   const title = typeof clipTitleBytes === 'number' ? clipToBytes(ap?.title, clipTitleBytes) : ap?.title;
   const slug =
     ap?.slug ? (typeof clipSlugBytes === 'number' ? clipToBytes(ap.slug, clipSlugBytes) : ap.slug) : '';
-  return `⚠ ANTI-PATTERN [${(ap?.severity ?? 'warn').toUpperCase()}] for this path — '${title}'${slug ? ` [${slug}]` : ''} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
+  return `⚠ ANTI-PATTERN [${(ap?.severity ?? 'warn').toUpperCase()}] ${matchLabel} — '${title}'${slug ? ` [${slug}]` : ''} (full record: knowledge_get ${ap?.id})${statusAnnotation(ap)}`;
 }
 
 /** `total` / `suppressed` (fixer F3) exist for the DRAIN, which is handed only
@@ -868,12 +868,12 @@ export function hazardHeaderLine(ap, { clipTitleBytes, clipSlugBytes } = {}) {
  *  died) and must still replay the ORIGINAL '+N more' tail rather than deriving
  *  a new one from the survivors it happens to have left. Omitted, both fall back
  *  to today's derivation, so every producer call is byte-identical. */
-export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
   const fullTotal = total ?? hazards.length;
   const dropped = suppressed ?? hazards.length - shown.length;
   const blocks = shown.map((ap) =>
-    [hazardHeaderLine(ap), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
+    [hazardHeaderLine(ap, { matchLabel }), `TRIGGER: ${clip(ap.trigger, charCap)}`, `RIGHT WAY: ${clip(ap.right_way, charCap)}`].join('\n')
   );
   if (dropped > 0) {
     // `remedy` overrides the widening query for callers whose match was not a
@@ -895,19 +895,19 @@ export function renderHazards(hazards, charCap, { cap = HAZARD_CAP, fileKeys = [
  *  (item 4: Bash now included). The trailing '+N more' disclosure line, if
  *  any, carries no identity and `contentClass:'chrome'`, so it can never earn
  *  a delivery mark for a hazard the reader never actually saw. */
-export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed } = {}) {
+export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, total, suppressed, matchLabel } = {}) {
   const shown = cappedHazards(hazards, cap);
-  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed });
+  const blocks = renderHazards(hazards, Number.MAX_SAFE_INTEGER, { cap, fileKeys, remedy, total, suppressed, matchLabel });
   return blocks.map((text, i) =>
     i < shown.length
       ? {
-          kind: 'hazard', contentClass: 'substance', identity: shown[i].id, revision: recordRevision(shown[i]), text,
+          kind: 'hazard', contentClass: 'substance', identity: shown[i].id, revision: recordRevision(shown[i]), name: shown[i].slug || shown[i].title, text,
           // TRANSPORT-OVERFLOW FALLBACK (fix-round HIGH 1, decision 92088a62
           // NOT GUARANTEED clause): a hazard whose OWN whole block cannot fit
           // the hard transport ceiling degrades to this bare notice — never a
           // partial trigger/right_way (the HAZARDS clause: "each whole") —
           // and the assembler then correctly withholds its substance mark.
-          pointer: hazardOverflowPointer(shown[i]),
+          pointer: hazardOverflowPointer(shown[i], matchLabel),
         }
       : { kind: 'hazard', contentClass: 'chrome', text }
   );
@@ -918,8 +918,8 @@ export function hazardParts(hazards, { cap = HAZARD_CAP, fileKeys = [], remedy, 
  *  the ordinary "held back by the delivery cap" pointers: this is never our
  *  own configured cap turning it away (hazards are exempt from that), only
  *  the platform's transport boundary. */
-export function hazardOverflowPointer(record) {
-  return `⚠ ANTI-PATTERN [${(record?.severity ?? 'warn').toUpperCase()}] for this path — TOO LARGE to show in full (exceeds the transport limit) · knowledge_get ${record?.id}${statusAnnotation(record)}`;
+export function hazardOverflowPointer(record, matchLabel = 'for this path') {
+  return `⚠ ANTI-PATTERN [${(record?.severity ?? 'warn').toUpperCase()}] ${matchLabel} — TOO LARGE to show in full (exceeds the transport limit) · knowledge_get ${record?.id}${statusAnnotation(record)}`;
 }
 
 /** How many feature_article pointers render per dispatch (H20 subject-axis
@@ -1052,14 +1052,14 @@ export const DECISION_REJECTED_CLIP = 140;
  *  untouched: it ruled on rendering decision BODIES, not on which field is
  *  clipped. alternatives_rejected needs no wider read — SterlingStore.query
  *  rehydrates whole bodies (packages/store/src/index.ts:289). */
-export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed } = {}) {
+export function renderDecisionPointers(rel, decisions, cap = DECISION_POINTER_CAP, { remedy, total, suppressed, matchLabel = 'for this path' } = {}) {
   const shown = decisions.slice(0, cap);
   // `total` / `suppressed` (fixer F3) — see renderHazards' note: the drain holds
   // only the shown slice and replays the original count and tail.
   const fullTotal = total ?? decisions.length;
   const dropped = suppressed ?? decisions.length - shown.length;
   const lines = [
-    `▸ DECISIONS for this path (${fullTotal}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
+    `▸ DECISIONS ${matchLabel} (${fullTotal}) — why it is this way and what was rejected. Pointers only; follow one before contradicting it:`,
   ];
   for (const d of shown) {
     const authorityMarker = d.authority ? `[${d.authority}] ` : '';
@@ -1312,7 +1312,10 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       pinned: part.kind === 'hazard' ? true : !!part.pinned,
     }));
 
-  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision }] : []);
+  // `name` (optional, per identity entry or on a single-identity part) is the
+  // record's human name — slug or title — used ONLY to title the '+N more'
+  // disclosure line; it never affects credit, dedupe or omission counts.
+  const idsOf = (part) => part.identities ?? (part.identity ? [{ identity: part.identity, revision: part.revision, name: part.name }] : []);
   const dedupeEntries = (entries) => {
     const seen = new Set();
     const out = [];
@@ -1357,36 +1360,63 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   const totalBytes = () => bytes(output().join(sep));
   const hazardBytesUsed = () =>
     [...selected.entries()].reduce((sum, [part, sel]) => sum + (isHazard(part) ? bytes(sel.text) : 0), 0);
-  const fitsOrdinaryCap = () => Math.max(0, totalBytes() - hazardBytesUsed()) <= ordinaryCeiling;
-  const fitsTransport = () => totalBytes() <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
+  const ordinaryBytesUsed = () => Math.max(0, totalBytes() - hazardBytesUsed());
+  // `extra` is room held back for bytes not yet selected — the reserved
+  // pointers of later ordinary parts (see RESERVED POINTERS below).
+  const fitsOrdinaryCap = (extra = 0) => ordinaryBytesUsed() + extra <= ordinaryCeiling;
+  const fitsTransport = (extra = 0) => totalBytes() + extra <= DELIVERY_TRANSPORT_VISIBLE_BYTES;
   const pointerFor = (part) => part.pointer || '';
 
   // ORDINARY/CHROME DEGRADE: whole while it fits both budgets, then a
   // byte-safe excerpt + `suffix`, then a bare `pointer`, then full omission.
+  // `fitsFn(stage)` is told which rendering it judges — 'whole', 'excerpt' or
+  // 'pointer' — so a caller can hold back more room from an excerpt than
+  // from a whole part or a pointer (see RESERVED POINTERS below).
   const tryDegradeOrdinary = (part, fitsFn) => {
     selected.set(part, { text: part.text, full: true });
-    if (fitsFn()) return;
+    if (fitsFn('whole')) return;
     selected.delete(part);
 
-    const suffix = part.suffix || pointerFor(part);
+    const ptr = pointerFor(part);
+    const suffix = part.suffix || ptr;
     if (suffix) {
       const lines = part.text.split('\n');
+      // A block whose first line IS its pointer (the H19 Bash shape) already
+      // carries it: appending it again would render the pointer twice.
+      const carriesSuffix = lines[0] === suffix;
+      const render = (candidate) => (carriesSuffix ? candidate : `${candidate}\n${suffix}`);
       let clipped = '';
       let best = '';
+      let bestLines = 0;
       for (const line of lines) {
         const candidate = clipped ? `${clipped}\n${line}` : line;
-        selected.set(part, { text: `${candidate}\n${suffix}`, full: false });
-        if (!fitsFn()) break;
+        selected.set(part, { text: render(candidate), full: false });
+        if (!fitsFn('excerpt')) break;
         clipped = candidate;
-        best = `${candidate}\n${suffix}`;
+        best = render(candidate);
+        bestLines += 1;
+      }
+      // HEADING-ONLY EXCERPT (H20 decision crowd-out, 2026-09-24): a
+      // multi-line block cut to its FIRST line keeps only the block's heading
+      // ("▸ DECISIONS (5) — …") over a separate `suffix` ("… the rest held
+      // back — knowledge_query …") and names none of its records. The
+      // pointer wins when it fits; when it does not, the part is omitted so
+      // the '+N more' line names it. A part with no separate suffix renders
+      // heading + pointer, which already names what the pointer names.
+      if (best && bestLines === 1 && lines.length > 1 && part.suffix && part.suffix !== ptr) {
+        selected.set(part, { text: ptr, full: false });
+        if (ptr && fitsFn('pointer')) return;
+        selected.delete(part);
+        omitted.push(part);
+        return;
       }
       if (best) {
         selected.set(part, { text: best, full: false });
         return;
       }
       selected.delete(part);
-      selected.set(part, { text: pointerFor(part), full: false });
-      if (pointerFor(part) && fitsFn()) return;
+      selected.set(part, { text: ptr, full: false });
+      if (ptr && fitsFn('pointer')) return;
       selected.delete(part);
     }
     omitted.push(part);
@@ -1418,7 +1448,122 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
   // of an oversized single hazard), then ordinary.
   for (const part of items) if (isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
   for (const part of items) if (isHazard(part)) tryDegradeHazard(part);
-  for (const part of items) if (!isHazard(part) && !isChrome(part)) tryDegradeOrdinary(part, () => fitsOrdinaryCap() && fitsTransport());
+
+  // DISCLOSURE HELPERS — shared by the '+N more' line below and by the room
+  // the ordinary phase reserves for it.
+  // IDS FOR THE DISCLOSURE COME FROM PART METADATA FIRST (item 7 —
+  // "aggregate from record metadata"): `identity`/`identities` is the SAME
+  // structured field the assembler already uses to credit an emitted mark,
+  // so a part the caller tagged has its id(s) surface here without any text
+  // scan. A part with NO identity (bare chrome, or a caller that has not
+  // been migrated onto the tagged shape) falls back to the old regex scan
+  // of its own pointer/text — cosmetic only, never a delivery mark, and
+  // scoped to exactly the omitted part being described.
+  const idsForDisclosure = (part) => {
+    const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
+    if (tagged.length) return tagged;
+    return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
+  };
+  // TITLED ENTRIES (user ruling 2026-09-24): an omitted record is named
+  // `name (id8)`, name first. Names are derived from the CURRENT omission set
+  // on every render, so a part evicted late is named like any other.
+  // ONE FORMAT: entries are always space-separated, named or not — an
+  // id-only line is byte-identical to the pre-2026-09-24 one, and `(id8)`
+  // closes each named entry, so a title's own spaces stay unambiguous.
+  const disclosureEntries = (list) => {
+    const names = new Map();
+    for (const e of list.flatMap(idsOf)) {
+      if (e?.identity && typeof e.name === 'string' && e.name.trim() && !names.has(e.identity)) {
+        names.set(e.identity, clipToBytes(e.name.replace(/\s+/g, ' ').trim(), 80));
+      }
+    }
+    return [...new Set(list.flatMap(idsForDisclosure))].map((id) => ({ id8: id.slice(0, 8), name: names.get(id) }));
+  };
+  // COUNT BY IDENTITY, DEDUPED (fix-round MEDIUM 7): one omitted part
+  // naming several records (a joined decision-pointer block) must disclose
+  // ALL of them, not read as "+1" — matching the returned `omittedCount`
+  // computed the same way below. Falls back to the PART count only when
+  // NOTHING omitted carries any identity at all (pure chrome/framing —
+  // never "+0 more records" over content that visibly vanished).
+  const disclosureCount = (list) => dedupeEntries(list.flatMap(idsOf)).length || list.length;
+  const renderDisclosure = (count, entries) => {
+    const prefix = `+${count} more records: knowledge_query`;
+    return entries.length
+      ? `${prefix}; knowledge_get ${entries.map((e) => (e.name ? `${e.name} (${e.id8})` : e.id8)).join(' ')}`
+      : `${prefix}; knowledge_get`;
+  };
+  // The fully-named line for a candidate omission set — what the ordinary
+  // phase reserves room for (a custom `aggregateLabel` is sized as given).
+  const disclosureSize = (list, named) =>
+    aggregateLabel
+      ? bytes(aggregateLabel(disclosureCount(list), disclosureEntries(list).map((e) => e.id8)))
+      : bytes(renderDisclosure(disclosureCount(list), disclosureEntries(list).map((e) => (named ? e : { id8: e.id8 }))));
+  const sepCost = (renderedBefore) => (renderedBefore > 0 ? bytes(sep) : 0);
+
+  // RESERVED POINTERS (decision 301d8a0a: "Each later block's pointer is
+  // reserved up front so an early large block cannot crowd it out"; restored
+  // 2026-09-24 after H20 dropped the one decision that answered the question
+  // to a bare id). Once chrome and hazards hold their bytes, each ordinary
+  // part's pointer is reserved in caller order against BOTH budgets — the
+  // configured cap and the transport ceiling — charged a separator only when
+  // one will render before it. From what the pointers leave, room for the
+  // '+N more' line of whatever this placement omits is held back too: its
+  // ids-only size from whole renderings, its fully-named size from excerpts. While an
+  // ordinary part is placed, the pointers reserved for the parts AFTER it,
+  // and the disclosure's room, are held back, so it degrades (excerpt, then
+  // pointer) rather than spend them. The
+  // disclosure's size depends on what is omitted, so placement re-runs until
+  // the reserved room covers it (at most 4 passes; the eviction loop below
+  // stays the last resort, and evicts a reserved pointer only after every
+  // unreserved part). A pointer that does not fit the room left at
+  // reservation time is not reserved: that part competes for whatever room
+  // remains and, failing that, is counted and named in the '+N more' line
+  // and reported `degraded` — loud and deterministic, never silent.
+  const ordinaryParts = items.filter((part) => !isHazard(part) && !isChrome(part));
+  const baseOmitted = [...omitted];
+  const reserved = new Map();
+  const placeOrdinary = (disclosure) => {
+    for (const part of ordinaryParts) selected.delete(part);
+    omitted.length = 0;
+    omitted.push(...baseOmitted);
+    reserved.clear();
+    let rendered = selected.size;
+    let room = Math.min(ordinaryCeiling - ordinaryBytesUsed(), DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes());
+    for (const part of ordinaryParts) {
+      const ptr = pointerFor(part);
+      if (!ptr) continue;
+      const cost = bytes(ptr) + sepCost(rendered);
+      if (cost > room) continue;
+      reserved.set(part, cost);
+      rendered += 1;
+      room -= cost;
+    }
+    const roomFor = (size) => (size > 0 ? Math.max(0, Math.min(room, size + bytes(sep))) : 0);
+    const disclosureRoom = { whole: roomFor(disclosure.ids), excerpt: roomFor(disclosure.named), pointer: 0 };
+    ordinaryParts.forEach((part, i) => {
+      const later = ordinaryParts.slice(i + 1).reduce((sum, next) => sum + (reserved.get(next) ?? 0), 0);
+      tryDegradeOrdinary(part, (stage) => {
+        const extra = later + disclosureRoom[stage];
+        return fitsOrdinaryCap(extra) && fitsTransport(extra);
+      });
+    });
+  };
+  {
+    // The disclosure's room, from what the reserved pointers leave: its
+    // ids-only size is held back from whole renderings and its fully-NAMED
+    // size from excerpts (an omitted record's name outranks another block's
+    // extra excerpt lines), never from a reserved pointer. When even that
+    // room is missing, the eviction loop below takes an unreserved part
+    // before a reserved one.
+    let wanted = { ids: 0, named: 0 };
+    placeOrdinary(wanted);
+    for (let pass = 0; pass < 3 && omitted.length; pass++) {
+      const need = { ids: disclosureSize(omitted, false), named: disclosureSize(omitted, true) };
+      if (need.ids <= wanted.ids && need.named <= wanted.named) break;
+      wanted = { ids: Math.max(need.ids, wanted.ids), named: Math.max(need.named, wanted.named) };
+      placeOrdinary(wanted);
+    }
+  }
 
   if (omitted.length) {
     const aggregatePart = { kind: 'ordinary', contentClass: 'chrome', text: '' };
@@ -1429,29 +1574,13 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     // of the generic '+N more records' line below — purely presentational,
     // never a behavior change: the credit rules (an omitted part earns no
     // mark) are identical either way.
-    // IDS FOR THE DISCLOSURE COME FROM PART METADATA FIRST (item 7 —
-    // "aggregate from record metadata"): `identity`/`identities` is the SAME
-    // structured field the assembler already uses to credit an emitted mark,
-    // so a part the caller tagged has its id(s) surface here without any text
-    // scan. A part with NO identity (bare chrome, or a caller that has not
-    // been migrated onto the tagged shape) falls back to the old regex scan
-    // of its own pointer/text — cosmetic only, never a delivery mark, and
-    // scoped to exactly the omitted part being described.
-    const idsForDisclosure = (part) => {
-      const tagged = idsOf(part).map((e) => e.identity).filter(Boolean);
-      if (tagged.length) return tagged;
-      return [...String(part.pointer || part.text).matchAll(/knowledge_get\s+([^\s\])]+)/g)].map((m) => m[1]);
-    };
-    // COUNT BY IDENTITY, DEDUPED (fix-round MEDIUM 7): one omitted part
-    // naming several records (a joined decision-pointer block) must disclose
-    // ALL of them, not read as "+1" — matching the returned `omittedCount`
-    // computed the same way below. Falls back to the PART count only when
-    // NOTHING omitted carries any identity at all (pure chrome/framing —
-    // never "+0 more records" over content that visibly vanished).
+    // Names are shed lowest-ranked first to fit the room still free beside
+    // the content already selected; only then are ids dropped (for the cap).
     const aggregate = () => {
-      const count = dedupeEntries(omitted.flatMap(idsOf)).length || omitted.length;
-      const ids = [...new Set(omitted.flatMap(idsForDisclosure))].map((id) => id.slice(0, 8));
+      const count = disclosureCount(omitted);
+      const entries = disclosureEntries(omitted);
       if (aggregateLabel) {
+        const ids = entries.map((e) => e.id8);
         let line = aggregateLabel(count, ids);
         while (ids.length && bytes(line) > ordinaryCeiling) {
           ids.pop();
@@ -1459,11 +1588,17 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
         }
         return line;
       }
-      const prefix = `+${count} more records: knowledge_query`;
-      let line = ids.length ? `${prefix}; knowledge_get ${ids.join(' ')}` : `${prefix}; knowledge_get`;
-      while (ids.length && bytes(line) > ordinaryCeiling) {
-        ids.pop();
-        line = ids.length ? `${prefix}; knowledge_get ${ids.join(' ')}` : `${prefix}; knowledge_get`;
+      const sepBytes = sepCost([...selected.keys()].filter((part) => part !== aggregatePart).length);
+      const room = Math.min(ordinaryCeiling - ordinaryBytesUsed() - sepBytes, DELIVERY_TRANSPORT_VISIBLE_BYTES - totalBytes() - sepBytes);
+      let line = renderDisclosure(count, entries);
+      for (let i = entries.length - 1; i >= 0 && bytes(line) > room; i--) {
+        if (!entries[i].name) continue;
+        entries[i].name = undefined;
+        line = renderDisclosure(count, entries);
+      }
+      while (entries.length && bytes(line) > ordinaryCeiling) {
+        entries.pop();
+        line = renderDisclosure(count, entries);
       }
       return line;
     };
@@ -1474,7 +1609,9 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
     // is a legitimately whole, unbudgeted hazard). Priority for what gives up
     // room, in order: (1) evict an already-selected ORDINARY/chrome part —
     // never a hazard, first pass, preserving 301d8a0a's "hazards are never
-    // cut by the [CONFIGURED] cap"; (2) if nothing ordinary is left, degrade
+    // cut by the [CONFIGURED] cap"; unreserved parts go before a part holding
+    // a reserved pointer (review 2026-09-24: the reserved decision pointer
+    // was the eviction victim); (2) if nothing ordinary is left, degrade
     // the LAST already-whole hazard down to its OWN transport notice (never a
     // partial excerpt — the same whole-or-pointer rule `tryDegradeHazard`
     // enforces) — this is the aggregate's own final resort against the HARD
@@ -1496,7 +1633,11 @@ export function assembleDelivery(parts, capBytes, { sep = '\n\n', aggregateLabel
       const transportOk = fitsTransport();
       if (ordinaryOk && transportOk) break;
       selected.delete(aggregatePart);
-      const last = [...items].reverse().find((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      const evictable = [...items].reverse().filter((part) => part !== aggregatePart && !isHazard(part) && selected.has(part));
+      const last =
+        evictable.find((part) => !isChrome(part) && !reserved.has(part)) ??
+        evictable.find((part) => !isChrome(part)) ??
+        evictable[0];
       if (last) {
         selected.delete(last);
         omitted.push(last);
@@ -1546,9 +1687,13 @@ export function ownerSuffix(record) {
   return `▸ FULL RECORD (clipped at the delivery cap): knowledge_get ${record.id}`;
 }
 
-/** Pointer for a decision block the cap cannot hold. */
-export function decisionBlockPointer(count, widen) {
-  return `▸ DECISIONS (${count}) held back by the delivery cap — ${widen}`;
+/** Pointer for a decision block the cap cannot hold. `top` (optional, the
+ *  highest-ranked decision record) is named in it, name first, so the block's
+ *  reserved pointer never degrades the answer to a bare id. */
+export function decisionBlockPointer(count, widen, top) {
+  const name = top ? clipToBytes(String(top.slug || top.title || '').replace(/\s+/g, ' ').trim(), 120) : '';
+  const lead = top?.id ? ` — top: ${name ? `'${name}' ` : ''}(knowledge_get ${top.id})` : '';
+  return `▸ DECISIONS (${count}) held back by the delivery cap${lead} — ${widen}`;
 }
 
 export function payloadHeaderLine(rel) {
