@@ -38,7 +38,7 @@ import { withRegisterLock, classifyRegister, readRegister, formatDispatchRef, re
 import { disclosure, render } from '../lib/review-errors.mjs';
 import { mintSettlementReconcile, withFileLock, parseTouchesContent, gitTouches, gitTrackedSubset, writeGitSettled } from './lib/settlement.mjs';
 import { latestUsage, fillPct } from './lib/transcript.mjs';
-import { isOrphan, probeDirtyPaths, formatResidueLine } from './lib/dispatch-residue.mjs';
+import { isOrphan, probeDirtyPaths, formatResidueLine, pathOwnedBy } from './lib/dispatch-residue.mjs';
 import { gitTestIntegrity } from '../lib/test-integrity.mjs';
 import { matchesGlob, parseConfig } from '@sterling/schemas';
 import { publishNotice } from './lib/delivery.mjs';
@@ -798,7 +798,13 @@ try {
   // stripped for COMPARISON ONLY: touches.json keeps exactly what H7 wrote.
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? '').replace(WORKTREE_PREFIX_RE, '');
-  const deferredOwners = new Map(); // repo-relative path -> Set(owning agent_id)
+  // DIRECTORY ENTRIES (decision h22-dispatch-files-from-review-territory-and-
+  // resume-inherits-prior-round): a REVIEW-TERRITORY may declare a directory,
+  // e.g. "game/farm", so every register `files` entry owns a path exactly or
+  // on a '/' boundary ("game/farm/crop.gd", never "game/farmhouse.gd") — the
+  // shared matcher pathOwnedBy, the same one the residue probe uses.
+  const entryOwns = pathOwnedBy;
+  const deferredOwners = new Map(); // repo-relative entry -> Set(owning agent_id)
   const unknownRows = [];
   if (classified.availability === 'ok') {
     for (const row of classified.entries) {
@@ -814,7 +820,13 @@ try {
       // inactive-confirmed: ignored entirely — no exclusion, no disclosure.
     }
   }
-  const isDeferred = (p) => deferredOwners.has(joinKey(p));
+  const ownersOf = (p) => {
+    const k = joinKey(p);
+    const owners = new Set();
+    for (const [entryKey, ids] of deferredOwners) if (entryOwns(entryKey, k)) for (const id of ids) owners.add(id);
+    return owners;
+  };
+  const isDeferred = (p) => ownersOf(p).size > 0;
   // R5(a) (board c198866d round-3 fixer): the FULL, UNFILTERED touch set —
   // deliberately NOT touchedExisting (which is existsSync-filtered). Both
   // deferredPaths and settlementCandidates below derive from this, because a
@@ -834,7 +846,7 @@ try {
   // path a live dispatch still owns (isDeferred) is excluded, matching the
   // duty set's own exclusion.
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
-  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
+  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...ownersOf(p)]))];
   // Disclosure, not a demand: rides whatever release/deny the duties below
   // produce. Deliberately avoids the article-demand and capture-nag wording —
   // a deferred duty is not owed to the conductor right now.
@@ -867,7 +879,9 @@ try {
   // once-per-session key dedup (point C) applies ON TOP of biting: a note
   // fires only when the row bites AND its key is not yet spent this session.
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  const bitingUnknown = unknownRows.filter((row) =>
+    (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
+  );
   // FIX 2 (review round, re-applied): `raw.session_id !== input.session_id`
   // passes when BOTH are undefined, so an absent session_id was never
   // actually excluded — hasSession gates the reader, the writer AND the
@@ -2259,7 +2273,7 @@ try {
       const articleFiles = () => {
         const owedText = unowned.length ? ` · owed: ${capList(unowned)}` : '';
         const deferredText = deferredPaths.length
-          ? ` · deferred: ${capList(deferredPaths.map((p) => `${p} (${[...deferredOwners.get(joinKey(p))].join(', ')})`))}`
+          ? ` · deferred: ${capList(deferredPaths.map((p) => `${p} (${[...ownersOf(p)].join(', ')})`))}`
           : '';
         return `${owedText}${deferredText}`;
       };

@@ -8254,6 +8254,10 @@ function isOrphan(entry, staleMinutes, nowMs = Date.now()) {
   if (Number.isNaN(t)) return true;
   return nowMs - t > staleMinutes * 6e4;
 }
+function pathOwnedBy(entry, path) {
+  if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
+  return path === entry || path.startsWith(`${entry}/`);
+}
 function probeDirtyPaths(projectDir, files) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
@@ -8284,7 +8288,11 @@ function probeDirtyPaths(projectDir, files) {
       i++;
     }
   }
-  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+  const dirty = [];
+  for (const entry of declared) {
+    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+  }
+  return { verified: true, dirty };
 }
 function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
   const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
@@ -8676,6 +8684,7 @@ try {
   const isDispatchEventLive = (e) => ownRegisterRow(e)?.status === "presumed-active";
   const WORKTREE_PREFIX_RE = /^\.claude\/worktrees\/[^/]+\//;
   const joinKey = (p) => String(p ?? "").replace(WORKTREE_PREFIX_RE, "");
+  const entryOwns = pathOwnedBy;
   const deferredOwners = /* @__PURE__ */ new Map();
   const unknownRows = [];
   if (classified.availability === "ok") {
@@ -8691,11 +8700,17 @@ try {
       }
     }
   }
-  const isDeferred = (p) => deferredOwners.has(joinKey(p));
+  const ownersOf = (p) => {
+    const k = joinKey(p);
+    const owners = /* @__PURE__ */ new Set();
+    for (const [entryKey, ids] of deferredOwners) if (entryOwns(entryKey, k)) for (const id of ids) owners.add(id);
+    return owners;
+  };
+  const isDeferred = (p) => ownersOf(p).size > 0;
   const allTouchedPaths = [...new Set((Array.isArray(touches) ? touches : []).map((t) => t?.path).filter(Boolean))];
   const deferredPaths = allTouchedPaths.filter(isDeferred);
   const settlementCandidates = allTouchedPaths.filter((p) => !isDeferred(p));
-  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...deferredOwners.get(joinKey(p))]))];
+  const deferredAgents = [...new Set(deferredPaths.flatMap((p) => [...ownersOf(p)]))];
   const disclosureParts = [];
   if (lostSettlementMessage) disclosureParts.push(lostSettlementMessage);
   if (residueLines.length) disclosureParts.push(...residueLines);
@@ -8707,7 +8722,9 @@ try {
     );
   }
   const touchedKeys = new Set(touchedExisting.map(joinKey));
-  const bitingUnknown = unknownRows.filter((row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => touchedKeys.has(joinKey(f))));
+  const bitingUnknown = unknownRows.filter(
+    (row) => (Array.isArray(row.entry.files) ? row.entry.files : []).some((f) => [...touchedKeys].some((k) => entryOwns(joinKey(f), k)))
+  );
   const hasSession = typeof input.session_id === "string" && input.session_id.length > 0;
   const dispatchUnknownNotedPath = join6(input.cwd, ".sterling", "transient", "dispatch-unknown-noted.json");
   const dispatchUnknownNotedKeys = (() => {
@@ -9157,7 +9174,7 @@ try {
       const capList = (arr) => arr.length > 5 ? `${arr.slice(0, 5).join(", ")} +${arr.length - 5} more` : arr.join(", ");
       const articleFiles = () => {
         const owedText = unowned.length ? ` \xB7 owed: ${capList(unowned)}` : "";
-        const deferredText = deferredPaths.length ? ` \xB7 deferred: ${capList(deferredPaths.map((p) => `${p} (${[...deferredOwners.get(joinKey(p))].join(", ")})`))}` : "";
+        const deferredText = deferredPaths.length ? ` \xB7 deferred: ${capList(deferredPaths.map((p) => `${p} (${[...ownersOf(p)].join(", ")})`))}` : "";
         return `${owedText}${deferredText}`;
       };
       const segs = openLanes.map((lane) => `${lane}\u2192${tokenFor(lane)}${lane === "articles" ? articleFiles() : ""}`);

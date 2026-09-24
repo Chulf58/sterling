@@ -633,3 +633,75 @@ test('SPEC B (6) CONTROL: an empty register plus a self-claim never produces a s
     cleanup();
   }
 });
+
+// ===========================================================================
+// SPEC A (8) — DECLARED DIRECTORIES (decision h22-dispatch-files-from-review-
+// territory-and-resume-inherits-prior-round, e841facd; Sol review of its
+// implementation). A REVIEW-TERRITORY may declare a directory ("src/farm"),
+// so a register entry's `files` can hold one. The residue probe must report
+// the DIRTY DESCENDANTS of such an entry: exact-only matching returned
+// dirty: [] and H1 then wiped the register with the residue unreported.
+// Every entry is matched exact-or-'/'-prefix (a file has no descendants), so
+// a dotted directory ("vendor/cache.v2") is covered too.
+// ===========================================================================
+
+const RESIDUE_LIB = join(root, 'scripts', 'hooks', 'lib', 'dispatch-residue.mjs');
+
+function dirtyNew(dir, relPath) {
+  mkdirSync(dirname(join(dir, relPath)), { recursive: true });
+  writeFileSync(join(dir, relPath), '// new, uncommitted\n');
+}
+
+test('SPEC A (8a): pathOwnedBy matches exactly or on a "/" boundary, for dotted and undotted entries alike', async () => {
+  const { pathOwnedBy } = await import(new URL(`file://${RESIDUE_LIB}`).href);
+  assert.equal(typeof pathOwnedBy, 'function', 'one shared ownership matcher is exported');
+  assert.equal(pathOwnedBy('src/farm', 'src/farm/crop.gd'), true);
+  assert.equal(pathOwnedBy('src/farm', 'src/farm'), true);
+  assert.equal(pathOwnedBy('src/farm', 'src/farmhouse.gd'), false, 'a shared string prefix is not containment');
+  assert.equal(pathOwnedBy('vendor/cache.v2', 'vendor/cache.v2/blob.bin'), true, 'a dotted directory owns its descendants');
+  assert.equal(pathOwnedBy('.claude', '.claude/settings.json'), true);
+  assert.equal(pathOwnedBy('src/a.mjs', 'src/a.mjs'), true);
+  assert.equal(pathOwnedBy('src/a.mjs', 'src/a.mjsx'), false);
+});
+
+test('SPEC A (8b): probeDirtyPaths returns the dirty DESCENDANTS of a declared directory, dotted or not', { skip: GIT_SKIP }, async () => {
+  const { probeDirtyPaths } = await import(new URL(`file://${RESIDUE_LIB}`).href);
+  const { dir, cleanup } = makeGitProject();
+  try {
+    dirtyNew(dir, 'src/farm/crop.gd');
+    dirtyNew(dir, 'vendor/cache.v2/blob.bin');
+    dirtyNew(dir, 'src/farmhouse.gd');
+    dirty(dir, 'src/a.mjs');
+    const probe = probeDirtyPaths(dir, ['src/farm', 'vendor/cache.v2', 'src/a.mjs']);
+    assert.equal(probe.verified, true);
+    assert.deepEqual([...probe.dirty].sort(), ['src/a.mjs', 'src/farm/crop.gd', 'vendor/cache.v2/blob.bin']);
+  } finally {
+    cleanup();
+  }
+});
+
+test('SPEC A (8c): H1 SessionStart reports residue for an orphan that declared a DIRECTORY and left a dirty file under it', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    dirtyNew(dir, 'src/farm/crop.gd');
+    writeRegisterRaw(dir, [liveEntry('orphan-dir', 'implementor', ['src/farm'], { minutesAgo: 90 })]);
+    const r = h1(dir, 'startup');
+    assert.equal(r.code, 0, r.stderr);
+    assertResidue(r.additionalContext || out(r), { agentType: 'implementor', agentId: 'orphan-dir', paths: ['src/farm/crop.gd'] });
+  } finally {
+    cleanup();
+  }
+});
+
+test('SPEC A (8d): H22 kill-signature SubagentStop reports residue for a dirty file under a declared DIRECTORY', { skip: GIT_SKIP }, () => {
+  const { dir, cleanup } = makeGitProject();
+  try {
+    dirtyNew(dir, 'src/farm/crop.gd');
+    writeRegisterRaw(dir, [liveEntry('killed-dir', 'coder', ['src/farm'], { minutesAgo: 0 })]);
+    const r = runHook('h22-dispatch-register.mjs', h22StopInput(dir, { agent_id: 'killed-dir', last_assistant_message: '' }), dir);
+    assert.equal(r.code, 0, r.stderr);
+    assertResidue(out(r), { agentType: 'coder', agentId: 'killed-dir', paths: ['src/farm/crop.gd'] });
+  } finally {
+    cleanup();
+  }
+});

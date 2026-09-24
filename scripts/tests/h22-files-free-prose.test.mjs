@@ -14,6 +14,10 @@
 // surrounding prose, with `files_source: 'free-prose-fallback'` rather than
 // the deleted 'review-territory' provenance.
 //
+// Arm (b) was RE-CUT by decision h22-dispatch-files-from-review-territory-and-
+// resume-inherits-prior-round (e841facd): a valid REVIEW-TERRITORY now decides
+// `files`. Arms (a) and (c), briefs without a declaration, are unchanged.
+//
 // Harness mirrors the now-deleted scripts/tests/h22-claimed-territory.test.mjs
 // (real PreToolUse Task events, then a real SubagentStart, reading the
 // register file directly) — reused, not modified (that file no longer
@@ -125,15 +129,16 @@ test('(a) a prohibited path mention and an owned path mention BOTH land in files
 });
 
 // ===========================================================================
-// (b) A REVIEW-TERRITORY-shaped line is no longer parsed as a structured
-// declaration — it is scanned by the SAME bare free-prose extractor as the
-// rest of the prompt, so the path INSIDE the marker's JSON array and a path
-// mentioned elsewhere in the prose both land in `files` (a union), and
-// files_source is always 'free-prose-fallback' now that the
-// 'review-territory' provenance value is never produced.
+// (b) RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
+// inherits-prior-round (e841facd). This arm used to pin the opposite: that a
+// REVIEW-TERRITORY line was unparsed and its path merely joined the free-
+// prose union. A valid declaration is now the authority for `files`, so a
+// path mentioned only in the surrounding prose is NOT owned, and files_source
+// is 'review-territory'. Free-prose extraction (arms (a) and (c)) still
+// applies to every brief without a declaration.
 // ===========================================================================
 
-test('(b) a REVIEW-TERRITORY-shaped line contributes its path via bare free-prose extraction, unioned with surrounding prose — files_source stays free-prose-fallback', () => {
+test('(b) a valid REVIEW-TERRITORY line replaces free-prose extraction — the surrounding prose path is not owned, files_source is review-territory', () => {
   const { dir, cleanup } = makeProject();
   try {
     const prompt = [
@@ -147,13 +152,9 @@ test('(b) a REVIEW-TERRITORY-shaped line contributes its path via bare free-pros
 
     const entry = entryFor(dir, 'sub-b');
     assert.equal(entry.attribution, 'block');
-    assert.deepEqual(
-      [...entry.files].sort(),
-      ['scripts/decoy-analysis.mjs', 'scripts/target-a.mjs'],
-      'no REVIEW-TERRITORY precedence exists any more — the marker-carried path and the surrounding prose path both survive as an ordinary free-prose union'
-    );
-    assert.equal(entry.files_source, 'free-prose-fallback', "'review-territory' is never produced — parseReviewTerritory is deleted");
-    assert.doesNotMatch(s.stderr, /REVIEW-TERRITORY/, 'no territory_declaration_malformed/missing disclosure fires any more — that advisory is deleted with the parser');
+    assert.deepEqual(entry.files, ['scripts/target-a.mjs'], 'the declaration is the whole territory — the prose-only decoy path is not owned');
+    assert.equal(entry.files_source, 'review-territory');
+    assert.doesNotMatch(s.stderr, /territory_declaration_malformed/, 'a valid declaration is not disclosed as malformed');
   } finally {
     cleanup();
   }

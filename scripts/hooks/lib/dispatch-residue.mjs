@@ -30,7 +30,23 @@ export function isOrphan(entry, staleMinutes, nowMs = Date.now()) {
 }
 
 /**
- * Which of an entry's declared files are git-dirty right now.
+ * THE ONE OWNERSHIP MATCHER for a register `files` entry (decision h22-
+ * dispatch-files-from-review-territory-and-resume-inherits-prior-round): an
+ * entry owns a path when they are equal, or when the path lies under the
+ * entry on a '/' boundary. A REVIEW-TERRITORY may declare a directory, and
+ * nothing tells a directory from a file by its name ("vendor/cache.v2",
+ * ".claude"), so EVERY entry is matched this way — a file has no
+ * descendants, so a file entry still only matches itself. Shared by H10's
+ * deferral join and by this module's residue probe (H1, H10, H22).
+ */
+export function pathOwnedBy(entry, path) {
+  if (typeof entry !== 'string' || entry === '' || typeof path !== 'string') return false;
+  return path === entry || path.startsWith(`${entry}/`);
+}
+
+/**
+ * Which of an entry's declared paths are git-dirty right now: a dirty file
+ * entry reports itself, a declared directory reports its dirty descendants.
  * Returns { verified: true, dirty: string[] } on a successful probe, or
  * { verified: false, dirty: <all declared>, reason } when the probe itself
  * fails — the CALLER must still report residue then, marked
@@ -77,7 +93,11 @@ export function probeDirtyPaths(projectDir, files) {
       i++; // consume the original-path field so it is never re-parsed as its own status record
     }
   }
-  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+  const dirty = [];
+  for (const entry of declared) {
+    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+  }
+  return { verified: true, dirty };
 }
 
 /**
