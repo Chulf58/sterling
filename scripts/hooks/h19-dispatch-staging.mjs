@@ -437,13 +437,14 @@ async function main(input) {
             kind: 'ordinary',
             contentClass: 'chrome',
           },
-          ...hazardParts(subjectHazards, { remedy }),
+          // Matched on the task's SUBJECT, not a file path.
+          ...hazardParts(subjectHazards, { remedy, matchLabel: 'for this subject' }),
           ...(subjectDecisions.length
             ? [
                 {
                   kind: 'ordinary', contentClass: 'discovery',
                   identities: subjectDecisions.slice(0, SUBJECT_MAX_DECISIONS).map((d) => ({ identity: d.id, revision: recordRevision(d) })),
-                  text: renderDecisionPointers('(subject match)', subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy }),
+                  text: renderDecisionPointers('(subject match)', subjectDecisions, SUBJECT_MAX_DECISIONS, { remedy: decisionRemedy, matchLabel: 'for this subject' }),
                   pointer: decisionBlockPointer(subjectDecisions.length, decisionRemedy),
                   suffix: `  … the rest held back by the delivery cap — ${decisionRemedy}`,
                 },
