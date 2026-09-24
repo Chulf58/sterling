@@ -78,7 +78,7 @@ try {
   const configPath = join(target, '.sterling', 'config.json');
   const raw = existsSync(configPath) ? readFileSync(configPath, 'utf8') : '';
   const parsed = raw ? JSON.parse(raw) : {};
-  const next = registeredProjections(parsed.generated_projections, files);
+  const next = registeredProjections(parsed.generated_projections, files, done.removed);
   if (JSON.stringify(next) !== JSON.stringify(parsed.generated_projections ?? [])) {
     parsed.generated_projections = next;
     writeFileSync(configPath, JSON.stringify(parsed, null, 2) + (raw.endsWith('\n') || !raw ? '\n' : ''));

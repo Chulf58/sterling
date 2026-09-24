@@ -165,6 +165,27 @@ test('registers the generated FILES (not a glob) in config.generated_projections
   }
 });
 
+// Sol review: registration removed EVERY entry under docs/sterling/, including
+// ones another producer registered. Only this producer's own files and the
+// marker-verified stale files it removes leave the list.
+test('registration keeps a foreign generated_projections entry inside docs/sterling/', () => {
+  const foreign = ['docs/sterling/api-reference.md', 'docs/sterling/decisions/imported-by-hand.md'];
+  const dir = fixture({ config: { generated_projections: [...foreign] } });
+  try {
+    mkdirSync(join(dir, 'docs', 'sterling', 'decisions'), { recursive: true });
+    writeFileSync(join(dir, 'docs/sterling/api-reference.md'), '# produced by another generator\n');
+    writeFileSync(join(dir, 'docs/sterling/decisions/imported-by-hand.md'), '# not ours\n');
+    const r = project(dir);
+    assert.equal(r.code, 0, r.out);
+    const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(config.generated_projections, [...foreign, ...EXPECTED_FILES]);
+    assert.equal(project(dir).code, 0);
+    assert.deepEqual(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).generated_projections, [...foreign, ...EXPECTED_FILES], 'stable on rerun');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('removes a stale record file (a record no longer in the store) and unregisters it', () => {
   const dir = fixture();
   try {

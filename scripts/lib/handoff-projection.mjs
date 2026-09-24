@@ -232,8 +232,21 @@ export function planHandoff(root, files) {
 
 // config.generated_projections holds exact FILES (every consumer — H7's
 // settlement, check-record-citations, the MCP drift check, direct-merge — tests
-// membership, never a glob). Entries this projection does not own are kept.
-export function registeredProjections(existing, files) {
-  const kept = (existing ?? []).filter((p) => !isHandoffPath(p));
+// membership, never a glob). Only this producer's own entries change: the files
+// it generates now (re-appended in sorted order) and the marker-verified stale
+// files it removed. Every other entry — another producer's, even one under
+// docs/sterling/ — is kept in place.
+export function registeredProjections(existing, files, removed = []) {
+  const ours = new Set([...files.keys(), ...removed]);
+  const kept = (existing ?? []).filter((p) => !ours.has(p));
   return [...kept, ...[...files.keys()].sort(byText)];
+}
+
+// Is `rel` a file this producer generated (for callers comparing a recorded
+// config against defaults): the two root indexes or a marker-carrying file.
+export function isOwnedExport(root, rel) {
+  if (HANDOFF_ROOT_FILES.includes(rel)) return true;
+  if (!isHandoffPath(rel)) return false;
+  const abs = join(root, rel);
+  return existsSync(abs) && isHandoffOwned(readFileSync(abs, 'utf8'), rel);
 }

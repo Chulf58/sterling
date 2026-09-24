@@ -30,7 +30,7 @@ import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isHandoffPath } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport } from './lib/handoff-projection.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -68,7 +68,7 @@ const normalize = (s) => s.replace(/\r\n/g, '\n');
 // The handoff projection registers its own files in config.generated_projections
 // (a managed write, like the universal-domain add below), so those entries never
 // read as a hand edit when init compares the recorded config with the defaults.
-const withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isHandoffPath(p)) });
+const withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isOwnedExport(target, p)) });
 const canonical = (v) =>
   JSON.stringify(v, (_, val) =>
     val && typeof val === 'object' && !Array.isArray(val)
