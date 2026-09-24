@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SterlingStore } from '@sterling/store';
+import { buildHandoffFiles } from '../lib/handoff-projection.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const NOW = '2026-09-24T12:00:00.000Z';
@@ -22,7 +23,7 @@ const base = (type) => ({
 });
 
 const ARTICLE = {
-  ...base('feature_article'),
+  ...base('feature_article'), id: 'aaaaaaaa-0000-4000-8000-000000000001',
   slug: 'order-import',
   title: 'Order import — pulls orders from the shop API',
   what_it_does: 'Fetches new orders every five minutes and writes them to the orders table. The queue redelivers on failure.',
@@ -35,7 +36,7 @@ const ARTICLE = {
   dependencies: { relies_on: [], relied_by: [] }, state: 'active', history: [{ date: NOW, event: 'created' }], live_test_refs: [],
 };
 const DECISION = {
-  ...base('decision'),
+  ...base('decision'), id: 'bbbbbbbb-0000-4000-8000-000000000002',
   slug: 'importer-has-no-retry-loop',
   title: 'The importer has no retry loop; the queue redelivers',
   statement: 'The importer calls the shop API once per order and never retries.',
@@ -44,7 +45,7 @@ const DECISION = {
   file_keys: ['src/importer/fetch.ts'],
 };
 const ANTI_PATTERN = {
-  ...base('anti_pattern'),
+  ...base('anti_pattern'), id: 'cccccccc-0000-4000-8000-000000000003',
   slug: 'mocking-the-shop-api-clock',
   title: 'Mocking the shop API clock in importer tests',
   trigger: 'Writing an importer test that needs a timeout.',
@@ -92,9 +93,9 @@ const snapshot = (dir) => Object.fromEntries(listTree(dir).map((f) => [f, readFi
 
 const EXPECTED_FILES = [
   'architecture.md',
-  'docs/sterling/anti-patterns/mocking-the-shop-api-clock.md',
-  'docs/sterling/articles/order-import.md',
-  'docs/sterling/decisions/importer-has-no-retry-loop.md',
+  'docs/sterling/anti-patterns/mocking-the-shop-api-clock-cccccccc.md',
+  'docs/sterling/articles/order-import-aaaaaaaa.md',
+  'docs/sterling/decisions/importer-has-no-retry-loop-bbbbbbbb.md',
   'rulings.md',
 ];
 
@@ -106,15 +107,15 @@ test('projects indexes at the root and one COMPLETE record file per record under
     assert.match(r.out, /handoff projection: written/);
     assert.deepEqual(listTree(dir), EXPECTED_FILES);
 
-    const article = readFileSync(join(dir, 'docs/sterling/articles/order-import.md'), 'utf8');
+    const article = readFileSync(join(dir, 'docs/sterling/articles/order-import-aaaaaaaa.md'), 'utf8');
     for (const text of [ARTICLE.title, ARTICLE.what_it_does, ARTICLE.intended_behavior, '`src/importer/fetch.ts` — calls the shop API', '`src/importer/write.ts` — writes rows', 'a redelivered order is not duplicated']) {
       assert.ok(article.includes(text), `article file carries: ${text}`);
     }
-    const decision = readFileSync(join(dir, 'docs/sterling/decisions/importer-has-no-retry-loop.md'), 'utf8');
+    const decision = readFileSync(join(dir, 'docs/sterling/decisions/importer-has-no-retry-loop-bbbbbbbb.md'), 'utf8');
     for (const text of [DECISION.statement, DECISION.rationale, 'Exponential backoff in the importer', 'Duplicates on a late commit.', '`src/importer/fetch.ts`']) {
       assert.ok(decision.includes(text), `decision file carries: ${text}`);
     }
-    const anti = readFileSync(join(dir, 'docs/sterling/anti-patterns/mocking-the-shop-api-clock.md'), 'utf8');
+    const anti = readFileSync(join(dir, 'docs/sterling/anti-patterns/mocking-the-shop-api-clock-cccccccc.md'), 'utf8');
     for (const text of [ANTI_PATTERN.trigger, ANTI_PATTERN.guidance, ANTI_PATTERN.wrong_way, ANTI_PATTERN.right_way]) {
       assert.ok(anti.includes(text), `anti-pattern file carries: ${text}`);
     }
@@ -122,11 +123,11 @@ test('projects indexes at the root and one COMPLETE record file per record under
     const arch = readFileSync(join(dir, 'architecture.md'), 'utf8');
     assert.match(arch, /DO NOT EDIT/);
     assert.match(arch, /^## src\/importer$/m, 'grouped by area (path prefix)');
-    assert.ok(arch.includes('[Order import — pulls orders from the shop API](docs/sterling/articles/order-import.md)'), 'index links the full record');
+    assert.ok(arch.includes('[Order import — pulls orders from the shop API](docs/sterling/articles/order-import-aaaaaaaa.md)'), 'index links the full record');
     assert.ok(arch.includes('`src/importer/fetch.ts`'), 'index names the owning paths');
     const rulings = readFileSync(join(dir, 'rulings.md'), 'utf8');
-    assert.ok(rulings.includes('(docs/sterling/decisions/importer-has-no-retry-loop.md)'));
-    assert.ok(rulings.includes('(docs/sterling/anti-patterns/mocking-the-shop-api-clock.md)'));
+    assert.ok(rulings.includes('(docs/sterling/decisions/importer-has-no-retry-loop-bbbbbbbb.md)'));
+    assert.ok(rulings.includes('(docs/sterling/anti-patterns/mocking-the-shop-api-clock-cccccccc.md)'));
     assert.match(rulings, /^## No file paths$/m, 'a record with no file keys gets its own section');
     for (const f of EXPECTED_FILES) {
       assert.doesNotMatch(readFileSync(join(dir, f), 'utf8'), /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/, `${f}: no timestamp`);
@@ -169,7 +170,7 @@ test('removes a stale record file (a record no longer in the store) and unregist
   try {
     assert.equal(project(dir).code, 0);
     const stale = 'docs/sterling/decisions/an-old-ruling.md';
-    writeFileSync(join(dir, stale), readFileSync(join(dir, 'docs/sterling/decisions/importer-has-no-retry-loop.md'), 'utf8'));
+    writeFileSync(join(dir, stale), readFileSync(join(dir, 'docs/sterling/decisions/importer-has-no-retry-loop-bbbbbbbb.md'), 'utf8'));
     const configPath = join(dir, '.sterling', 'config.json');
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
     writeFileSync(configPath, JSON.stringify({ ...config, generated_projections: [...config.generated_projections, stale] }, null, 2) + '\n');
@@ -279,4 +280,35 @@ test('never runs against the Sterling clone itself: skipped loudly, its own proj
   assert.match(r.out, /handoff projection: SKIPPED .*Sterling clone/);
   assert.equal(readFileSync(join(root, 'architecture.md'), 'utf8'), before);
   assert.ok(!existsSync(join(root, 'docs', 'sterling')));
+});
+
+// Sol review (duplicate slugs collapse records): record filenames are
+// <slug>-<id8>, always, lowercase, and the id part grows while a case-folded
+// collision persists — so no two records ever share a file, on any filesystem.
+test('record filenames are unique and case-insensitive-safe: duplicate slugs, shared id prefixes, truncation, case', () => {
+  const rec = (id, slug, title = 'A title') => ({ ...DECISION, id, slug, title });
+  const long = 'x'.repeat(100);
+  const records = [
+    rec('11111111-aaaa-4000-8000-000000000001', 'same-slug'),
+    rec('22222222-aaaa-4000-8000-000000000002', 'same-slug'),
+    rec('33333333-aaaa-4000-8000-000000000003', 'shared-prefix'),
+    rec('33333333-bbbb-4000-8000-000000000004', 'shared-prefix'),
+    rec('44444444-aaaa-4000-8000-000000000005', `${long}-first`),
+    rec('44444444-aaaa-4000-8000-000000000015', `${long}-second`),
+    rec('66666666-aaaa-4000-8000-000000000007', 'Mixed-CASE'),
+    rec('66666666-aaaa-4000-8000-000000000008', 'mixed-case'),
+    rec('77777777-aaaa-4000-8000-000000000009', undefined, 'No Slug Here'),
+  ];
+  const { files } = buildHandoffFiles(records);
+  const recordFiles = [...files.keys()].filter((f) => f.startsWith('docs/sterling/'));
+  assert.equal(recordFiles.length, records.length, `one file per record: ${recordFiles.join(', ')}`);
+  assert.equal(new Set(recordFiles.map((f) => f.toLowerCase())).size, records.length, 'unique under case folding');
+  for (const f of recordFiles) assert.equal(f, f.toLowerCase(), `${f} is lowercase`);
+  assert.ok(recordFiles.includes('docs/sterling/decisions/same-slug-11111111.md'));
+  assert.ok(recordFiles.includes('docs/sterling/decisions/same-slug-22222222.md'));
+  assert.ok(recordFiles.includes('docs/sterling/decisions/shared-prefix-33333333.md'));
+  assert.ok(recordFiles.includes('docs/sterling/decisions/shared-prefix-33333333-bbbb.md'), `a shared id8 extends: ${recordFiles.join(', ')}`);
+  assert.ok(recordFiles.includes('docs/sterling/decisions/no-slug-here-77777777.md'));
+  assert.ok(recordFiles.every((f) => f.split('/').pop().length <= 100), 'a long slug is truncated');
+  assert.deepEqual([...buildHandoffFiles([...records].reverse()).files.keys()], [...files.keys()], 'deterministic whatever the input order');
 });

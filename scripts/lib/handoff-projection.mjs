@@ -78,19 +78,29 @@ function slugify(text) {
   return String(text).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'record';
 }
 
-// Stable filenames: the record's slug when it has one, else its slugified title
-// plus id prefix. A collision inside one type directory (possible only between a
-// slug and a derived name) is resolved by id order, never by insertion order.
+// Stable, unconditionally unique filenames: `<slug>-<id prefix>` (the slugified
+// title when a record has no slug), lowercase. The id prefix starts at 8
+// characters and grows while a case-folded collision persists — duplicate slugs,
+// two ids sharing 8 characters, or two long slugs that truncate alike — up to the
+// full id, which is unique. Assigned in id order, so input order never matters.
 function assignFiles(records) {
-  const taken = new Map();
+  const taken = new Set();
   const sorted = [...records].sort((a, b) => byText(a.id, b.id));
   const fileOf = new Map();
   for (const r of sorted) {
     const dir = `${HANDOFF_DOCS_DIR}/${TYPE_DIRS[r.type]}`;
-    let name = r.slug ? slugify(r.slug) : `${slugify(r.title)}-${r.id.slice(0, 8)}`;
-    if (taken.has(`${dir}/${name}`)) name = `${name}-${r.id.slice(0, 8)}`;
-    taken.set(`${dir}/${name}`, r.id);
-    fileOf.set(r.id, `${dir}/${name}.md`);
+    const stem = slugify(r.slug ?? r.title);
+    const id = String(r.id).toLowerCase();
+    // prefix lengths: 8, then each later id group boundary (a uuid's dashes), then the full id
+    const lengths = [8, ...[...id.matchAll(/-/g)].map((m) => m.index).filter((i) => i > 8), id.length].filter((n) => n <= id.length);
+    let rel;
+    for (const n of lengths) {
+      rel = `${dir}/${stem}-${slugify(id.slice(0, n))}.md`;
+      if (!taken.has(rel.toLowerCase())) break;
+    }
+    if (taken.has(rel.toLowerCase())) throw new Error(`handoff projection: two records resolve to ${rel} even with their full ids — refusing (P5)`);
+    taken.add(rel.toLowerCase());
+    fileOf.set(r.id, rel);
   }
   return fileOf;
 }
