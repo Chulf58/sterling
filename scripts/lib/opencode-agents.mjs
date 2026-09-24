@@ -20,6 +20,7 @@
 
 import { readFileSync } from 'node:fs';
 import { ContainmentError, existsContained, readContained, writeContained } from './contained-fs.mjs';
+import { ignoredPaths, ignoredRemedy } from './git-ignore-check.mjs';
 import { join } from 'node:path';
 import { sha256, loadRegistry, OPENCODE_PERMISSION_KEYS, OPENCODE_PERMISSION_VALUES } from './agent-distribution.mjs';
 import { renderPortableText } from './agent-fences.mjs';
@@ -120,7 +121,8 @@ function syncOne(targetDir, candidate) {
 
 // Statuses: installed | up_to_date | refreshed | header_repaired |
 // locally_modified_up_to_date | refused_local_modification (refused) | foreign_file (refused) |
-// refused_unsafe_path (refused: a symlink or non-directory on the way).
+// refused_unsafe_path (refused: a symlink or non-directory on the way) |
+// refused_ignored (refused: the target's own ignore rules cover the path).
 export function syncOpenCodeAgents({ registryPath, templatesDir, targetDir, renderer = OPENCODE_RENDERER }) {
   const entries = portableAgentEntries(loadRegistry(registryPath));
   // Render everything before writing anything: a bad template refuses the whole set.
@@ -130,12 +132,21 @@ export function syncOpenCodeAgents({ registryPath, templatesDir, targetDir, rend
     return out;
   });
   const report = [];
+  // The copies are meant to be committed: an agent path the target's own ignore
+  // rules cover is refused, naming the rule (Sol review); the rules are never edited.
+  const ignore = ignoredPaths(targetDir, rendered.map((c) => `${OPENCODE_AGENTS_DIR}/${c.name}.md`));
+  const ignoredByPath = new Map((ignore.ignored ?? []).map((i) => [i.path, i]));
   for (const candidate of rendered) {
+    const hit = ignoredByPath.get(`${OPENCODE_AGENTS_DIR}/${candidate.name}.md`);
+    if (hit) {
+      report.push({ name: candidate.name, status: 'refused_ignored', refused: true, instruction: `REFUSED: ${OPENCODE_AGENTS_DIR}/${candidate.name}.md is ${ignoredRemedy([hit])}` });
+      continue;
+    }
     try {
       report.push(syncOne(targetDir, candidate));
     } catch (err) {
       if (!(err instanceof ContainmentError)) throw err;
-      report.push({ name: candidate.name, status: 'refused_unsafe_path', refused: true, instruction: opencodeRefuseInstruction(candidate.name, `cannot be written safely: ${err.message}`) });
+      report.push({ name: candidate.name, status: 'refused_unsafe_path', refused: true, instruction: `REFUSED: ${OPENCODE_AGENTS_DIR}/${candidate.name}.md cannot be written safely: ${err.message}. Nothing was written; remove the link or file in the way, then rerun.` });
     }
   }
   return { report };

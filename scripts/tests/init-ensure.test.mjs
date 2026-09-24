@@ -2542,3 +2542,24 @@ test('OpenCode handoff: fresh init writes committed .opencode/agents/ and the ha
     rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 });
+
+// Sol review MEDIUM: a target that ALREADY ignores the handoff paths would never
+// commit them. Init refuses those rows loudly, naming the rule, and leaves the
+// user's ignore rules alone.
+test('OpenCode handoff: a target whose .gitignore already covers the handoff paths gets refused rows naming the rule', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-opencode-ignored-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, '.gitignore'), '.opencode/\nrulings.md\n');
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^\.opencode\/agents\/scout\.md\s+refused\s+ignored by git/m);
+    assert.match(r.stdout, /\.gitignore:1:\.opencode\//);
+    assert.match(r.stdout, /^architecture\.md \+ rulings\.md \+ docs\/sterling\/ \(handoff projection\)\s+refused\s+REFUSED — .*ignored by git.*\.gitignore:2:rulings\.md/m);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
+    assert.ok(!existsSync(join(dir, 'architecture.md')), 'the projection wrote nothing');
+    assert.ok(readFileSync(join(dir, '.gitignore'), 'utf8').startsWith('.opencode/\nrulings.md\n'), 'the user rules are left as they were');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});

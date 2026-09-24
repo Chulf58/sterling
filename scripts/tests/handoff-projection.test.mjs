@@ -373,6 +373,27 @@ test('containment: a regular file where docs/sterling must be a directory is ref
   }
 });
 
+// Sol review MEDIUM: a target whose ignore rules already cover the generated
+// paths would never commit them. Refuse before writing, naming the rule; never
+// edit the user's ignore rules.
+test('ignore rules: a generated path the target already ignores is refused, naming the rule and the remedy', () => {
+  const dir = fixture();
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, '.gitignore'), 'node_modules/\ndocs/\n');
+    const r = project(dir);
+    assert.equal(r.code, 3, r.out);
+    assert.match(r.out, /handoff projection: REFUSED .*ignored by git/);
+    assert.match(r.out, /\.gitignore:2:docs\//, 'names the rule: source, line, pattern');
+    assert.match(r.out, /docs\/sterling\/articles\/order-import-aaaaaaaa\.md/, 'names an ignored path');
+    assert.match(r.out, /never edits your ignore rules/);
+    assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), 'node_modules/\ndocs/\n', 'the ignore file is untouched');
+    assert.deepEqual(listTree(dir), [], 'nothing written');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // Sol review (duplicate slugs collapse records): record filenames are
 // <slug>-<id8>, always, lowercase, and the id part grows while a case-folded
 // collision persists — so no two records ever share a file, on any filesystem.

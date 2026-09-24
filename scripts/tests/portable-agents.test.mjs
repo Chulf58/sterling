@@ -370,6 +370,24 @@ for (const [label, link, toFile] of [
   });
 }
 
+test('sync refuses an agent path the target already ignores, naming the rule; nothing written', () => {
+  const dir = tempTarget();
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, '.gitignore'), '.opencode/\n');
+    const { report } = syncOpenCodeAgents({ registryPath, templatesDir, targetDir: dir });
+    assert.deepEqual(new Set(report.map((r) => r.status)), new Set(['refused_ignored']));
+    for (const r of report) {
+      assert.equal(r.refused, true);
+      assert.match(r.instruction, /\.gitignore:1:\.opencode\//);
+    }
+    assert.ok(!existsSync(join(dir, OPENCODE_AGENTS_DIR)), 'nothing written');
+    assert.equal(readFileSync(join(dir, '.gitignore'), 'utf8'), '.opencode/\n');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('sync treats a CRLF checkout of an unmodified agent as up_to_date', () => {
   const dir = tempTarget();
   try {
