@@ -242,7 +242,7 @@ test('guard: a missing store refuses loudly and writes nothing', () => {
   const dir = fixture({ store: false });
   try {
     const r = project(dir);
-    assert.equal(r.code, 2, r.out);
+    assert.equal(r.code, 3, r.out); // actionable: run init
     assert.match(r.out, /handoff projection: REFUSED .*no Sterling store/);
     assert.deepEqual(listTree(dir), []);
   } finally {
@@ -259,7 +259,7 @@ test('guard: an empty store never wipes existing exports', () => {
     for (const f of readdirSync(join(dir, '.sterling'))) if (f.startsWith('sterling.db')) rmSync(join(dir, '.sterling', f));
     new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
     const r = project(dir);
-    assert.equal(r.code, 2, r.out);
+    assert.equal(r.code, 3, r.out); // actionable
     assert.match(r.out, /handoff projection: REFUSED .*holds no articles, decisions or anti-patterns/);
     assert.deepEqual(snapshot(dir), before);
   } finally {
@@ -279,7 +279,7 @@ test('guard: an empty store never overwrites root-only exports', () => {
     for (const f of readdirSync(join(dir, '.sterling'))) if (f.startsWith('sterling.db')) rmSync(join(dir, '.sterling', f));
     new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
     const r = project(dir);
-    assert.notEqual(r.code, 0, r.out);
+    assert.equal(r.code, 3, r.out);
     assert.match(r.out, /handoff projection: REFUSED .*holds no articles, decisions or anti-patterns/);
     assert.deepEqual(snapshot(dir), before);
   } finally {
@@ -308,7 +308,7 @@ test('a hand-written root architecture.md is foreign: refused, untouched, nothin
   try {
     writeFileSync(join(dir, 'architecture.md'), '# Our architecture\n');
     const r = project(dir);
-    assert.equal(r.code, 2, r.out);
+    assert.equal(r.code, 3, r.out); // actionable: move the file
     assert.match(r.out, /handoff projection: REFUSED .*architecture\.md/);
     assert.equal(readFileSync(join(dir, 'architecture.md'), 'utf8'), '# Our architecture\n');
     assert.deepEqual(listTree(dir), ['architecture.md']);
@@ -349,8 +349,7 @@ for (const [label, link] of [
       symlinkSync(link === 'architecture.md' ? join(outside, 'victim.md') : outside, join(dir, link));
       const before = outsideSnapshot(outside);
       const r = project(dir);
-      assert.notEqual(r.code, 0, r.out);
-      assert.equal(r.code === 1, false, `a containment refusal is a refusal, not a crash: ${r.out}`);
+      assert.equal(r.code, 3, `a containment refusal is an actionable refusal, not a crash: ${r.out}`);
       assert.match(r.out, /handoff projection: REFUSED .*symlink/);
       assert.deepEqual(outsideSnapshot(outside), before, 'the outside directory is byte-identical');
     } finally {
@@ -366,7 +365,7 @@ test('containment: a regular file where docs/sterling must be a directory is ref
     mkdirSync(join(dir, 'docs'), { recursive: true });
     writeFileSync(join(dir, 'docs', 'sterling'), 'a file, not a directory\n');
     const r = project(dir);
-    assert.notEqual(r.code, 0, r.out);
+    assert.equal(r.code, 3, r.out);
     assert.match(r.out, /handoff projection: REFUSED .*not a directory/);
     assert.equal(readFileSync(join(dir, 'docs', 'sterling'), 'utf8'), 'a file, not a directory\n');
   } finally {

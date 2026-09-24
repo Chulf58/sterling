@@ -12,9 +12,13 @@
 //   0  written | unchanged | SKIPPED (the Sterling clone itself — it owns
 //      different projections, produced by architecture-projection.mjs and
 //      rulings-projection.mjs)
-//   2  REFUSED, nothing written (refinement (f)): store_authority is not
-//      'primary'; no store; the store yields no records while exports exist; or a
-//      target path holds a file Sterling did not generate
+//   2  REFUSED, STANDING — store_authority is not 'primary' (refinement (f)). A
+//      declared state of this project, not a defect: nothing was written, and
+//      nothing here can change until the authority does.
+//   3  REFUSED, ACTIONABLE — nothing was written, and the user can fix it: no
+//      store; an empty store while exports exist; a hand-written file in the way;
+//      a symlink or non-directory on the way. /sterling:update withholds its
+//      completion marker, so the next update retries.
 //   1  failed part-way — the export may be INCOMPLETE; rerun after fixing
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -27,10 +31,12 @@ const pluginRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const target = resolve(process.argv[2] ?? process.cwd());
 const fwd = (p) => p.replace(/\\/g, '/');
 
-function refuse(detail) {
+const STANDING = 2;
+const ACTIONABLE = 3;
+function refuse(detail, code = ACTIONABLE) {
   console.log(`handoff projection: REFUSED — ${detail}`);
   console.log('Nothing was written; existing exports are untouched.');
-  process.exit(2);
+  process.exit(code);
 }
 
 if (isSterlingClone(target, pluginRoot)) {
@@ -45,7 +51,7 @@ const { store, config } = openProject(target);
 let records;
 try {
   if (config.store_authority !== 'primary') {
-    refuse(`store_authority is '${config.store_authority}' in .sterling/config.json — only the primary store may produce the committed exports (decision 'Citation and projection authority is per-store'); a secondary store projects a smaller document over a shared file.`);
+    refuse(`store_authority is '${config.store_authority}' in .sterling/config.json — only the primary store may produce the committed exports (decision 'Citation and projection authority is per-store'); a secondary store projects a smaller document over a shared file.`, STANDING);
   }
   records = store.query({ types: ['feature_article', 'decision', 'anti_pattern'], cap: 1_000_000 });
 } finally {

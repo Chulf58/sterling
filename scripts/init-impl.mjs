@@ -981,7 +981,7 @@ if (isSterlingClone(target, pluginRoot)) {
   const handoffLine = handoffOut.split('\n')[0].replace(/^handoff projection: /, '');
   const handoffStatus = handoff.status === 0
     ? (handoffLine.startsWith('unchanged') ? 'matches' : handoffLine.startsWith('SKIPPED') ? 'skipped' : 'refreshed')
-    : handoff.status === 2 ? 'refused' : 'failed';
+    : handoff.status === 2 || handoff.status === 3 ? 'refused' : 'failed';
   items.push({ item: 'architecture.md + rulings.md + docs/sterling/ (handoff projection)', status: handoffStatus, detail: handoffLine });
   if (handoffStatus === 'failed') {
     warns.push(`\n⚠ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE; rerun init:\n${handoffOut}`);
