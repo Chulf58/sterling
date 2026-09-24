@@ -252,7 +252,7 @@ test('review P1: the "+N more" line never evicts a RESERVED decision pointer, an
       kind: 'ordinary', contentClass: 'discovery',
       identities: [{ identity: 'dec00000-1111', revision: 'r', name: 'the-answering-decision' }],
       text: blockOf('▸ DECISIONS (1)', 900, 'd'),
-      pointer: `▸ DECISIONS (1) held back — top: 'the-answering-decision' (knowledge_get dec00000-1111) — knowledge_query types:["decision"] cap:1 ${PAD_PTR}`,
+      pointer: `▸ DECISIONS (1) held back — top: 'the-answering-decision' (knowledge_get dec00000-1111) — knowledge_query types:["decision"] cap:1 ${PAD_PTR}`, // not-a-citation: fixture id
       suffix: '  … rest held back',
     },
   ];
