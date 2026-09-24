@@ -707,6 +707,26 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
       }
+      // Handoff projection (decision
+      // init-prepares-opencode-portable-agents-and-target-handoff-projections): refresh
+      // the project's committed architecture.md / rulings.md / docs/sterling/ from ITS
+      // OWN store. A REFUSED run (exit 2: a secondary, missing or empty store, or a
+      // foreign file in the way) wrote nothing and is a standing state of that
+      // project, not a failure of this update — loud, never fatal. A run that failed
+      // part-way (exit 1) may have left an INCOMPLETE export, so it withholds the
+      // completion marker and the next update retries it.
+      const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });
+      const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
+      const handoffLine = handoffOut.split('\n')[0];
+      report.projects[report.projects.length - 1].handoff = handoff.status;
+      if (handoff.status === 2) {
+        log(`      ⚠ ${handoffLine}`);
+      } else if (handoff.status !== 0) {
+        log(`      ✗ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE:\n${handoffOut.split('\n').map((l) => `          ${l}`).join('\n')}`);
+        report.exit = report.exit === 0 ? 1 : report.exit;
+      } else if (!handoffLine.startsWith('handoff projection: unchanged')) {
+        log(`      ${handoffLine}`);
+      }
       // Deliver the double-click updater to every registered project — the
       // update event is how a machine receives new artifacts, so a project
       // init'd before this launcher existed gets one here rather than waiting

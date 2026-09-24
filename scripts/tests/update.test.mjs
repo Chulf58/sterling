@@ -1570,3 +1570,42 @@ test('the created native launcher is CRLF on disk end to end — the appended ge
 // SABOTAGE: append the generated-marker line with '\n' instead of '\r\n' — the
 // lone-LF assertion goes red while every other native-arm test stays green.
 // That is precisely the hole a render-only CRLF pin cannot see.
+
+// Handoff projection in the fan-out (decision
+// init-prepares-opencode-portable-agents-and-target-handoff-projections): it runs once
+// per project after the agent sync. A REFUSED run (exit 2 — a secondary, missing or
+// empty store) is a standing state of that project: loud, never fatal. A run that
+// failed part-way (exit 1) may have left an incomplete export, so it withholds the
+// completion marker.
+test('fan-out: the handoff projection runs per project; a refusal is loud but not fatal, a failure withholds completion', async () => {
+  const run = async (statuses) => {
+    const cwd = scratchCwd();
+    try {
+      const { exec: base, calls } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
+      const exec = (cmd, args, o) => {
+        if (!args[0]?.endsWith('handoff-projection.mjs')) return base(cmd, args, o);
+        calls.push(`${cmd} ${args.join(' ')}`);
+        const status = statuses[args[1]];
+        const stdout = { 0: 'handoff projection: unchanged — 3 record(s)\n', 1: 'handoff projection: FAILED — the export is INCOMPLETE\n', 2: "handoff projection: REFUSED — store_authority is 'secondary'\n" }[status];
+        return { status, stdout, stderr: '' };
+      };
+      const lines = [];
+      const projects = Object.keys(statuses).map((repo_path) => ({ name: repo_path.split('/').pop(), repo_path }));
+      const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects, opts: {} });
+      return { report, calls, log: lines.join('\n') };
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  };
+
+  const refusedOnly = await run({ '/tmp/handoff-ok': 0, '/tmp/handoff-secondary': 2 });
+  assert.equal(refusedOnly.calls.filter((c) => c.includes('handoff-projection.mjs')).length, 2);
+  assert.deepEqual(refusedOnly.report.projects.map((p) => p.handoff), [0, 2]);
+  assert.equal(refusedOnly.report.exit, 0, 'a refused projection does not fail the update');
+  assert.match(refusedOnly.log, /⚠ handoff projection: REFUSED — store_authority is 'secondary'/);
+  assert.doesNotMatch(refusedOnly.log, /handoff projection: unchanged/, 'an unchanged projection stays quiet');
+
+  const failed = await run({ '/tmp/handoff-broken': 1 });
+  assert.equal(failed.report.exit, 1, 'an incomplete export withholds the completion marker');
+  assert.match(failed.log, /✗ handoff projection FAILED \(exit 1\) — the export may be INCOMPLETE/);
+});

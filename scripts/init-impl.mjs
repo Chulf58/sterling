@@ -29,6 +29,8 @@ import { arg, argAll, fail } from './lib/project.mjs';
 import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
+import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
+import { isSterlingClone, isHandoffPath } from './lib/handoff-projection.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -63,6 +65,10 @@ const declaredToolchains = argAll('--toolchain').map((spec) => {
 const fwd = (p) => p.replace(/\\/g, '/');
 const normalize = (s) => s.replace(/\r\n/g, '\n');
 // canonical compare: key order must not decide "hand-edited"
+// The handoff projection registers its own files in config.generated_projections
+// (a managed write, like the universal-domain add below), so those entries never
+// read as a hand edit when init compares the recorded config with the defaults.
+const withoutHandoffEntries = (c) => ({ ...c, generated_projections: (c.generated_projections ?? []).filter((p) => !isHandoffPath(p)) });
 const canonical = (v) =>
   JSON.stringify(v, (_, val) =>
     val && typeof val === 'object' && !Array.isArray(val)
@@ -176,7 +182,7 @@ if (recorded) {
 }
 
 // ---- §12 manifest, in order: per-item verify → create absent → skip matching → leave-and-report ----
-const items = []; // { item, status: created|matches|differs|exists|refused|refreshed|stale|skipped, detail }
+const items = []; // { item, status: created|matches|differs|exists|refused|refreshed|stale|skipped|failed, detail }
 const warns = [];
 
 // directories: a present directory is simply `exists` (a dir cannot be hand-edited)
@@ -224,7 +230,7 @@ if (!recorded) {
     parseConfig(mutated);
     writeFileSync(configPath, JSON.stringify(mutated, null, 2));
     items.push({ item: '.sterling/config.json', status: 'refreshed', detail: mutationNotes.join('; ') });
-  } else if (canonical(recorded) === canonical(expectedConfig)) {
+  } else if (canonical(withoutHandoffEntries(recorded)) === canonical(withoutHandoffEntries(expectedConfig))) {
     items.push({ item: '.sterling/config.json', status: 'matches', detail: 'defaults + recorded declarations' });
   } else {
     items.push({ item: '.sterling/config.json', status: 'differs', detail: 'left untouched (tuned or hand-edited) — declarations were read from it' });
@@ -938,6 +944,49 @@ items.push({
   status: { written: 'created', already: 'matches', refused: 'refused', skipped: 'skipped' }[conductorActivation.activation],
   detail: conductorActivation.reason ?? (conductorActivation.activation === 'written' ? `wrote "agent": "conductor" to ${conductorActivation.path}` : 'already "agent": "conductor"'),
 });
+
+// OpenCode handoff (decision
+// init-prepares-opencode-portable-agents-and-target-handoff-projections): portable
+// .opencode/agents/ copies and the architecture.md / rulings.md / docs/sterling/
+// projection of THIS project's store, all committed, for engineers without
+// Sterling. Neither applies to the Sterling clone itself (said, not silent). The
+// projection runs as its own process: its guards (secondary, missing or empty
+// store; a foreign file in the way) refuse by exit code, and init reports them as
+// rows like every other refusal instead of stopping.
+if (isSterlingClone(target, pluginRoot)) {
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: 'the target is a Sterling clone — it has its own projections and is not a handoff target' });
+} else {
+  const { report: opencodeReport } = syncOpenCodeAgents({
+    templatesDir: join(pluginRoot, 'agent-templates'),
+    registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
+    targetDir: target,
+  });
+  const opencodeRows = {
+    installed: ['created', 'portable OpenCode agent (committed; no model pin)'],
+    refreshed: ['refreshed', 'clean copy, newer render — regenerated'],
+    header_repaired: ['refreshed', 'portable header repaired in place — content unchanged'],
+    up_to_date: ['matches', 'content hash matches a fresh render'],
+    locally_modified_up_to_date: ['differs', 'locally modified, render unchanged — left untouched'],
+    refused_local_modification: ['refused', 'locally modified AND render changed — overwrite refused (see guidance below)'],
+    foreign_file: ['refused', 'not Sterling-generated — never overwritten (see guidance below)'],
+  };
+  for (const r of opencodeReport) {
+    const [status, detail] = opencodeRows[r.status];
+    items.push({ item: `${OPENCODE_AGENTS_DIR}/${r.name}.md`, status, detail });
+    if (r.instruction) agentInstructions.push(r.instruction);
+  }
+  const handoff = spawnSync(process.execPath, [join(pluginRoot, 'scripts', 'handoff-projection.mjs'), target], { cwd: target, encoding: 'utf8' });
+  const handoffOut = `${handoff.stdout ?? ''}${handoff.stderr ?? ''}${handoff.error ? handoff.error.message : ''}`.trim();
+  const handoffLine = handoffOut.split('\n')[0].replace(/^handoff projection: /, '');
+  const handoffStatus = handoff.status === 0
+    ? (handoffLine.startsWith('unchanged') ? 'matches' : handoffLine.startsWith('SKIPPED') ? 'skipped' : 'refreshed')
+    : handoff.status === 2 ? 'refused' : 'failed';
+  items.push({ item: 'architecture.md + rulings.md + docs/sterling/ (handoff projection)', status: handoffStatus, detail: handoffLine });
+  if (handoffStatus === 'failed') {
+    warns.push(`\n⚠ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE; rerun init:\n${handoffOut}`);
+    process.exitCode = 1;
+  }
+}
 
 // MCP packaging (decision foreign_097851ed, refined): the Sterling MCP server is declared
 // ONCE as the PLUGIN's server — but NOT via a root .mcp.json. A root .mcp.json is

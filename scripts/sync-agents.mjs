@@ -12,6 +12,8 @@ import { dirname, join, resolve } from 'node:path';
 import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
+import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
+import { isSterlingClone } from './lib/handoff-projection.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -69,6 +71,30 @@ for (const r of report) {
   }
 }
 if (report.length === 0) console.log('no agents registered — nothing to sync');
+
+// Portable OpenCode copies (decision
+// init-prepares-opencode-portable-agents-and-target-handoff-projections): the same
+// ownership rules, printed as `<status>: .opencode/agents/<name>.md` so the
+// /sterling:update fan-out counts them like any other agent line. A refusal is a
+// refusal (exit 2). They need no restart: OpenCode reads them in the other
+// engineer's session, not this one. The Sterling clone itself is not a handoff
+// target and gets none (said, not silent).
+const cloneTarget = isSterlingClone(targetDir, pluginRoot);
+if (cloneTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — the target is a Sterling clone, not a handoff target`);
+const { report: opencodeReport } = cloneTarget
+  ? { report: [] }
+  : syncOpenCodeAgents({
+      templatesDir: join(pluginRoot, 'agent-templates'),
+      registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),
+      targetDir,
+    });
+for (const r of opencodeReport) {
+  console.log(`${r.status}: ${OPENCODE_AGENTS_DIR}/${r.name}.md`);
+  if (r.instruction) {
+    if (r.refused) refused += 1;
+    console.error('\n' + r.instruction + '\n');
+  }
+}
 // Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's
 // config-write taint latch and enforcement_reconcile were both removed per
 // decision sterling-claude-code-scale-down-boundary (2ad87dd1); there is no

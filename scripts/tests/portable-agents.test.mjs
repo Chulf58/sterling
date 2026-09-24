@@ -23,6 +23,7 @@ import {
   OPENCODE_AGENTS_DIR,
 } from '../lib/opencode-agents.mjs';
 import { lintAgentFences } from '../lib/checks.mjs';
+import { isSterlingClone } from '../lib/handoff-projection.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const templatesDir = join(root, 'agent-templates');
@@ -269,6 +270,33 @@ test('sync refuses a foreign same-named file and leaves it untouched', () => {
     assert.equal(entry.refused, true);
     assert.equal(readFileSync(join(dir, OPENCODE_AGENTS_DIR, 'scout.md'), 'utf8'), foreign);
     assert.equal(statusOf(report).implementor, 'installed');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the sync-agents CLI (the /sterling:update fan-out) writes the portable set and exits 2 on a portable refusal', () => {
+  const dir = tempTarget();
+  try {
+    const cli = () => spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir });
+    const first = cli();
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    for (const name of PORTABLE) assert.match(first.stdout, new RegExp(`^installed: \\.opencode/agents/${name}\\.md$`, 'm'));
+    writeFileSync(join(dir, OPENCODE_AGENTS_DIR, 'scout.md'), '---\ndescription: ours\nmode: subagent\n---\n');
+    const second = cli();
+    assert.equal(second.status, 2, second.stdout + second.stderr);
+    assert.match(second.stdout, /^foreign_file: \.opencode\/agents\/scout\.md$/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('isSterlingClone (the skip sync-agents and init apply): this clone and any Sterling checkout yes, a target no', () => {
+  const dir = tempTarget();
+  try {
+    assert.equal(isSterlingClone(root, root), true);
+    assert.equal(isSterlingClone(root, dir), true, 'recognized by its manifest even when it is not the running plugin root');
+    assert.equal(isSterlingClone(dir, root), false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
