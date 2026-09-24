@@ -267,6 +267,26 @@ test('guard: an empty store never wipes existing exports', () => {
   }
 });
 
+// Sol review HIGH: exports consisting of the root indexes alone (no record files)
+// were overwritten with "No records yet" by an empty store.
+test('guard: an empty store never overwrites root-only exports', () => {
+  const dir = fixture();
+  try {
+    assert.equal(project(dir).code, 0);
+    rmSync(join(dir, 'docs'), { recursive: true, force: true });
+    const before = snapshot(dir);
+    assert.deepEqual(Object.keys(before), ['architecture.md', 'rulings.md']);
+    for (const f of readdirSync(join(dir, '.sterling'))) if (f.startsWith('sterling.db')) rmSync(join(dir, '.sterling', f));
+    new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
+    const r = project(dir);
+    assert.notEqual(r.code, 0, r.out);
+    assert.match(r.out, /handoff projection: REFUSED .*holds no articles, decisions or anti-patterns/);
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a genuinely new, empty store writes explicit "no records yet" indexes', () => {
   const dir = fixture({ records: [] });
   try {
@@ -275,6 +295,9 @@ test('a genuinely new, empty store writes explicit "no records yet" indexes', ()
     assert.deepEqual(listTree(dir), ['architecture.md', 'rulings.md']);
     assert.match(readFileSync(join(dir, 'architecture.md'), 'utf8'), /No records yet/);
     assert.match(readFileSync(join(dir, 'rulings.md'), 'utf8'), /No records yet/);
+    const again = project(dir);
+    assert.equal(again.code, 0, `an empty store rerun over its own empty indexes is unchanged, not refused: ${again.out}`);
+    assert.match(again.out, /handoff projection: unchanged/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
