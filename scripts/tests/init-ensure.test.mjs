@@ -2502,3 +2502,84 @@ test('H containment: the whole suite leaves THIS clone\'s live plugin MCP config
 // test never makes), not defense in depth for the same mutation: they redden under
 // different conditions, and only the first is machine-independent. The `after()`
 // cleanup and the returned value are plumbing, not layers.
+
+// Decision init-prepares-opencode-portable-agents-and-target-handoff-projections:
+// init prepares a target for engineers WITHOUT Sterling — portable OpenCode agents
+// and the handoff projection, all committed (never gitignored), and a rerun is
+// byte-stable.
+test('OpenCode handoff: fresh init writes committed .opencode/agents/ and the handoff projection; a rerun matches', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-opencode-init-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    for (const name of ['implementor', 'researcher', 'scout']) {
+      assert.match(r.stdout, new RegExp(`^\\.opencode/agents/${name}\\.md\\s+created\\b`, 'm'));
+      assert.match(readFileSync(join(dir, '.opencode', 'agents', `${name}.md`), 'utf8'), /^---\ndescription: .+\nmode: subagent\n/);
+    }
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'librarian.md')), 'librarian is not portable');
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'conductor.md')), 'conductor is not portable');
+    assert.match(r.stdout, /^architecture\.md \+ rulings\.md \+ docs\/sterling\/ \(handoff projection\)\s+refreshed\s+written/m);
+    assert.match(readFileSync(join(dir, 'architecture.md'), 'utf8'), /No records yet/);
+    assert.match(readFileSync(join(dir, 'rulings.md'), 'utf8'), /No records yet/);
+    const config = JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8'));
+    assert.deepEqual(config.generated_projections, ['architecture.md', 'rulings.md']);
+
+    for (const path of ['.opencode/agents/scout.md', 'architecture.md', 'rulings.md']) {
+      const ignored = spawnSync('git', ['check-ignore', '-q', path], { cwd: dir, encoding: 'utf8' });
+      assert.equal(ignored.status, 1, `${path} must NOT be gitignored (it is committed for engineers without Sterling)`);
+    }
+
+    const tracked = ['.opencode/agents/scout.md', 'architecture.md', 'rulings.md', '.sterling/config.json'];
+    const before = Object.fromEntries(tracked.map((f) => [f, readFileSync(join(dir, f), 'utf8')]));
+    const rerun = init(dir);
+    assert.equal(rerun.code, 0, rerun.stderr);
+    assert.match(rerun.stdout, /^\.sterling\/config\.json\s+matches\b/m, 'the managed generated_projections entries do not read as a hand edit');
+    assert.match(rerun.stdout, /^\.opencode\/agents\/scout\.md\s+matches\b/m);
+    assert.match(rerun.stdout, /^architecture\.md \+ rulings\.md \+ docs\/sterling\/ \(handoff projection\)\s+matches\s+unchanged/m);
+    for (const [f, content] of Object.entries(before)) assert.equal(readFileSync(join(dir, f), 'utf8'), content, `${f} byte-identical on rerun`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+// Sol review MEDIUM: the destructive-conflict preflight runs before ANY write, so
+// a regular file where a handoff directory must be is refused before init creates
+// anything.
+for (const rel of ['.opencode', '.opencode/agents', 'docs/sterling', 'docs/sterling/articles', 'docs/sterling/decisions', 'docs/sterling/anti-patterns']) {
+  test(`preflight: a regular file at ${rel} is refused before anything is written`, () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sterling-preflight-'));
+    try {
+      mkdirSync(join(dir, dirname(rel)), { recursive: true });
+      writeFileSync(join(dir, rel), 'a file, not a directory\n');
+      const r = init(dir, FRESH_FLAGS);
+      assert.equal(r.code, 2, r.stdout + r.stderr);
+      assert.match(r.stderr, new RegExp(`init REFUSED \\(destructive\\): '${rel.replace(/\./g, '\\.')}' exists as a file`));
+      assert.ok(!existsSync(join(dir, '.sterling')), 'nothing was written');
+      assert.equal(readFileSync(join(dir, rel), 'utf8'), 'a file, not a directory\n');
+    } finally {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    }
+  });
+}
+
+// Sol review MEDIUM: a target that ALREADY ignores the handoff paths would never
+// commit them. Init refuses those rows loudly, naming the rule, and leaves the
+// user's ignore rules alone.
+test('OpenCode handoff: a target whose .gitignore already covers the handoff paths gets refused rows naming the rule', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-opencode-ignored-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    writeFileSync(join(dir, '.gitignore'), '.opencode/\nrulings.md\n');
+    const r = init(dir, FRESH_FLAGS);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, /^\.opencode\/agents\/scout\.md\s+refused\s+ignored by git/m);
+    assert.match(r.stdout, /\.gitignore:1:\.opencode\//);
+    assert.match(r.stdout, /^architecture\.md \+ rulings\.md \+ docs\/sterling\/ \(handoff projection\)\s+refused\s+REFUSED — .*ignored by git.*\.gitignore:2:rulings\.md/m);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
+    assert.ok(!existsSync(join(dir, 'architecture.md')), 'the projection wrote nothing');
+    assert.ok(readFileSync(join(dir, '.gitignore'), 'utf8').startsWith('.opencode/\nrulings.md\n'), 'the user rules are left as they were');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});

@@ -2,7 +2,40 @@
 // functions over file contents so the day-one scripts and the tests share one
 // definition. Empty sets pass: the checks exist before the members (invariant 3).
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { validateFences, renderPortableText, findPortableVocabulary } from './agent-fences.mjs';
+
+// Agent fences + portable vocabulary (decision
+// init-prepares-opencode-portable-agents-and-target-handoff-projections, (c)).
+// Every template's fences must be balanced, un-nested and exact; a template the
+// registry marks portable (an `opencode` block) must also render a body with no
+// Sterling vocabulary, because that body ships committed to engineers without
+// Sterling. The portable set is read from the registry, never restated here.
+// The portable frontmatter description (the registry's opencode.description
+// override, else the template's) ships too, so it is scanned the same way.
+function shippedPortableBlocks() {
+  const shippedRegistryPath = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'agent-templates', 'registry.json');
+  const registry = JSON.parse(readFileSync(shippedRegistryPath, 'utf8'));
+  return Object.fromEntries(registry.agents.filter((a) => a.opencode !== undefined).map((a) => [a.file, a.opencode]));
+}
+
+export function lintAgentFences(content, label, portableBlocks = shippedPortableBlocks()) {
+  const violations = validateFences(content, label);
+  const block = portableBlocks[label];
+  if (violations.length || block === undefined) return violations;
+  const normalized = content.replace(/\r\n/g, '\n');
+  const description = block.description ?? normalized.match(/^---\n[\s\S]*?^description:\s*(.*)$/m)?.[1] ?? '';
+  const descriptionHits = findPortableVocabulary(description).map((hit) => ({
+    kind: 'portable_vocabulary',
+    detail: `${label}: portable description carries ${hit.term} ('${hit.match}') — set a portable opencode.description for it in agent-templates/registry.json`,
+  }));
+  const body = normalized.replace(/^---\n[\s\S]*?\n---\n/, '');
+  return [...descriptionHits, ...findPortableVocabulary(renderPortableText(body, label)).map((hit) => ({
+    kind: 'portable_vocabulary',
+    detail: `${label}: portable body line ${hit.line} carries ${hit.term} ('${hit.match}') — fence it <!-- sterling-only --> and, if the rule still applies without Sterling, add a <!-- portable-only --> rewrite: ${hit.text.trim().slice(0, 120)}`,
+  }))];
+}
 
 // Main-session agents (route A, decision
 // conductor-instructions-via-main-session-agent-route-a): installed to
