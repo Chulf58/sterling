@@ -21,7 +21,6 @@
 //      ignore rules cover. /sterling:update withholds its
 //      completion marker, so the next update retries.
 //   1  failed part-way — the export may be INCOMPLETE; rerun after fixing
-import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openProject } from './lib/project.mjs';
@@ -41,11 +40,22 @@ function refuse(detail, code = ACTIONABLE) {
   process.exit(code);
 }
 
-if (isSterlingClone(target, pluginRoot)) {
+// The clone detection and the store probe read TARGET paths: both go through
+// contained-fs, and a containment failure is an actionable refusal (Sol re-check).
+let cloneTarget;
+let storePresent;
+try {
+  cloneTarget = isSterlingClone(target, pluginRoot);
+  storePresent = cloneTarget || existsContained(target, '.sterling/sterling.db', 'file');
+} catch (err) {
+  if (!(err instanceof ContainmentError)) throw err;
+  refuse(`${err.message} (every read, write and removal stays inside the project).`);
+}
+if (cloneTarget) {
   console.log(`handoff projection: SKIPPED — ${fwd(target)} is a Sterling clone; its architecture.md and rulings.md come from scripts/architecture-projection.mjs and scripts/rulings-projection.mjs, never from this script.`);
   process.exit(0);
 }
-if (!existsSync(join(target, '.sterling', 'sterling.db'))) {
+if (!storePresent) {
   refuse(`no Sterling store at ${fwd(join(target, '.sterling', 'sterling.db'))} — run /sterling:init in that project first.`);
 }
 

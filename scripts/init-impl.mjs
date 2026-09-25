@@ -31,6 +31,7 @@ import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { isSterlingClone, isOwnedExport, HANDOFF_DIRS } from './lib/handoff-projection.mjs';
+import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './lib/consumer-checks.mjs';
@@ -956,9 +957,19 @@ items.push({
 // projection runs as its own process: its guards (secondary, missing or empty
 // store; a foreign file in the way) refuse by exit code, and init reports them as
 // rows like every other refusal instead of stopping.
-if (isSterlingClone(target, pluginRoot)) {
+// The clone probe reads target paths through contained-fs; a symlinked manifest
+// is a refused row, never a guessed "clone" or "not a clone".
+let handoffCloneTarget;
+try {
+  handoffCloneTarget = isSterlingClone(target, pluginRoot);
+} catch (err) {
+  if (!(err instanceof ContainmentError)) throw err;
+  handoffCloneTarget = null;
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
+}
+if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: 'the target is a Sterling clone — it has its own projections and is not a handoff target' });
-} else {
+} else if (handoffCloneTarget === false) {
   const { report: opencodeReport } = syncOpenCodeAgents({
     templatesDir: join(pluginRoot, 'agent-templates'),
     registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),

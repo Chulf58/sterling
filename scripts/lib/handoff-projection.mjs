@@ -18,7 +18,6 @@
 // Deterministic: no timestamps, stable filenames and ordering, so an unchanged
 // store reproduces the same bytes and the CLI writes nothing.
 
-import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { existsContained, readContained, readdirContained } from './contained-fs.mjs';
 
@@ -28,11 +27,15 @@ const fwd = (p) => p.replace(/\\/g, '/');
 // its own engineers have Sterling. Identity: the same one init uses
 // (STERLING_PLUGIN_ROOT_MATCH, else the running plugin root), plus any other clone
 // recognized by its manifest — a worktree or second checkout of Sterling included.
+// The manifest probe reads TARGET paths, so it goes through contained-fs: a
+// symlinked plugin.json (or directory on the way) throws ContainmentError rather
+// than spoofing a silent "clone, skipped" (Sol re-check). Callers turn that into
+// an actionable refusal.
 export function isSterlingClone(root, pluginRoot) {
   if (fwd(resolve(root)) === fwd(resolve(process.env.STERLING_PLUGIN_ROOT_MATCH || pluginRoot))) return true;
-  const manifest = join(root, '.claude-plugin', 'plugin.json');
-  if (!existsSync(manifest) || !existsSync(join(root, 'scripts', 'architecture-projection.mjs'))) return false;
-  return JSON.parse(readFileSync(manifest, 'utf8')).name === 'sterling';
+  const manifest = '.claude-plugin/plugin.json';
+  if (!existsContained(root, manifest, 'file') || !existsContained(root, 'scripts/architecture-projection.mjs', 'file')) return false;
+  return JSON.parse(readContained(root, manifest)).name === 'sterling';
 }
 
 export const HANDOFF_DOCS_DIR = 'docs/sterling';

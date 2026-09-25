@@ -14,6 +14,7 @@ import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
 import { isSterlingClone } from './lib/handoff-projection.mjs';
+import { ContainmentError } from './lib/contained-fs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const pluginRoot = resolve(here, '..');
@@ -79,9 +80,19 @@ if (report.length === 0) console.log('no agents registered — nothing to sync')
 // refusal (exit 2). They need no restart: OpenCode reads them in the other
 // engineer's session, not this one. The Sterling clone itself is not a handoff
 // target and gets none (said, not silent).
-const cloneTarget = isSterlingClone(targetDir, pluginRoot);
+// A containment failure in that probe (a symlinked plugin.json) is a refusal,
+// never a guessed answer either way.
+let cloneTarget;
+try {
+  cloneTarget = isSterlingClone(targetDir, pluginRoot);
+} catch (err) {
+  if (!(err instanceof ContainmentError)) throw err;
+  console.log(`refused_unsafe_path: ${OPENCODE_AGENTS_DIR}/ — ${err.message}; portable agents not synced`);
+  refused += 1;
+  cloneTarget = null;
+}
 if (cloneTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — the target is a Sterling clone, not a handoff target`);
-const { report: opencodeReport } = cloneTarget
+const { report: opencodeReport } = cloneTarget !== false
   ? { report: [] }
   : syncOpenCodeAgents({
       templatesDir: join(pluginRoot, 'agent-templates'),

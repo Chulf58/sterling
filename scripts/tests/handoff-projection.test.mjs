@@ -359,6 +359,45 @@ for (const [label, link] of [
   });
 }
 
+// Sol re-check MEDIUM (guard bypass): the clone detection and the store probe read
+// target paths too. A symlinked .claude-plugin/plugin.json must not spoof "this
+// is a Sterling clone" (a silent SKIPPED), and a symlinked store must not be
+// probed through: both are actionable refusals (exit 3).
+test('containment: a symlinked .claude-plugin/plugin.json cannot spoof Sterling-clone detection', () => {
+  const dir = fixture();
+  const outside = mkdtempSync(join(tmpdir(), 'sterling-handoff-outside-'));
+  try {
+    writeFileSync(join(outside, 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '// a project file that happens to share the name\n');
+    symlinkSync(join(outside, 'plugin.json'), join(dir, '.claude-plugin', 'plugin.json'));
+    const r = project(dir);
+    assert.equal(r.code, 3, r.out);
+    assert.doesNotMatch(r.out, /SKIPPED/);
+    assert.match(r.out, /handoff projection: REFUSED .*plugin\.json is a symlink/);
+    assert.deepEqual(listTree(dir), [], 'nothing written');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test('containment: a symlinked store is refused by the store probe (exit 3), not followed', () => {
+  const dir = fixture({ store: false });
+  const outside = fixture();
+  try {
+    symlinkSync(join(outside, '.sterling', 'sterling.db'), join(dir, '.sterling', 'sterling.db'));
+    const r = project(dir);
+    assert.equal(r.code, 3, r.out);
+    assert.match(r.out, /handoff projection: REFUSED .*sterling\.db is a symlink/);
+    assert.deepEqual(listTree(dir), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test('containment: a regular file where docs/sterling must be a directory is refused, not followed', () => {
   const dir = fixture();
   try {

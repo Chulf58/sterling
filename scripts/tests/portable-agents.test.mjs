@@ -388,6 +388,26 @@ test('sync refuses an agent path the target already ignores, naming the rule; no
   }
 });
 
+test('the sync-agents CLI refuses (exit 2) when a symlinked plugin.json would spoof Sterling-clone detection', () => {
+  const dir = tempTarget();
+  const outside = mkdtempSync(join(tmpdir(), 'sterling-opencode-outside-'));
+  try {
+    writeFileSync(join(outside, 'plugin.json'), JSON.stringify({ name: 'sterling' }));
+    mkdirSync(join(dir, '.claude-plugin'), { recursive: true });
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(join(dir, 'scripts', 'architecture-projection.mjs'), '// project file\n');
+    symlinkSync(join(outside, 'plugin.json'), join(dir, '.claude-plugin', 'plugin.json'));
+    const r = spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir });
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stdout, /^refused_unsafe_path: \.opencode\/agents\/ — .*plugin\.json is a symlink/m);
+    assert.doesNotMatch(r.stdout, /SKIPPED — the target is a Sterling clone/);
+    assert.ok(!existsSync(join(dir, OPENCODE_AGENTS_DIR)));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test('sync treats a CRLF checkout of an unmodified agent as up_to_date', () => {
   const dir = tempTarget();
   try {
