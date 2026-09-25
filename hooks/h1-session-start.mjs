@@ -9153,7 +9153,7 @@ try {
     if (mode === void 0 || mode === "hobby" || mode === "work") {
       modeContext = `
 
-Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "no OpenCode agents or handoff files; those are work-only.");
+Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.");
     } else {
       modeContext = `
 

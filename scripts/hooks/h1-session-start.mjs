@@ -495,7 +495,7 @@ try {
         `\n\nProject mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
         (mode === 'work'
           ? 'the OpenCode agents and handoff files are written and maintained.'
-          : 'no OpenCode agents or handoff files; those are work-only.');
+          : 'the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.');
     } else {
       modeContext =
         `\n\nProject mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +

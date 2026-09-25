@@ -42,17 +42,19 @@ function context(dir) {
 
 const modeLines = (ctx) => ctx.split('\n').filter((l) => l.startsWith('Project mode:'));
 
+const WORK_LINE = 'Project mode: WORK (config.mode — TUI System tab) — the OpenCode agents and handoff files are written and maintained.';
+const HOBBY_LINE = 'Project mode: HOBBY (config.mode — TUI System tab) — the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.';
+
 for (const [label, cfg, expected] of [
-  ['work', { ...BASE_CONFIG, mode: 'work' }, /^Project mode: WORK \(config\.mode — TUI System tab\)/],
-  ['hobby', { ...BASE_CONFIG, mode: 'hobby' }, /^Project mode: HOBBY \(config\.mode — TUI System tab\)/],
-  ['a missing key (hobby)', BASE_CONFIG, /^Project mode: HOBBY \(config\.mode — TUI System tab\)/],
+  ['work', { ...BASE_CONFIG, mode: 'work' }, WORK_LINE],
+  ['hobby', { ...BASE_CONFIG, mode: 'hobby' }, HOBBY_LINE],
+  ['a missing key (hobby)', BASE_CONFIG, HOBBY_LINE],
 ]) {
-  test(`H1 states the project mode exactly once: ${label}`, () => {
+  test(`H1 states the project mode exactly once, full text: ${label}`, () => {
     const dir = project(cfg);
     try {
       const lines = modeLines(context(dir));
-      assert.equal(lines.length, 1, `exactly one project-mode line; got ${JSON.stringify(lines)}`);
-      assert.match(lines[0], expected);
+      assert.deepEqual(lines, [expected]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -64,7 +66,7 @@ test('H1 reads an invalid mode as INVALID, never as either flow', () => {
   try {
     const lines = modeLines(context(dir));
     assert.equal(lines.length, 1);
-    assert.match(lines[0], /^Project mode: INVALID \('Work'\)/);
+    assert.equal(lines[0], "Project mode: INVALID ('Work') — config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).");
     assert.doesNotMatch(lines[0], /HOBBY|WORK/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -76,7 +78,7 @@ test('H1 reads an unreadable config as UNKNOWN, never the hobby default', () => 
   try {
     const lines = modeLines(context(dir));
     assert.equal(lines.length, 1);
-    assert.match(lines[0], /^Project mode: UNKNOWN/);
+    assert.equal(lines[0], 'Project mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. This is NOT the hobby default: repair the config.');
     assert.doesNotMatch(lines[0], /HOBBY/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
