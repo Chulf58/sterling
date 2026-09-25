@@ -1338,7 +1338,11 @@ test('DS-RS03: a RESUME still appends a fresh UNENDED round (each Start is its o
     assert.equal(rounds.length, 2, 'round 2 is appended beside the ended round 1');
     const unended = rounds.filter((e) => !e.ended);
     assert.equal(unended.length, 1);
-    assert.deepEqual(unended[0].files, [], 'a resume stages nothing, so its round declares no territory');
+    // RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
+    // inherits-prior-round (e841facd): a resume still stages nothing, but its
+    // round keeps the territory of the agent's prior round. The resolution
+    // carries it to the builder; H22's use of it is pinned in DSH-5.
+    assert.deepEqual(r.resolution.inherited_files, ['src/round1.mjs'], "a resume stages nothing, but its resolution carries its prior round's territory");
     assert.equal(unended[0].files_source, 'unattributable');
     assert.equal(unended[0].attribution, 'none');
     assert.equal(DS.dispatchState(await recordFor(dir, 'toolu_fresh3')), 'pending', "the fresh slot belongs to somebody else and stays pending");

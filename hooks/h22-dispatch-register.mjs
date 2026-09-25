@@ -5212,6 +5212,32 @@ function extractPathCandidates(text) {
   const found = String(text ?? "").match(PATH_CANDIDATE_RE) ?? [];
   return [...new Set(found)];
 }
+var REVIEW_TERRITORY_RE = /^REVIEW-TERRITORY:[ \t]*(\S.*)$/m;
+var GLOB_METACHAR_RE = /[*?[\]]/;
+function isRepoRelativePosixShape(p) {
+  if (typeof p !== "string" || p === "") return false;
+  if (GLOB_METACHAR_RE.test(p)) return false;
+  try {
+    return normalizeRepoPath(p) === p;
+  } catch {
+    return false;
+  }
+}
+function parseReviewTerritory(text) {
+  const match = REVIEW_TERRITORY_RE.exec(String(text ?? ""));
+  if (!match) return { present: false };
+  const raw = match[0];
+  let parsed;
+  try {
+    parsed = JSON.parse(match[1]);
+  } catch {
+    return { present: true, valid: false, raw };
+  }
+  if (!Array.isArray(parsed) || !parsed.every(isRepoRelativePosixShape)) {
+    return { present: true, valid: false, raw };
+  }
+  return { present: true, valid: true, files: [...new Set(parsed)] };
+}
 
 // scripts/hooks/lib/transcript.mjs
 import { openSync, readSync, closeSync, fstatSync, existsSync as existsSync2, statSync, readdirSync } from "node:fs";
@@ -5344,6 +5370,10 @@ function isReviewerClass(type) {
 
 // scripts/hooks/lib/dispatch-residue.mjs
 import { spawnSync } from "node:child_process";
+function pathOwnedBy(entry, path) {
+  if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
+  return path === entry || path.startsWith(`${entry}/`);
+}
 function probeDirtyPaths(projectDir, files) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
@@ -5374,7 +5404,11 @@ function probeDirtyPaths(projectDir, files) {
       i++;
     }
   }
-  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+  const dirty = [];
+  for (const entry of declared) {
+    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+  }
+  return { verified: true, dirty };
 }
 function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
   const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;
@@ -6114,6 +6148,17 @@ function hasRegisterRound(root, sessionId, agentId) {
   if (availability !== "ok") return false;
   return entries.some((e) => e && e.agent_id === agentId && e.session_id === sessionId);
 }
+function priorRoundFiles(root, sessionId, agentId) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return null;
+  let latest = null;
+  for (const e of entries) {
+    if (!e || e.agent_id !== agentId || e.session_id !== sessionId) continue;
+    const round = typeof e.round === "number" ? e.round : 1;
+    if (latest === null || round >= latest.round) latest = { round, files: e.files };
+  }
+  return latest ? latest.files.slice() : null;
+}
 function appendStartedBy(record, consumer) {
   const prior = record.started;
   const by = Array.isArray(prior?.by) ? [...prior.by] : [];
@@ -6427,7 +6472,11 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
   ) || terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
-    return { verdict: "resolved", value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
+    const inherited_files = priorRoundFiles(root, session_id, agent_id);
+    return {
+      verdict: "resolved",
+      value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files }
+    };
   }
   if (typeof agent_type !== "string" || agent_type === "") {
     return { verdict: "resolved", value: unattributable("no-agent-type", agent_type) };
@@ -6728,9 +6777,30 @@ try {
       }
       let files, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
-        files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
+        const territory = parseReviewTerritory(matchedBlocks[0].prompt);
+        if (territory.present && territory.valid) {
+          files = normalizeRegisterPaths(territory.files, input.cwd);
+          filesSource = "review-territory";
+        } else {
+          files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
+          filesSource = territory.present ? "free-prose-malformed-territory" : "free-prose-fallback";
+          if (territory.present) {
+            lines.push(
+              render(
+                disclosure(
+                  "territory_declaration_malformed",
+                  { line: territory.raw },
+                  `H22: malformed REVIEW-TERRITORY declaration ignored, so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
+                )
+              )
+            );
+          }
+        }
         attribution = "block";
-        filesSource = "free-prose-fallback";
+      } else if (res.source === "resume" && Array.isArray(res.inherited_files)) {
+        files = res.inherited_files;
+        attribution = "none";
+        filesSource = "resume-inherited";
       } else {
         files = [];
         attribution = "none";
