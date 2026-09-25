@@ -316,6 +316,45 @@ test('work: an origin that is not a GitHub-shaped URL (a local path) is refused 
   }
 });
 
+test('work: an open PR from the same head into ANOTHER base is not reused — a new PR is created against the requested base', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    seedPr(p, { number: 30, base: 'release' });
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.created, true, 'the release PR is not reused for a merge into main');
+    assert.notEqual(out.pr_number, 30);
+    const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
+    assert.equal(creates.length, 1);
+    assert.equal(creates[0][creates[0].indexOf('--base') + 1], 'main');
+    for (const l of ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list')) {
+      assert.equal(l[l.indexOf('--base') + 1], 'main', 'the lookup filters by base');
+      assert.match(l[l.indexOf('--json') + 1], /headRefName/);
+      assert.match(l[l.indexOf('--json') + 1], /baseRefName/);
+    }
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: MORE THAN ONE open PR for the same repo/head/base fails closed with exit 1 — nothing pushed, nothing created', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    seedPr(p, { number: 31 });
+    seedPr(p, { number: 32 });
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 1, `ambiguous PRs exit 1 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /#31/);
+    assert.match(r.stderr, /#32/);
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, 'no create');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+    assertBaseUntouched(p, 'ambiguous');
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('parseOriginRepo: https, ssh:// and scp-style origin URLs give host/owner/repo; anything else is null', () => {
   const ok = {
     'https://github.com/acme/widget.git': 'github.com/acme/widget',

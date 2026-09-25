@@ -99,11 +99,13 @@ export function prTextFromCommits(cwd, mergeBase, branchTip, branch) {
   return { title: branch, body: [...sections, PR_ATTRIBUTION].join('\n\n') };
 }
 
-/** The open PR whose head is `branch`, or null. Throws on a gh failure — an
- * unknown answer must never read as "no PR" and create a duplicate. */
-export function findOpenPr(cwd, repo, branch) {
-  const r = gh(cwd, ['pr', 'list', '--repo', repo, '--head', branch, '--state', 'open', '--json', 'url,number']);
-  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch} failed (exit ${r.status}): ${streams(r)}`);
+/** The open PR in `repo` from `branch` into `base`, or null. Filters by head
+ * AND base, and validates both on every returned entry. Throws on a gh
+ * failure, a malformed answer, or more than one match — an unknown answer
+ * must never read as "no PR" (a duplicate) or pick one PR at random. */
+export function findOpenPr(cwd, repo, branch, base) {
+  const r = gh(cwd, ['pr', 'list', '--repo', repo, '--head', branch, '--base', base, '--state', 'open', '--json', 'url,number,headRefName,baseRefName']);
+  if (r.status !== 0) throw new Error(`gh pr list --repo ${repo} --head ${branch} --base ${base} failed (exit ${r.status}): ${streams(r)}`);
   let prs;
   try {
     prs = JSON.parse(r.stdout);
@@ -111,10 +113,19 @@ export function findOpenPr(cwd, repo, branch) {
     throw new Error(`gh pr list returned unparseable JSON (${e.message}): ${r.stdout.trim()}`);
   }
   if (!Array.isArray(prs)) throw new Error(`gh pr list returned a non-array: ${r.stdout.trim()}`);
-  if (prs.length === 0) return null;
-  const [pr] = prs;
-  if (typeof pr?.url !== 'string' || !Number.isInteger(pr?.number)) throw new Error(`gh pr list returned an entry without url/number: ${JSON.stringify(pr)}`);
-  return { url: pr.url, number: pr.number };
+  for (const pr of prs) {
+    if (typeof pr?.url !== 'string' || !Number.isInteger(pr?.number) || typeof pr?.headRefName !== 'string' || typeof pr?.baseRefName !== 'string') {
+      throw new Error(`gh pr list returned an entry without url/number/headRefName/baseRefName: ${JSON.stringify(pr)}`);
+    }
+  }
+  const matches = prs.filter((pr) => pr.headRefName === branch && pr.baseRefName === base);
+  if (matches.length > 1) {
+    throw new Error(
+      `${matches.length} open PRs in ${repo} from ${branch} into ${base} (${matches.map((pr) => `#${pr.number} ${pr.url}`).join(', ')}) — ` +
+        'refusing to pick one. Close the duplicates on GitHub, then rerun.'
+    );
+  }
+  return matches.length ? { url: matches[0].url, number: matches[0].number } : null;
 }
 
 /** `git push <args>` with the WSL git.exe retry (credentials in the Windows
@@ -142,7 +153,7 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, log })
   const result = { mode: 'work', pr_url: null, pr_number: null, branch, created: false };
   let existing;
   try {
-    existing = findOpenPr(cwd, repo, branch);
+    existing = findOpenPr(cwd, repo, branch, base);
   } catch (e) {
     log(`direct-merge: could not look up an open PR for ${branch} — nothing pushed, nothing created. ${e.message}`);
     return { exitCode: 1, result };
@@ -186,7 +197,7 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, log })
   }
   let created;
   try {
-    created = findOpenPr(cwd, repo, branch);
+    created = findOpenPr(cwd, repo, branch, base);
   } catch (e) {
     created = null;
     log(`direct-merge: the PR was created but reading it back failed: ${e.message}`);
