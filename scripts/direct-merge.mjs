@@ -5,6 +5,9 @@
 // branch and sweeps every other fully-merged branch (git branch -d — refuses
 // unmerged, never loses work).
 // Refuses on a dirty tree, or when already on the base.
+// WORK mode (config.mode, decision project-mode-hobby-work-toggle-decides-flow):
+// the same preflight, then push the branch and open or reuse a GitHub PR
+// (scripts/lib/work-pr.mjs) — never a merge, sweep or push of the base.
 //   node scripts/direct-merge.mjs [--into <branch>] [--branch <branch>] [--target <dir>]
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
@@ -15,12 +18,38 @@ import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
+import { readProjectMode } from './lib/handoff-projection.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry } from './lib/work-pr.mjs';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
 // a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
+
+// PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
+// key is hobby). An invalid value refuses before anything runs — the flow is
+// never guessed. Work-only preconditions are checked here too, cheap and
+// before the battery: --no-push cannot ship a PR, and gh must be usable.
+let mode;
+try {
+  mode = readProjectMode(target);
+} catch (e) {
+  fail(`direct-merge: ${e?.message ?? e} — refusing; nothing was run.`, 2);
+}
+let workRepo;
+if (mode === 'work') {
+  if (process.argv.includes('--no-push')) {
+    fail(
+      'direct-merge: --no-push is refused in WORK mode — work mode ships by opening a PR, and a PR needs a pushed branch.\n' +
+        'Rerun without --no-push, or commit and keep working on the branch until it is ready.',
+      2
+    );
+  }
+  const pre = workPreflight(target);
+  if (pre.refusal) fail(pre.refusal, 2);
+  workRepo = pre.repo;
+}
 
 // Pre-merge preflight: openProject fails loud on a missing store or malformed
 // config BEFORE anything lands (see the post-merge note below).
@@ -599,6 +628,15 @@ const attestationDisclosure = (() => {
 })();
 for (const line of attestationDisclosure) console.error(line);
 
+// WORK MODE ends here: push the branch and open or reuse its PR. Nothing below
+// (merge, board nudge, sweep, rebuild, parked sweep, base push) runs — a human
+// merges the PR.
+if (mode === 'work') {
+  const { exitCode, result } = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, log: (m) => console.error(m) });
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(exitCode);
+}
+
 // branch-manager throws raw Errors (it is a library, shared with the §8.1 gate and
 // the MCP server, so it cannot process.exit). Routing them through fail() here
 // gives the gate ONE failure shape instead of a stack trace after the battery.
@@ -820,19 +858,7 @@ if (process.argv.includes('--no-push')) {
   if (!hasOrigin) {
     console.error("direct-merge: no 'origin' remote — push skipped (loud).");
   } else {
-    const tryPush = (cmd) =>
-      spawnSync(cmd, ['push', 'origin', into], {
-        cwd: target,
-        encoding: 'utf8',
-        timeout: 120_000,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      });
-    let push = tryPush('git');
-    if (push.status !== 0 && process.platform !== 'win32') {
-      console.error('direct-merge: `git push` failed — retrying through git.exe (Windows credential manager)…');
-      const winPush = tryPush('git.exe');
-      if (!winPush.error) push = winPush; // git.exe absent (spawn error) → keep the original failure
-    }
+    const push = pushWithWindowsRetry(target, ['origin', into], (m) => console.error(m));
     if (push.status === 0) {
       pushed = true;
       console.error(`direct-merge: pushed ${into} to origin.`);

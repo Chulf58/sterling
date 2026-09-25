@@ -1,0 +1,338 @@
+// DIRECT-MERGE WORK MODE (decision project-mode-hobby-work-toggle-decides-flow,
+// slice S2). In a WORK project /sterling:merge runs the same pre-merge
+// preflight, then pushes the feature branch and opens (or reuses) a GitHub PR.
+// It never checks out, merges into or pushes the base, never sweeps branches
+// and never runs post-merge repairs. Stdout is ONE JSON object
+// {mode, pr_url, pr_number, branch, created}; progress goes to stderr.
+// Hobby (or a missing key) is today's direct merge and never calls gh.
+//
+// Harness: a bare git repo as origin, and a PATH-prepended fake `gh` that
+// records its argv (one JSON line per call) and answers from a state dir.
+// No real GitHub call is ever made. Fixture idiom from
+// direct-merge-board-nudge.test.mjs (duplicated; test files export nothing).
+// Child streams are flattened with oneLine() before landing in an assertion
+// message (anti-pattern foreign_ee89c3fd).
+
+import { test, before } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname, delimiter } from 'node:path';
+import { pathToFileURL, fileURLToPath } from 'node:url';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const ATTRIBUTION = '🤖 Generated with [Claude Code](https://claude.com/claude-code)';
+
+let SterlingStore;
+before(async () => {
+  ({ SterlingStore } = await import(pathToFileURL(join(root, 'packages', 'store', 'dist', 'index.js')).href));
+});
+
+function oneLine(s) {
+  return String(s ?? '').replace(/\s+/g, ' ').trim();
+}
+
+function git(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
+  assert.equal(r.status, 0, `git ${args.join(' ')}: ${oneLine(r.stderr)}`);
+  return (r.stdout ?? '').trim();
+}
+
+function gitMaybe(cwd, args) {
+  const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 30_000 });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+// The fake gh. State dir files:
+//   log.jsonl    one JSON argv array per invocation (appended)
+//   prs.json     what `gh pr list` prints (default [])
+//   create_fail  present => `gh pr create` exits 1
+//   auth_fail    present => `gh auth status` exits 1
+const FAKE_GH_IMPL = `
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const state = process.env.FAKE_GH_STATE;
+const argv = process.argv.slice(2);
+appendFileSync(join(state, 'log.jsonl'), JSON.stringify(argv) + '\\n');
+const [a, b] = argv;
+if (a === '--version') { console.log('gh version 9.9.9 (fake)'); process.exit(0); }
+if (a === 'auth' && b === 'status') {
+  if (existsSync(join(state, 'auth_fail'))) { console.error('You are not logged into any GitHub hosts. To log in, run: gh auth login'); process.exit(1); }
+  console.error('Logged in to github.com as fake'); process.exit(0);
+}
+if (a === 'repo' && b === 'view') { console.log(JSON.stringify({ nameWithOwner: 'acme/widget' })); process.exit(0); }
+if (a === 'pr' && b === 'list') {
+  const f = join(state, 'prs.json');
+  console.log(existsSync(f) ? readFileSync(f, 'utf8') : '[]'); process.exit(0);
+}
+if (a === 'pr' && b === 'create') {
+  if (existsSync(join(state, 'create_fail'))) { console.error('GraphQL: something went wrong (createPullRequest)'); process.exit(1); }
+  const url = 'https://github.com/acme/widget/pull/7';
+  writeFileSync(join(state, 'prs.json'), JSON.stringify([{ url, number: 7 }]));
+  console.log(url); process.exit(0);
+}
+console.error('fake gh: unhandled ' + JSON.stringify(argv)); process.exit(3);
+`;
+
+function makeFakeGh(base) {
+  const bin = join(base, 'fakebin');
+  const state = join(base, 'ghstate');
+  mkdirSync(bin, { recursive: true });
+  mkdirSync(state, { recursive: true });
+  const impl = join(base, 'fake-gh.mjs');
+  writeFileSync(impl, FAKE_GH_IMPL);
+  const shim = join(bin, 'gh');
+  writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${impl}" "$@"\n`);
+  chmodSync(shim, 0o755);
+  return { bin, state };
+}
+
+function ghCalls(state) {
+  const f = join(state, 'log.jsonl');
+  if (!existsSync(f)) return [];
+  return readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+}
+
+/** A project with a bare origin holding main, a feature branch checked out
+ * with `commits` commits, and (unless mode is undefined) .sterling/config.json. */
+function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets' } = {}) {
+  const base = mkdtempSync(join(tmpdir(), 'sterling-dm-work-'));
+  const dir = join(base, 'repo');
+  const origin = join(base, 'origin.git');
+  mkdirSync(dir);
+  git(base, ['init', '--bare', '-b', 'main', origin]);
+  git(dir, ['init', '-b', 'main']);
+  git(dir, ['config', 'user.email', 'test@sterling.local']);
+  git(dir, ['config', 'user.name', 'Sterling Test']);
+  mkdirSync(join(dir, 'src'), { recursive: true });
+  writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
+  writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  git(dir, ['add', '-A']);
+  git(dir, ['commit', '-m', 'base']);
+  git(dir, ['remote', 'add', 'origin', origin]);
+  git(dir, ['push', 'origin', 'main']);
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  if (mode !== undefined) writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode }));
+  new SterlingStore(join(dir, '.sterling', 'sterling.db')).close();
+  git(dir, ['checkout', '-b', branchName]);
+  commits.forEach((c, i) => {
+    writeFileSync(join(dir, 'src', `f${i}.mjs`), `export const f${i} = ${i};\n`);
+    git(dir, ['add', '-A']);
+    git(dir, ['commit', '-m', c.subject, ...(c.body ? ['-m', c.body] : [])]);
+  });
+  const gh = makeFakeGh(base);
+  return {
+    base,
+    dir,
+    origin,
+    branchName,
+    gh,
+    mainSha: git(dir, ['rev-parse', 'main']),
+    originMainSha: git(origin, ['rev-parse', 'main']),
+    branchSha: git(dir, ['rev-parse', 'HEAD']),
+    cleanup: () => rmSync(base, { recursive: true, force: true }),
+  };
+}
+
+function runDirectMerge(p, extra = [], { path } = {}) {
+  return spawnSync(process.execPath, [join(root, 'scripts', 'direct-merge.mjs'), '--target', p.dir, ...extra], {
+    encoding: 'utf8',
+    cwd: p.dir,
+    timeout: 60_000,
+    env: { ...process.env, PATH: path ?? `${p.gh.bin}${delimiter}${process.env.PATH}`, FAKE_GH_STATE: p.gh.state, GIT_TERMINAL_PROMPT: '0' },
+  });
+}
+
+function assertBaseUntouched(p, label) {
+  assert.equal(git(p.dir, ['rev-parse', 'main']), p.mainSha, `${label}: local main must not move`);
+  assert.equal(git(p.origin, ['rev-parse', 'main']), p.originMainSha, `${label}: origin main must not move`);
+  assert.equal(git(p.dir, ['branch', '--show-current']), p.branchName, `${label}: the feature branch stays checked out (no checkout of main)`);
+  assert.ok(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), `${label}: the feature branch is never deleted or swept`);
+}
+
+function parseSingleJson(stdout, label) {
+  let parsed;
+  assert.doesNotThrow(() => {
+    parsed = JSON.parse(stdout);
+  }, `${label}: stdout must be exactly one JSON object, got: ${oneLine(stdout)}`);
+  assert.equal(typeof parsed, 'object');
+  assert.ok(parsed && !Array.isArray(parsed));
+  return parsed;
+}
+
+test('work: a merge pushes the branch and CREATES the PR with an explicit repo/head/base; title and body come from the branch commits; local AND origin main are unchanged; stdout is one JSON object', () => {
+  const p = makeProject({
+    mode: 'work',
+    commits: [
+      { subject: 'test: pin sprocket count', body: 'Red first.' },
+      { subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' },
+    ],
+  });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'work create');
+    assert.deepEqual(out, { mode: 'work', pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
+
+    assertBaseUntouched(p, 'work create');
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the feature branch is pushed to origin at its tip');
+    assert.equal(git(p.dir, ['rev-parse', '--abbrev-ref', `${p.branchName}@{upstream}`]), `origin/${p.branchName}`, 'push sets the upstream (-u)');
+
+    const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
+    assert.equal(creates.length, 1, 'exactly one gh pr create');
+    const c = creates[0];
+    const flag = (name) => c[c.indexOf(name) + 1];
+    assert.equal(flag('--repo'), 'acme/widget');
+    assert.equal(flag('--head'), p.branchName);
+    assert.equal(flag('--base'), 'main');
+    assert.equal(flag('--title'), p.branchName, 'several commits: the title is the branch name (gh --fill semantics)');
+    const body = flag('--body');
+    for (const piece of ['test: pin sprocket count', 'Red first.', 'feat: widget sprockets', 'Adds sprockets to the widget.']) {
+      assert.ok(body.includes(piece), `the body carries every commit subject and body — missing ${piece}`);
+    }
+    assert.ok(body.indexOf('test: pin sprocket count') < body.indexOf('feat: widget sprockets'), 'commits listed oldest first');
+    assert.ok(body.trimEnd().endsWith(ATTRIBUTION), 'the body ends with the PR attribution line');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: an existing open PR for the head is REUSED — the branch is pushed, no second gh pr create', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'prs.json'), JSON.stringify([{ url: 'https://github.com/acme/widget/pull/41', number: 41 }]));
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `reuse must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = parseSingleJson(r.stdout, 'work reuse');
+    assert.deepEqual(out, { mode: 'work', pr_url: 'https://github.com/acme/widget/pull/41', pr_number: 41, branch: p.branchName, created: false });
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, 'no gh pr create when a PR is open');
+    const list = ghCalls(p.gh.state).find((c) => c[0] === 'pr' && c[1] === 'list');
+    assert.ok(list, 'the open PR is looked up with gh pr list');
+    assert.equal(list[list.indexOf('--head') + 1], p.branchName);
+    assert.equal(list[list.indexOf('--state') + 1], 'open');
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch is still pushed');
+    assertBaseUntouched(p, 'work reuse');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the rerun detects the pushed branch and creates the PR', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'create_fail'), '');
+    const r1 = runDirectMerge(p);
+    assert.equal(r1.status, 1, `a failed PR create exits 1 — stdout=${oneLine(r1.stdout)} stderr=${oneLine(r1.stderr)}`);
+    assert.match(r1.stderr, /PUSHED/, 'stderr names that the push succeeded');
+    assert.match(r1.stderr, /rerun/i, 'stderr says a rerun is the remedy');
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch reached origin before the create failed');
+    const out1 = parseSingleJson(r1.stdout, 'partial');
+    assert.equal(out1.mode, 'work');
+    assert.equal(out1.created, false);
+    assert.equal(out1.pr_url, null);
+    assert.equal(out1.pr_number, null);
+    assert.equal(out1.pushed, true);
+    assertBaseUntouched(p, 'partial');
+
+    rmSync(join(p.gh.state, 'create_fail'));
+    const r2 = runDirectMerge(p);
+    assert.equal(r2.status, 0, `the rerun must succeed — stdout=${oneLine(r2.stdout)} stderr=${oneLine(r2.stderr)}`);
+    const out2 = parseSingleJson(r2.stdout, 'rerun');
+    assert.deepEqual(out2, { mode: 'work', pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
+    const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
+    assert.equal(creates.length, 2, 'one failed create, one successful create on the rerun');
+    const c = creates[1];
+    assert.equal(c[c.indexOf('--title') + 1], 'feat: widget sprockets', 'one commit: the title is its subject');
+    assert.ok(c[c.indexOf('--body') + 1].includes('Adds sprockets to the widget.'), 'one commit: the body carries its body');
+    assertBaseUntouched(p, 'rerun');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('an INVALID mode is refused with exit 2 before anything runs: no gh call, no push, nothing merged', () => {
+  const p = makeProject({ mode: 'office' });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 2, `invalid mode exits 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /office/, 'the refusal names the bad value');
+    assert.equal(r.stdout, '', 'nothing on stdout');
+    assert.deepEqual(ghCalls(p.gh.state), [], 'gh is never called');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+    assertBaseUntouched(p, 'invalid mode');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: --no-push is refused with exit 2 and an explanation (a PR needs a pushed branch)', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const r = runDirectMerge(p, ['--no-push']);
+    assert.equal(r.status, 2, `--no-push in work mode exits 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /--no-push/);
+    assert.match(r.stderr, /pushed branch/i);
+    assert.deepEqual(ghCalls(p.gh.state), [], 'gh is never called');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+    assertBaseUntouched(p, 'no-push');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: gh ABSENT from PATH is refused with exit 2 naming gh auth login; nothing pushed', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    // A PATH holding only git and sh, so a gh installed on the machine cannot leak in.
+    const onlyGit = join(p.base, 'onlygit');
+    mkdirSync(onlyGit);
+    for (const tool of ['git', 'sh']) {
+      const real = spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim();
+      assert.ok(real, `${tool} must be resolvable to build the restricted PATH`);
+      symlinkSync(real, join(onlyGit, tool));
+    }
+    const r = runDirectMerge(p, [], { path: onlyGit });
+    assert.equal(r.status, 2, `gh absent exits 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /gh auth login/);
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+    assertBaseUntouched(p, 'gh absent');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: gh present but UNAUTHENTICATED is refused with exit 2 naming gh auth login; no PR call, nothing pushed', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'auth_fail'), '');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 2, `unauthenticated gh exits 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /gh auth login/);
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
+    assertBaseUntouched(p, 'gh unauthenticated');
+  } finally {
+    p.cleanup();
+  }
+});
+
+for (const mode of [undefined, 'hobby']) {
+  const label = mode === undefined ? 'a MISSING mode key' : "mode 'hobby'";
+  test(`hobby (${label}): today's direct merge — merges into main, pushes main, sweeps the branch — and NEVER calls gh even with gh on PATH`, () => {
+    const p = makeProject({ mode });
+    try {
+      const r = runDirectMerge(p);
+      assert.equal(r.status, 0, `hobby merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+      const out = parseSingleJson(r.stdout, 'hobby');
+      assert.equal(out.mode, undefined, 'the hobby report shape is unchanged (no mode key)');
+      assert.equal(out.pushed, true, 'hobby pushes the base as today');
+      assert.deepEqual(ghCalls(p.gh.state), [], 'hobby never calls gh');
+      assert.notEqual(git(p.dir, ['rev-parse', 'main']), p.mainSha, 'hobby merges into main');
+      assert.equal(git(p.origin, ['rev-parse', 'main']), git(p.dir, ['rev-parse', 'main']), 'hobby pushes main to origin');
+      assert.equal(gitMaybe(p.dir, ['rev-parse', '--verify', `refs/heads/${p.branchName}`]), null, 'hobby deletes the merged branch');
+    } finally {
+      p.cleanup();
+    }
+  });
+}
