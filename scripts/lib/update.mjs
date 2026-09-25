@@ -346,6 +346,14 @@ function writeUpdateMarker(cwd, sha, handoffRetry = [], projects = {}, projectRe
   writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry, project_retry: projectRetry, projects }, null, 2) + '\n');
 }
 
+// A Node filesystem error (EACCES, EPERM, EIO, ...) raised while reading ONE
+// project's files: a per-project refusal, never an abort of the machine-wide
+// update (Sol re-check). contained-fs rethrows every non-ENOENT lstat error.
+const isFsError = (err) => typeof err?.code === 'string' && typeof err?.syscall === 'string';
+// The refusals a per-project read may raise: an invalid mode, an unsafe path,
+// or a filesystem error.
+const isProjectReadRefusal = (err) => err instanceof ProjectModeError || err instanceof ContainmentError || isFsError(err);
+
 // The project's config bytes, hashed: a STANDING refusal (outcome 'standing')
 // is retried only when this or the clone head changes. Read through contained-fs.
 function configHash(repoPath) {
@@ -429,7 +437,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     try {
       return readProjectMode(p.repo_path);
     } catch (err) {
-      if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+      if (!isProjectReadRefusal(err)) throw err;
       log(`${indent}✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; the next /sterling:update reruns its agent sync and handoff projection once config.mode is fixed.`);
       if (!report.project_retry.includes(p.repo_path)) report.project_retry.push(p.repo_path);
       return null;
@@ -456,7 +464,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     try {
       provisioning[p.repo_path] = { mode: 'work', head, outcome, config: configHash(p.repo_path) };
     } catch (err) {
-      if (!(err instanceof ContainmentError)) throw err;
+      if (!(err instanceof ContainmentError) && !isFsError(err)) throw err;
       delete provisioning[p.repo_path]; // unprovable: the next run judges it afresh
     }
   };
@@ -741,8 +749,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           const stale = !workFilesComplete(p.repo_path, { handoff: !standing }) || (standing && configHash(p.repo_path) !== state.config);
           if (stale) toProvision.push(p);
         } catch (err) {
-          if (!(err instanceof ContainmentError)) throw err;
+          if (!(err instanceof ContainmentError) && !isFsError(err)) throw err;
           log(`\n✗ ${p.name}: REFUSED — ${err.message}; its OpenCode and handoff files were not checked or provisioned (fix the path, then rerun /sterling:update)`);
+          if (!report.project_retry.includes(p.repo_path)) report.project_retry.push(p.repo_path);
           report.exit = 2;
         }
       }

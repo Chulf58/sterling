@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, symlinkSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -484,6 +484,7 @@ for (const [label, breakIt] of [
       const r = await update({ behind: 0, projects: [dir], cwd });
       assert.equal(r.report.exit, 2, r.log);
       assert.match(r.log, /✗ .*REFUSED — .*\.opencode\/agents/);
+      assert.deepEqual(markerOf(cwd).project_retry, [dir], 'a probe failure joins the same retry set as an invalid mode');
       assert.equal(r.handoffCalls.length + r.syncCalls.length, 0, 'nothing is provisioned through an unsafe path');
     } finally {
       [cwd, dir, outside].forEach(cleanup);
@@ -532,5 +533,39 @@ test('update, HEAD unchanged: a standing project that lost a portable agent gets
     assert.deepEqual(opencodeFiles(dir), PORTABLE.map((n) => `${n}.md`), 'scout.md is restored');
   } finally {
     [cwd, dir].forEach(cleanup);
+  }
+});
+
+// Sol re-check, final round, item 3: a filesystem error (EACCES) while reading
+// ONE project's .sterling/ is that project's refusal (project_retry, exit 2) —
+// the machine-wide update never aborts, and the other projects proceed. An
+// unsearchable .sterling/ makes the contained-fs lstat itself fail (a
+// non-ENOENT error it rethrows), which is the path that used to abort the run.
+test('update: an unreadable project .sterling/ is a per-project refusal; the other projects proceed', { skip: process.getuid?.() === 0 ? 'running as root: chmod 000 does not deny reads' : false }, async () => {
+  const cwd = scratch();
+  const locked = project('work');
+  const fine = project('work');
+  const cfg = join(locked, '.sterling');
+  try {
+    chmodSync(cfg, 0o000);
+    const full = await update({ behind: 2, projects: [locked, fine], cwd });
+    assert.equal(full.report.exit, 2, full.log);
+    assert.match(full.log, /✗ .*REFUSED — project mode: .*EACCES/);
+    assert.deepEqual(markerOf(cwd).project_retry, [locked]);
+    assert.deepEqual(opencodeFiles(fine), PORTABLE.map((n) => `${n}.md`), 'the other project is provisioned');
+    assert.deepEqual(handoffFiles(fine), HANDOFF_FILES);
+
+    const again = await update({ behind: 0, projects: [locked, fine], cwd });
+    assert.equal(again.report.exit, 2, again.log);
+    assert.deepEqual(markerOf(cwd).project_retry, [locked], 'still unresolved, still retried');
+
+    chmodSync(cfg, 0o755);
+    const fixed = await update({ behind: 0, projects: [locked, fine], cwd });
+    assert.equal(fixed.report.exit, 0, fixed.log);
+    assert.deepEqual(markerOf(cwd).project_retry, []);
+    assert.deepEqual(opencodeFiles(locked), PORTABLE.map((n) => `${n}.md`));
+  } finally {
+    chmodSync(cfg, 0o755);
+    [cwd, locked, fine].forEach(cleanup);
   }
 });
