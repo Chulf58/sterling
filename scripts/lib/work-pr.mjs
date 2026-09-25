@@ -70,6 +70,16 @@ export function workPreflight(cwd) {
   return { repo: origin.repo };
 }
 
+/** A refusal message when `branch` is not a real local branch, else null. The
+ * push publishes refs/heads/<branch>, so a tag, a remote-tracking ref or a
+ * SHA given as --branch must never be pushed under a branch name. */
+export function localBranchRefusal(cwd, branch) {
+  const fmt = spawnSync('git', ['check-ref-format', '--branch', branch], { cwd, encoding: 'utf8', timeout: 30_000 });
+  const ref = spawnSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], { cwd, encoding: 'utf8', timeout: 30_000 });
+  if (fmt.status === 0 && ref.status === 0) return null;
+  return `direct-merge: '${branch}' is not a local branch (no refs/heads/${branch}) — work mode pushes a local branch to open its PR. Check out the branch, or pass --branch <local branch>.`;
+}
+
 /** Title and body from the branch's own commits, oldest first. One commit:
  * its subject and body. Several: the branch name as title and every commit's
  * subject and body in the body (gh's own --fill semantics). The body always
@@ -164,19 +174,27 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, log })
     return { exitCode: 1, result };
   }
 
-  log(`direct-merge: work mode — pushing ${branch} to origin (the base ${base} is never pushed or merged here)…`);
-  const push = pushWithWindowsRetry(cwd, ['-u', 'origin', branch], log);
+  // PINNED PUSH: the refspec names the SHA the preflight and battery checked,
+  // never the mutable branch name, so a commit that lands on the branch while
+  // the battery runs cannot ship unchecked. The same refspec goes through the
+  // git.exe retry. The upstream is set separately, as plain config.
+  log(`direct-merge: work mode — pushing ${branch} at ${branchTip} to origin (the base ${base} is never pushed or merged here)…`);
+  const push = pushWithWindowsRetry(cwd, ['origin', `${branchTip}:refs/heads/${branch}`], log);
   if (push.status !== 0) {
     log(
       [
         `direct-merge: the PUSH of ${branch} to origin FAILED — no PR was ${existing ? 'updated' : 'created'}. Fix the push and rerun.`,
-        `  (on WSL, try: git.exe push -u origin ${branch} — credentials live in GCM)`,
+        `  (on WSL, try: git.exe push origin ${branchTip}:refs/heads/${branch} — credentials live in GCM)`,
         streams(push),
       ].join('\n')
     );
     return { exitCode: 1, result };
   }
-  log(`direct-merge: pushed ${branch} to origin.`);
+  log(`direct-merge: pushed ${branch} (${branchTip}) to origin.`);
+  for (const [key, value] of [[`branch.${branch}.remote`, 'origin'], [`branch.${branch}.merge`, `refs/heads/${branch}`]]) {
+    const set = spawnSync('git', ['config', key, value], { cwd, encoding: 'utf8', timeout: 30_000 });
+    if (set.status !== 0) log(`direct-merge: could not set the upstream (${key}); the push and PR are unaffected. Set it with: git branch --set-upstream-to=origin/${branch} ${branch}`);
+  }
 
   if (existing) {
     log(`direct-merge: an open PR already exists for ${branch} — reused, the push updated it: ${existing.url}`);

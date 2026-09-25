@@ -19,7 +19,7 @@ import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/l
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
-import { workPreflight, shipAsPr, pushWithWindowsRetry } from './lib/work-pr.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal } from './lib/work-pr.mjs';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
 // a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
@@ -66,6 +66,10 @@ if (branch === into) {
       `check 'git log --oneline -3 ${into}' before merging anything again. A gate that exits\n` +
       `non-zero after a SUCCESSFUL merge (stale bundles / failed sweep) says so on its first line.`
   );
+}
+if (mode === 'work') {
+  const notBranch = localBranchRefusal(target, branch);
+  if (notBranch) fail(notBranch, 2);
 }
 
 // Cheap git precondition BEFORE the expensive checks (P1). mergeBranchInto keeps

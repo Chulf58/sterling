@@ -123,7 +123,7 @@ function ghCalls(state) {
 
 /** A project with a bare origin holding main, a feature branch checked out
  * with `commits` commits, and (unless mode is undefined) .sterling/config.json. */
-function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets' } = {}) {
+function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', body: 'Adds sprockets to the widget.' }], branchName = 'feat/sprockets', checkScript } = {}) {
   const base = mkdtempSync(join(tmpdir(), 'sterling-dm-work-'));
   const dir = join(base, 'repo');
   const origin = join(base, 'origin.git');
@@ -135,6 +135,9 @@ function makeProject({ mode, commits = [{ subject: 'feat: widget sprockets', bod
   mkdirSync(join(dir, 'src'), { recursive: true });
   writeFileSync(join(dir, 'src', 'base.mjs'), 'export const base = 1;\n');
   writeFileSync(join(dir, '.gitignore'), '.sterling/\n');
+  // A package.json `check` script is the gate's battery (npm run check); a
+  // test uses it as the hook point that runs AFTER the preflight snapshot.
+  if (checkScript) writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { check: checkScript } }));
   git(dir, ['add', '-A']);
   git(dir, ['commit', '-m', 'base']);
   // origin's identity is a GitHub URL; pushes are redirected to the local bare
@@ -350,6 +353,36 @@ test('work: MORE THAN ONE open PR for the same repo/head/base fails closed with 
     assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, 'no create');
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');
     assertBaseUntouched(p, 'ambiguous');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: the push is PINNED to the preflight SHA — a commit that lands on the branch during the battery never ships', () => {
+  const p = makeProject({ mode: 'work', checkScript: "git commit --allow-empty -q -m 'sneaky: never gated'" });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    assert.notEqual(git(p.dir, ['rev-parse', p.branchName]), p.branchSha, 'the battery really did move the branch (the hook point fired)');
+    assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'origin holds the pinned, gated SHA — not the moved branch tip');
+    assert.equal(git(p.dir, ['config', `branch.${p.branchName}.remote`]), 'origin', 'the upstream remote is set');
+    assert.equal(git(p.dir, ['config', `branch.${p.branchName}.merge`]), `refs/heads/${p.branchName}`, 'the upstream branch is set');
+    const create = ghCalls(p.gh.state).find((c) => c[0] === 'pr' && c[1] === 'create');
+    assert.ok(!create.join(' ').includes('sneaky'), 'the PR text comes from the pinned range too');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: --branch naming something that is not a local branch (a tag) is refused with exit 2 before the battery; nothing pushed', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    git(p.dir, ['tag', 'v1']);
+    const r = runDirectMerge(p, ['--branch', 'v1']);
+    assert.equal(r.status, 2, `a non-branch --branch exits 2 — stderr=${oneLine(r.stderr)}`);
+    assert.match(r.stderr, /v1/);
+    assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr').length, 0, 'no pr call');
+    assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', 'refs/heads/v1']), null, 'nothing pushed');
   } finally {
     p.cleanup();
   }
