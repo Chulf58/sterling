@@ -1672,12 +1672,18 @@ test('fan-out: an actionable handoff conflict does not wedge the update; only th
     assert.deepEqual(marker().handoff_retry, [A]);
     assert.match(first.log, /cannot be repaired.*--prune-missing.*store_authority/s, 'names the unregister / retire remedy');
 
-    // 2) already current: ONLY A is retried — no build, no agent sync, no B
+    // 2) already current: A is retried, and the retry does NOT starve the normal
+    // scan (Sol re-check, final round): B lost a portable agent, so B is still
+    // scanned and provisioned in the same run. No build, and the core sequence is
+    // not repeated.
+    rmSync(join(B, '.opencode', 'agents', 'scout.md'));
     const second = await runOnce({ behind: 0, statuses: { [A]: 3 } });
-    assert.deepEqual(second.handoffCalls.map((c) => c.split(' ').pop()), [A]);
-    assert.equal(second.calls.filter((c) => c.startsWith('npm ') || c.includes('sync-agents')).length, 0, 'the core sequence is not repeated');
+    assert.deepEqual(second.handoffCalls.map((c) => c.split(' ').pop()), [A, B], 'A retried first, then B provisioned');
+    assert.equal(second.calls.filter((c) => c.startsWith('npm ')).length, 0, 'the core sequence is not repeated');
+    assert.deepEqual(second.calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), [B], 'only B, the stale project, is re-synced');
     assert.equal(second.report.exit, 2);
     assert.deepEqual(marker().handoff_retry, [A]);
+    writeFileSync(join(B, '.opencode', 'agents', 'scout.md'), 'x\n'); // what B's real sync restores (the fake exec writes nothing)
 
     // 3) A is fixed: it clears from the retry set
     const third = await runOnce({ behind: 0, statuses: {} });

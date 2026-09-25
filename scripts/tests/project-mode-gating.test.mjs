@@ -490,3 +490,29 @@ for (const [label, breakIt] of [
     }
   });
 }
+
+// Sol re-check, final round, item 1 (starvation): while a retry set is
+// non-empty the already-current path must still scan every OTHER registered
+// project — a project switched hobby→work is provisioned in the same run that
+// retries a stuck one.
+test('update, HEAD unchanged: a stuck retry project does not starve the scan — another project switched to work is provisioned in the same run', async () => {
+  const cwd = scratch();
+  const stuck = project('work');
+  const switched = project('hobby');
+  try {
+    writeFileSync(join(stuck, 'architecture.md'), '# ours, hand-written\n'); // a foreign file: actionable refusal
+    const full = await update({ behind: 2, projects: [stuck, switched], cwd });
+    assert.deepEqual(markerOf(cwd).handoff_retry, [stuck], full.log);
+    writeConfig(switched, 'work');
+    const r = await update({ behind: 0, projects: [stuck, switched], cwd });
+    assert.equal(r.report.exit, 2, 'the stuck project keeps the run loud');
+    assert.deepEqual(r.handoffCalls.map((c) => c.split(' ').pop()).sort(), [stuck, switched].sort(), 'both are handled: A retried, B provisioned');
+    assert.deepEqual(opencodeFiles(switched), PORTABLE.map((n) => `${n}.md`));
+    assert.deepEqual(handoffFiles(switched), HANDOFF_FILES);
+    assert.deepEqual(markerOf(cwd).handoff_retry, [stuck]);
+    assert.equal(markerOf(cwd).projects?.[switched]?.mode, 'work', 'B is recorded in the one marker write');
+    assert.equal(r.handoffCalls.filter((c) => c.endsWith(stuck)).length, 1, 'the retried project is not scanned a second time');
+  } finally {
+    [cwd, stuck, switched].forEach(cleanup);
+  }
+});

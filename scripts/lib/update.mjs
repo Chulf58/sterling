@@ -632,77 +632,75 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     const marker = readUpdateMarker(cwd, log);
     const markerSha = marker?.sha ?? null;
     provisioning = { ...(marker?.projects ?? {}) };
-    if (markerSha === before.head && (marker.handoff_retry.length || marker.project_retry.length) && opts.projects !== false) {
-      // The clone update itself is complete; only projects left unresolved are
-      // outstanding: handoff_retry reruns the projection, project_retry (an
-      // invalid mode) reruns the agent sync AND the projection. Nothing else.
-      let registered;
-      try {
-        registered = (typeof projects === 'function' ? (await projects()) ?? [] : projects);
-      } catch (err) {
-        log(`\n⚠ handoff retry skipped — project registry unavailable: ${err?.message ?? err}`);
-        report.exit = 2;
-        return report;
-      }
-      const byPath = new Map(registered.map((p) => [p.repo_path, p]));
-      const retried = (repoPath) => {
-        const p = byPath.get(repoPath);
-        if (!p) log(`  • ${repoPath}: no longer registered — dropped from the retry set`);
-        return p;
-      };
-      if (marker.project_retry.length) {
-        log(`\n▸ already current at ${before.head_short}; retrying the agent sync and handoff projection for ${marker.project_retry.length} project(s) whose project mode was invalid`);
-        for (const repoPath of marker.project_retry) {
-          const p = retried(repoPath);
-          if (!p || projectModeOrRefuse(p) === null) continue;
-          const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
-          if (r.status !== 0) {
-            log(`  ✗ ${p.name}: agent sync ${r.status === 2 ? 'REFUSED' : 'failed'} (exit ${r.status}):\n${`${r.stdout}${r.stderr}`.trim().split('\n').map((l) => `      ${l}`).join('\n')}`);
-            report.exit = r.status === 2 ? 2 : report.exit === 0 ? 1 : report.exit;
-          } else {
-            log(`  • ${p.name}: agents synced`);
-          }
-          const handoff = runHandoff(p);
-          recordProvisioning(p, markerSha, r.status, handoff);
-          report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
-        }
-      }
-      if (marker.handoff_retry.length) {
-        log(`\n▸ already current at ${before.head_short}; retrying the handoff projection for ${marker.handoff_retry.length} project(s) left unresolved by the last update`);
-        for (const repoPath of marker.handoff_retry) {
-          const p = retried(repoPath);
-          if (!p) continue;
-          log(`  • ${p.name}:`);
-          const handoff = runHandoff(p);
-          recordProvisioning(p, markerSha, 0, handoff);
-          report.projects.push({ name: p.name, repo_path: p.repo_path, handoff });
-        }
-      }
-      try {
-        writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning, report.project_retry);
-      } catch (err) {
-        log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
-        report.exit = report.exit === 0 ? 1 : report.exit;
-      }
-      if (report.handoff_retry.length || report.project_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
-      else log('\nEvery previously unresolved project is now resolved.');
-      return report;
-    }
     if (markerSha === before.head) {
-      // FULLY NONFATAL: resolving the registry can throw (open/list failure). An
-      // already-current update has already succeeded by the time we get here, so a
-      // registry failure must NOT reject the update or leave a half-applied state
-      // — log and continue to the success return.
+      // The clone update itself is complete. Unresolved projects are retried
+      // FIRST (handoff_retry reruns the projection, project_retry — an invalid
+      // mode — reruns the agent sync AND the projection), then the normal scan
+      // below covers every registered project that was NOT retried, so a stuck
+      // project never starves another one's provisioning (Sol re-check). One
+      // marker write at the end.
+      const hasRetry = (marker.handoff_retry.length || marker.project_retry.length) && opts.projects !== false;
       let noopProjectList = [];
       try {
         noopProjectList =
           opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+      } catch (err) {
+        if (hasRetry) {
+          log(`\n⚠ handoff retry skipped — project registry unavailable: ${err?.message ?? err}`);
+          report.exit = 2;
+          return report;
+        }
+        // FULLY NONFATAL without a retry set: an already-current update has
+        // already succeeded, so a registry failure must NOT reject it.
+        log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+      }
+      try {
         // The blind spot this reports is INDEPENDENT of clone lag — an
         // already-current clone with two unregistered projects is the measured
         // 2026-08-28 state exactly — so the report belongs on this path too.
         await reportCoverage(noopProjectList);
       } catch (err) {
-        log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+        log(`\n⚠ registry coverage skipped (nonfatal): ${err?.message ?? err}`);
+      }
+      const recordedBefore = JSON.stringify(provisioning);
+      const retriedPaths = new Set();
+      if (hasRetry) {
+        const byPath = new Map(noopProjectList.map((p) => [p.repo_path, p]));
+        const retried = (repoPath) => {
+          retriedPaths.add(repoPath);
+          const p = byPath.get(repoPath);
+          if (!p) log(`  • ${repoPath}: no longer registered — dropped from the retry set`);
+          return p;
+        };
+        if (marker.project_retry.length) {
+          log(`\n▸ already current at ${before.head_short}; retrying the agent sync and handoff projection for ${marker.project_retry.length} project(s) whose project mode was invalid`);
+          for (const repoPath of marker.project_retry) {
+            const p = retried(repoPath);
+            if (!p || projectModeOrRefuse(p) === null) continue;
+            const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
+            if (r.status !== 0) {
+              log(`  ✗ ${p.name}: agent sync ${r.status === 2 ? 'REFUSED' : 'failed'} (exit ${r.status}):\n${`${r.stdout}${r.stderr}`.trim().split('\n').map((l) => `      ${l}`).join('\n')}`);
+              report.exit = r.status === 2 ? 2 : report.exit === 0 ? 1 : report.exit;
+            } else {
+              log(`  • ${p.name}: agents synced`);
+            }
+            const handoff = runHandoff(p);
+            recordProvisioning(p, markerSha, r.status, handoff);
+            report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
+          }
+        }
+        if (marker.handoff_retry.length) {
+          log(`\n▸ already current at ${before.head_short}; retrying the handoff projection for ${marker.handoff_retry.length} project(s) left unresolved by the last update`);
+          for (const repoPath of marker.handoff_retry) {
+            if (retriedPaths.has(repoPath)) continue; // already rerun in full above
+            const p = retried(repoPath);
+            if (!p) continue;
+            log(`  • ${p.name}:`);
+            const handoff = runHandoff(p);
+            recordProvisioning(p, markerSha, 0, handoff);
+            report.projects.push({ name: p.name, repo_path: p.repo_path, handoff });
+          }
+        }
       }
       // Hobby→work with HEAD unchanged (decision
       // project-mode-hobby-work-toggle-decides-flow; Sol review of S1): no new
@@ -712,9 +710,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // state is missing, is not work, or is at another head — or when its file
       // set is incomplete. A hobby project's state is recorded as hobby, so a
       // later switch back to work re-provisions it.
-      const recordedBefore = JSON.stringify(provisioning);
       const toProvision = [];
       for (const p of noopProjectList) {
+        if (retriedPaths.has(p.repo_path)) continue;
         const mode = projectModeOrRefuse(p, '\n');
         if (mode === null) {
           delete provisioning[p.repo_path];
@@ -758,7 +756,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
         }
       }
-      if (toProvision.length || report.project_retry.length || JSON.stringify(provisioning) !== recordedBefore) {
+      const unresolved = report.handoff_retry.length || report.project_retry.length;
+      if (hasRetry || toProvision.length || unresolved || JSON.stringify(provisioning) !== recordedBefore) {
         try {
           writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning, report.project_retry);
         } catch (err) {
@@ -766,11 +765,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           report.exit = report.exit === 0 ? 1 : report.exit;
         }
       }
-      if (toProvision.length) {
-        if (report.handoff_retry.length || report.project_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
-        return report;
-      }
-      if (report.exit === 0) log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
+      if (unresolved) report.exit = report.exit === 0 ? 2 : report.exit;
+      else if (hasRetry) log('\nEvery previously unresolved project is now resolved.');
+      if (report.exit === 0 && !hasRetry && !toProvision.length) log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
       return report;
     }
     // Git is current, but nothing on disk proves the LAST post-merge sequence
