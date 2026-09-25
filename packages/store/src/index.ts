@@ -1104,6 +1104,37 @@ export class JournalDemotionRefusedError extends Error {
  * an unresolvable owner (deleted concurrently) is the caller's problem to
  * degrade, not this function's — it renders whatever it is given.
  */
+/**
+ * DECLARED-TARGET IDENTITY FOR capture_owed (decision
+ * capture-pending-grace-per-declaration-held-while-any-dispatch-live, fix
+ * rounds): H10 converts a lapsed capture_pending declaration into a capture_owed
+ * item whose text opens with `capture owed: declared pending (` and ends with
+ * the trailer ` [target <JSON string>]`, the JSON string being the declaration
+ * exactly as H10 holds it, trimmed. That string is the item's identity,
+ * compared byte-exact (no case folding, no split on ' — ', which may occur
+ * inside a target); its file_keys are context only. Keyed on file_keys, two
+ * targets over one file collapsed and one target over two file sets
+ * duplicated. The todo schema has no target field, so the trailer is the
+ * carrier and this is its one parser. The LAST ` [target "` is the trailer's:
+ * inside a JSON literal every quote is escaped, so that sequence cannot occur
+ * there. Returns null for any other capture_owed text (undeclared debt, H1's
+ * residue, and items minted without the trailer keep the ordinary key).
+ */
+export const DECLARED_CAPTURE_OWED_PREFIX = 'capture owed: declared pending (';
+const DECLARED_CAPTURE_TARGET_TRAILER = ' [target ';
+export function declaredCaptureTarget(text: string | undefined): string | null {
+  if (typeof text !== 'string' || !text.startsWith(DECLARED_CAPTURE_OWED_PREFIX) || !text.endsWith('"]')) return null;
+  const at = text.lastIndexOf(`${DECLARED_CAPTURE_TARGET_TRAILER}"`);
+  if (at < 0) return null;
+  let target: unknown;
+  try {
+    target = JSON.parse(text.slice(at + DECLARED_CAPTURE_TARGET_TRAILER.length, -1));
+  } catch {
+    return null; // not the H10 trailer: this item keeps the ordinary key
+  }
+  return typeof target === 'string' && target.length > 0 ? target : null;
+}
+
 export function buildReconcileText(owner: { type: 'feature_article' | 'reference_material'; slug?: string; title?: string }, fileKeys: string[]): string {
   const files = [...fileKeys].sort();
   return owner.type === 'reference_material'
@@ -2420,6 +2451,10 @@ export class SterlingStore {
     // lane-specific exception at this one choke point, not a universal key
     // change.
     const keyOf = (t: { system_reason?: string; feature_link?: string; file_keys?: string[]; text?: string }) => {
+      // capture_owed minted from a capture_pending declaration: the declared
+      // target is the identity, file_keys are context (declaredCaptureTarget).
+      const declaredTarget = t.system_reason === 'capture_owed' ? declaredCaptureTarget(t.text) : null;
+      if (declaredTarget !== null) return JSON.stringify(['capture_owed', t.feature_link ?? '', [], `declared-target:${declaredTarget}`]);
       const files = t.system_reason === 'state_review' ? [] : [...(t.file_keys ?? [])].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? '', t.feature_link ?? '', files, identified ? '' : (t.text ?? '')]);

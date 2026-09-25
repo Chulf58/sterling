@@ -514,6 +514,12 @@ test('P3 (ZERO-QUEUE-NOISE, unchanged by the carry): a capture landing WHILE the
 // declared files are disjoint from the touched set, deliberately.
 // ===========================================================================
 
+// SUPERSEDED IN PART, 2026-09-25: decision
+// capture-pending-grace-per-declaration-held-while-any-dispatch-live (294706f6,
+// user-ruled) HOLDS a declaration while ANY dispatch is live, so "EVEN IF OTHER
+// DISPATCHES ARE STILL LIVE" above no longer holds. P4/P4b/P4c now pin the hold
+// while the survivors live and the conversion once they land; their
+// anti-evaporation assertions are unchanged.
 const pendingDetail = ({ agentId, agentType, files, reason }) =>
   `${agentType} ${agentId} (agent_id ${agentId}, agent_type ${agentType}, files ${files.join(', ')}) — ${reason}`;
 
@@ -578,7 +584,7 @@ test('P4-CONTROL (must pass for the OPPOSITE reason — placed FIRST among the i
   }
 });
 
-test('P4 (DEFECT 3, RED as built — the CRITICAL arm): once the NAMED TARGET lands, the duty converts to exactly ONE deduped capture_owed citing it, even though an unrelated dispatch of the SAME agent_type is still live', () => {
+test('P4 (pin changed by decision 294706f6): once the NAMED TARGET lands, a surviving unrelated dispatch of the SAME agent_type HOLDS the declaration; once it lands too, the duty converts to exactly ONE deduped capture_owed citing the target', () => {
   // SABOTAGE that must turn this red: decide target liveness by substring —
   // `entries.some((e) => detail.includes(e.agent_type))` — i.e. the
   // implementation as reviewed.
@@ -596,11 +602,22 @@ test('P4 (DEFECT 3, RED as built — the CRITICAL arm): once the NAMED TARGET la
     // The TARGET lands. The unrelated coder lane stays live and keeps its type.
     writeRegisterRaw(dir, [typeOther()]);
 
+    // PIN CHANGED 2026-09-25 by decision
+    // capture-pending-grace-per-declaration-held-while-any-dispatch-live
+    // (294706f6, user-ruled): a declaration is HELD while ANY dispatch is live,
+    // so a surviving unrelated lane now holds it too. The anti-evaporation
+    // property is kept: the hold ends when the last lane lands, and the debt is
+    // then recorded within the same bounded window.
+    const held = stopsUntilOwed(dir, store);
+    assert.equal(held.items.length, 0, `HOLD SHAPE: an unrelated dispatch is still live, so the declaration is held (decision 294706f6). Codes: [${held.codes.join(', ')}]`);
+    assert.equal(existsSync(eventsPath(dir)), true, 'the held declaration survives on disk');
+    writeRegisterRaw(dir, []); // the last live lane lands
+
     const { codes, items } = stopsUntilOwed(dir, store);
     assert.equal(
       items.length,
       1,
-      `IMPERSONATION SHAPE (this is the assertion that is RED as built, firing as 0 !== 1): sub-target LANDED and nothing was captured, so the pending duty must convert within two Stops. An unrelated live entry that merely SHARES the target's agent_type ("coder") is not the target — matching a declaration's free text against live entries' agent_type lets any surviving lane of the same class impersonate a landed one, and the duty is then carried forever while the real debt evaporates (P5). Codes: [${codes.join(', ')}]`
+      `EVAPORATION SHAPE: sub-target and every other lane LANDED and nothing was captured, so the pending duty must convert within two Stops. (Original impersonation rationale, superseded for the hold by decision 294706f6 and kept for the conversion:) An unrelated live entry that merely SHARES the target's agent_type ("coder") is not the target — matching a declaration's free text against live entries' agent_type lets any surviving lane of the same class impersonate a landed one, and the duty is then carried forever while the real debt evaporates (P5). Codes: [${codes.join(', ')}]`
     );
     assert.match(items[0].text, /sub-target/, 'the minted item cites the LANDED TARGET, so a drain can verify whether its capture landed');
     assert.equal(codes[codes.length - 1], 0, 'the converting Stop releases the session');
@@ -639,7 +656,7 @@ const idSurvivors = () => [
   liveEntry('sub-lane-104', ['src/unrelated/lane-104.mjs'], 'librarian'),
 ];
 
-test('P4b (DEFECT 3, RED as built): the duty converts once the target lands even when a surviving lane\'s agent_id substring-collides with the landed target\'s id — in EITHER direction', () => {
+test('P4b (pin changed by decision 294706f6): surviving lanes whose agent_ids substring-collide with the landed target HOLD the declaration; once they land, the duty converts citing the target', () => {
   // SABOTAGE that must turn this red: decide target liveness by id substring —
   // `entries.some((e) => detail.includes(e.agent_id) || e.agent_id.includes(targetId))`.
   const { dir, store, cleanup } = makeProject();
@@ -653,11 +670,17 @@ test('P4b (DEFECT 3, RED as built): the duty converts once the target lands even
 
     writeRegisterRaw(dir, idSurvivors()); // ONLY sub-lane-10 lands
 
+    // PIN CHANGED 2026-09-25 (decision 294706f6, see P4): the survivors hold
+    // the declaration; conversion follows once they land too.
+    const held = stopsUntilOwed(dir, store);
+    assert.equal(held.items.length, 0, `HOLD SHAPE: sub-lane-1 and sub-lane-104 are still live, so the declaration is held (decision 294706f6). Codes: [${held.codes.join(', ')}]`);
+    writeRegisterRaw(dir, []);
+
     const { codes, items } = stopsUntilOwed(dir, store);
     assert.equal(
       items.length,
       1,
-      `IMPERSONATION SHAPE (id vector, RED as built, firing as 0 !== 1): sub-lane-10 landed, but sub-lane-1 and sub-lane-104 are still live and each substring-collides with it — one in each direction. A prefix relation between two unrelated lane ids is not identity, and treating it as identity carries the declaration past its own target's death. Codes: [${codes.join(', ')}]`
+      `EVAPORATION SHAPE (id vector): every lane landed, so the pending duty must convert within two Stops. (Original rationale, superseded for the hold by decision 294706f6: sub-lane-1 and sub-lane-104 each substring-collide with sub-lane-10 — one in each direction. A prefix relation between two unrelated lane ids is not identity, and treating it as identity carries the declaration past its own target's death.) Codes: [${codes.join(', ')}]`
     );
     assert.match(items[0].text, /sub-lane-10/, 'the minted item cites the landed target');
     assert.equal(codes[codes.length - 1], 0, 'the converting Stop releases the session');
@@ -679,7 +702,7 @@ const PATH_DETAIL = pendingDetail({
 });
 const pathSurvivor = () => liveEntry('sub-render-9', [NOTES_FILE], 'reviewer');
 
-test('P4c (DEFECT 3, RED as built): the duty converts once the target lands even when a surviving lane DECLARES a file path that the declaration\'s free-text reason happens to mention', () => {
+test('P4c (pin changed by decision 294706f6): a surviving lane declaring a path the reason mentions HOLDS the declaration; once it lands, the duty converts citing the target', () => {
   // SABOTAGE that must turn this red: decide target liveness by declared-path
   // substring — `entries.some((e) => e.files.some((f) => detail.includes(f)))`.
   const { dir, store, cleanup } = makeProject();
@@ -693,11 +716,17 @@ test('P4c (DEFECT 3, RED as built): the duty converts once the target lands even
 
     writeRegisterRaw(dir, [pathSurvivor()]); // ONLY sub-notes-3 lands
 
+    // PIN CHANGED 2026-09-25 (decision 294706f6, see P4): the survivor holds
+    // the declaration; conversion follows once it lands too.
+    const held = stopsUntilOwed(dir, store);
+    assert.equal(held.items.length, 0, `HOLD SHAPE: sub-render-9 is still live, so the declaration is held (decision 294706f6). Codes: [${held.codes.join(', ')}]`);
+    writeRegisterRaw(dir, []);
+
     const { codes, items } = stopsUntilOwed(dir, store);
     assert.equal(
       items.length,
       1,
-      `IMPERSONATION SHAPE (declared-path vector, RED as built, firing as 0 !== 1): sub-notes-3 landed, and the only surviving lane sub-render-9 is unrelated — it merely holds ${NOTES_FILE}, a path the declaration's PROSE mentions. A file named in a reason is subject matter, not an owner; treating it as proof the target lives means the duty never converts. Codes: [${codes.join(', ')}]`
+      `EVAPORATION SHAPE (declared-path vector): every lane landed, so the pending duty must convert within two Stops. (Original rationale, superseded for the hold by decision 294706f6: sub-notes-3 landed, and the only surviving lane sub-render-9 is unrelated — it merely holds ${NOTES_FILE}, a path the declaration's PROSE mentions. A file named in a reason is subject matter, not an owner; treating it as proof the target lives means the duty never converts.) Codes: [${codes.join(', ')}]`
     );
     assert.match(items[0].text, /sub-notes-3/, 'the minted item cites the landed target, not the surviving lane');
     assert.equal(codes[codes.length - 1], 0, 'the converting Stop releases the session');

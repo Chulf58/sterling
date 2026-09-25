@@ -8814,10 +8814,13 @@ export class SterlingTools {
    * not express, which trained operators to write boilerplate no_capture
    * declarations (six in ~90 minutes, measured 2026-08-09), and boilerplate is
    * exactly how a FALSE declaration eventually slips through. H10's contract
-   * for this kind: defer one Stop with registers preserved (a landed write
-   * settles the duty cleanly), then convert a still-pending duty to ONE
-   * deduped capture_owed item citing the target — pending work defers or lands
-   * on the queue, never evaporates.
+   * for this kind (decision
+   * capture-pending-grace-per-declaration-held-while-any-dispatch-live): hold
+   * while any dispatched subagent is live, then give THIS declaration event
+   * (identified by its `at` and detail) one Stop of grace, registers preserved
+   * (a landed write settles the duty cleanly), then convert a still-pending
+   * duty to a capture_owed item keyed by its declared target — pending work
+   * defers or lands on the queue, never evaporates.
    */
   capturePending(target: string, reason: string): { pending: string; at: string } {
     if (!target || !target.trim()) {

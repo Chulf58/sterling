@@ -591,7 +591,7 @@ export function createSterlingServer(storePath: string): { server: McpServer; st
     'capture_pending',
     {
       description:
-        "Declare that a capture exists and its write is in flight on a named target (a pending commit, a dispatched agent). H10 defers the capture duty one Stop; if still pending at the next Stop it becomes one deduped capture_owed queue item citing the target.",
+        "Declare that a capture exists and its write is in flight on a named target (a pending commit, a dispatched agent). H10 defers the capture duty: the declaration holds while any dispatched subagent is live, then gets one Stop of grace counted from the declaration (an earlier nag does not spend it); if still pending after that it becomes a capture_owed queue item citing this target, deduped per target. A real capture spends the declaration.",
       inputSchema: strict({ target: z.string(), reason: z.string() }),
     },
     ({ target, reason }) => json(tools.capturePending(target, reason))
