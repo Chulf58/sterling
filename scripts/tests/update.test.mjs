@@ -1592,7 +1592,7 @@ test('fan-out: the handoff projection runs per project; a refusal is loud but no
       const lines = [];
       const projects = Object.keys(statuses).map((repo_path) => ({ name: repo_path.split('/').pop(), repo_path }));
       const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects, opts: {} });
-      return { report, calls, log: lines.join('\n') };
+      return { report, calls, log: lines.join('\n'), markerPresent: existsSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH)) };
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -1608,6 +1608,9 @@ test('fan-out: the handoff projection runs per project; a refusal is loud but no
   const failed = await run({ '/tmp/handoff-broken': 1 });
   assert.equal(failed.report.exit, 1, 'an incomplete export withholds the completion marker');
   assert.match(failed.log, /✗ handoff projection FAILED \(exit 1\) — the export may be INCOMPLETE/);
+  // Sol re-check LOW: prove the part-way failure really withholds the marker.
+  assert.equal(failed.markerPresent, false, 'no completion marker after a part-way failure');
+  assert.equal(refusedOnly.markerPresent, true, 'control: a standing refusal alone still completes the update');
 });
 
 // Sol review MEDIUM + LOW: an ACTIONABLE conflict (exit 3 — a hand-written
