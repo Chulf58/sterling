@@ -360,13 +360,15 @@ const MODULE_PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '
 // declares, both handoff indexes, and every docs/sterling file registered in its
 // config.generated_projections exist as regular files — checked exactly, never
 // "some .md". Target paths go through contained-fs (a symlink or non-directory
-// on the way throws ContainmentError).
-function workFilesComplete(repoPath) {
+// on the way throws ContainmentError). `handoff: false` checks the portable
+// agents only — for a STANDING projection refusal, whose handoff files are
+// legitimately absent, while its agent set must still be exactly complete.
+function workFilesComplete(repoPath, { handoff = true } = {}) {
   const registry = JSON.parse(readFileSync(join(MODULE_PLUGIN_ROOT, 'agent-templates', 'registry.json'), 'utf8'));
   const portable = registry.agents.filter((a) => a.opencode !== undefined).map((a) => `.opencode/agents/${a.name}.md`);
   const config = existsContained(repoPath, '.sterling/config.json', 'file') ? JSON.parse(readContained(repoPath, '.sterling/config.json')) : {};
   const registered = Array.isArray(config.generated_projections) ? config.generated_projections.filter((r) => typeof r === 'string' && isHandoffPath(r)) : [];
-  return [...portable, ...HANDOFF_ROOT_FILES, ...registered].every((rel) => existsContained(repoPath, rel, 'file'));
+  return [...portable, ...(handoff ? [...HANDOFF_ROOT_FILES, ...registered] : [])].every((rel) => existsContained(repoPath, rel, 'file'));
 }
 
 // What to do about a project whose handoff refusal will not go away by itself.
@@ -732,7 +734,11 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         // non-directory on the way is a REPORTED refusal, never a throw out of
         // the update and never a provisioning through the unsafe path.
         try {
-          const stale = state.outcome === 'standing' ? configHash(p.repo_path) !== state.config : !workFilesComplete(p.repo_path);
+          // The exact portable-agent set is ALWAYS checked; a standing outcome
+          // skips only the handoff-file completeness and is otherwise retried
+          // only when its config changes.
+          const standing = state.outcome === 'standing';
+          const stale = !workFilesComplete(p.repo_path, { handoff: !standing }) || (standing && configHash(p.repo_path) !== state.config);
           if (stale) toProvision.push(p);
         } catch (err) {
           if (!(err instanceof ContainmentError)) throw err;

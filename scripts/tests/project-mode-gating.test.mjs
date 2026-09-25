@@ -516,3 +516,21 @@ test('update, HEAD unchanged: a stuck retry project does not starve the scan —
     [cwd, stuck, switched].forEach(cleanup);
   }
 });
+
+// Sol re-check, final round, item 2: a STANDING projection refusal skips only
+// the handoff-file completeness; the exact portable-agent set is always checked.
+test('update, HEAD unchanged: a standing project that lost a portable agent gets it restored', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    setConfig(dir, { project_name: 'fixture', mode: 'work', store_authority: 'secondary' });
+    await update({ behind: 2, projects: [dir], cwd });
+    assert.equal(markerOf(cwd).projects?.[dir]?.outcome, 'standing');
+    rmSync(join(dir, '.opencode', 'agents', 'scout.md'));
+    const r = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(r.report.exit, 0, r.log);
+    assert.deepEqual(opencodeFiles(dir), PORTABLE.map((n) => `${n}.md`), 'scout.md is restored');
+  } finally {
+    [cwd, dir].forEach(cleanup);
+  }
+});
