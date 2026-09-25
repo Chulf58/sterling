@@ -264,27 +264,41 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state,
 
   state.stage = 'pr-create';
   const create = gh(cwd, ['pr', 'create', '--repo', repo, '--head', branch, '--base', base, '--title', text.title, '--body', text.body]);
-  if (create.status !== 0) {
+  // STRICT READ-BACK after EVERY create, failed or not: a failed create may
+  // still have made the PR (a race with another run, a timeout after the
+  // server acted), so the repo/head/base lookup decides. Found after a
+  // failure → reported as reused. Not found or not readable → the state is
+  // UNKNOWN, never asserted absent.
+  let found;
+  let lookupError = null;
+  try {
+    found = findOpenPr(cwd, repo, branch, base);
+  } catch (e) {
+    found = null;
+    lookupError = e.message;
+  }
+  if (!found) {
+    const lookupCmd = `gh pr list --repo ${repo} --head ${branch} --base ${base} --state open`;
     return {
       exitCode: 1,
       error: [
-        `direct-merge: PUSHED ${branch} to origin, but \`gh pr create\` FAILED — no PR exists yet.`,
-        `Rerun /sterling:merge: it is safe (it finds no open PR, the push is a no-op, and it creates the PR).`,
-        streams(create),
+        create.status !== 0
+          ? `direct-merge: PUSHED ${branch} (${branchTip}) to origin, but \`gh pr create\` FAILED, and whether a PR exists is UNKNOWN.`
+          : `direct-merge: PUSHED ${branch} (${branchTip}) to origin and \`gh pr create\` reported success, but the PR could not be read back, so its state is UNKNOWN.`,
+        lookupError ? `The follow-up lookup failed: ${lookupError}` : 'The follow-up lookup found no open PR for this repo, head and base.',
+        `Check with: ${lookupCmd}`,
+        `Then rerun /sterling:merge: it is safe — it reuses an open PR for this head and base, or creates one; the push is a no-op.`,
+        `gh pr create said: ${streams(create)}`,
       ].join('\n'),
     };
   }
-  let created;
-  try {
-    created = findOpenPr(cwd, repo, branch, base);
-  } catch (e) {
-    return { exitCode: 1, error: `direct-merge: the PR was created but reading it back failed: ${e.message}` };
-  }
-  if (!created) {
-    return { exitCode: 1, error: `direct-merge: \`gh pr create\` succeeded but no open PR for ${branch} could be read back — check ${repo} on GitHub before rerunning. gh said: ${create.stdout.trim()}` };
-  }
+  const created = found;
   state.pr_url = created.url;
   state.pr_number = created.number;
+  if (create.status !== 0) {
+    log(`direct-merge: \`gh pr create\` failed (${streams(create)}), but an open PR for ${branch} into ${base} exists — reused: ${created.url}`);
+    return null;
+  }
   state.created = true;
   log(`direct-merge: opened PR #${created.number}: ${created.url}`);
   return null;

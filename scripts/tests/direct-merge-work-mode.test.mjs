@@ -259,6 +259,8 @@ test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the re
     assert.equal(r1.status, 1, `a failed PR create exits 1 — stdout=${oneLine(r1.stdout)} stderr=${oneLine(r1.stderr)}`);
     assert.match(r1.stderr, /PUSHED/, 'stderr names that the push succeeded');
     assert.match(r1.stderr, /rerun/i, 'stderr says a rerun is the remedy');
+    assert.match(r1.stderr, /UNKNOWN/, 'after a failed create with no PR found, the PR state is reported UNKNOWN — never asserted absent');
+    assert.doesNotMatch(r1.stderr, /no PR exists/i, 'the gate never claims no PR exists');
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the branch reached origin before the create failed');
     const out1 = parseSingleJson(r1.stdout, 'partial');
     assert.equal(out1.mode, 'work');
@@ -475,6 +477,28 @@ test('work stdout contract: success carries ok:true, stage done, error null, exi
     assert.equal(out.error, null);
     assert.equal(out.exit, 0);
     assert.equal(out.pushed, true);
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work: gh pr create FAILS but the PR exists afterwards (a create race or a timeout) — the strict follow-up lookup finds it and reports it REUSED with exit 0', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    writeFileSync(join(p.gh.state, 'create_fail_after'), '');
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, `exit 0 when the PR turns out to exist — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.ok, true);
+    assert.equal(out.created, false, 'reported as reused, not as created by this run');
+    assert.equal(out.pr_url, 'https://github.com/acme/widget/pull/7');
+    assert.equal(out.pr_number, 7);
+    const lists = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'list');
+    assert.equal(lists.length, 2, 'one lookup before the create, one strict lookup after it failed');
+    const after = lists[1];
+    assert.equal(after[after.indexOf('--repo') + 1], ORIGIN_REPO);
+    assert.equal(after[after.indexOf('--head') + 1], p.branchName);
+    assert.equal(after[after.indexOf('--base') + 1], 'main');
   } finally {
     p.cleanup();
   }
