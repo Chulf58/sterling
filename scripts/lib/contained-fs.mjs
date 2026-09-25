@@ -6,12 +6,22 @@
 //
 // One guard, every operation: `containedPath` lstat-walks each EXISTING component
 // of root/rel, refusing a symlink anywhere on the path, then applies
-// resolveStoreWritePath (no '..' or absolute segment, no realpath escape); it refuses an existing
-// non-directory where a directory is required, and checks the leaf's kind. Leaf
-// writes open with O_NOFOLLOW where the platform defines it (Linux, macOS); on a
-// platform without it the lstat walk just before the open is the only guard, and
-// a race between the two is not covered. Nothing here swallows an error: a
-// refusal throws ContainmentError, anything else propagates.
+// resolveStoreWritePath (no '..' or absolute segment, no realpath escape); it
+// refuses an existing non-directory where a directory is required, and checks the
+// leaf's kind. Nothing here swallows an error: a refusal throws ContainmentError,
+// anything else propagates.
+//
+// THE INVARIANT, exactly: a symlink that ALREADY EXISTS anywhere on the path —
+// root excluded, every intermediate directory, the leaf — when containedPath runs
+// is refused, so no read, write, listing or delete follows it. What is NOT
+// defended: a concurrent swap by another process between the check and the use.
+// Every operation below re-opens the path by name after the walk, and Node has no
+// openat2/RESOLVE_BENEATH (or a directory-fd-relative open) to pin the walked
+// directories. O_NOFOLLOW on leaf writes (Linux, macOS; absent on Windows) covers
+// only the LEAF: a parent directory swapped for a symlink after the walk is still
+// followed, on every platform. The risk was accepted by user ruling ("Accept race,
+// fix 2", 2026-09-25): the threat is a local process racing the update, which
+// already runs with that user's rights.
 
 import { lstatSync, readFileSync, readdirSync, mkdirSync, openSync, writeSync, closeSync, unlinkSync, constants } from 'node:fs';
 import { join, resolve } from 'node:path';
