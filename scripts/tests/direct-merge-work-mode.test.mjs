@@ -206,7 +206,7 @@ test('work: a merge pushes the branch and CREATES the PR with an explicit repo/h
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, `work merge must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     const out = parseSingleJson(r.stdout, 'work create');
-    assert.deepEqual(out, { mode: 'work', pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
+    assert.deepEqual(out, { mode: 'work', ok: true, stage: 'done', error: null, exit: 0, pushed: true, pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
 
     assertBaseUntouched(p, 'work create');
     assert.equal(git(p.origin, ['rev-parse', p.branchName]), p.branchSha, 'the feature branch is pushed to origin at its tip');
@@ -238,7 +238,7 @@ test('work: an existing open PR for the head is REUSED — the branch is pushed,
     const r = runDirectMerge(p);
     assert.equal(r.status, 0, `reuse must succeed — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
     const out = parseSingleJson(r.stdout, 'work reuse');
-    assert.deepEqual(out, { mode: 'work', pr_url: 'https://github.com/acme/widget/pull/41', pr_number: 41, branch: p.branchName, created: false });
+    assert.deepEqual(out, { mode: 'work', ok: true, stage: 'done', error: null, exit: 0, pushed: true, pr_url: 'https://github.com/acme/widget/pull/41', pr_number: 41, branch: p.branchName, created: false });
     assert.equal(ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create').length, 0, 'no gh pr create when a PR is open');
     const list = ghCalls(p.gh.state).find((c) => c[0] === 'pr' && c[1] === 'list');
     assert.ok(list, 'the open PR is looked up with gh pr list');
@@ -272,7 +272,7 @@ test('work: pushed but gh pr create FAILED exits 1 naming what succeeded; the re
     const r2 = runDirectMerge(p);
     assert.equal(r2.status, 0, `the rerun must succeed — stdout=${oneLine(r2.stdout)} stderr=${oneLine(r2.stderr)}`);
     const out2 = parseSingleJson(r2.stdout, 'rerun');
-    assert.deepEqual(out2, { mode: 'work', pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
+    assert.deepEqual(out2, { mode: 'work', ok: true, stage: 'done', error: null, exit: 0, pushed: true, pr_url: 'https://github.com/acme/widget/pull/7', pr_number: 7, branch: p.branchName, created: true });
     const creates = ghCalls(p.gh.state).filter((c) => c[0] === 'pr' && c[1] === 'create');
     assert.equal(creates.length, 2, 'one failed create, one successful create on the rerun');
     const c = creates[1];
@@ -388,6 +388,98 @@ test('work: --branch naming something that is not a local branch (a tag) is refu
   }
 });
 
+/** Every work-mode exit prints ONE JSON object: {mode:'work', ok:false,
+ * stage, error, exit, pushed, pr_url, …}, with exit equal to the process's. */
+function assertWorkFailureJson(r, label) {
+  let out;
+  assert.doesNotThrow(() => {
+    out = JSON.parse(r.stdout);
+  }, `${label}: stdout must be exactly one JSON object, got: ${oneLine(r.stdout)} (stderr=${oneLine(r.stderr)})`);
+  assert.equal(out.mode, 'work', label);
+  assert.equal(out.ok, false, label);
+  assert.equal(typeof out.stage, 'string', `${label}: stage`);
+  assert.ok(out.stage.length > 0, `${label}: stage`);
+  assert.equal(typeof out.error, 'string', `${label}: error`);
+  assert.ok(out.error.length > 0, `${label}: error`);
+  assert.equal(out.exit, r.status, `${label}: exit mirrors the process exit code`);
+  assert.equal(typeof out.pushed, 'boolean', `${label}: pushed`);
+  assert.ok('pr_url' in out, `${label}: pr_url`);
+  return out;
+}
+
+const WORK_REFUSALS = [
+  ['--no-push', 2, (p) => ({ extra: ['--no-push'] })],
+  ['gh unauthenticated', 2, (p) => (writeFileSync(join(p.gh.state, 'auth_fail'), ''), {})],
+  ['non-GitHub origin', 2, (p) => (git(p.dir, ['remote', 'set-url', 'origin', p.origin]), {})],
+  ['--branch is a tag', 2, (p) => (git(p.dir, ['tag', 'v1']), { extra: ['--branch', 'v1'] })],
+  ['not a git repository', 1, (p) => (rmSync(join(p.dir, '.git'), { recursive: true, force: true }), {})],
+  ['no Sterling store (openProject refuses)', 1, (p) => (rmSync(join(p.dir, '.sterling', 'sterling.db')), {})],
+  ['on the base branch', 1, (p) => (git(p.dir, ['checkout', '-q', 'main']), {})],
+  ['dirty tree', 1, (p) => (writeFileSync(join(p.dir, 'src', 'f0.mjs'), 'dirty\n'), {})],
+  ['battery fails', 1, null],
+  ['ambiguous open PRs', 1, (p) => (seedPr(p, { number: 31 }), seedPr(p, { number: 32 }), {})],
+  ['pushed but PR create failed', 1, (p) => (writeFileSync(join(p.gh.state, 'create_fail'), ''), {})],
+];
+
+const EXPECTED_STAGE = {
+  '--no-push': 'work-preflight',
+  'gh unauthenticated': 'work-preflight',
+  'non-GitHub origin': 'work-preflight',
+  '--branch is a tag': 'branch',
+  'not a git repository': 'git-repo',
+  'no Sterling store (openProject refuses)': 'open-project',
+  'on the base branch': 'branch',
+  'dirty tree': 'dirty-tree',
+  'battery fails': 'battery',
+  'ambiguous open PRs': 'pr-lookup',
+  'pushed but PR create failed': 'pr-create',
+};
+
+for (const [label, code, arrange] of WORK_REFUSALS) {
+  test(`work stdout contract: '${label}' exits ${code} with ONE JSON object {mode, ok:false, stage, error, exit, pushed, pr_url} on stdout`, () => {
+    const p = arrange ? makeProject({ mode: 'work' }) : makeProject({ mode: 'work', checkScript: 'echo battery-broke >&2; exit 3' });
+    try {
+      const { extra = [] } = arrange ? arrange(p) : {};
+      const r = runDirectMerge(p, extra);
+      assert.equal(r.status, code, `${label}: exit — stdout=${oneLine(r.stdout)} stderr=${oneLine(r.stderr)}`);
+      const out = assertWorkFailureJson(r, label);
+      assert.equal(out.stage, EXPECTED_STAGE[label], `${label}: the stage names where it stopped`);
+    } finally {
+      p.cleanup();
+    }
+  });
+}
+
+test('work stdout contract: gh ABSENT also prints one JSON object', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const onlyGit = join(p.base, 'onlygit');
+    mkdirSync(onlyGit);
+    for (const tool of ['git', 'sh']) symlinkSync(spawnSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).stdout.trim(), join(onlyGit, tool));
+    const r = runDirectMerge(p, [], { path: onlyGit });
+    assert.equal(r.status, 2);
+    assert.equal(assertWorkFailureJson(r, 'gh absent').stage, 'work-preflight');
+  } finally {
+    p.cleanup();
+  }
+});
+
+test('work stdout contract: success carries ok:true, stage done, error null, exit 0', () => {
+  const p = makeProject({ mode: 'work' });
+  try {
+    const r = runDirectMerge(p);
+    assert.equal(r.status, 0, oneLine(r.stderr));
+    const out = JSON.parse(r.stdout);
+    assert.equal(out.ok, true);
+    assert.equal(out.stage, 'done');
+    assert.equal(out.error, null);
+    assert.equal(out.exit, 0);
+    assert.equal(out.pushed, true);
+  } finally {
+    p.cleanup();
+  }
+});
+
 test('parseOriginRepo: https, ssh:// and scp-style origin URLs give host/owner/repo; anything else is null', () => {
   const ok = {
     'https://github.com/acme/widget.git': 'github.com/acme/widget',
@@ -410,6 +502,8 @@ test('an INVALID mode is refused with exit 2 before anything runs: no gh call, n
     const r = runDirectMerge(p);
     assert.equal(r.status, 2, `invalid mode exits 2 — stderr=${oneLine(r.stderr)}`);
     assert.match(r.stderr, /office/, 'the refusal names the bad value');
+    // BOUNDARY: an invalid mode means the mode is unknown, so this exit keeps
+    // today's behaviour (stderr only) — no work-mode JSON is promised.
     assert.equal(r.stdout, '', 'nothing on stdout');
     assert.deepEqual(ghCalls(p.gh.state), [], 'gh is never called');
     assert.equal(gitMaybe(p.origin, ['rev-parse', '--verify', p.branchName]), null, 'the branch is not pushed');

@@ -157,39 +157,98 @@ export function pushWithWindowsRetry(cwd, pushArgs, log) {
   return push;
 }
 
-/** Push the branch and open or reuse its PR. Returns { exitCode, result }
- * where result is the ONE stdout JSON object. Never touches the base. */
-export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, log }) {
-  const result = { mode: 'work', pr_url: null, pr_number: null, branch, created: false };
+/** The ONE work-mode result writer. Every work-mode exit — success, refusal,
+ * a fail() from a shared helper that calls process.exit itself (openProject),
+ * or an uncaught exception — prints exactly one JSON object on stdout:
+ *   {mode:'work', ok, stage, error, exit, branch, pushed, pr_url, pr_number, created}
+ * Human text stays on stderr. `state` is mutated by the caller as it goes
+ * (stage, branch, pushed, pr_*); an exit that bypasses fail() (a helper's own
+ * process.exit) is caught by the exit hook, which reports the last stderr
+ * message as the error. Install it only once the mode is KNOWN to be work. */
+export function installWorkResult() {
+  const state = { stage: 'start', branch: null, pushed: false, pr_url: null, pr_number: null, created: false };
+  const stderr = console.error.bind(console);
+  let lastError = null;
+  let written = false;
+  console.error = (...args) => {
+    lastError = args.map(String).join(' ');
+    stderr(...args);
+  };
+  const write = (obj) => {
+    if (written) return;
+    written = true;
+    process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
+  };
+  const result = (ok, error, exit) => ({
+    mode: 'work',
+    ok,
+    stage: state.stage,
+    error,
+    exit,
+    branch: state.branch,
+    pushed: state.pushed,
+    pr_url: state.pr_url,
+    pr_number: state.pr_number,
+    created: state.created,
+  });
+  process.on('exit', (code) => {
+    write(result(false, lastError ?? `exited with code ${code} during stage '${state.stage}' without a result`, code));
+  });
+  process.on('uncaughtException', (e) => {
+    const message = `direct-merge: unexpected error during stage '${state.stage}': ${e?.stack ?? e}`;
+    stderr(message);
+    write(result(false, message, 1));
+    process.exit(1);
+  });
+  return {
+    state,
+    fail(message, code = 1) {
+      stderr(message);
+      write(result(false, message, code));
+      process.exit(code);
+    },
+    succeed() {
+      state.stage = 'done';
+      write(result(true, null, 0));
+      process.exit(0);
+    },
+  };
+}
+
+/** Push the branch and open or reuse its PR, recording progress on `state`
+ * (the installWorkResult state). Returns null on success, or
+ * { error, exitCode } for the caller's result writer. Never touches the base. */
+export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, state, log }) {
   let existing;
+  state.stage = 'pr-lookup';
   try {
     existing = findOpenPr(cwd, repo, branch, base);
   } catch (e) {
-    log(`direct-merge: could not look up an open PR for ${branch} — nothing pushed, nothing created. ${e.message}`);
-    return { exitCode: 1, result };
+    return { exitCode: 1, error: `direct-merge: could not look up an open PR for ${branch} — nothing pushed, nothing created. ${e.message}` };
   }
   const text = existing ? null : prTextFromCommits(cwd, mergeBase, branchTip, branch);
   if (!existing && text === null) {
-    log(`direct-merge: ${branch} has no commits beyond ${base} — nothing to open a PR for. Nothing pushed.`);
-    return { exitCode: 1, result };
+    return { exitCode: 1, error: `direct-merge: ${branch} has no commits beyond ${base} — nothing to open a PR for. Nothing pushed.` };
   }
 
   // PINNED PUSH: the refspec names the SHA the preflight and battery checked,
   // never the mutable branch name, so a commit that lands on the branch while
   // the battery runs cannot ship unchecked. The same refspec goes through the
   // git.exe retry. The upstream is set separately, as plain config.
+  state.stage = 'push';
   log(`direct-merge: work mode — pushing ${branch} at ${branchTip} to origin (the base ${base} is never pushed or merged here)…`);
   const push = pushWithWindowsRetry(cwd, ['origin', `${branchTip}:refs/heads/${branch}`], log);
   if (push.status !== 0) {
-    log(
-      [
+    return {
+      exitCode: 1,
+      error: [
         `direct-merge: the PUSH of ${branch} to origin FAILED — no PR was ${existing ? 'updated' : 'created'}. Fix the push and rerun.`,
         `  (on WSL, try: git.exe push origin ${branchTip}:refs/heads/${branch} — credentials live in GCM)`,
         streams(push),
-      ].join('\n')
-    );
-    return { exitCode: 1, result };
+      ].join('\n'),
+    };
   }
+  state.pushed = true;
   log(`direct-merge: pushed ${branch} (${branchTip}) to origin.`);
   for (const [key, value] of [[`branch.${branch}.remote`, 'origin'], [`branch.${branch}.merge`, `refs/heads/${branch}`]]) {
     const set = spawnSync('git', ['config', key, value], { cwd, encoding: 'utf8', timeout: 30_000 });
@@ -197,33 +256,36 @@ export function shipAsPr({ cwd, repo, branch, base, mergeBase, branchTip, log })
   }
 
   if (existing) {
+    state.pr_url = existing.url;
+    state.pr_number = existing.number;
     log(`direct-merge: an open PR already exists for ${branch} — reused, the push updated it: ${existing.url}`);
-    return { exitCode: 0, result: { ...result, pr_url: existing.url, pr_number: existing.number } };
+    return null;
   }
 
+  state.stage = 'pr-create';
   const create = gh(cwd, ['pr', 'create', '--repo', repo, '--head', branch, '--base', base, '--title', text.title, '--body', text.body]);
   if (create.status !== 0) {
-    log(
-      [
-        '',
+    return {
+      exitCode: 1,
+      error: [
         `direct-merge: PUSHED ${branch} to origin, but \`gh pr create\` FAILED — no PR exists yet.`,
         `Rerun /sterling:merge: it is safe (it finds no open PR, the push is a no-op, and it creates the PR).`,
         streams(create),
-      ].join('\n')
-    );
-    return { exitCode: 1, result: { ...result, pushed: true } };
+      ].join('\n'),
+    };
   }
   let created;
   try {
     created = findOpenPr(cwd, repo, branch, base);
   } catch (e) {
-    created = null;
-    log(`direct-merge: the PR was created but reading it back failed: ${e.message}`);
+    return { exitCode: 1, error: `direct-merge: the PR was created but reading it back failed: ${e.message}` };
   }
   if (!created) {
-    log(`direct-merge: \`gh pr create\` succeeded but no open PR for ${branch} could be read back — check ${repo} on GitHub before rerunning. gh said: ${create.stdout.trim()}`);
-    return { exitCode: 1, result: { ...result, pushed: true } };
+    return { exitCode: 1, error: `direct-merge: \`gh pr create\` succeeded but no open PR for ${branch} could be read back — check ${repo} on GitHub before rerunning. gh said: ${create.stdout.trim()}` };
   }
+  state.pr_url = created.url;
+  state.pr_number = created.number;
+  state.created = true;
   log(`direct-merge: opened PR #${created.number}: ${created.url}`);
-  return { exitCode: 0, result: { ...result, pr_url: created.url, pr_number: created.number, created: true } };
+  return null;
 }

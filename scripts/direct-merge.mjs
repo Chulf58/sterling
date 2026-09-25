@@ -12,39 +12,59 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { arg, fail, openProject } from './lib/project.mjs';
+import { arg, fail as baseFail, openProject } from './lib/project.mjs';
 import { isGitRepo, currentBranch, defaultBranch, mergeBranchInto, sweepMergedBranches } from './lib/branch-manager.mjs';
 import { defaultExec } from './lib/update.mjs';
 import { mintSettlementReconcile, explainReconcileDebtLiveness } from './hooks/lib/settlement.mjs';
 import { deletedBetween, parkedItemResolved } from './lib/parked-close.mjs';
 import { SterlingStore } from '@sterling/store';
 import { readProjectMode } from './lib/handoff-projection.mjs';
-import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal } from './lib/work-pr.mjs';
+import { workPreflight, shipAsPr, pushWithWindowsRetry, localBranchRefusal, installWorkResult } from './lib/work-pr.mjs';
 // Attestation disclosure (decision attestation-staleness-disclosure-only-never-
 // a-refusing-gate, 1f069af4 v2) — the read-only inspector used here; see the
 // block above the merge action.
 import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, parseNulPathList } from './lib/attestation-inspection.mjs';
 const target = arg('--target') ?? process.cwd();
+
+// PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
+// key is hobby), and read FIRST so a work-mode run can put every exit through
+// its one result writer. An unreadable or invalid mode is REFUSED only after
+// openProject, so a malformed config keeps its own loud refusal (ruling
+// e13f0fb5). BOUNDARY: the exits before the mode is known — a bad --target
+// argument, and an unreadable/invalid mode — keep today's behaviour (stderr
+// only, no JSON); in work mode every later exit prints one JSON object
+// (installWorkResult in scripts/lib/work-pr.mjs). Hobby is unchanged: fail()
+// below is the shared fail() whenever the mode is not work.
+let mode;
+let modeError;
+try {
+  mode = readProjectMode(target);
+} catch (e) {
+  modeError = e;
+}
+const work = mode === 'work' ? installWorkResult() : null;
+const stage = (name) => {
+  if (work) work.state.stage = name;
+};
+function fail(message, code = 1) {
+  if (work) work.fail(message, code);
+  baseFail(message, code);
+}
+
+stage('git-repo');
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
 // Pre-merge preflight: openProject fails loud on a missing store or malformed
 // config BEFORE anything lands (see the post-merge note below).
+stage('open-project');
 openProject(target).store.close();
 
-// PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
-// key is hobby). An invalid value refuses before anything runs — the flow is
-// never guessed. Read AFTER openProject, so a malformed config keeps its own
-// loud refusal (ruling e13f0fb5) and hobby behaviour is unchanged. Work-only
-// preconditions are checked here too, cheap and before the battery: --no-push
-// cannot ship a PR, and gh must be usable.
-let mode;
-try {
-  mode = readProjectMode(target);
-} catch (e) {
-  fail(`direct-merge: ${e?.message ?? e} — refusing; nothing was run.`, 2);
-}
+if (modeError) fail(`direct-merge: ${modeError?.message ?? modeError} — refusing; nothing was run.`, 2);
+// Work-only preconditions, cheap and before the battery: --no-push cannot ship
+// a PR, and origin and gh must be usable.
 let workRepo;
 if (mode === 'work') {
+  stage('work-preflight');
   if (process.argv.includes('--no-push')) {
     fail(
       'direct-merge: --no-push is refused in WORK mode — work mode ships by opening a PR, and a PR needs a pushed branch.\n' +
@@ -57,8 +77,10 @@ if (mode === 'work') {
   workRepo = pre.repo;
 }
 
+stage('branch');
 const into = arg('--into') ?? defaultBranch(target);
 const branch = arg('--branch') ?? currentBranch(target);
+if (work) work.state.branch = branch;
 if (branch === into) {
   fail(
     `direct-merge: currently on the base branch '${into}' — checkout the branch to merge, or pass --branch.\n` +
@@ -80,6 +102,7 @@ if (mode === 'work') {
 // "commit or discard": that advice was actively wrong for untracked documents
 // whose disposition is a user decision, so tracked and untracked are separated
 // and untracked files are named as a choice rather than an obstacle.
+stage('dirty-tree');
 const dirtyCheck = spawnSync('git', ['status', '--porcelain'], { cwd: target, encoding: 'utf8', timeout: 60_000 });
 if (dirtyCheck.status !== 0) {
   fail(`direct-merge: git status --porcelain failed (${dirtyCheck.status}): ${(dirtyCheck.stderr || dirtyCheck.stdout || '').trim()}`);
@@ -127,6 +150,7 @@ if (dirtyLines.length > 0) {
 // resolution error, and reuse these three SHAs everywhere below (the version-only
 // proof, next) — never re-derive them. `git diff --name-only mergeBase branchTip`
 // is semantically identical to the three-dot `into...branch` form it replaces.
+stage('resolve');
 const resolveSha = (ref, label) => {
   const r = spawnSync('git', ['rev-parse', ref], { cwd: target, encoding: 'utf8', timeout: 30_000 });
   if (r.status !== 0) fail(`direct-merge: git rev-parse ${label} ('${ref}') failed: ${(r.stderr || '').trim()}`);
@@ -276,6 +300,7 @@ const reconcileChanged = new Set([...changed].filter((p) => !versionOnlyPaths.in
 // never moves the owning article's file_baselines — and re-minted within
 // minutes, blocking the merge twice. The gate now reports every cleared row so
 // the close can be deliberate. It still closes NOTHING itself.
+stage('reconcile');
 const { store: settleStore } = openProject(target);
 let debt;
 let cleared;
@@ -523,6 +548,7 @@ if (debt.length > 0) {
 // package.json and plugin.json move in the same commit). Fixture repos and
 // consuming projects have no plugin manifest — skipped loud. --allow-same-version
 // is the deliberate escape for a merge that genuinely deserves no bump.
+stage('version');
 const GENERATED_ONLY = new Set(['architecture.md', 'rulings.md']);
 const pluginManifestRel = '.claude-plugin/plugin.json';
 if (existsSync(join(target, pluginManifestRel))) {
@@ -561,6 +587,7 @@ if (existsSync(join(target, pluginManifestRel))) {
 // prose invoked it, so registry/skill/bundle/projection drift could merge
 // silently. The gate is where the cost of being wrong jumps (P1). Projects
 // without a check script (consuming projects, test fixtures) skip LOUDLY.
+stage('battery');
 const pkgJsonPath = join(target, 'package.json');
 const hasCheck = existsSync(pkgJsonPath) && !!JSON.parse(readFileSync(pkgJsonPath, 'utf8')).scripts?.check;
 if (hasCheck) {
@@ -611,6 +638,7 @@ if (hasCheck) {
 // was redesigned not to be. The schema is unrefined; the tolerant read below
 // drops unusable entries and DISCLOSES the drop.
 // ===========================================================================
+stage('attestation');
 const attestationDisclosure = (() => {
   try {
     const { globs: declaredGlobs, dropped } = readAttestationGlobs(target);
@@ -637,10 +665,10 @@ for (const line of attestationDisclosure) console.error(line);
 // WORK MODE ends here: push the branch and open or reuse its PR. Nothing below
 // (merge, board nudge, sweep, rebuild, parked sweep, base push) runs — a human
 // merges the PR.
-if (mode === 'work') {
-  const { exitCode, result } = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, log: (m) => console.error(m) });
-  console.log(JSON.stringify(result, null, 2));
-  process.exit(exitCode);
+if (work) {
+  const shipped = shipAsPr({ cwd: target, repo: workRepo, branch, base: into, mergeBase, branchTip, state: work.state, log: (m) => console.error(m) });
+  if (shipped) work.fail(shipped.error, shipped.exitCode);
+  work.succeed();
 }
 
 // branch-manager throws raw Errors (it is a library, shared with the §8.1 gate and
