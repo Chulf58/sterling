@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -398,3 +398,58 @@ test('update, HEAD unchanged: a fully provisioned work project is a no-op', asyn
     [cwd, dir].forEach(cleanup);
   }
 });
+
+// Sol review of S1, item 2: a STANDING refusal (a secondary store) is recorded
+// in the same persisted state, so an already-current run retries it only when
+// the project's config or the clone head changes; completeness probes go
+// through contained-fs, and a probe failure is a reported refusal, never a throw.
+const setConfig = (dir, cfg) => writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify(cfg, null, 2) + '\n');
+
+test('update, HEAD unchanged: a standing refusal is not re-provisioned until its config changes', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    setConfig(dir, { project_name: 'fixture', mode: 'work', store_authority: 'secondary' });
+    const full = await update({ behind: 2, projects: [dir], cwd });
+    assert.match(full.log, /handoff projection: REFUSED — store_authority is 'secondary'/);
+    assert.equal(markerOf(cwd).projects?.[dir]?.outcome, 'standing');
+    const quiet = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(quiet.handoffCalls.length + quiet.syncCalls.length, 0, quiet.log);
+    assert.equal(quiet.report.exit, 0);
+    setConfig(dir, { project_name: 'renamed', mode: 'work', store_authority: 'secondary' });
+    const changed = await update({ behind: 0, projects: [dir], cwd });
+    assert.deepEqual(changed.handoffCalls.map((c) => c.split(' ').pop()), [dir], 'a config change retries it once');
+    const again = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(again.handoffCalls.length + again.syncCalls.length, 0, again.log);
+  } finally {
+    [cwd, dir].forEach(cleanup);
+  }
+});
+
+for (const [label, breakIt] of [
+  ['a symlinked .opencode/agents', (dir, outside) => {
+    for (const n of PORTABLE) writeFileSync(join(outside, `${n}.md`), 'outside\n');
+    rmSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    symlinkSync(outside, join(dir, '.opencode', 'agents'));
+  }],
+  ['a regular file where .opencode/agents must be a directory', (dir) => {
+    rmSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    writeFileSync(join(dir, '.opencode', 'agents'), 'not a directory\n');
+  }],
+]) {
+  test(`update, HEAD unchanged: ${label} is a reported refusal, never a throw`, async () => {
+    const cwd = scratch();
+    const dir = project('work');
+    const outside = mkdtempSync(join(tmpdir(), 'sterling-mode-outside-'));
+    try {
+      await update({ behind: 2, projects: [dir], cwd });
+      breakIt(dir, outside);
+      const r = await update({ behind: 0, projects: [dir], cwd });
+      assert.equal(r.report.exit, 2, r.log);
+      assert.match(r.log, /✗ .*REFUSED — .*\.opencode\/agents/);
+      assert.equal(r.handoffCalls.length + r.syncCalls.length, 0, 'nothing is provisioned through an unsafe path');
+    } finally {
+      [cwd, dir, outside].forEach(cleanup);
+    }
+  });
+}

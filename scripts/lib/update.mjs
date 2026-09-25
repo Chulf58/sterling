@@ -18,6 +18,7 @@
 // refusal matrix and the step ordering are unit-testable without a network, an
 // npm install, or a 90-second test battery. scripts/update.mjs is the thin CLI.
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -340,6 +341,13 @@ function writeUpdateMarker(cwd, sha, handoffRetry = [], projects = {}) {
   writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry, projects }, null, 2) + '\n');
 }
 
+// The project's config bytes, hashed: a STANDING refusal (outcome 'standing')
+// is retried only when this or the clone head changes. Read through contained-fs.
+function configHash(repoPath) {
+  const rel = '.sterling/config.json';
+  return existsContained(repoPath, rel, 'file') ? createHash('sha256').update(readContained(repoPath, rel)).digest('hex') : 'absent';
+}
+
 // The clone this module lives in: its registry declares the portable set.
 const MODULE_PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -411,10 +419,26 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // writeUpdateMarker). Seeded from the marker on the already-current path; the
   // full fan-out rebuilds it for every project it visits.
   let provisioning = {};
+  // outcome 'ok': agent sync and projection both succeeded. outcome 'standing':
+  // the agents synced but the projection refused STANDING (exit 2, e.g. a
+  // secondary store) — nothing to retry until the config or the head changes,
+  // so `config` records the config hash it was judged against.
   const recordProvisioning = (p, head, syncStatus, handoffStatus) => {
-    if (handoffStatus === 'skipped') provisioning[p.repo_path] = { mode: 'hobby' };
-    else if (syncStatus === 0 && handoffStatus === 0) provisioning[p.repo_path] = { mode: 'work', head, outcome: 'ok' };
-    else delete provisioning[p.repo_path];
+    if (handoffStatus === 'skipped') {
+      provisioning[p.repo_path] = { mode: 'hobby' };
+      return;
+    }
+    const outcome = syncStatus === 0 && handoffStatus === 0 ? 'ok' : syncStatus === 0 && handoffStatus === 2 ? 'standing' : null;
+    if (!outcome) {
+      delete provisioning[p.repo_path];
+      return;
+    }
+    try {
+      provisioning[p.repo_path] = { mode: 'work', head, outcome, config: configHash(p.repo_path) };
+    } catch (err) {
+      if (!(err instanceof ContainmentError)) throw err;
+      delete provisioning[p.repo_path]; // unprovable: the next run judges it afresh
+    }
   };
 
   // Handoff projection for one project (decision
@@ -671,7 +695,21 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           continue;
         }
         const state = provisioning[p.repo_path];
-        if (!state || state.mode !== 'work' || state.head !== before.head || !workFilesComplete(p.repo_path)) toProvision.push(p);
+        if (!state || state.mode !== 'work' || state.head !== before.head) {
+          toProvision.push(p);
+          continue;
+        }
+        // The probes read target paths through contained-fs: a symlink or a
+        // non-directory on the way is a REPORTED refusal, never a throw out of
+        // the update and never a provisioning through the unsafe path.
+        try {
+          const stale = state.outcome === 'standing' ? configHash(p.repo_path) !== state.config : !workFilesComplete(p.repo_path);
+          if (stale) toProvision.push(p);
+        } catch (err) {
+          if (!(err instanceof ContainmentError)) throw err;
+          log(`\n✗ ${p.name}: REFUSED — ${err.message}; its OpenCode and handoff files were not checked or provisioned (fix the path, then rerun /sterling:update)`);
+          report.exit = 2;
+        }
       }
       if (toProvision.length) {
         log(`\n▸ already current at ${before.head_short}; provisioning ${toProvision.length} work-mode project(s) whose OpenCode or handoff files are unrecorded, stale or incomplete`);
@@ -701,7 +739,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         if (report.handoff_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
         return report;
       }
-      log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
+      if (report.exit === 0) log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
       return report;
     }
     // Git is current, but nothing on disk proves the LAST post-merge sequence
