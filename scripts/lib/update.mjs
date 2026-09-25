@@ -25,8 +25,9 @@ import { dirname, join } from 'node:path';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
-import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './handoff-projection.mjs';
-import { ContainmentError } from './contained-fs.mjs';
+import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL, HANDOFF_ROOT_FILES, isHandoffPath } from './handoff-projection.mjs';
+import { ContainmentError, existsContained, readContained } from './contained-fs.mjs';
+import { fileURLToPath } from 'node:url';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -311,7 +312,12 @@ function readUpdateMarker(cwd, log) {
     if (typeof parsed?.sha !== 'string' || !parsed.sha) throw new Error('missing or invalid "sha" field');
     const retry = parsed.handoff_retry ?? [];
     if (!Array.isArray(retry) || retry.some((r) => typeof r !== 'string')) throw new Error('invalid "handoff_retry" field');
-    return { sha: parsed.sha, handoff_retry: retry };
+    const projects = parsed.projects ?? {};
+    const isState = (v) => v !== null && typeof v === 'object' && !Array.isArray(v) && typeof v.mode === 'string';
+    if (projects === null || typeof projects !== 'object' || Array.isArray(projects) || !Object.values(projects).every(isState)) {
+      throw new Error('invalid "projects" field');
+    }
+    return { sha: parsed.sha, handoff_retry: retry, projects };
   } catch (err) {
     log(`\n⚠ update marker '${p}' is corrupt/unreadable — degrading to a full resume rather than trusting a marker that cannot be verified: ${err?.message ?? err}`);
     return null;
@@ -322,19 +328,32 @@ function readUpdateMarker(cwd, log) {
  *  see the call site. A halted or failed run must never leave a marker that
  *  makes the NEXT run believe "Already current" without the sequence having
  *  actually finished. */
-function writeUpdateMarker(cwd, sha, handoffRetry = []) {
+// `projects` is the per-project PROVISIONING STATE (decision
+// project-mode-hobby-work-toggle-decides-flow; Sol review of S1): repo_path →
+// { mode: 'hobby' } for a project last seen in hobby mode, or { mode: 'work',
+// head, outcome } for the last successful work provisioning (agent sync plus
+// projection) at clone sha `head`. The already-current path reads it to decide
+// which work projects need provisioning; presence of files alone never decides.
+function writeUpdateMarker(cwd, sha, handoffRetry = [], projects = {}) {
   const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry }, null, 2) + '\n');
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry, projects }, null, 2) + '\n');
 }
 
-// A work project is fully provisioned when its portable OpenCode agents and both
-// handoff indexes exist. Presence only: whether they are CURRENT is the full
-// fan-out's job, and a project whose projection refuses keeps its retry state.
-function workFilesMissing(repoPath) {
-  const agentsDir = join(repoPath, '.opencode', 'agents');
-  const hasAgents = existsSync(agentsDir) && readdirSync(agentsDir).some((f) => f.endsWith('.md'));
-  return !hasAgents || !existsSync(join(repoPath, 'architecture.md')) || !existsSync(join(repoPath, 'rulings.md'));
+// The clone this module lives in: its registry declares the portable set.
+const MODULE_PLUGIN_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+// A work project's files are complete when EVERY portable agent the registry
+// declares, both handoff indexes, and every docs/sterling file registered in its
+// config.generated_projections exist as regular files — checked exactly, never
+// "some .md". Target paths go through contained-fs (a symlink or non-directory
+// on the way throws ContainmentError).
+function workFilesComplete(repoPath) {
+  const registry = JSON.parse(readFileSync(join(MODULE_PLUGIN_ROOT, 'agent-templates', 'registry.json'), 'utf8'));
+  const portable = registry.agents.filter((a) => a.opencode !== undefined).map((a) => `.opencode/agents/${a.name}.md`);
+  const config = existsContained(repoPath, '.sterling/config.json', 'file') ? JSON.parse(readContained(repoPath, '.sterling/config.json')) : {};
+  const registered = Array.isArray(config.generated_projections) ? config.generated_projections.filter((r) => typeof r === 'string' && isHandoffPath(r)) : [];
+  return [...portable, ...HANDOFF_ROOT_FILES, ...registered].every((rel) => existsContained(repoPath, rel, 'file'));
 }
 
 // What to do about a project whose handoff refusal will not go away by itself.
@@ -388,6 +407,15 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
   const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null, handoff_retry: [] };
+  // Per-project provisioning state persisted in the completion marker (see
+  // writeUpdateMarker). Seeded from the marker on the already-current path; the
+  // full fan-out rebuilds it for every project it visits.
+  let provisioning = {};
+  const recordProvisioning = (p, head, syncStatus, handoffStatus) => {
+    if (handoffStatus === 'skipped') provisioning[p.repo_path] = { mode: 'hobby' };
+    else if (syncStatus === 0 && handoffStatus === 0) provisioning[p.repo_path] = { mode: 'work', head, outcome: 'ok' };
+    else delete provisioning[p.repo_path];
+  };
 
   // Handoff projection for one project (decision
   // init-prepares-opencode-portable-agents-and-target-handoff-projections): refresh
@@ -568,6 +596,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   if (before.behind === 0 && !opts.force) {
     const marker = readUpdateMarker(cwd, log);
     const markerSha = marker?.sha ?? null;
+    provisioning = { ...(marker?.projects ?? {}) };
     if (markerSha === before.head && marker.handoff_retry.length && opts.projects !== false) {
       // The clone update itself is complete; only projects whose handoff projection
       // was refused actionably are outstanding. Retry exactly those — nothing else.
@@ -588,10 +617,12 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           continue;
         }
         log(`  • ${p.name}:`);
-        report.projects.push({ name: p.name, repo_path: p.repo_path, handoff: runHandoff(p) });
+        const handoff = runHandoff(p);
+        recordProvisioning(p, markerSha, 0, handoff);
+        report.projects.push({ name: p.name, repo_path: p.repo_path, handoff });
       }
       try {
-        writeUpdateMarker(cwd, markerSha, report.handoff_retry);
+        writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning);
       } catch (err) {
         log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
         report.exit = report.exit === 0 ? 1 : report.exit;
@@ -617,11 +648,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
       }
       // Hobby→work with HEAD unchanged (decision
-      // project-mode-hobby-work-toggle-decides-flow): a project switched to work
-      // after the last full update has no OpenCode agents or handoff files yet,
-      // and no new commit will ever trigger the fan-out for it. Provision exactly
-      // the work projects whose files are missing (agent sync + projection);
-      // everything else stays "already current".
+      // project-mode-hobby-work-toggle-decides-flow; Sol review of S1): no new
+      // commit will ever trigger the fan-out for a project switched to work, and
+      // files present on disk prove nothing about their currency. A work project
+      // is provisioned (idempotent agent sync + projection) when its recorded
+      // state is missing, is not work, or is at another head — or when its file
+      // set is incomplete. A hobby project's state is recorded as hobby, so a
+      // later switch back to work re-provisions it.
+      const recordedBefore = JSON.stringify(provisioning);
       const toProvision = [];
       for (const p of noopProjectList) {
         let mode;
@@ -632,10 +666,15 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           log(`\n⚠ ${p.name}: ${err.message}`);
           continue;
         }
-        if (mode === 'work' && workFilesMissing(p.repo_path)) toProvision.push(p);
+        if (mode !== 'work') {
+          provisioning[p.repo_path] = { mode: 'hobby' };
+          continue;
+        }
+        const state = provisioning[p.repo_path];
+        if (!state || state.mode !== 'work' || state.head !== before.head || !workFilesComplete(p.repo_path)) toProvision.push(p);
       }
       if (toProvision.length) {
-        log(`\n▸ already current at ${before.head_short}; provisioning ${toProvision.length} work-mode project(s) whose OpenCode or handoff files are missing`);
+        log(`\n▸ already current at ${before.head_short}; provisioning ${toProvision.length} work-mode project(s) whose OpenCode or handoff files are unrecorded, stale or incomplete`);
         for (const p of toProvision) {
           const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
           const out = `${r.stdout}${r.stderr}`.trim();
@@ -645,14 +684,20 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           } else {
             log(`  • ${p.name}: agents synced`);
           }
-          report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff: runHandoff(p) });
+          const handoff = runHandoff(p);
+          recordProvisioning(p, before.head, r.status, handoff);
+          report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
         }
+      }
+      if (toProvision.length || JSON.stringify(provisioning) !== recordedBefore) {
         try {
-          writeUpdateMarker(cwd, markerSha, report.handoff_retry);
+          writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning);
         } catch (err) {
           log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
           report.exit = report.exit === 0 ? 1 : report.exit;
         }
+      }
+      if (toProvision.length) {
         if (report.handoff_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
         return report;
       }
@@ -829,6 +874,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       }
     }
   }
+  // The full fan-out rebuilds the provisioning state for every project it
+  // visits; with --no-projects the previous record is kept as it was.
+  provisioning = opts.projects === false ? { ...(readUpdateMarker(cwd, () => {})?.projects ?? {}) } : {};
   if (opts.projects !== false && projectList.length) {
     log(`\n▸ syncing agents across ${projectList.length} registered project(s)`);
     for (const p of projectList) {
@@ -850,7 +898,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
       }
-      report.projects[report.projects.length - 1].handoff = runHandoff(p);
+      const handoff = runHandoff(p);
+      report.projects[report.projects.length - 1].handoff = handoff;
+      recordProvisioning(p, after.head, r.status, handoff);
       // Deliver the double-click updater to every registered project — the
       // update event is how a machine receives new artifacts, so a project
       // init'd before this launcher existed gets one here rather than waiting
@@ -912,7 +962,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // only those (Sol re-check, the update wedge). The exit stays loud (2).
   if (report.exit === 0) {
     try {
-      writeUpdateMarker(cwd, after.head, report.handoff_retry);
+      writeUpdateMarker(cwd, after.head, report.handoff_retry, provisioning);
     } catch (err) {
       log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
     }

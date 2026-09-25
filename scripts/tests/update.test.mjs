@@ -1580,9 +1580,10 @@ test('the created native launcher is CRLF on disk end to end — the appended ge
 // The projection is WORK-ONLY (decision project-mode-hobby-work-toggle-decides-flow):
 // the fan-out reads each project's own config.mode before running it, so the
 // projects below are real temp dirs declaring mode 'work' (the hobby skip is pinned
-// in project-mode-gating.test.mjs). `provisioned` seeds the OpenCode agents and
-// handoff indexes a completed run would have left, so an already-current run does
-// not provision them again.
+// in project-mode-gating.test.mjs). `provisioned` seeds the EXACT portable agent
+// set and the handoff indexes a completed run would have left, so an
+// already-current run does not provision them again (completeness is checked
+// exactly — Sol review of S1 — so a single agent file would not do).
 const workProjects = [];
 function workProject(name, { provisioned = true } = {}) {
   const dir = mkdtempSync(join(tmpdir(), `${name}-`));
@@ -1590,7 +1591,7 @@ function workProject(name, { provisioned = true } = {}) {
   writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
   if (provisioned) {
     mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
-    writeFileSync(join(dir, '.opencode', 'agents', 'scout.md'), 'x\n');
+    for (const name of ['implementor', 'researcher', 'scout']) writeFileSync(join(dir, '.opencode', 'agents', `${name}.md`), 'x\n');
     for (const f of ['architecture.md', 'rulings.md']) writeFileSync(join(dir, f), 'x\n');
   }
   workProjects.push(dir);

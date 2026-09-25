@@ -304,3 +304,97 @@ test('update: work→hobby keeps every file byte-identical and says they are no 
     [cwd, dir].forEach(cleanup);
   }
 });
+
+// ---------------------------------------------------------------- persisted provisioning state
+// Sol review of S1, item 1: the already-current path must not infer completeness
+// from "some files exist". The completion marker records each project's last
+// provisioning ({mode, head, outcome, config}); a work project whose record is
+// missing, not work, or at another head is re-provisioned even when files exist,
+// and the portable-agent set and the registered docs/sterling files are checked
+// EXACTLY.
+
+const NOW = '2026-09-25T12:00:00.000Z';
+function addArticle(dir, slug) {
+  const s = new SterlingStore(join(dir, '.sterling', 'sterling.db'));
+  s.create({
+    id: `aaaaaaaa-0000-4000-8000-${String(Math.floor(Math.random() * 1e12)).padStart(12, '0')}`, // not-a-citation: fixture id
+    type: 'feature_article', created_at: NOW, updated_at: NOW, author: 'conductor', status: 'active',
+    superseded_by: null, links: [], scope: 'project', stack_tags: [], slug,
+    title: `Area ${slug}`, what_it_does: `Does ${slug}.`, intended_behavior: 'Works.',
+    files: [{ path: `src/${slug}.ts`, role: 'the code' }],
+    current_ac: [{ ac_id: 'AC1', text: 'works', verifiable_at: 'final' }],
+    dependencies: { relies_on: [], relied_by: [] }, state: 'active', history: [{ date: NOW, event: 'created' }], live_test_refs: [],
+  });
+  s.close();
+}
+const docsFiles = (dir) => (existsSync(join(dir, 'docs', 'sterling', 'articles')) ? readdirSync(join(dir, 'docs', 'sterling', 'articles')).sort() : []);
+const markerOf = (cwd) => JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8'));
+
+test('update, HEAD unchanged: a work→hobby→work cycle re-provisions stale files even though every file exists', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    addArticle(dir, 'first');
+    await update({ behind: 2, projects: [dir], cwd });
+    assert.deepEqual(markerOf(cwd).projects?.[dir]?.mode, 'work', 'the marker records the work provisioning');
+    writeConfig(dir, 'hobby');
+    await update({ behind: 2, projects: [dir], cwd }); // a full update while hobby: the files go stale
+    assert.equal(markerOf(cwd).projects?.[dir]?.mode, 'hobby');
+    addArticle(dir, 'second');
+    writeConfig(dir, 'work');
+    const r = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(r.report.exit, 0, r.log);
+    assert.deepEqual(r.handoffCalls.map((c) => c.split(' ').pop()), [dir], 'the stale project is re-projected');
+    assert.match(readFileSync(join(dir, 'architecture.md'), 'utf8'), /Area second/, 'the projection is current again');
+  } finally {
+    [cwd, dir].forEach(cleanup);
+  }
+});
+
+test('update, HEAD unchanged: a PARTIAL portable-agent set is not complete — the missing agent is restored', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    await update({ behind: 2, projects: [dir], cwd });
+    rmSync(join(dir, '.opencode', 'agents', 'scout.md'));
+    const r = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(r.report.exit, 0, r.log);
+    assert.deepEqual(opencodeFiles(dir), PORTABLE.map((n) => `${n}.md`));
+  } finally {
+    [cwd, dir].forEach(cleanup);
+  }
+});
+
+test('update, HEAD unchanged: a missing registered docs/sterling file is not complete — it is restored', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    addArticle(dir, 'kept');
+    await update({ behind: 2, projects: [dir], cwd });
+    const [doc] = docsFiles(dir);
+    assert.ok(doc, 'the article was projected');
+    rmSync(join(dir, 'docs', 'sterling', 'articles', doc));
+    const r = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(r.report.exit, 0, r.log);
+    assert.deepEqual(docsFiles(dir), [doc]);
+  } finally {
+    [cwd, dir].forEach(cleanup);
+  }
+});
+
+test('update, HEAD unchanged: a fully provisioned work project is a no-op', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    addArticle(dir, 'steady');
+    await update({ behind: 2, projects: [dir], cwd });
+    const before = snapshot(dir);
+    const r = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(r.report.exit, 0, r.log);
+    assert.equal(r.handoffCalls.length + r.syncCalls.length, 0, r.log);
+    assert.match(r.log, /Already current/);
+    assert.deepEqual(snapshot(dir), before);
+  } finally {
+    [cwd, dir].forEach(cleanup);
+  }
+});
