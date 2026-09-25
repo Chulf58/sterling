@@ -5,7 +5,7 @@
 //      question a hand-rolled answer got wrong;
 //   2. the STEP ORDER — driven through an injected exec, so the ordering and the
 //      conditional steps are asserted without an npm ci or a 90s battery.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, rmSync, existsSync } from 'node:fs';
@@ -1577,6 +1577,28 @@ test('the created native launcher is CRLF on disk end to end — the appended ge
 // empty store) is a standing state of that project: loud, never fatal. A run that
 // failed part-way (exit 1) may have left an incomplete export, so it withholds the
 // completion marker.
+// The projection is WORK-ONLY (decision project-mode-hobby-work-toggle-decides-flow):
+// the fan-out reads each project's own config.mode before running it, so the
+// projects below are real temp dirs declaring mode 'work' (the hobby skip is pinned
+// in project-mode-gating.test.mjs). `provisioned` seeds the EXACT portable agent
+// set and the handoff indexes a completed run would have left, so an
+// already-current run does not provision them again (completeness is checked
+// exactly — Sol review of S1 — so a single agent file would not do).
+const workProjects = [];
+function workProject(name, { provisioned = true } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), `${name}-`));
+  mkdirSync(join(dir, '.sterling'), { recursive: true });
+  writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
+  if (provisioned) {
+    mkdirSync(join(dir, '.opencode', 'agents'), { recursive: true });
+    for (const name of ['implementor', 'researcher', 'scout']) writeFileSync(join(dir, '.opencode', 'agents', `${name}.md`), 'x\n');
+    for (const f of ['architecture.md', 'rulings.md']) writeFileSync(join(dir, f), 'x\n');
+  }
+  workProjects.push(dir);
+  return dir;
+}
+after(() => { for (const d of workProjects) rmSync(d, { recursive: true, force: true }); });
+
 test('fan-out: the handoff projection runs per project; a refusal is loud but not fatal, a failure withholds completion', async () => {
   const run = async (statuses) => {
     const cwd = scratchCwd();
@@ -1598,14 +1620,14 @@ test('fan-out: the handoff projection runs per project; a refusal is loud but no
     }
   };
 
-  const refusedOnly = await run({ '/tmp/handoff-ok': 0, '/tmp/handoff-secondary': 2 });
+  const refusedOnly = await run({ [workProject('handoff-ok')]: 0, [workProject('handoff-secondary')]: 2 });
   assert.equal(refusedOnly.calls.filter((c) => c.includes('handoff-projection.mjs')).length, 2);
   assert.deepEqual(refusedOnly.report.projects.map((p) => p.handoff), [0, 2]);
   assert.equal(refusedOnly.report.exit, 0, 'a refused projection does not fail the update');
   assert.match(refusedOnly.log, /⚠ handoff projection: REFUSED — store_authority is 'secondary'/);
   assert.doesNotMatch(refusedOnly.log, /handoff projection: unchanged/, 'an unchanged projection stays quiet');
 
-  const failed = await run({ '/tmp/handoff-broken': 1 });
+  const failed = await run({ [workProject('handoff-broken')]: 1 });
   assert.equal(failed.report.exit, 1, 'an incomplete export withholds the completion marker');
   assert.match(failed.log, /✗ handoff projection FAILED \(exit 1\) — the export may be INCOMPLETE/);
   // Sol re-check LOW: prove the part-way failure really withholds the marker.
@@ -1621,8 +1643,8 @@ test('fan-out: the handoff projection runs per project; a refusal is loud but no
 // withheld — the wedge Sol found in that design.)
 test('fan-out: an actionable handoff conflict does not wedge the update; only that project is retried until it clears', async () => {
   const cwd = scratchCwd();
-  const A = '/tmp/handoff-stuck';
-  const B = '/tmp/handoff-fine';
+  const A = workProject('handoff-stuck');
+  const B = workProject('handoff-fine');
   const marker = () => JSON.parse(readFileSync(join(cwd, UPDATE_MARKER_RELATIVE_PATH), 'utf8'));
   try {
     const runOnce = async ({ behind, statuses, registered = [A, B] }) => {
@@ -1650,12 +1672,18 @@ test('fan-out: an actionable handoff conflict does not wedge the update; only th
     assert.deepEqual(marker().handoff_retry, [A]);
     assert.match(first.log, /cannot be repaired.*--prune-missing.*store_authority/s, 'names the unregister / retire remedy');
 
-    // 2) already current: ONLY A is retried — no build, no agent sync, no B
+    // 2) already current: A is retried, and the retry does NOT starve the normal
+    // scan (Sol re-check, final round): B lost a portable agent, so B is still
+    // scanned and provisioned in the same run. No build, and the core sequence is
+    // not repeated.
+    rmSync(join(B, '.opencode', 'agents', 'scout.md'));
     const second = await runOnce({ behind: 0, statuses: { [A]: 3 } });
-    assert.deepEqual(second.handoffCalls.map((c) => c.split(' ').pop()), [A]);
-    assert.equal(second.calls.filter((c) => c.startsWith('npm ') || c.includes('sync-agents')).length, 0, 'the core sequence is not repeated');
+    assert.deepEqual(second.handoffCalls.map((c) => c.split(' ').pop()), [A, B], 'A retried first, then B provisioned');
+    assert.equal(second.calls.filter((c) => c.startsWith('npm ')).length, 0, 'the core sequence is not repeated');
+    assert.deepEqual(second.calls.filter((c) => c.includes('sync-agents')).map((c) => c.split(' ').pop()), [B], 'only B, the stale project, is re-synced');
     assert.equal(second.report.exit, 2);
     assert.deepEqual(marker().handoff_retry, [A]);
+    writeFileSync(join(B, '.opencode', 'agents', 'scout.md'), 'x\n'); // what B's real sync restores (the fake exec writes nothing)
 
     // 3) A is fixed: it clears from the retry set
     const third = await runOnce({ behind: 0, statuses: {} });
@@ -1674,7 +1702,7 @@ test('fan-out: an actionable handoff conflict does not wedge the update; only th
 
 test('fan-out: a retry-set project that left the registry is dropped, not retried', async () => {
   const cwd = scratchCwd();
-  const A = '/tmp/handoff-retired';
+  const A = workProject('handoff-retired');
   try {
     const { exec: base } = fakeExec({ behind: 2, changed: ['packages/store/src/index.ts'] });
     const stuck = (cmd, args, o) => (args[0]?.endsWith('handoff-projection.mjs') ? { status: 3, stdout: 'handoff projection: REFUSED — x\n', stderr: '' } : base(cmd, args, o));

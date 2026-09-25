@@ -5163,7 +5163,23 @@ var configSchema = external_exports.object({
   // gate or hook arm keys on this toggle.
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
+  // per-project switch that decides the flow. 'hobby' (the default, today's
+  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
+  // writes and maintains them. Toggled in the TUI System tab. A missing key
+  // means hobby.
+  // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
+  // S1): any other value is PRESERVED raw, never coerced to hobby and never
+  // thrown on — a typo here must not turn every parseConfig reader (the MCP
+  // server's boot included) into a startup failure. The strict judge is
+  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
+  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // Consumers of the PARSED config must narrow this field themselves.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  mode: external_exports.unknown().default("hobby")
 });
 
 // packages/schemas/dist/registry.js
@@ -9128,6 +9144,24 @@ TDD posture: tests-first ${tddOn ? "ON" : "OFF"} (config.tdd.enabled \u2014 TUI 
   }
 } catch {
 }
+var modeContext = "";
+try {
+  if (configUnreadable) {
+    modeContext = "\n\nProject mode: UNKNOWN \u2014 the project config could not be read, so config.mode could not be determined. This is NOT the hobby default: repair the config.";
+  } else {
+    const mode = config?.mode;
+    if (mode === void 0 || mode === "hobby" || mode === "work") {
+      modeContext = `
+
+Project mode: ${mode === "work" ? "WORK" : "HOBBY"} (config.mode \u2014 TUI System tab) \u2014 ` + (mode === "work" ? "the OpenCode agents and handoff files are written and maintained." : "the OpenCode agents and handoff files are not written or maintained in hobby mode; existing ones may remain from an earlier work period.");
+    } else {
+      modeContext = `
+
+Project mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) \u2014 config.mode must be 'hobby' or 'work'; init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).`;
+    }
+  }
+} catch {
+}
 var currencyWarning = "";
 var currencyContext = "";
 try {
@@ -9789,6 +9823,6 @@ var output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? "" : "s"}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? "" : "s"})` : ""} \xB7 ${counts.maintenance} maintenance item${counts.maintenance === 1 ? "" : "s"} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
+  hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext }
 };
 exitAfterWrite(JSON.stringify(output), 0);

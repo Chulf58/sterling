@@ -4995,7 +4995,23 @@ var configSchema = external_exports.object({
   // gate or hook arm keys on this toggle.
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
+  // per-project switch that decides the flow. 'hobby' (the default, today's
+  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
+  // writes and maintains them. Toggled in the TUI System tab. A missing key
+  // means hobby.
+  // PERMISSIVE ON PURPOSE, like attestation_path_globs above (Sol review of
+  // S1): any other value is PRESERVED raw, never coerced to hobby and never
+  // thrown on — a typo here must not turn every parseConfig reader (the MCP
+  // server's boot included) into a startup failure. The strict judge is
+  // readProjectMode() in scripts/lib/handoff-projection.mjs, which every
+  // surface that ACTS on the mode (init, sync-agents, /sterling:update, the
+  // handoff-projection CLI) uses, and which refuses an invalid value loudly.
+  // Consumers of the PARSED config must narrow this field themselves.
+  // The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  mode: external_exports.unknown().default("hobby")
 });
 
 // packages/schemas/dist/registry.js

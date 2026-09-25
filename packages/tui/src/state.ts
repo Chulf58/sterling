@@ -116,6 +116,11 @@ export interface AgentRosterSnapshot {
    *  the TDD-by-default posture toggle. Additive-optional, same idiom as
    *  sparringPartner — absent → the buildSystemTab default below applies. */
   tdd?: { enabled: boolean };
+  /** config.mode (decision project-mode-hobby-work-toggle-decides-flow): the RAW
+   *  config value, never the parsed one, so an invalid value renders INVALID
+   *  instead of vanishing into a failed parse. Absent → hobby (the schema default);
+   *  null → the config could not be read (UNKNOWN, never the default). */
+  mode?: string | null;
 }
 
 /** A projected System-tab line (renderer prints text verbatim; kind styles it). */
@@ -151,6 +156,10 @@ export interface SystemTabView {
    *  cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
    *  2026-09-22). */
   tddRows: SystemRow[];
+  /** project mode toggle row (decision project-mode-hobby-work-toggle-decides-flow):
+   *  a single-entry list, same toggle-only shape as tddRows, appended after it in
+   *  cursor order; hidden while a config.models picker is open. */
+  modeRows: SystemRow[];
 }
 
 const EMPTY_ROSTER: AgentRosterSnapshot = {
@@ -160,6 +169,7 @@ const EMPTY_ROSTER: AgentRosterSnapshot = {
   sparringPartner: { enabled: true },
   codexWired: false,
   tdd: { enabled: true },
+  mode: 'hobby',
 };
 
 /** Pure scalar drift check: true iff the installed value differs from config. */
@@ -292,13 +302,20 @@ export interface TddToggleEffect {
   type: 'tdd_toggle';
   enabled: boolean;
 }
+/** System tab, project mode row (decision project-mode-hobby-work-toggle-decides-flow):
+ *  writes config.mode. Carries the NEW mode. */
+export interface ModeToggleEffect {
+  type: 'mode_toggle';
+  mode: 'hobby' | 'work';
+}
 export type Effect =
   | SelectEffect
   | QuitEffect
   | ModelSwapEffect
   | SparringToggleEffect
   | SparringModelEffect
-  | TddToggleEffect;
+  | TddToggleEffect
+  | ModeToggleEffect;
 
 export type UiEvent =
   | { kind: 'key'; name: 'LEFT' | 'RIGHT' | 'TAB' | 'UP' | 'DOWN' | 'ENTER' | 'SPACE' | 'QUIT' | 'ESCAPE' | 'BACKSPACE' }
@@ -611,7 +628,9 @@ export function buildSystemTab(snapshot: AgentRosterSnapshot, ui: UiState, width
   // the tdd row continues past the two sparring rows (keys.length,
   // keys.length + 1) at keys.length + 2.
   const tddRows = selector ? [] : [tddToggleRow(snap, ui, width, keys.length + 2)];
-  return { rows: shown, banner, sparringRows, tddRows };
+  // the project mode row follows the tdd row, at keys.length + 3.
+  const modeRows = selector ? [] : [modeToggleRow(snap, ui, width, keys.length + 3)];
+  return { rows: shown, banner, sparringRows, tddRows, modeRows };
 }
 
 /** The catalog-status banner: absent / current(fresh) / stale-with-date. */
@@ -684,6 +703,19 @@ function tddToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cur
   const marker = selected ? '› ' : '  ';
   const onOff = tdd.enabled ? 'ON' : 'OFF';
   return { id: 'sys:tdd_enabled', lines: [{ text: clip(`${marker}TDD: ${onOff}`), kind: 'title', selected }] };
+}
+
+/** project mode row (decision project-mode-hobby-work-toggle-decides-flow): HOBBY or
+ *  WORK from the raw config.mode (absent → HOBBY), UNKNOWN for an unreadable
+ *  config, and INVALID for any other value — never shown as either flow.
+ *  Mirrors tddToggleRow's shape. */
+function modeToggleRow(snap: AgentRosterSnapshot, ui: UiState, width: number, cursorIndex: number): SystemRow {
+  const clip = (s: string): string => clipEllipsis(s, width);
+  const mode = snap.mode === undefined ? 'hobby' : snap.mode;
+  const selected = ui.cursor === cursorIndex;
+  const marker = selected ? '› ' : '  ';
+  const shown = mode === null ? 'UNKNOWN (config unreadable)' : mode === 'hobby' || mode === 'work' ? mode.toUpperCase() : `INVALID ('${mode}')`;
+  return { id: 'sys:project_mode', lines: [{ text: clip(`${marker}Project mode: ${shown}`), kind: 'title', selected }] };
 }
 
 /** Bridge the pure System projection into a DashboardState the renderer draws:
@@ -778,7 +810,9 @@ function systemDashboardState(
   }
   // tdd toggle row (decision foreign_752caf98): drawn after the sparring-partner
   // rows, same row shape — a separate list, never merged.
-  for (const sr of view.tddRows) {
+  // project mode row (decision project-mode-hobby-work-toggle-decides-flow): drawn
+  // after the tdd row, same row shape.
+  for (const sr of [...view.tddRows, ...view.modeRows]) {
     const lines: RowLine[] = sr.lines.map((l) => ({
       text: l.text,
       kind: (l.kind === 'title' ? 'title' : l.kind === 'meta' ? 'meta' : 'body') as RowLine['kind'],
@@ -1043,7 +1077,9 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
         // sysKeys.length + 3 was REMOVED entirely (decision
         // cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
         // 2026-09-22).
-        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 3 - 1)));
+        // + 4 since the project mode row (sysKeys.length + 3, decision
+        // project-mode-hobby-work-toggle-decides-flow) joined after the tdd row.
+        const sysClamp = (c: number) => Math.max(0, Math.min(c, Math.max(0, sysKeys.length + 4 - 1)));
         const sel = ui.selector;
         const editing = ui.sparringModelEdit !== undefined;
         switch (event.name) {
@@ -1099,6 +1135,12 @@ export function reduce(store: SterlingStore, ui: UiState, event: UiEvent, viewpo
             if (cursor === sysKeys.length + 2) {
               // tdd toggle row (decision foreign_752caf98): an immediate flip, no picker
               effects.push({ type: 'tdd_toggle', enabled: !(roster.tdd?.enabled ?? true) });
+              return { ui: { ...ui, cursor, notice: undefined }, effects };
+            }
+            if (cursor === sysKeys.length + 3) {
+              // project mode row: an immediate flip. An invalid value flips to
+              // hobby, the default flow — a visible, deliberate write, never a guess.
+              effects.push({ type: 'mode_toggle', mode: (roster.mode ?? 'hobby') === 'hobby' ? 'work' : 'hobby' });
               return { ui: { ...ui, cursor, notice: undefined }, effects };
             }
             const key = sysKeys[cursor];

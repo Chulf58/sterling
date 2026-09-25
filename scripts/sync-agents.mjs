@@ -13,7 +13,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { parseConfig } from '@sterling/schemas';
 import { syncAgents, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone } from './lib/handoff-projection.mjs';
+import { isSterlingClone, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -24,6 +24,19 @@ const targetIdx = args.indexOf('--target');
 const targetDir = targetIdx !== -1 ? resolve(args[targetIdx + 1]) : process.cwd();
 
 const pluginVersion = JSON.parse(readFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), 'utf8')).version;
+
+// Project mode (decision project-mode-hobby-work-toggle-decides-flow), read
+// from the TARGET's own config BEFORE the schema parse below: an invalid value
+// would otherwise surface as a raw zod throw. It is a refusal (exit 2) naming
+// the value, and nothing is synced until it is fixed.
+let projectMode;
+try {
+  projectMode = readProjectMode(targetDir);
+} catch (err) {
+  if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+  console.log(`refused_project_mode: ${err.message}; nothing synced`);
+  process.exit(2);
+}
 
 // config.models is the authoritative model/effort source (98064d77): read the
 // target project's config when present, else the shipped default config, so a
@@ -82,6 +95,11 @@ if (report.length === 0) console.log('no agents registered — nothing to sync')
 // target and gets none (said, not silent).
 // A containment failure in that probe (a symlinked plugin.json) is a refusal,
 // never a guessed answer either way.
+// Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
+// portable copies are WORK-ONLY (projectMode, read above from the TARGET's own
+// config). Hobby is a loud skip that deletes nothing. Every
+// run provisions a work target, so a hobby→work switch is realized by the next
+// sync whatever the plugin HEAD is.
 let cloneTarget;
 try {
   cloneTarget = isSterlingClone(targetDir, pluginRoot);
@@ -92,7 +110,9 @@ try {
   cloneTarget = null;
 }
 if (cloneTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — the target is a Sterling clone, not a handoff target`);
-const { report: opencodeReport } = cloneTarget !== false
+const workTarget = cloneTarget === false && projectMode === 'work';
+if (cloneTarget === false && !workTarget) console.log(`portable agents (${OPENCODE_AGENTS_DIR}/) SKIPPED — ${HOBBY_SKIP_DETAIL}`);
+const { report: opencodeReport } = !workTarget
   ? { report: [] }
   : syncOpenCodeAgents({
       templatesDir: join(pluginRoot, 'agent-templates'),
