@@ -297,13 +297,19 @@ export const UPDATE_MARKER_RELATIVE_PATH = join('.sterling', 'update-complete.js
  * (P5) — both return null so the caller resumes either way, but only the
  * corrupt case logs.
  */
+// Also carries `handoff_retry`: the project paths whose handoff projection ended
+// in an ACTIONABLE refusal (exit 3). That is per-project retry state, not a
+// failure of the clone update: one project that can never be repaired must not
+// keep the whole sequence from completing (Sol re-check, the update wedge).
 function readUpdateMarker(cwd, log) {
   const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
   if (!existsSync(p)) return null;
   try {
     const parsed = JSON.parse(readFileSync(p, 'utf8'));
     if (typeof parsed?.sha !== 'string' || !parsed.sha) throw new Error('missing or invalid "sha" field');
-    return parsed.sha;
+    const retry = parsed.handoff_retry ?? [];
+    if (!Array.isArray(retry) || retry.some((r) => typeof r !== 'string')) throw new Error('invalid "handoff_retry" field');
+    return { sha: parsed.sha, handoff_retry: retry };
   } catch (err) {
     log(`\n⚠ update marker '${p}' is corrupt/unreadable — degrading to a full resume rather than trusting a marker that cannot be verified: ${err?.message ?? err}`);
     return null;
@@ -314,10 +320,19 @@ function readUpdateMarker(cwd, log) {
  *  see the call site. A halted or failed run must never leave a marker that
  *  makes the NEXT run believe "Already current" without the sequence having
  *  actually finished. */
-function writeUpdateMarker(cwd, sha) {
+function writeUpdateMarker(cwd, sha, handoffRetry = []) {
   const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString() }, null, 2) + '\n');
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry }, null, 2) + '\n');
+}
+
+// What to do about a project whose handoff refusal will not go away by itself.
+export function handoffRetryRemedy(repoPath) {
+  return (
+    `fix it in ${repoPath} and rerun /sterling:update (only this project is retried). ` +
+    `If it cannot be repaired: retire it (move or delete the project, then \`node scripts/list-projects.mjs --prune-missing\` unregisters it), ` +
+    `or set "store_authority": "secondary" in its .sterling/config.json so the refusal becomes a standing one.`
+  );
 }
 
 /** Existing project + domain stores, without opening any database connection. */
@@ -361,7 +376,33 @@ function probeSchemaVersion(dbPath) {
 export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
-  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null };
+  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null, handoff_retry: [] };
+
+  // Handoff projection for one project (decision
+  // init-prepares-opencode-portable-agents-and-target-handoff-projections): refresh
+  // its committed architecture.md / rulings.md / docs/sterling/ from ITS OWN store.
+  // Exit 2 is a STANDING refusal (a secondary store): loud, never fatal. Exit 3 is
+  // an ACTIONABLE refusal (a hand-written file, symlink or ignore rule in the way, a
+  // missing or empty store): the project joins report.handoff_retry, which the
+  // completion marker persists, and the next already-current run retries ONLY it.
+  // Any other failure (exit 1) may have left an INCOMPLETE export: update exit 1.
+  const runHandoff = (p) => {
+    const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });
+    const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
+    const handoffLine = handoffOut.split('\n')[0];
+    if (handoff.status === 2) {
+      log(`      ⚠ ${handoffLine}`);
+    } else if (handoff.status === 3) {
+      log(`      ✗ ${handoffLine}\n        (${handoffRetryRemedy(p.repo_path)})`);
+      report.handoff_retry.push(p.repo_path);
+    } else if (handoff.status !== 0) {
+      log(`      ✗ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE:\n${handoffOut.split('\n').map((l) => `          ${l}`).join('\n')}`);
+      report.exit = report.exit === 0 ? 1 : report.exit;
+    } else if (!handoffLine.startsWith('handoff projection: unchanged')) {
+      log(`      ${handoffLine}`);
+    }
+    return handoff.status;
+  };
 
   // A step: loud on failure (full output), one line on success. A failure stops
   // the sequence — half-updating quietly is the failure mode this replaces.
@@ -497,7 +538,40 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   };
 
   if (before.behind === 0 && !opts.force) {
-    const markerSha = readUpdateMarker(cwd, log);
+    const marker = readUpdateMarker(cwd, log);
+    const markerSha = marker?.sha ?? null;
+    if (markerSha === before.head && marker.handoff_retry.length && opts.projects !== false) {
+      // The clone update itself is complete; only projects whose handoff projection
+      // was refused actionably are outstanding. Retry exactly those — nothing else.
+      let registered;
+      try {
+        registered = (typeof projects === 'function' ? (await projects()) ?? [] : projects);
+      } catch (err) {
+        log(`\n⚠ handoff retry skipped — project registry unavailable: ${err?.message ?? err}`);
+        report.exit = 2;
+        return report;
+      }
+      const byPath = new Map(registered.map((p) => [p.repo_path, p]));
+      log(`\n▸ already current at ${before.head_short}; retrying the handoff projection for ${marker.handoff_retry.length} project(s) left unresolved by the last update`);
+      for (const repoPath of marker.handoff_retry) {
+        const p = byPath.get(repoPath);
+        if (!p) {
+          log(`  • ${repoPath}: no longer registered — dropped from the retry set`);
+          continue;
+        }
+        log(`  • ${p.name}:`);
+        report.projects.push({ name: p.name, repo_path: p.repo_path, handoff: runHandoff(p) });
+      }
+      try {
+        writeUpdateMarker(cwd, markerSha, report.handoff_retry);
+      } catch (err) {
+        log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
+        report.exit = report.exit === 0 ? 1 : report.exit;
+      }
+      if (report.handoff_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
+      else log('\nEvery previously unresolved handoff projection is now resolved.');
+      return report;
+    }
     if (markerSha === before.head) {
       // FULLY NONFATAL: resolving the registry can throw (open/list failure). An
       // already-current update has already succeeded by the time we get here, so a
@@ -707,30 +781,7 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         log(`  • ${p.name}: ${changedAgents.length ? changedAgents.join(', ') : driftedAgents.length ? 'no agent changes' : 'up to date'}`);
         for (const line of driftedAgents) log(`      ⚠ ${line}`);
       }
-      // Handoff projection (decision
-      // init-prepares-opencode-portable-agents-and-target-handoff-projections): refresh
-      // the project's committed architecture.md / rulings.md / docs/sterling/ from ITS
-      // OWN store. Exit 2 is a STANDING refusal (a secondary store): a declared state
-      // of that project, loud but never fatal. Exit 3 is an ACTIONABLE refusal (a
-      // hand-written file, symlink or ignore rule in the way, a missing or empty
-      // store): the update exits 2 and writes no completion marker, so the next
-      // /sterling:update resumes and retries once the user has fixed it (Sol
-      // review). Any other failure (exit 1) may have left an INCOMPLETE export: exit 1.
-      const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });
-      const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
-      const handoffLine = handoffOut.split('\n')[0];
-      report.projects[report.projects.length - 1].handoff = handoff.status;
-      if (handoff.status === 2) {
-        log(`      ⚠ ${handoffLine}`);
-      } else if (handoff.status === 3) {
-        log(`      ✗ ${handoffLine}\n        (fix it in ${p.repo_path}, then rerun /sterling:update — no completion marker is written until it succeeds)`);
-        report.exit = 2;
-      } else if (handoff.status !== 0) {
-        log(`      ✗ handoff projection FAILED (exit ${handoff.status}) — the export may be INCOMPLETE:\n${handoffOut.split('\n').map((l) => `          ${l}`).join('\n')}`);
-        report.exit = report.exit === 0 ? 1 : report.exit;
-      } else if (!handoffLine.startsWith('handoff projection: unchanged')) {
-        log(`      ${handoffLine}`);
-      }
+      report.projects[report.projects.length - 1].handoff = runHandoff(p);
       // Deliver the double-click updater to every registered project — the
       // update event is how a machine receives new artifacts, so a project
       // init'd before this launcher existed gets one here rather than waiting
@@ -787,11 +838,18 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // behind-0 run report "Already current" while that failure is still
   // unresolved. Never fatal: the update itself already succeeded by the time
   // this runs.
+  // An actionable handoff refusal is NOT a core failure: the marker is stamped
+  // with the unresolved project paths, and the next already-current run retries
+  // only those (Sol re-check, the update wedge). The exit stays loud (2).
   if (report.exit === 0) {
     try {
-      writeUpdateMarker(cwd, after.head);
+      writeUpdateMarker(cwd, after.head, report.handoff_retry);
     } catch (err) {
       log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
+    }
+    if (report.handoff_retry.length) {
+      log(`\n✗ ${report.handoff_retry.length} project(s) have an unresolved handoff projection: ${report.handoff_retry.join(', ')} — the next /sterling:update retries only these.`);
+      report.exit = 2;
     }
   }
 
