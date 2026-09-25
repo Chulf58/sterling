@@ -1098,6 +1098,26 @@ function hasRegisterRound(root, sessionId, agentId) {
   return entries.some((e) => e && e.agent_id === agentId && e.session_id === sessionId);
 }
 
+// priorRoundFiles — the `files` of this (session, agent_id)'s most recent
+// register round, or null when no such round exists. A resume inherits them
+// (decision h22-dispatch-files-from-review-territory-and-resume-inherits-
+// prior-round): the resumed agent is still editing the territory it had, and
+// a resume re-fires only SubagentStart, never Pre/Post, so no brief exists to
+// re-derive it from. Most recent = highest `round` (1 when absent); a tie
+// keeps the later register position. Only the register carries `files`; a
+// dispatch-state record holds a prompt, which is nulled at Stop.
+function priorRoundFiles(root, sessionId, agentId) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== 'ok') return null;
+  let latest = null;
+  for (const e of entries) {
+    if (!e || e.agent_id !== agentId || e.session_id !== sessionId) continue;
+    const round = typeof e.round === 'number' ? e.round : 1;
+    if (latest === null || round >= latest.round) latest = { round, files: e.files };
+  }
+  return latest ? latest.files.slice() : null;
+}
+
 function appendStartedBy(record, consumer) {
   const prior = record.started;
   const by = Array.isArray(prior?.by) ? [...prior.by] : [];
@@ -1493,7 +1513,13 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     ) ||
       terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
-    return { verdict: 'resolved', value: { source: 'resume', case: 'resume', prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
+    // inherited_files: null when resume evidence came only from dispatch
+    // state (no register round of this session to inherit from).
+    const inherited_files = priorRoundFiles(root, session_id, agent_id);
+    return {
+      verdict: 'resolved',
+      value: { source: 'resume', case: 'resume', prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files },
+    };
   }
 
   // agent_type MISSING on Start -> no derivation is even attempted (§6):

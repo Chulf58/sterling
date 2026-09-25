@@ -8576,6 +8576,17 @@ function hasRegisterRound(root, sessionId, agentId) {
   if (availability !== "ok") return false;
   return entries.some((e) => e && e.agent_id === agentId && e.session_id === sessionId);
 }
+function priorRoundFiles(root, sessionId, agentId) {
+  const { availability, entries } = readRegister(root);
+  if (availability !== "ok") return null;
+  let latest = null;
+  for (const e of entries) {
+    if (!e || e.agent_id !== agentId || e.session_id !== sessionId) continue;
+    const round = typeof e.round === "number" ? e.round : 1;
+    if (latest === null || round >= latest.round) latest = { round, files: e.files };
+  }
+  return latest ? latest.files.slice() : null;
+}
 function appendStartedBy(record, consumer) {
   const prior = record.started;
   const by = Array.isArray(prior?.by) ? [...prior.by] : [];
@@ -8615,7 +8626,11 @@ function attemptDetermine(root, { session_id, agent_id, agent_type, consumer }) 
     ({ record }) => record.started?.agent_id === agent_id || record.post_binding?.agent_id === agent_id || record.derived_binding?.agent_id === agent_id
   ) || terminalResumeHit(root, scan, agent_id));
   if (resumeHit || hasRegisterRound(root, session_id, agent_id)) {
-    return { verdict: "resolved", value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null } };
+    const inherited_files = priorRoundFiles(root, session_id, agent_id);
+    return {
+      verdict: "resolved",
+      value: { source: "resume", case: "resume", prompt: null, subagent_type: agent_type ?? null, tool_use_id: null, record: null, inherited_files }
+    };
   }
   if (typeof agent_type !== "string" || agent_type === "") {
     return { verdict: "resolved", value: unattributable("no-agent-type", agent_type) };

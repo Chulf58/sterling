@@ -38,7 +38,7 @@
 import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { readStdin, allow, warnNonBlocking, repoRel, loadConfig } from './lib/common.mjs';
-import { extractPathCandidates } from './lib/dispatch-prompt.mjs';
+import { extractPathCandidates, parseReviewTerritory } from './lib/dispatch-prompt.mjs';
 import { deriveAgentTranscript } from './lib/transcript.mjs';
 import { isReviewerClass } from './lib/dispatch-advisory.mjs';
 import { probeDirtyPaths, formatResidueLine, claimedResources } from './lib/dispatch-residue.mjs';
@@ -74,13 +74,20 @@ function loadExclusiveResourceNames(cwd) {
 // "which prompt is mine" (decision dispatch-state-machine-pre-slot-post-
 // binding-locked-start-resolution-replaces-transcript-attribution).
 //
-// `files` is free-prose extraction ONLY — the REVIEW-TERRITORY structured
-// declaration override (parseReviewTerritory) and the claimed_files/
-// claimed_glob_prefixes write-side negation guard it fed are DELETED (no
-// non-test reader ever consumed them: research_finding
-// h22-dispatch-register-consumer-map-which-parts-have-a-reader-september-2026).
-// This hook now writes `files` (territory EXAMINED — the field h10/h1 read)
-// and nothing else on the territory axis.
+// `files` (territory EXAMINED — the field H10's deferral and H1/H10's residue
+// probe read) comes from, in order (decision h22-dispatch-files-from-review-
+// territory-and-resume-inherits-prior-round):
+//   1. a valid REVIEW-TERRITORY declaration in the attributed brief
+//      (files_source 'review-territory');
+//   2. otherwise free-prose extraction over the brief ('free-prose-fallback',
+//      or 'free-prose-malformed-territory' plus a stderr disclosure when a
+//      declaration was present but malformed);
+//   3. for a resume, which has no brief, the same agent's most recent prior
+//      round in this session ('resume-inherited');
+//   4. otherwise nothing ('unattributable').
+// The claimed_files/claimed_glob_prefixes write-side negation guard stays
+// deleted (research_finding h22-dispatch-register-consumer-map-which-parts-
+// have-a-reader-september-2026).
 // ---------------------------------------------------------------------------
 
 function candidatesFromBlocks(blocks) {
@@ -307,9 +314,32 @@ try {
 
       let files, attribution, filesSource;
       if (matchedBlocks.length && positionalSafe) {
-        files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
+        const territory = parseReviewTerritory(matchedBlocks[0].prompt);
+        if (territory.present && territory.valid) {
+          files = normalizeRegisterPaths(territory.files, input.cwd);
+          filesSource = 'review-territory';
+        } else {
+          files = normalizeRegisterPaths(candidatesFromBlocks(matchedBlocks), input.cwd);
+          filesSource = territory.present ? 'free-prose-malformed-territory' : 'free-prose-fallback';
+          if (territory.present) {
+            lines.push(
+              render(
+                disclosure(
+                  'territory_declaration_malformed',
+                  { line: territory.raw },
+                  `H22: malformed REVIEW-TERRITORY declaration ignored, so dispatch '${input.agent_id}' (${input.agent_type}) owns its free-prose paths instead, including any it was told not to write: ${territory.raw}`
+                )
+              )
+            );
+          }
+        }
         attribution = 'block';
-        filesSource = 'free-prose-fallback';
+      } else if (res.source === 'resume' && Array.isArray(res.inherited_files)) {
+        // A resumed agent keeps its prior round's territory; it still stages
+        // nothing and has no brief attributed (attribution 'none').
+        files = res.inherited_files;
+        attribution = 'none';
+        filesSource = 'resume-inherited';
       } else {
         files = [];
         attribution = 'none';

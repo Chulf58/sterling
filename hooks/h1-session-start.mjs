@@ -7794,6 +7794,10 @@ var GLOB_PREFIX_RE = /(?:[\w-]+\/){2,}\*\*/g;
 var PATH_SHAPED_TEST = new RegExp(`^(?:${PATH_CANDIDATE_RE.source}|${GLOB_PREFIX_RE.source})$`);
 
 // scripts/hooks/lib/dispatch-residue.mjs
+function pathOwnedBy(entry, path) {
+  if (typeof entry !== "string" || entry === "" || typeof path !== "string") return false;
+  return path === entry || path.startsWith(`${entry}/`);
+}
 function probeDirtyPaths(projectDir, files) {
   const declared = (Array.isArray(files) ? files : []).filter((f) => typeof f === "string" && f);
   if (declared.length === 0) return { verified: true, dirty: [] };
@@ -7824,7 +7828,11 @@ function probeDirtyPaths(projectDir, files) {
       i++;
     }
   }
-  return { verified: true, dirty: declared.filter((f) => flagged.has(f)) };
+  const dirty = [];
+  for (const entry of declared) {
+    for (const path of flagged) if (pathOwnedBy(entry, path) && !dirty.includes(path)) dirty.push(path);
+  }
+  return { verified: true, dirty };
 }
 function formatResidueLine(entry, paths, { verified = true, reason = "" } = {}) {
   const identity = `${entry?.agent_type ?? "unknown"}:${entry?.agent_id ?? "unknown"}`;

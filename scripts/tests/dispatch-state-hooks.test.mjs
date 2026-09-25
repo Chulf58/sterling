@@ -517,7 +517,11 @@ test('DSH-5: a RESUME (an already-ended round for this agent_id + a fresh same-t
     assert.equal(rounds.length, 2, 'each Start is its own round (decision 24dc4c63) — a resume appends round 2'); // not-a-citation: fixture id
     const unended = rounds.filter((e) => !e.ended);
     assert.equal(unended.length, 1);
-    assert.deepEqual(unended[0].files, []);
+    // RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
+    // inherits-prior-round (e841facd): the resumed round keeps round 1's
+    // territory (was files: []), and still never takes the stranger's.
+    assert.deepEqual(unended[0].files, ['src/round1.mjs'], "the resumed round inherits its own prior round's files, never the fresh slot's src/fresh.mjs");
+    assert.equal(unended[0].files_source, 'resume-inherited');
     assert.equal(unended[0].attribution, 'none');
   } finally {
     cleanup();
@@ -681,16 +685,16 @@ test('DSH-9: the DELETED transcript-tail readers survive NOWHERE — not in scri
 // the file that kept them. The bundle half is the load-bearing one: the
 // bundles are what the platform executes.
 
-test('DSH-10: extractPathCandidates SURVIVES in scripts/hooks/lib/dispatch-prompt.mjs; parseReviewTerritory is GONE (no non-test reader, H22 dispatch-register slim-down)', async () => {
+test('DSH-10: extractPathCandidates SURVIVES in scripts/hooks/lib/dispatch-prompt.mjs; parseReviewTerritory is RESTORED (it feeds `files`, which H10 reads); the transcript tail readers stay GONE', async () => {
   assert.equal(existsSync(DISPATCH_PROMPT_LIB), true, 'the prompt-parsing lib is kept, not deleted with the tail readers');
   const mod = await import(pathToFileURL(DISPATCH_PROMPT_LIB).href);
   assert.equal(typeof mod.extractPathCandidates, 'function', 'extractPathCandidates stays exported — the consumers parse the resolved prompt with it');
-  // parseReviewTerritory (decision 8f137474) is DELETED // not-a-citation: fixture id
-  // — research_finding h22-dispatch-register-consumer-map-which-parts-have-a-
-  // reader-september-2026 found no non-test reader of the REVIEW-TERRITORY
-  // declared-territory override — h22's SubagentStart now writes `files` from
-  // free-prose extraction only.
-  for (const name of ['lastDispatchPrompts', 'lastDispatchBlocks', 'attributeBlocks', 'parseReviewTerritory']) {
+  // RE-CUT by decision h22-dispatch-files-from-review-territory-and-resume-
+  // inherits-prior-round (e841facd): parseReviewTerritory was deleted in
+  // e16e127 as reader-less, but it fed the register's `files`, which H10's
+  // deferral join reads. It is restored; it was removed from the list below.
+  assert.equal(typeof mod.parseReviewTerritory, 'function', "parseReviewTerritory is exported again — H22's SubagentStart reads it");
+  for (const name of ['lastDispatchPrompts', 'lastDispatchBlocks', 'attributeBlocks']) {
     assert.equal(mod[name], undefined, `${name} must not survive as an export — an importable reader is a live fallback, not dead code`);
   }
 });

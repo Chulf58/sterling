@@ -450,9 +450,13 @@ test('R1-A94 CONTROL: the SAME agent_id after an ENDED round is ADMITTED as a ne
     // STRANGER's territory, and H19's delivery guard would make that
     // misattribution permanent. The pending slot below proves it was left for
     // its real owner.
-    assert.deepEqual(unended[0].files, [], 'a RESUMED round stages nothing and declares no territory (§5(ii)) — it must never claim the fresh pending slot beside it');
+    // SECOND RE-CUT, decision h22-dispatch-files-from-review-territory-and-
+    // resume-inherits-prior-round (e841facd): the resumed round still stages
+    // nothing and never claims the fresh slot, but it now INHERITS round 1's
+    // territory (was files:[] files_source:'unattributable').
+    assert.deepEqual(unended[0].files, ['src/x.mjs'], "a RESUMED round inherits its own round 1's territory (§5(ii) still holds) — it must never claim the fresh pending slot's src/y.mjs");
     assert.equal(unended[0].attribution, 'none');
-    assert.equal(unended[0].files_source, 'unattributable');
+    assert.equal(unended[0].files_source, 'resume-inherited');
   } finally {
     cleanup();
   }
