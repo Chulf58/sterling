@@ -476,6 +476,36 @@ try {
   // fail-open — a malformed config costs only this line
 }
 
+// PROJECT MODE (decision project-mode-hobby-work-toggle-decides-flow, slice S1):
+// informational only — states this project's config.mode next to the role and
+// TDD lines so the session knows which flow applies. Same three states as the
+// TDD line above: an absent key IS the schema default (hobby); an unreadable
+// config is UNKNOWN, never the default; and a value outside hobby/work reads
+// INVALID, never as either flow (the surfaces that act on the mode refuse it).
+let modeContext = '';
+try {
+  if (configUnreadable) {
+    modeContext =
+      '\n\nProject mode: UNKNOWN — the project config could not be read, so config.mode could not be determined. ' +
+      'This is NOT the hobby default: repair the config.';
+  } else {
+    const mode = config?.mode;
+    if (mode === undefined || mode === 'hobby' || mode === 'work') {
+      modeContext =
+        `\n\nProject mode: ${mode === 'work' ? 'WORK' : 'HOBBY'} (config.mode — TUI System tab) — ` +
+        (mode === 'work'
+          ? 'the OpenCode agents and handoff files are written and maintained.'
+          : 'no OpenCode agents or handoff files; those are work-only.');
+    } else {
+      modeContext =
+        `\n\nProject mode: INVALID (${JSON.stringify(mode).replace(/^"|"$/g, "'")}) — config.mode must be 'hobby' or 'work'; ` +
+        'init, sync-agents and /sterling:update refuse to act on it until it is fixed (TUI System tab).';
+    }
+  }
+} catch {
+  // fail-open — a malformed config costs only this line
+}
+
 // CLONE-CURRENCY SIGNAL (closes the gap decision foreign_be9168e8 surfaced and parked:
 // "a machine that never runs /sterling:update has no passive signal that it is
 // behind"). Probes the CLONE at pluginRoot() — not this project — so every
@@ -1718,7 +1748,7 @@ const output = {
   systemMessage: `${staleWarning}${machineWarning}${agentCurrencyWarning}${currencyWarning}${counts.todos} task${counts.todos === 1 ? '' : 's'}${counts.objectives > 0 ? ` (${counts.groupedTodos} in ${counts.objectives} objective${counts.objectives === 1 ? '' : 's'})` : ''} · ${counts.maintenance} maintenance item${counts.maintenance === 1 ? '' : 's'} pending`,
   // PLAN LOCK LEADS (decision plan-lock-...): it is the authority over what this
   // session may take on, so it is read before everything else.
-  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
+  hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: planLockContext + conductorActivationContext + rotationContext + dispatchResidueContext + residueContext + roleContext + tddPostureContext + modeContext + currencyContext + registryContext + machineContext + agentCurrencyContext + queueContext + undeclaredSourceContext },
 };
 // R0: the payload and the exit are ONE state machine — a bare
 // process.stdout.write() followed by a separate allow() can exit before the

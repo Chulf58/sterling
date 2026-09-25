@@ -323,3 +323,26 @@ test('agents: a non-array extra_tools (e.g. a string) still parses — refused a
     assert.deepEqual(parseConfig({ agents: { implementor: { extra_tools: bad } } }).agents.implementor.extra_tools, bad);
   }
 });
+
+// ------------------- project mode (decision project-mode-hobby-work-toggle-decides-flow, slice S1) -------------------
+
+// The default lives TWICE (anti_pattern 85d15143): the zod default and
+// templates/default-config.json. A missing key means hobby; the two copies must agree.
+type CfgWithMode = { mode?: string };
+
+test('mode: an empty config defaults to hobby, and the shipped template carries the same default', () => {
+  const empty = parseConfig({}) as unknown as CfgWithMode;
+  assert.equal(empty.mode, 'hobby', 'a missing mode key means hobby');
+  const rawTemplate = JSON.parse(readFileSync(join(root, 'templates', 'default-config.json'), 'utf8')) as CfgWithMode;
+  assert.equal(rawTemplate.mode, 'hobby', 'templates/default-config.json declares mode explicitly');
+  const shipped = parseConfig(rawTemplate) as unknown as CfgWithMode;
+  assert.equal(shipped.mode, empty.mode, 'schema default and shipped template agree');
+});
+
+test('mode: work is accepted; an invalid value is refused loudly, never coerced to a flow', () => {
+  assert.equal((parseConfig({ mode: 'work' }) as unknown as CfgWithMode).mode, 'work');
+  assert.equal((parseConfig({ mode: 'hobby' }) as unknown as CfgWithMode).mode, 'hobby');
+  for (const bad of ['Work', 'hobbyist', '', 1, true, null]) {
+    assert.throws(() => parseConfig({ mode: bad }), /mode/, `mode ${JSON.stringify(bad)} must be refused`);
+  }
+});

@@ -51,5 +51,6 @@
   },
   "tdd": {
     "enabled": true
-  }
+  },
+  "mode": "hobby"
 }

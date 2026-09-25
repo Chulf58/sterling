@@ -5147,7 +5147,17 @@ var configSchema = external_exports.object({
   // gate or hook arm keys on this toggle.
   tdd: external_exports.object({
     enabled: external_exports.boolean().default(true)
-  }).default({})
+  }).default({}),
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
+  // per-project switch that decides the flow. 'hobby' (the default, today's
+  // behaviour) skips the OpenCode agents and the handoff projection; 'work'
+  // writes and maintains them. Toggled in the TUI System tab. A missing key
+  // means hobby. A strict enum on purpose: an invalid value is REFUSED, never
+  // read as either flow. The scripts that act on the mode read it through
+  // readProjectMode() (scripts/lib/handoff-projection.mjs), which refuses the
+  // same way. The default lives twice (anti_pattern 85d15143): here and in
+  // templates/default-config.json; config.test.ts pins that they agree.
+  mode: external_exports.enum(["hobby", "work"]).default("hobby")
 });
 
 // packages/schemas/dist/registry.js
