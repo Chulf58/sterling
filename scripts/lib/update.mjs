@@ -25,6 +25,8 @@ import { dirname, join } from 'node:path';
 // bootstrap-independence note in scripts/update.mjs).
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './update-launcher.mjs';
 import { ensureConsumerCheckLauncher, CONSUMER_CHECK_LAUNCHER_NAME } from './consumer-checks.mjs';
+import { readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './handoff-projection.mjs';
+import { ContainmentError } from './contained-fs.mjs';
 
 // Build + test batteries dominate an update (measured on this machine: build
 // ~19s, check ~12s, tests ~87s), so the ceiling is generous — a timeout here
@@ -326,6 +328,15 @@ function writeUpdateMarker(cwd, sha, handoffRetry = []) {
   writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry }, null, 2) + '\n');
 }
 
+// A work project is fully provisioned when its portable OpenCode agents and both
+// handoff indexes exist. Presence only: whether they are CURRENT is the full
+// fan-out's job, and a project whose projection refuses keeps its retry state.
+function workFilesMissing(repoPath) {
+  const agentsDir = join(repoPath, '.opencode', 'agents');
+  const hasAgents = existsSync(agentsDir) && readdirSync(agentsDir).some((f) => f.endsWith('.md'));
+  return !hasAgents || !existsSync(join(repoPath, 'architecture.md')) || !existsSync(join(repoPath, 'rulings.md'));
+}
+
 // What to do about a project whose handoff refusal will not go away by itself.
 export function handoffRetryRemedy(repoPath) {
   return (
@@ -386,7 +397,24 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // missing or empty store): the project joins report.handoff_retry, which the
   // completion marker persists, and the next already-current run retries ONLY it.
   // Any other failure (exit 1) may have left an INCOMPLETE export: update exit 1.
+  // Project mode (decision project-mode-hobby-work-toggle-decides-flow): the
+  // projection is WORK-ONLY, read from the project's OWN config. Hobby is a loud
+  // skip (returns 'skipped', deletes nothing, never enters the retry set); an
+  // invalid mode is an actionable refusal that joins the retry set like exit 3.
   const runHandoff = (p) => {
+    let mode;
+    try {
+      mode = readProjectMode(p.repo_path);
+    } catch (err) {
+      if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+      log(`      ✗ handoff projection: REFUSED — ${err.message}\n        (the next /sterling:update retries this project once the mode is fixed)`);
+      report.handoff_retry.push(p.repo_path);
+      return 3;
+    }
+    if (mode !== 'work') {
+      log(`      skipped — ${HOBBY_SKIP_DETAIL}`);
+      return 'skipped';
+    }
     const handoff = exec(nodeBin, [join(cwd, 'scripts', 'handoff-projection.mjs'), p.repo_path], { cwd });
     const handoffOut = `${handoff.stdout}${handoff.stderr}`.trim();
     const handoffLine = handoffOut.split('\n')[0];
@@ -577,8 +605,9 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       // already-current update has already succeeded by the time we get here, so a
       // registry failure must NOT reject the update or leave a half-applied state
       // — log and continue to the success return.
+      let noopProjectList = [];
       try {
-        const noopProjectList =
+        noopProjectList =
           opts.projects === false ? [] : (typeof projects === 'function' ? (await projects()) ?? [] : projects);
         // The blind spot this reports is INDEPENDENT of clone lag — an
         // already-current clone with two unregistered projects is the measured
@@ -586,6 +615,46 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         await reportCoverage(noopProjectList);
       } catch (err) {
         log(`\n⚠ registry coverage skipped — project registry unavailable (nonfatal): ${err?.message ?? err}`);
+      }
+      // Hobby→work with HEAD unchanged (decision
+      // project-mode-hobby-work-toggle-decides-flow): a project switched to work
+      // after the last full update has no OpenCode agents or handoff files yet,
+      // and no new commit will ever trigger the fan-out for it. Provision exactly
+      // the work projects whose files are missing (agent sync + projection);
+      // everything else stays "already current".
+      const toProvision = [];
+      for (const p of noopProjectList) {
+        let mode;
+        try {
+          mode = readProjectMode(p.repo_path);
+        } catch (err) {
+          if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+          log(`\n⚠ ${p.name}: ${err.message}`);
+          continue;
+        }
+        if (mode === 'work' && workFilesMissing(p.repo_path)) toProvision.push(p);
+      }
+      if (toProvision.length) {
+        log(`\n▸ already current at ${before.head_short}; provisioning ${toProvision.length} work-mode project(s) whose OpenCode or handoff files are missing`);
+        for (const p of toProvision) {
+          const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
+          const out = `${r.stdout}${r.stderr}`.trim();
+          if (r.status !== 0) {
+            log(`  ✗ ${p.name}: agent sync ${r.status === 2 ? 'REFUSED' : 'failed'} (exit ${r.status}):\n${out.split('\n').map((l) => `      ${l}`).join('\n')}`);
+            report.exit = r.status === 2 ? 2 : report.exit === 0 ? 1 : report.exit;
+          } else {
+            log(`  • ${p.name}: agents synced`);
+          }
+          report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff: runHandoff(p) });
+        }
+        try {
+          writeUpdateMarker(cwd, markerSha, report.handoff_retry);
+        } catch (err) {
+          log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
+          report.exit = report.exit === 0 ? 1 : report.exit;
+        }
+        if (report.handoff_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
+        return report;
       }
       log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
       return report;

@@ -30,7 +30,7 @@ import { backupPathForRuntime } from './lib/wsl-path.mjs';
 import { resolveToolchains } from './adapters/resolve.mjs';
 import { syncAgents, findDeadTerms, RESTART_INSTRUCTION, agentChangesRequireRestart, ensureConductorActivation, describeConfigDrift } from './lib/agent-distribution.mjs';
 import { syncOpenCodeAgents, OPENCODE_AGENTS_DIR } from './lib/opencode-agents.mjs';
-import { isSterlingClone, isOwnedExport, HANDOFF_DIRS } from './lib/handoff-projection.mjs';
+import { isSterlingClone, isOwnedExport, HANDOFF_DIRS, readProjectMode, ProjectModeError, HOBBY_SKIP_DETAIL } from './lib/handoff-projection.mjs';
 import { ContainmentError } from './lib/contained-fs.mjs';
 import { ensureUpdateLauncher, UPDATE_LAUNCHER_NAME } from './lib/update-launcher.mjs';
 import { stampBody, verifyStamp } from './lib/generated-marker.mjs';
@@ -165,6 +165,10 @@ const expectedConfig = parseConfig({
     ? { project_name: recorded ? recorded.project_name : eff.projectName }
     : {}),
   ...(eff.backupPath ? { backup_path: eff.backupPath } : { backup_opt_out: eff.backupOptOut }),
+  // the project mode (decision project-mode-hobby-work-toggle-decides-flow) is a
+  // recorded declaration like the ones above, switched in the TUI System tab: a
+  // work project's config is not "hand-edited" for carrying it
+  ...(recorded ? { mode: recorded.mode } : {}),
 });
 if (eff.splitRatio === undefined) eff.splitRatio = expectedConfig.tui_split_ratio;
 
@@ -967,9 +971,24 @@ try {
   handoffCloneTarget = null;
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
 }
+// Project mode (decision project-mode-hobby-work-toggle-decides-flow): both are
+// WORK-ONLY, read from this target's own config. Hobby is a loud skip row that
+// deletes nothing; every init run provisions a work target, so re-running init
+// after a hobby→work switch writes the files.
+let handoffMode = null;
+if (handoffCloneTarget === false) {
+  try {
+    handoffMode = readProjectMode(target);
+  } catch (err) {
+    if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+    items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'refused', detail: `${err.message} — nothing written` });
+  }
+}
 if (handoffCloneTarget === true) {
   items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: 'the target is a Sterling clone — it has its own projections and is not a handoff target' });
-} else if (handoffCloneTarget === false) {
+} else if (handoffMode === 'hobby') {
+  items.push({ item: `${OPENCODE_AGENTS_DIR}/ + handoff projection`, status: 'skipped', detail: HOBBY_SKIP_DETAIL });
+} else if (handoffMode === 'work') {
   const { report: opencodeReport } = syncOpenCodeAgents({
     templatesDir: join(pluginRoot, 'agent-templates'),
     registryPath: join(pluginRoot, 'agent-templates', 'registry.json'),

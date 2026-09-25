@@ -2507,12 +2507,61 @@ test('H containment: the whole suite leaves THIS clone\'s live plugin MCP config
 // init prepares a target for engineers WITHOUT Sterling — portable OpenCode agents
 // and the handoff projection, all committed (never gitignored), and a rerun is
 // byte-stable.
-test('OpenCode handoff: fresh init writes committed .opencode/agents/ and the handoff projection; a rerun matches', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'sterling-opencode-init-'));
+// Decision project-mode-hobby-work-toggle-decides-flow (slice S1): those files are
+// WORK-ONLY. A fresh init records mode 'hobby' (the shipped default), so the
+// project is switched to work — as the TUI System tab does — and init re-run.
+const setMode = (dir, mode) => {
+  const p = join(dir, '.sterling', 'config.json');
+  writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, 'utf8')), mode }, null, 2));
+};
+const HOBBY_ROW = /^\.opencode\/agents\/ \+ handoff projection\s+skipped\s+project mode is hobby \(OpenCode and handoff files are work-only; existing files are no longer maintained, and nothing is deleted\)/m;
+
+test('project mode: a fresh (hobby) init writes no OpenCode agents and no handoff files, with a loud skip row', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-init-hobby-'));
   try {
     assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
     const r = init(dir, FRESH_FLAGS);
     assert.equal(r.code, 0, r.stderr);
+    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'hobby', 'a fresh config records the hobby default');
+    assert.match(r.stdout, HOBBY_ROW);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
+    assert.ok(!existsSync(join(dir, 'architecture.md')));
+    assert.ok(!existsSync(join(dir, 'rulings.md')));
+    assert.ok(!existsSync(join(dir, 'docs', 'sterling')));
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('project mode: work→hobby re-init deletes nothing — every file byte-identical, skip row says so', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-init-tohobby-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    setMode(dir, 'work');
+    assert.equal(init(dir).code, 0);
+    const files = ['.opencode/agents/implementor.md', '.opencode/agents/researcher.md', '.opencode/agents/scout.md', 'architecture.md', 'rulings.md'];
+    const before = Object.fromEntries(files.map((f) => [f, readFileSync(join(dir, f), 'utf8')]));
+    setMode(dir, 'hobby');
+    const r = init(dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stdout, HOBBY_ROW);
+    for (const [f, content] of Object.entries(before)) assert.equal(readFileSync(join(dir, f), 'utf8'), content, `${f} kept byte-identical`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test('OpenCode handoff: a work project\'s init writes committed .opencode/agents/ and the handoff projection; a rerun matches', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-opencode-init-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    // hobby→work: the next init provisions (HEAD unchanged — init always provisions a work target)
+    setMode(dir, 'work');
+    const r = init(dir);
+    assert.equal(r.code, 0, r.stderr);
+    assert.doesNotMatch(r.stdout, HOBBY_ROW);
     for (const name of ['implementor', 'researcher', 'scout']) {
       assert.match(r.stdout, new RegExp(`^\\.opencode/agents/${name}\\.md\\s+created\\b`, 'm'));
       assert.match(readFileSync(join(dir, '.opencode', 'agents', `${name}.md`), 'utf8'), /^---\ndescription: .+\nmode: subagent\n/);
@@ -2571,7 +2620,9 @@ test('OpenCode handoff: a target whose .gitignore already covers the handoff pat
   try {
     assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
     writeFileSync(join(dir, '.gitignore'), '.opencode/\nrulings.md\n');
-    const r = init(dir, FRESH_FLAGS);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    setMode(dir, 'work'); // the handoff files are work-only (decision project-mode-hobby-work-toggle-decides-flow)
+    const r = init(dir);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stdout, /^\.opencode\/agents\/scout\.md\s+refused\s+ignored by git/m);
     assert.match(r.stdout, /\.gitignore:1:\.opencode\//);

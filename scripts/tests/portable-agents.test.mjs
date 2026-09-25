@@ -316,6 +316,9 @@ test('sync refuses a foreign same-named file and leaves it untouched', () => {
 test('the sync-agents CLI (the /sterling:update fan-out) writes the portable set and exits 2 on a portable refusal', () => {
   const dir = tempTarget();
   try {
+    // the portable set is work-only (decision project-mode-hobby-work-toggle-decides-flow)
+    mkdirSync(join(dir, '.sterling'), { recursive: true });
+    writeFileSync(join(dir, '.sterling', 'config.json'), JSON.stringify({ mode: 'work' }));
     const cli = () => spawnSync(process.execPath, [join(root, 'scripts', 'sync-agents.mjs'), '--target', dir], { encoding: 'utf8', cwd: dir });
     const first = cli();
     assert.equal(first.status, 0, first.stdout + first.stderr);
