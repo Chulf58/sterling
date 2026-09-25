@@ -27,7 +27,7 @@
 // — board 09f05fca half 2, review fix.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { SparringToggleEffect, TddToggleEffect } from './state.js';
+import type { ModeToggleEffect, SparringToggleEffect, TddToggleEffect } from './state.js';
 
 function configPath(explicit?: string): string {
   return explicit ?? join(process.cwd(), '.sterling', 'config.json');
@@ -67,6 +67,25 @@ export function applyTddToggle(e: TddToggleEffect, onError?: (msg: string) => vo
     return true;
   } catch (err) {
     onError?.(`tdd toggle failed — ${(err as Error).message}`);
+    return false;
+  }
+}
+
+/** Execute a mode_toggle effect: config.mode write only (decision
+ *  project-mode-hobby-work-toggle-decides-flow) — mirrors applyTddToggle. The
+ *  switch deletes nothing: work→hobby leaves existing OpenCode and handoff
+ *  files in place (they stop being maintained); hobby→work is provisioned by
+ *  the next init, sync-agents or /sterling:update. Optional trailing `path`
+ *  overrides the cwd-derived default (see applySparringToggle). */
+export function applyModeToggle(e: ModeToggleEffect, onError?: (msg: string) => void, path?: string): boolean {
+  try {
+    const target = configPath(path);
+    const raw = JSON.parse(readFileSync(target, 'utf8')) as { mode?: string };
+    raw.mode = e.mode;
+    writeFileSync(target, JSON.stringify(raw, null, 2) + '\n');
+    return true;
+  } catch (err) {
+    onError?.(`mode toggle failed — ${(err as Error).message}`);
     return false;
   }
 }

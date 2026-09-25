@@ -8,8 +8,8 @@ import { randomUUID } from 'node:crypto';
 import { MountedStores, resolveDomainMounts, catalogStatus, type DomainMount } from '@sterling/store';
 import { parseConfig, AGENT_MODEL_KEY } from '@sterling/schemas';
 import { acquireTuiLock, releaseTuiLock } from './lock.js';
-import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect } from './state.js';
-import { applySparringToggle, applyTddToggle } from './config-writeback.js';
+import { buildDashboardState, initialUi, reduce, runEffects, visibleBodyLines, SYSTEM_TAB, type UiState, type AgentRosterSnapshot, type RosterAgent, type CatalogStatusView, type ModelSwapEffect, type SparringToggleEffect, type SparringModelEffect, type TddToggleEffect, type ModeToggleEffect } from './state.js';
+import { applyModeToggle, applySparringToggle, applyTddToggle } from './config-writeback.js';
 import { bannerLines } from './banner.js';
 import { draw, keyToEvent, mouseToEvent } from './render.js';
 
@@ -141,6 +141,7 @@ function loadRoster(): AgentRosterSnapshot {
   const configModels = cfg.models ?? {};
   const sparringPartner = { enabled: cfg.sparring_partner?.enabled ?? true, model: cfg.sparring_partner?.model };
   const tdd = { enabled: cfg.tdd?.enabled ?? true };
+  const mode = readRawMode();
   const codexWired = probeCodexWired();
   const agents: RosterAgent[] = Object.keys(AGENT_MODEL_KEY)
     .filter((name) => existsSync(join(agentsDir, `${name}.md`)))
@@ -167,7 +168,22 @@ function loadRoster(): AgentRosterSnapshot {
     // (audit finding 41/43) — surface it as a visible System-tab notice instead.
     ui = { ...ui, notice: `catalog unavailable — ${(err as Error).message}` };
   }
-  return { agents, configModels, catalog, sparringPartner, codexWired, tdd };
+  return { agents, configModels, catalog, sparringPartner, codexWired, tdd, mode };
+}
+
+/** config.mode as written on disk (decision project-mode-hobby-work-toggle-decides-flow).
+ *  Read RAW, not through parseConfig: the schema refuses an invalid mode, and
+ *  the row must show that value as INVALID rather than lose it. Absent →
+ *  undefined (hobby); an unreadable config → null, which the row shows as
+ *  UNKNOWN (never the hobby default) with the read error as a notice. */
+function readRawMode(): string | null | undefined {
+  try {
+    const raw = JSON.parse(readFileSync(configPath, 'utf8')) as { mode?: unknown };
+    return raw.mode === undefined ? undefined : typeof raw.mode === 'string' ? raw.mode : JSON.stringify(raw.mode);
+  } catch (err) {
+    ui = { ...ui, notice: `project mode unknown — config unreadable: ${(err as Error).message}` };
+    return null;
+  }
 }
 
 /** Execute a sparring_model effect: config.sparring_partner.model write. An
@@ -289,13 +305,21 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
   // last-write-wins on the shared notice sink.
   const sparringToggles = result.effects.filter((e): e is SparringToggleEffect => e.type === 'sparring_toggle');
   const tddToggles = result.effects.filter((e): e is TddToggleEffect => e.type === 'tdd_toggle');
+  const modeToggles = result.effects.filter((e): e is ModeToggleEffect => e.type === 'mode_toggle');
   let toggleWrote = false;
   let toggleFailure: string | undefined;
   const collectFailure = (msg: string) => { toggleFailure = msg; };
   for (const e of sparringToggles) { if (applySparringToggle(e, collectFailure, configPath)) toggleWrote = true; }
   for (const e of tddToggles) { if (applyTddToggle(e, collectFailure, configPath)) toggleWrote = true; }
+  let modeWritten: ModeToggleEffect['mode'] | undefined;
+  for (const e of modeToggles) { if (applyModeToggle(e, collectFailure, configPath)) { toggleWrote = true; modeWritten = e.mode; } }
   if (toggleFailure !== undefined) {
     notice(toggleFailure);
+  } else if (modeWritten !== undefined) {
+    // what the switch does to the files, said at the moment it is made
+    notice(modeWritten === 'work'
+      ? 'project mode set to work — the next init, sync-agents or /sterling:update writes the OpenCode agents and handoff files.'
+      : 'project mode set to hobby — OpenCode agents and handoff files are no longer maintained; existing files were NOT deleted.');
   } else if (toggleWrote) {
     // Was: "run enforcement_reconcile {adopt:true}… (H17 latch)" — H17's
     // config-write taint latch and enforcement_reconcile were both removed
@@ -306,7 +330,7 @@ async function handle(event: ReturnType<typeof keyToEvent>): Promise<void> {
     // pick the new value up there.
     notice('config.json updated — hooks pick this up on their next invocation; restart the session to reload the MCP server.');
   }
-  if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length) roster = loadRoster();
+  if (swaps.length || sparringToggles.length || sparringModels.length || tddToggles.length || modeToggles.length) roster = loadRoster();
   if (runEffects(store, result.effects)) {
     restoreTerminal();
     process.exit(0);

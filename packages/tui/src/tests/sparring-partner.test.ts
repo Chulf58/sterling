@@ -281,9 +281,11 @@ test('sparring 4: UP/DOWN traverse past the config.models keys onto the toggle r
     // already owns. The sibling mutation row that used to sit one further
     // row down was REMOVED entirely (decision
     // cleanup-run-deletes-dead-scripts-and-removes-mutation-verification-key,
-    // 2026-09-22), so the tdd row is now the true bottom.
-    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 2 }), key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 2, "DOWN clamps at the tab's true last row (the tdd row), not the model row");
+    // 2026-09-22). The project mode row (decision
+    // project-mode-hobby-work-toggle-decides-flow) then joined below the tdd row,
+    // so it is now the true bottom.
+    const clamped = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 3 }), key('DOWN'), undefined, undefined, snap);
+    assert.equal(clamped.ui.cursor, numKeys + 3, "DOWN clamps at the tab's true last row (the project mode row), not the model row");
 
     let up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, numKeys, 'UP from the model row returns to the toggle row');

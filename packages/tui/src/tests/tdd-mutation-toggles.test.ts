@@ -251,10 +251,15 @@ test('toggles 3: UP/DOWN traverse past sparringRows onto the tdd row, and clamp 
     let r = SR.reduce(store, st({ tab: SYS_TAB, cursor: numKeys + 1 }), key('DOWN'), undefined, undefined, snap);
     assert.equal(r.ui.cursor, numKeys + 2, 'DOWN from the sparring model row lands on the tdd toggle row');
 
-    const clamped = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
-    assert.equal(clamped.ui.cursor, numKeys + 2, 'DOWN past the tdd row clamps — it is the last row on the tab');
+    // The tdd row is no longer the tab's last row: the project mode row
+    // (decision project-mode-hobby-work-toggle-decides-flow) sits below it at
+    // numKeys + 3 and owns the bottom clamp (pinned in project-mode-toggle.test.ts).
+    const below = SR.reduce(store, r.ui, key('DOWN'), undefined, undefined, snap);
+    assert.equal(below.ui.cursor, numKeys + 3, 'DOWN past the tdd row lands on the project mode row');
+    const clamped = SR.reduce(store, below.ui, key('DOWN'), undefined, undefined, snap);
+    assert.equal(clamped.ui.cursor, numKeys + 3, "DOWN clamps at the tab's true last row (the project mode row)");
 
-    const up = SR.reduce(store, clamped.ui, key('UP'), undefined, undefined, snap);
+    const up = SR.reduce(store, r.ui, key('UP'), undefined, undefined, snap);
     assert.equal(up.ui.cursor, numKeys + 1, 'UP from the tdd row returns to the sparring model row');
   } finally {
     cleanup();
@@ -356,7 +361,7 @@ test('toggles 6: buildDashboardState honors ui.scroll on the System tab — the 
       lastEffects = r.effects;
     }
     void lastEffects;
-    assert.equal(cur.cursor, numKeys + 2, 'DOWN-walked all the way onto the tdd row (the last row on the tab)');
+    assert.equal(cur.cursor, numKeys + 2, 'DOWN-walked all the way onto the tdd row');
     assert.ok((cur.scroll ?? 0) > 0, 'precondition: the reducer already pushes ui.scroll forward to keep the cursor in view');
 
     // The bug under test: buildDashboardState's SYS_TAB branch is reported to
@@ -423,10 +428,10 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     assert.strictEqual(typeof stateMod.screenLineToRow, 'function', 'screenLineToRow must be exported');
 
     const numKeys = Object.keys(baseSnapshot().configModels).length;
-    const totalSelectableRows = numKeys + 3; // config rows + 2 sparring + 1 tdd (frozen: toggles 1-6)
+    const totalSelectableRows = numKeys + 4; // config rows + 2 sparring + 1 tdd (frozen: toggles 1-6) + 1 project mode (decision project-mode-hobby-work-toggle-decides-flow)
     const maxBodyLines = 2; // total SYS_TAB rows exceed this — the roster is taller than the viewport
     const vp = { maxBodyLines, width: 80 };
-    const lastRowCursor = numKeys + 2; // the tdd row — the last selectable row on the tab
+    const lastRowCursor = numKeys + 3; // the project mode row — the last selectable row on the tab
 
     interface DashRow { selected?: boolean }
     interface Dash { rows: DashRow[]; bodyTop: number; scroll?: number }
@@ -512,14 +517,14 @@ test('toggles 7 (board 8fc765e2): a notice banner does not push the selected row
     assertSelectedRowVisible(controlDash, 'CONTROL (stationary cursor, revealAt never invoked)');
 
     // TREATMENT ARM — the same bannerSnap, DOWN-walked from the top onto the
-    // tdd row (the last selectable row), exactly like toggles 6. This is the
+    // project mode row (the last selectable row), exactly like toggles 6. This is the
     // arm that actually exercises revealAt's banner-offset arithmetic.
     function driveToLastRow(snap: AgentRosterSnapshot): UiState {
       let cur = st({ tab: SYS_TAB, cursor: 0, scroll: 0 });
       for (let i = 0; i < lastRowCursor; i++) {
         cur = SR.reduce(store, cur, key('DOWN'), vp, undefined, snap).ui;
       }
-      assert.equal(cur.cursor, lastRowCursor, 'DOWN-walked onto the tdd row (the last selectable row on the tab)');
+      assert.equal(cur.cursor, lastRowCursor, 'DOWN-walked onto the project mode row (the last selectable row on the tab)');
       return cur;
     }
     const treatmentDash = buildDashboardState(store, driveToLastRow(bannerSnap), 80, maxBodyLines, undefined, undefined, undefined, bannerSnap);
