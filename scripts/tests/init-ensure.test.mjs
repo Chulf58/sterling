@@ -2533,6 +2533,22 @@ test('project mode: a fresh (hobby) init writes no OpenCode agents and no handof
   }
 });
 
+test('project mode: an invalid mode is a refused row naming the value — the rest of init completes, nothing handoff-related is written', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-init-invalid-'));
+  try {
+    assert.equal(spawnSync('git', ['init', '-q'], { cwd: dir, encoding: 'utf8' }).status, 0);
+    assert.equal(init(dir, FRESH_FLAGS).code, 0);
+    setMode(dir, 'Work');
+    const r = init(dir);
+    assert.match(r.stdout, /^\.opencode\/agents\/ \+ handoff projection\s+refused\s+config\.mode is "Work"/m, r.stdout + r.stderr);
+    assert.ok(!existsSync(join(dir, '.opencode', 'agents', 'scout.md')));
+    assert.ok(!existsSync(join(dir, 'architecture.md')));
+    assert.equal(JSON.parse(readFileSync(join(dir, '.sterling', 'config.json'), 'utf8')).mode, 'Work', 'the raw value is left for the user to fix');
+  } finally {
+    rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
 test('project mode: work→hobby re-init deletes nothing — every file byte-identical, skip row says so', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sterling-mode-init-tohobby-'));
   try {

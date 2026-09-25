@@ -339,10 +339,15 @@ test('mode: an empty config defaults to hobby, and the shipped template carries 
   assert.equal(shipped.mode, empty.mode, 'schema default and shipped template agree');
 });
 
-test('mode: work is accepted; an invalid value is refused loudly, never coerced to a flow', () => {
+test('mode: parseConfig is PERMISSIVE — hobby/work pass, any other value is preserved raw, never coerced and never thrown on', () => {
+  // A typo in config.mode must not brick every parseConfig reader (the MCP
+  // server boots through it). readProjectMode (scripts/lib/handoff-projection.mjs)
+  // is the strict judge wherever the mode is ACTED on; its refusal tests live in
+  // scripts/tests/project-mode-gating.test.mjs.
   assert.equal((parseConfig({ mode: 'work' }) as unknown as CfgWithMode).mode, 'work');
   assert.equal((parseConfig({ mode: 'hobby' }) as unknown as CfgWithMode).mode, 'hobby');
-  for (const bad of ['Work', 'hobbyist', '', 1, true, null]) {
-    assert.throws(() => parseConfig({ mode: bad }), /mode/, `mode ${JSON.stringify(bad)} must be refused`);
+  for (const raw of ['Work', 'hobbyist', '', 1, true, null, ['work'], { mode: 'work' }]) {
+    const parsed = parseConfig({ mode: raw }) as unknown as { mode?: unknown };
+    assert.deepEqual(parsed.mode, raw, `mode ${JSON.stringify(raw)} is preserved verbatim, never coerced to hobby`);
   }
 });

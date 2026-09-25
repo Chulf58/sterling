@@ -64,6 +64,11 @@ test('readProjectMode: an invalid value or unparseable config is refused loudly,
   try {
     assert.throws(() => readProjectMode(bad), (e) => e instanceof ProjectModeError && /"Work"/.test(e.message) && /'hobby' or 'work'/.test(e.message));
     assert.throws(() => readProjectMode(broken), (e) => e instanceof ProjectModeError && /not valid JSON/.test(e.message));
+    // the refusals parseConfig no longer makes (it preserves the raw value)
+    for (const raw of ['', 'hobbyist', 1, true, null, ['work'], { mode: 'work' }]) {
+      writeFileSync(join(bad, '.sterling', 'config.json'), JSON.stringify({ mode: raw }));
+      assert.throws(() => readProjectMode(bad), (e) => e instanceof ProjectModeError && e.message.includes(JSON.stringify(raw)), `mode ${JSON.stringify(raw)} refused`);
+    }
   } finally {
     cleanup(bad);
     cleanup(broken);
