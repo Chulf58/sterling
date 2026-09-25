@@ -219,7 +219,7 @@ async function update({ behind, projects, cwd }) {
   const { exec, calls } = updateExec({ behind });
   const lines = [];
   const report = await runUpdate({ cwd, exec, log: (l) => lines.push(l), projects: projects.map((p) => ({ name: p.split(/[\\/]/).pop(), repo_path: p })), opts: {} });
-  return { report, log: lines.join('\n'), handoffCalls: calls.filter((c) => c.includes('handoff-projection.mjs')), syncCalls: calls.filter((c) => c.includes('sync-agents.mjs')) };
+  return { report, calls, log: lines.join('\n'), handoffCalls: calls.filter((c) => c.includes('handoff-projection.mjs')), syncCalls: calls.filter((c) => c.includes('sync-agents.mjs')) };
 }
 const scratch = () => mkdtempSync(join(tmpdir(), 'sterling-mode-update-cwd-'));
 const seedMarker = (cwd, sha) => {
@@ -246,17 +246,54 @@ test('update fan-out: a hobby project gets a loud skip line and no files; a work
   }
 });
 
-test('update fan-out: an invalid mode is refused loudly and joins the retry set', async () => {
+// Sol review of S1, item 3: an invalid mode is its own refusal class — never
+// mislabelled as a locally modified agent, never withholding the core marker.
+// The project joins a generalized retry set (project_retry) that reruns BOTH
+// the agent sync and the projection, and update exits non-zero while it is
+// unresolved, on the already-current path too.
+test('update fan-out: an invalid mode is its own refusal; the marker is stamped; the project is retried (sync + projection) until fixed', async () => {
   const cwd = scratch();
   const bad = project('WORK');
   try {
-    const { report, log, handoffCalls } = await update({ behind: 2, projects: [bad], cwd });
-    assert.equal(handoffCalls.length, 0);
-    assert.match(log, /✗ .*"WORK"/);
-    assert.equal(report.exit, 2);
-    assert.deepEqual(report.handoff_retry, [bad]);
+    const full = await update({ behind: 2, projects: [bad], cwd });
+    assert.equal(full.report.exit, 2, full.log);
+    assert.match(full.log, /✗ .*REFUSED — project mode: config\.mode is "WORK"/);
+    assert.doesNotMatch(full.log, /locally modified agent/);
+    assert.equal(full.syncCalls.length + full.handoffCalls.length, 0, 'nothing is synced for a project whose mode is invalid');
+    assert.equal(markerOf(cwd).sha, HEAD_B, 'the core update is stamped complete');
+    assert.deepEqual(markerOf(cwd).project_retry, [bad]);
+    assert.deepEqual(markerOf(cwd).handoff_retry, []);
+
+    const still = await update({ behind: 0, projects: [bad], cwd });
+    assert.equal(still.report.exit, 2, still.log);
+    assert.equal(still.calls.filter((c) => c.startsWith('npm ')).length, 0, 'the core sequence is not repeated');
+    assert.deepEqual(markerOf(cwd).project_retry, [bad]);
+
+    writeConfig(bad, 'work');
+    const fixed = await update({ behind: 0, projects: [bad], cwd });
+    assert.equal(fixed.report.exit, 0, fixed.log);
+    assert.equal(fixed.syncCalls.length, 1, 'the agent sync is rerun');
+    assert.equal(fixed.handoffCalls.length, 1, 'the projection is rerun');
+    assert.deepEqual(opencodeFiles(bad), PORTABLE.map((n) => `${n}.md`));
+    assert.deepEqual(handoffFiles(bad), HANDOFF_FILES);
+    assert.deepEqual(markerOf(cwd).project_retry, []);
   } finally {
     [cwd, bad].forEach(cleanup);
+  }
+});
+
+test('update, HEAD unchanged: a mode made invalid after a full update exits non-zero and joins the retry set', async () => {
+  const cwd = scratch();
+  const dir = project('work');
+  try {
+    await update({ behind: 2, projects: [dir], cwd });
+    writeConfig(dir, 'Work');
+    const r = await update({ behind: 0, projects: [dir], cwd });
+    assert.equal(r.report.exit, 2, r.log);
+    assert.match(r.log, /✗ .*REFUSED — project mode: config\.mode is "Work"/);
+    assert.deepEqual(markerOf(cwd).project_retry, [dir]);
+  } finally {
+    [cwd, dir].forEach(cleanup);
   }
 });
 

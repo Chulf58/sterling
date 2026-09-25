@@ -318,7 +318,9 @@ function readUpdateMarker(cwd, log) {
     if (projects === null || typeof projects !== 'object' || Array.isArray(projects) || !Object.values(projects).every(isState)) {
       throw new Error('invalid "projects" field');
     }
-    return { sha: parsed.sha, handoff_retry: retry, projects };
+    const projectRetry = parsed.project_retry ?? [];
+    if (!Array.isArray(projectRetry) || projectRetry.some((r) => typeof r !== 'string')) throw new Error('invalid "project_retry" field');
+    return { sha: parsed.sha, handoff_retry: retry, projects, project_retry: projectRetry };
   } catch (err) {
     log(`\n⚠ update marker '${p}' is corrupt/unreadable — degrading to a full resume rather than trusting a marker that cannot be verified: ${err?.message ?? err}`);
     return null;
@@ -335,10 +337,13 @@ function readUpdateMarker(cwd, log) {
 // head, outcome } for the last successful work provisioning (agent sync plus
 // projection) at clone sha `head`. The already-current path reads it to decide
 // which work projects need provisioning; presence of files alone never decides.
-function writeUpdateMarker(cwd, sha, handoffRetry = [], projects = {}) {
+// `project_retry` (Sol review of S1, item 3): projects whose config.mode is
+// invalid. Unlike handoff_retry it reruns BOTH the agent sync and the
+// projection once the mode is fixed; update exits non-zero while it is non-empty.
+function writeUpdateMarker(cwd, sha, handoffRetry = [], projects = {}, projectRetry = []) {
   const p = join(cwd, UPDATE_MARKER_RELATIVE_PATH);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry, projects }, null, 2) + '\n');
+  writeFileSync(p, JSON.stringify({ sha, completed_at: new Date().toISOString(), handoff_retry: handoffRetry, project_retry: projectRetry, projects }, null, 2) + '\n');
 }
 
 // The project's config bytes, hashed: a STANDING refusal (outcome 'standing')
@@ -414,7 +419,20 @@ function probeSchemaVersion(dbPath) {
 export async function runUpdate({ cwd, exec = defaultExec, log = console.log, projects = [], opts = {} }) {
   const git = gitFrom(exec, cwd);
   const nodeBin = opts.nodeBin ?? process.execPath;
-  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null, handoff_retry: [] };
+  const report = { exit: 0, currency: null, steps: [], projects: [], migrations: [], refusal: null, handoff_retry: [], project_retry: [] };
+  // A project whose config.mode is invalid (or unreadable through contained-fs):
+  // its own refusal class, logged with its own message, joining project_retry.
+  // Returns the mode, or null after reporting the refusal.
+  const projectModeOrRefuse = (p, indent = '  ') => {
+    try {
+      return readProjectMode(p.repo_path);
+    } catch (err) {
+      if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
+      log(`${indent}✗ ${p.name}: REFUSED — project mode: ${err.message}. Nothing was synced or projected for this project; the next /sterling:update reruns its agent sync and handoff projection once config.mode is fixed.`);
+      if (!report.project_retry.includes(p.repo_path)) report.project_retry.push(p.repo_path);
+      return null;
+    }
+  };
   // Per-project provisioning state persisted in the completion marker (see
   // writeUpdateMarker). Seeded from the marker on the already-current path; the
   // full fan-out rebuilds it for every project it visits.
@@ -454,15 +472,8 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // skip (returns 'skipped', deletes nothing, never enters the retry set); an
   // invalid mode is an actionable refusal that joins the retry set like exit 3.
   const runHandoff = (p) => {
-    let mode;
-    try {
-      mode = readProjectMode(p.repo_path);
-    } catch (err) {
-      if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
-      log(`      ✗ handoff projection: REFUSED — ${err.message}\n        (the next /sterling:update retries this project once the mode is fixed)`);
-      report.handoff_retry.push(p.repo_path);
-      return 3;
-    }
+    const mode = projectModeOrRefuse(p, '      ');
+    if (mode === null) return 'refused_project_mode';
     if (mode !== 'work') {
       log(`      skipped — ${HOBBY_SKIP_DETAIL}`);
       return 'skipped';
@@ -621,9 +632,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
     const marker = readUpdateMarker(cwd, log);
     const markerSha = marker?.sha ?? null;
     provisioning = { ...(marker?.projects ?? {}) };
-    if (markerSha === before.head && marker.handoff_retry.length && opts.projects !== false) {
-      // The clone update itself is complete; only projects whose handoff projection
-      // was refused actionably are outstanding. Retry exactly those — nothing else.
+    if (markerSha === before.head && (marker.handoff_retry.length || marker.project_retry.length) && opts.projects !== false) {
+      // The clone update itself is complete; only projects left unresolved are
+      // outstanding: handoff_retry reruns the projection, project_retry (an
+      // invalid mode) reruns the agent sync AND the projection. Nothing else.
       let registered;
       try {
         registered = (typeof projects === 'function' ? (await projects()) ?? [] : projects);
@@ -633,26 +645,47 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
         return report;
       }
       const byPath = new Map(registered.map((p) => [p.repo_path, p]));
-      log(`\n▸ already current at ${before.head_short}; retrying the handoff projection for ${marker.handoff_retry.length} project(s) left unresolved by the last update`);
-      for (const repoPath of marker.handoff_retry) {
+      const retried = (repoPath) => {
         const p = byPath.get(repoPath);
-        if (!p) {
-          log(`  • ${repoPath}: no longer registered — dropped from the retry set`);
-          continue;
+        if (!p) log(`  • ${repoPath}: no longer registered — dropped from the retry set`);
+        return p;
+      };
+      if (marker.project_retry.length) {
+        log(`\n▸ already current at ${before.head_short}; retrying the agent sync and handoff projection for ${marker.project_retry.length} project(s) whose project mode was invalid`);
+        for (const repoPath of marker.project_retry) {
+          const p = retried(repoPath);
+          if (!p || projectModeOrRefuse(p) === null) continue;
+          const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
+          if (r.status !== 0) {
+            log(`  ✗ ${p.name}: agent sync ${r.status === 2 ? 'REFUSED' : 'failed'} (exit ${r.status}):\n${`${r.stdout}${r.stderr}`.trim().split('\n').map((l) => `      ${l}`).join('\n')}`);
+            report.exit = r.status === 2 ? 2 : report.exit === 0 ? 1 : report.exit;
+          } else {
+            log(`  • ${p.name}: agents synced`);
+          }
+          const handoff = runHandoff(p);
+          recordProvisioning(p, markerSha, r.status, handoff);
+          report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
         }
-        log(`  • ${p.name}:`);
-        const handoff = runHandoff(p);
-        recordProvisioning(p, markerSha, 0, handoff);
-        report.projects.push({ name: p.name, repo_path: p.repo_path, handoff });
+      }
+      if (marker.handoff_retry.length) {
+        log(`\n▸ already current at ${before.head_short}; retrying the handoff projection for ${marker.handoff_retry.length} project(s) left unresolved by the last update`);
+        for (const repoPath of marker.handoff_retry) {
+          const p = retried(repoPath);
+          if (!p) continue;
+          log(`  • ${p.name}:`);
+          const handoff = runHandoff(p);
+          recordProvisioning(p, markerSha, 0, handoff);
+          report.projects.push({ name: p.name, repo_path: p.repo_path, handoff });
+        }
       }
       try {
-        writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning);
+        writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning, report.project_retry);
       } catch (err) {
         log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
         report.exit = report.exit === 0 ? 1 : report.exit;
       }
-      if (report.handoff_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
-      else log('\nEvery previously unresolved handoff projection is now resolved.');
+      if (report.handoff_retry.length || report.project_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
+      else log('\nEvery previously unresolved project is now resolved.');
       return report;
     }
     if (markerSha === before.head) {
@@ -682,12 +715,10 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
       const recordedBefore = JSON.stringify(provisioning);
       const toProvision = [];
       for (const p of noopProjectList) {
-        let mode;
-        try {
-          mode = readProjectMode(p.repo_path);
-        } catch (err) {
-          if (!(err instanceof ProjectModeError) && !(err instanceof ContainmentError)) throw err;
-          log(`\n⚠ ${p.name}: ${err.message}`);
+        const mode = projectModeOrRefuse(p, '\n');
+        if (mode === null) {
+          delete provisioning[p.repo_path];
+          report.exit = 2;
           continue;
         }
         if (mode !== 'work') {
@@ -727,16 +758,16 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
           report.projects.push({ name: p.name, repo_path: p.repo_path, status: r.status, handoff });
         }
       }
-      if (toProvision.length || JSON.stringify(provisioning) !== recordedBefore) {
+      if (toProvision.length || report.project_retry.length || JSON.stringify(provisioning) !== recordedBefore) {
         try {
-          writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning);
+          writeUpdateMarker(cwd, markerSha, report.handoff_retry, provisioning, report.project_retry);
         } catch (err) {
           log(`\n⚠ update marker write FAILED: ${err?.message ?? err}`);
           report.exit = report.exit === 0 ? 1 : report.exit;
         }
       }
       if (toProvision.length) {
-        if (report.handoff_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
+        if (report.handoff_retry.length || report.project_retry.length) report.exit = report.exit === 0 ? 2 : report.exit;
         return report;
       }
       if (report.exit === 0) log('\nAlready current — nothing to do. (Rerun with --force to rebuild and re-sync anyway.)');
@@ -918,6 +949,14 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   if (opts.projects !== false && projectList.length) {
     log(`\n▸ syncing agents across ${projectList.length} registered project(s)`);
     for (const p of projectList) {
+      // An invalid project mode is its own refusal (never a "locally modified
+      // agent"): nothing is synced or projected for the project, the core
+      // marker is still stamped, and project_retry reruns both once it is fixed.
+      if (projectModeOrRefuse(p) === null) {
+        delete provisioning[p.repo_path];
+        report.projects.push({ name: p.name, repo_path: p.repo_path, status: null, handoff: 'refused_project_mode' });
+        continue;
+      }
       const r = exec(nodeBin, [join(cwd, 'scripts', 'sync-agents.mjs'), '--target', p.repo_path], { cwd });
       const out = `${r.stdout}${r.stderr}`.trim();
       const statuses = r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[a-z_]+: /.test(l));
@@ -1000,12 +1039,16 @@ export async function runUpdate({ cwd, exec = defaultExec, log = console.log, pr
   // only those (Sol re-check, the update wedge). The exit stays loud (2).
   if (report.exit === 0) {
     try {
-      writeUpdateMarker(cwd, after.head, report.handoff_retry, provisioning);
+      writeUpdateMarker(cwd, after.head, report.handoff_retry, provisioning, report.project_retry);
     } catch (err) {
       log(`\n⚠ update marker write FAILED (nonfatal — the update itself already succeeded): ${err?.message ?? err}`);
     }
     if (report.handoff_retry.length) {
       log(`\n✗ ${report.handoff_retry.length} project(s) have an unresolved handoff projection: ${report.handoff_retry.join(', ')} — the next /sterling:update retries only these.`);
+      report.exit = 2;
+    }
+    if (report.project_retry.length) {
+      log(`\n✗ ${report.project_retry.length} project(s) have an invalid project mode: ${report.project_retry.join(', ')} — fix config.mode ('hobby' or 'work', TUI System tab); the next /sterling:update reruns their agent sync and handoff projection.`);
       report.exit = 2;
     }
   }
