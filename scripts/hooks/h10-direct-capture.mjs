@@ -669,9 +669,8 @@ try {
   // enumerates a register that plainly does not exist.
   const classified = classifyRegister(input.cwd, { now: nowMs, sessionId: input.session_id, staleMinutes });
   // Flat presumed-active entry list — consumed further down by the
-  // capture_pending "does the declared target name a live dispatch"
-  // heuristic (namesLiveTarget/pendingTargetLive), a SEPARATE question from
-  // the file-deferral join above (who owns THIS touched path).
+  // capture_pending hold (pendingHeld: is ANY dispatch live), a SEPARATE
+  // question from the file-deferral join above (who owns THIS touched path).
   const liveDispatches = classified.availability === 'ok' ? classified.entries.filter((r) => r.status === 'presumed-active').map((r) => r.entry) : [];
 
   // Research-event classification, hoisted here (ahead of clearRegisters()'s
@@ -969,12 +968,14 @@ try {
   // every release exactly as it did before the deferral existed. Preserving it
   // would permanently spend the once-per-session inline-demand stage: every
   // later genuine duty (a new unowned file, a new concept design — none of them
-  // deferred) would land silently as queue debt, and a capture_pending declared
-  // afterwards would see the stale marker and mint capture_owed on its FIRST
-  // pending Stop, destroying the grace bd594c03 deliberately built. Repeat nags
-  // while a deferral is live are bounded by enqueueSystemTodo's dedup — noise is
-  // acceptable, silence is not.
-  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [] } = {}) => {
+  // deferred) would land silently as queue debt. A capture_pending declaration
+  // no longer depends on this clear for its grace: the grace is counted per
+  // declaration (pendingInGrace — the marker lists which declarations spent
+  // it; decision
+  // capture-pending-grace-per-declaration-held-while-any-dispatch-live). Repeat
+  // nags while a deferral is live are bounded by enqueueSystemTodo's dedup —
+  // noise is acceptable, silence is not.
+  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [], retainedCaptureEvents = null } = {}) => {
     // F3/F4/R4 (board c198866d fixer round): the touches claim is RELEASED
     // (see releaseTouchesClaim above) rather than discarded whenever a live
     // dispatch still owns work OR this Stop's own settlement attempt failed —
@@ -982,7 +983,12 @@ try {
     // not settle (F3). The events register and nag marker are UNAFFECTED by
     // settlementFailed — only touches.json gets the preservation exception
     // (F3: "not the other registers").
-    if (deferredPaths.length || settlementFailed) {
+    // retainedCaptureEvents (non-null) marks a capture duty a capture_pending
+    // declaration deferred at the second pass: its touches and its capture-lane
+    // events are outstanding work, never discarded here. The kept touches also
+    // re-derive the article demand on later Stops, so its reminder may repeat
+    // during a hold — accepted: a repeat never hides a demand.
+    if (deferredPaths.length || settlementFailed || retainedCaptureEvents) {
       releaseTouchesClaim();
     } else {
       discardTouchesClaim();
@@ -1009,7 +1015,7 @@ try {
       // here — is consumed exactly as a non-deferring Stop would consume it;
       // only the genuinely-still-outstanding ones survive to re-arm the duty
       // once their dispatch returns (decision b2474b26).
-      const survivors = [...pendingDeclarations, ...outstandingResearchEvents];
+      const survivors = [...pendingDeclarations, ...(retainedCaptureEvents ?? []), ...outstandingResearchEvents];
       if (survivors.length) {
         writeFileSync(eventsPath, JSON.stringify(survivors));
       } else {
@@ -1214,66 +1220,48 @@ try {
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === 'capture_pending' && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
 
-  // IS THE NAMED TARGET STILL A LIVE DISPATCH? (board cb457cbd, built on the
-  // fan-out-aware deferral ec9eacaa.) The declaration names a target, and whether
-  // that target is still running is a fact THIS hook already holds in the H22
-  // register — so the conductor was hand-supplying it, re-typing an unchanged
-  // declaration on every Stop (measured twice: three declarations in one session,
-  // the last two restating the same in-flight lanes with no new substance). A
-  // declaration that must be repeated verbatim is a declaration that stops being
-  // read. The file lanes already re-arm on liveness; the capture lane never
-  // inherited it. Consumed by the deferral block below.
-  //
-  // The detail is conductor FREE TEXT ('<target> — <reason>'), not a structured
-  // reference, so the carry is decided by IDENTITY MATCHED EXACTLY, never by text
-  // search. THE DETAIL IS TOKENIZED ONCE (whitespace split, surrounding shell/prose
-  // decoration stripped) and an entry counts as the named target only when its
-  // AGENT_ID — the one value that identifies a dispatch and nothing else — EQUALS
-  // a whole token of the declaration.
-  //
-  // TWO REVIEWERS, 2026-08-29, one of them outside-family: the previous
-  // `haystack.includes(t)` form over {agent_id, agent_type, declared files} was an
-  // UNANCHORED SUBSTRING test on free text — the exact shape of the block-severity
-  // anti-pattern `unanchored-substring-allowlist-in-command-guard` (a suppression
-  // granted because a name APPEARS IN text rather than IS the referent). All three
-  // keys were broken, each in its own way:
-  //   - AGENT_TYPE names a CLASS, not a target, so ANY live same-type entry
-  //     impersonated the landed one ('coder' also matching 'encoder'/'decoder',
-  //     which no length floor can help with — the false positives are ordinary
-  //     5-9 character words). REMOVED: no matching form turns a class into an
-  //     identity.
-  //   - AGENT_ID matched by substring, so unrelated sequential lane ids collide
-  //     in both directions (sub-lane-1 and sub-lane-104 vs sub-lane-10). KEPT,
-  //     but compared as a WHOLE TOKEN: a prefix relation is not identity.
-  //   - A DECLARED FILE matched when its path merely appeared in the reason —
-  //     and a capture_pending reason routinely names the file the capture is
-  //     about while an unrelated lane legitimately holds it open. REMOVED: a
-  //     file named in a reason is SUBJECT MATTER, not an owner. (The file
-  //     deferral above still joins touched paths to live entries; that is a
-  //     different question — who owns this file — asked of the register, not of
-  //     conductor prose.)
-  // THE KILL SCENARIO that made this silent knowledge loss: detail
-  // 'coder sub-target — capture auth findings'; sub-target LANDS and H22 removes
-  // its entry; an unrelated live {agent_id:'sub-other', agent_type:'coder'}
-  // remains; the substring 'coder' still matched, pendingTargetLive stayed true,
-  // the carry branch released non-terminally, and NO capture_owed was ever minted.
-  // Rolling replacement lanes defeat the TTL indefinitely — there is no background
-  // sweep — so the declaration was carried forever and the debt never recorded.
-  // A declaration that names no live agent_id simply falls back to the prior
-  // two-Stop cadence: a missed match costs one queue item (the safe direction),
-  // a false match MUTES a real duty. Tokens under 3 chars are ignored so a
-  // degenerate agent_id cannot match an ordinary short word.
-  const pendingTokens = new Set(
-    String(pendingDetail ?? '')
-      .split(/\s+/)
-      .map((t) => t.replace(/^[`'"([{<]+/, '').replace(/[`'")\]}>,;:.]+$/, '').trim().toLowerCase())
-      .filter(Boolean)
-  );
-  const namesLiveTarget = (e) =>
-    typeof e.agent_id === 'string' &&
-    e.agent_id.trim().length >= 3 &&
-    pendingTokens.has(e.agent_id.trim().toLowerCase());
-  const pendingTargetLive = Boolean(pendingDetail) && liveDispatches.some(namesLiveTarget);
+  // HOLD WHILE ANY DISPATCH IS LIVE (decision
+  // capture-pending-grace-per-declaration-held-while-any-dispatch-live,
+  // 294706f6, user-ruled 2026-09-25): while ANY row of the H22 register is
+  // presumed-active — the same classifyRegister verdict the file deferral
+  // uses, `liveDispatches` above — a capture_pending declaration is neither
+  // converted to debt nor re-demanded, whether or not its free text names an
+  // agent_id. This replaces the earlier carry (board cb457cbd), which held only
+  // while a whole-token agent_id in the text matched a live row, so a
+  // declaration naming a commit or a lane description converted every second
+  // Stop during a long fan-out and the conductor re-declared by hand (P1).
+  // Once nothing is live the normal one-Stop grace applies from that Stop, then
+  // conversion, so the debt is still recorded (P5).
+  // Not guaranteed (stated in the decision): a stale presumed-active row that
+  // never received a terminal hook holds the declaration until its TTL expires.
+  const pendingHeld = Boolean(pendingDetail) && liveDispatches.length > 0;
+
+  // GRACE PER DECLARATION (same decision, point 1; identity-based per the
+  // fix-round review): each declaration EVENT has its own one-Stop grace. The
+  // nag marker records WHICH declarations have spent it
+  // (`capture_pending_spent`, ids from pendingDeclId), written by the Stop that
+  // spent it. A marker without the list — the nag that PRECEDES a declaration,
+  // the normal order since the nag names capture_pending — spends nothing
+  // (finding b8ce1d54: every declaration used to live zero Stops). Identity,
+  // not wall-clock order, so a declaration stamped in the future cannot keep
+  // its grace forever. An unreadable marker counts as spending every
+  // declaration: the duty converts to recorded debt, the safe direction.
+  const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
+  const graceSpentIds = (() => {
+    if (!existsSync(nagMarker)) return new Set();
+    try {
+      const m = JSON.parse(readFileSync(nagMarker, 'utf8'));
+      return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
+    } catch {
+      return null; // unreadable marker: every declaration spent, see above
+    }
+  })();
+  const pendingInGrace = graceSpentIds === null ? [] : capturePendingEvents.filter((e) => !graceSpentIds.has(pendingDeclId(e)));
+  const pendingLapsed = capturePendingEvents.filter((e) => !pendingInGrace.includes(e));
+  // Spends the grace of every current declaration. Written only on a Stop that
+  // actually deferred the capture duty for them and was not a hold.
+  const spendPendingGrace = () =>
+    writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
 
   // Test-repair evidence (decision frozen-test-repair-signatures-plus-visible-repair):
   // scripts/test-repair.mjs records that the conductor repaired a demonstrably
@@ -1426,8 +1414,11 @@ try {
   // capture_owed file_keys: CONTEXT, not the debt (item 40b378e8, classification
   // settled 2026-08-29). Unlike article_missing — where the file list IS what is
   // owed, which is why the cap was removed there — a capture_owed item's subject
-  // is "this session ended without capture": the mint is gated on whether ANY
-  // capture_owed is open, the lane sits outside UPDATE_RESOLVABLE_LANES, and a
+  // is "this session ended without capture": the undeclared mint is gated on
+  // whether ANY capture_owed is open (a lapsed capture_pending instead joins
+  // only an item with its exact enqueueSystemTodo key — decision
+  // capture-pending-grace-per-declaration-held-while-any-dispatch-live), the
+  // lane sits outside UPDATE_RESOLVABLE_LANES, and a
   // `resolves` claim naming it is refused. The keys only tell the reader where to
   // look, so a cap on them costs no debt and the cap STAYS. It also has to stay
   // for now regardless: the second mint site (scripts/hooks/h1-session-start.mjs)
@@ -1441,6 +1432,36 @@ try {
     activePaths.length > owedKeys.length
       ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))`
       : '';
+  // EXACT-TARGET DEBT for lapsed capture_pending declarations (decision
+  // capture-pending-grace-per-declaration-held-while-any-dispatch-live): one
+  // enqueue PER DECLARATION, each keyed by its declared target through
+  // enqueueSystemTodo: the trimmed declaration is repeated as a JSON-quoted
+  // ` [target "…"]` trailer, and packages/store declaredCaptureTarget recovers
+  // it byte-exact from that literal — keep the two in step. (The readable
+  // `declared pending (…)` head is unchanged; hooks-full.test.mjs pins it.)
+  // The same exact target joins its own item;
+  // an unrelated open capture_owed, or another target over the same files,
+  // never suppresses or overwrites it (finding b8ce1d54).
+  const enqueuePendingDebt = (declarations) => {
+    for (const detail of [...new Set(declarations.map((e) => String(e.detail).trim()))]) {
+      store.enqueueSystemTodo({
+        id: randomUUID(),
+        type: 'todo',
+        created_at: now,
+        updated_at: now,
+        author: 'system',
+        status: 'active',
+        superseded_by: null,
+        links: [],
+        scope: 'project',
+        stack_tags: [],
+        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(detail)}]`,
+        source: 'system',
+        system_reason: 'capture_owed',
+        file_keys: owedKeys,
+      });
+    }
+  };
   // Research duty: triggered by research events not covered by a no-capture
   // declaration (research_tool or configured agent).
   const hasResearchDuty = activeResearchEvents.length > 0;
@@ -2074,79 +2095,42 @@ try {
     releaseWithPressure();
   }
 
-  // CAPTURE-PENDING DEFERRAL (board 1af5d630). Only the CAPTURE duty is
-  // deferrable, and only when every other duty is satisfied — a pending
-  // declaration must never mute a research/concept/article demand it says
-  // nothing about. First pending Stop: allow WITHOUT clearing the registers —
-  // a deliberate, narrow exception to the clear-on-terminal rule, because this
-  // release is NOT terminal: the duty stays armed so a write that lands before
-  // the next Stop settles it cleanly with zero queue noise. Second pending
-  // Stop: the write still has not landed — convert the debt to ONE deduped
-  // capture_owed item citing the target, then clear (P5: pending work defers
-  // or lands on the queue, never evaporates). The shared nag marker doubles as
-  // the once-only counter, exactly as it does for the soft-block.
+  // CAPTURE-PENDING DEFERRAL (board 1af5d630; grace, hold and debt identity
+  // per decision capture-pending-grace-per-declaration-held-while-any-dispatch-live).
+  // Only the CAPTURE duty is deferrable, and only when every other duty is
+  // satisfied — a pending declaration must never mute a research/concept/article
+  // demand it says nothing about. Three outcomes, in order:
+  //   HOLD — a dispatch is live (pendingHeld): release non-terminally.
+  //   GRACE — some declaration's one Stop is unspent (pendingInGrace): record
+  //     the debt of the declarations already lapsed, spend the grace, release
+  //     non-terminally.
+  //   CONVERT — otherwise: record every declaration's debt, then clear
+  //     (P5: pending work defers or lands on the queue, never evaporates).
+  // HOLD and GRACE are deliberate, narrow exceptions to the clear-on-terminal
+  // rule: the duty stays armed so a write that lands before a later Stop
+  // settles it cleanly with zero queue noise (the all-duties-satisfied branch
+  // above). Settlement stays unrun on both (F6: the capture duty is
+  // outstanding), and the touches claim is released so the next Stop adopts it
+  // (F4/R4).
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    // The marker ALONE is the once-only counter here — deliberately no
-    // stop_hook_active clause (review finding 1, 2026-08-09): that clause
-    // guards against re-BLOCKING in a deny loop, and this branch ALLOWS. With
-    // it, a pending declaration whose first Stop happened to follow some other
-    // hook's deny would lose its whole grace period and mint a false debt.
-    if (!existsSync(nagMarker)) {
-      writeFileSync(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
-      // Registers deliberately NOT cleared — see above. F4/R4: the claim
-      // must still be released (see releaseTouchesClaim above), or it would
-      // dangle in the claim file forever with no next-Stop adoption ever
-      // triggered. F6: duties are outstanding here (capture still pending),
-      // so settlement itself does not run.
+    if (pendingHeld) {
+      // The hold resets the grace: removing the marker makes the first Stop
+      // with nothing live a grace Stop, as the decision requires. Nothing is
+      // nagged on this path, so no nag cycle is lost with it.
+      rmSync(nagMarker, { force: true });
       releaseTouchesClaim();
       releaseWithPressure();
     }
-    // CARRY WHILE THE NAMED TARGET IS STILL LIVE (board cb457cbd). The bound on
-    // this grace is the TARGET's liveness, not a Stop count: while the register
-    // still holds the dispatch the declaration names, converting to debt would
-    // file mid-flight agent work as conductor negligence — the exact misreading
-    // decision foreign_ec9eacaa fixed for the file lanes, which this lane never
-    // inherited. Non-terminal in exactly the shape of the first pending Stop
-    // above: BOTH work registers survive, so a write landing before any later
-    // Stop still settles the duty terminally with zero queue noise (the
-    // all-duties-satisfied branch above), and the Stop after the entry leaves the
-    // register falls straight through to the conversion below — the debt is
-    // CARRIED, never dropped (P5), and never minted twice (the open-capture_owed
-    // choke). Settlement stays unrun here for the same reason it does above (F6):
-    // the capture duty is outstanding, so the candidates ride the claim onward.
-    // The nag marker is left exactly as the first pending Stop left it (spent),
-    // which is what makes the fall-through convert immediately once the target
-    // lands; the clear-on-every-release rule documented at clearRegisters()
-    // governs the paths that CALL it, and this path, like the first pending Stop
-    // above, deliberately does not.
-    if (pendingTargetLive) {
+    // Deliberately no stop_hook_active clause (review finding 1, 2026-08-09):
+    // that clause guards against re-BLOCKING in a deny loop, and this branch
+    // ALLOWS.
+    if (pendingInGrace.length) {
+      enqueuePendingDebt(pendingLapsed);
+      spendPendingGrace();
       releaseTouchesClaim();
       releaseWithPressure();
     }
-    // "any capture_owed open" gates more than the choke's exact-key match (its
-    // file_keys vary with activePaths) — kept deliberately; only the write
-    // itself routes through enqueueSystemTodo (decision foreign_194f43e4).
-    const openPending = store
-      .query({ types: ['todo'], cap: 1000 })
-      .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
-    if (!openPending) {
-      store.enqueueSystemTodo({
-        id: randomUUID(),
-        type: 'todo',
-        created_at: now,
-        updated_at: now,
-        author: 'system',
-        status: 'active',
-        superseded_by: null,
-        links: [],
-        scope: 'project',
-        stack_tags: [],
-        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close${clipped}`,
-        source: 'system',
-        system_reason: 'capture_owed',
-        file_keys: owedKeys,
-      });
-    }
+    enqueuePendingDebt(capturePendingEvents);
     // R2 (board c198866d round-3 fixer, BLOCKING): this IS a terminal
     // release — the session ends here, so there is no "next Stop" for
     // settlement to defer to the way F6's nag/deny paths can. Settling here,
@@ -2357,7 +2341,12 @@ try {
     // actually rendered.
     const dutyText = compact ? parts.join('\n\n') : `${H10_HEADER}\n${parts.join('\n\n')}`;
     writeThenSpend(dutyText, [
-      () => writeFileSync(nagMarker, JSON.stringify({ at: now })),
+      // A nag Stop on which declarations deferred the capture duty (not a hold)
+      // IS their grace Stop, so it records them as spent (pendingInGrace).
+      () =>
+        hasCaptureDuty && !captured && pendingDetail && !pendingHeld
+          ? spendPendingGrace()
+          : writeFileSync(nagMarker, JSON.stringify({ at: now })),
       // FIX 2: never persist a sessionless duty-nagged marker — the reader
       // above (priorDutyNag) already refuses to compact without a session;
       // this is the matching guard on the WRITE side.
@@ -2370,9 +2359,19 @@ try {
   }
 
   // Second pass: still owed — queue items and let the session end (P1: don't trap the human).
-  if (hasCaptureDuty && !captured) {
-    // Same "any open" broader gate as the pending-deferral site above; keep it,
-    // route only the write through enqueueSystemTodo.
+  // A capture_pending declaration that is HELD (a dispatch is live) or still
+  // inside its one-Stop grace defers the capture duty here exactly as it does in
+  // the pending branch above: no debt, and the declaration plus its capture
+  // work survive this release (see the clearRegisters call at the end). The
+  // other duties queue as usual — the declaration says nothing about them.
+  const pendingDefersCapture = hasCaptureDuty && !captured && Boolean(pendingDetail) && (pendingHeld || pendingInGrace.length > 0);
+  if (hasCaptureDuty && !captured && pendingDetail) {
+    // Lapsed declarations convert per target, as at the pending branch above;
+    // a held one converts nothing.
+    if (!pendingHeld) enqueuePendingDebt(pendingDefersCapture ? pendingLapsed : capturePendingEvents);
+  } else if (hasCaptureDuty && !captured) {
+    // Undeclared capture debt keeps the broader "any capture_owed open" gate,
+    // unchanged.
     const open = store
       .query({ types: ['todo'], cap: 1000 })
       .some((t) => t.source === 'system' && t.system_reason === 'capture_owed');
@@ -2388,10 +2387,7 @@ try {
         links: [],
         scope: 'project',
         stack_tags: [],
-        text:
-          (pendingDetail
-            ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release — verify the target landed its capture against HEAD, then close`
-            : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`) + clipped,
+        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture${clipped}`,
         source: 'system',
         system_reason: 'capture_owed',
         file_keys: owedKeys,
@@ -2542,13 +2538,24 @@ try {
   // whatever duties are still outstanding are already queued as owed/missing
   // items above; this is the last chance to settle before clearRegisters()
   // discards the claim, since no next Stop exists once the session ends here.
-  runSettlement();
+  // A capture duty a declaration deferred (pendingDefersCapture) is still
+  // outstanding and its work survives this release, so settlement waits for
+  // the terminal Stop exactly as on the pending branch's non-terminal paths
+  // (F6) — the capture may yet rebaseline the owning article.
+  if (!pendingDefersCapture) runSettlement();
   // Queueing a non-capture duty does not spend a pending declaration's forward
   // scope; queueing capture work does, and `hasCaptureDuty` distinguishes them.
+  // A deferred capture duty (pendingDefersCapture) was NOT queued, so its
+  // declaration and capture work survive with it.
   clearRegisters({
-    preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty,
+    preservePendingDeclaration: Boolean(pendingDetail) && (!hasCaptureDuty || pendingDefersCapture),
     outstandingResearchEvents: outstandingDeferredResearchEvents,
+    retainedCaptureEvents: pendingDefersCapture ? activeDebugEvents : null,
   });
+  // clearRegisters() removed the nag marker. A grace spent on this Stop is
+  // recorded again so the next Stop converts; a HOLD leaves it absent, so the
+  // first Stop with nothing live is the grace Stop.
+  if (pendingDefersCapture && !pendingHeld) spendPendingGrace();
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

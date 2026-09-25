@@ -5552,6 +5552,22 @@ var JournalDemotionRefusedError = class extends Error {
     this.name = "JournalDemotionRefusedError";
   }
 };
+var DECLARED_CAPTURE_OWED_PREFIX = "capture owed: declared pending (";
+var DECLARED_CAPTURE_TARGET_TRAILER = " [target ";
+function declaredCaptureTarget(text) {
+  if (typeof text !== "string" || !text.startsWith(DECLARED_CAPTURE_OWED_PREFIX) || !text.endsWith('"]'))
+    return null;
+  const at = text.lastIndexOf(`${DECLARED_CAPTURE_TARGET_TRAILER}"`);
+  if (at < 0)
+    return null;
+  let target;
+  try {
+    target = JSON.parse(text.slice(at + DECLARED_CAPTURE_TARGET_TRAILER.length, -1));
+  } catch {
+    return null;
+  }
+  return typeof target === "string" && target.length > 0 ? target : null;
+}
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
@@ -6431,6 +6447,9 @@ var SterlingStore = class _SterlingStore {
       throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
     }
     const keyOf = (t) => {
+      const declaredTarget = t.system_reason === "capture_owed" ? declaredCaptureTarget(t.text) : null;
+      if (declaredTarget !== null)
+        return JSON.stringify(["capture_owed", t.feature_link ?? "", [], `declared-target:${declaredTarget}`]);
       const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
@@ -8775,15 +8794,15 @@ try {
       )
     );
   }
-  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [] } = {}) => {
-    if (deferredPaths.length || settlementFailed) {
+  const clearRegisters = ({ preservePendingDeclaration = false, outstandingResearchEvents = [], retainedCaptureEvents = null } = {}) => {
+    if (deferredPaths.length || settlementFailed || retainedCaptureEvents) {
       releaseTouchesClaim();
     } else {
       discardTouchesClaim();
     }
     if (!deferredPaths.length) {
       const pendingDeclarations = preservePendingDeclaration ? sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail) : [];
-      const survivors = [...pendingDeclarations, ...outstandingResearchEvents];
+      const survivors = [...pendingDeclarations, ...retainedCaptureEvents ?? [], ...outstandingResearchEvents];
       if (survivors.length) {
         writeFileSync4(eventsPath, JSON.stringify(survivors));
       } else {
@@ -8846,11 +8865,20 @@ try {
   const dischargedOnResearchLane = (at) => dischargedByCutoff(at, researchLaneCutoff);
   const capturePendingEvents = sessionEvents.filter((e) => e.kind === "capture_pending" && e.detail);
   const pendingDetail = capturePendingEvents.length ? capturePendingEvents.map((e) => e.detail).at(-1) : null;
-  const pendingTokens = new Set(
-    String(pendingDetail ?? "").split(/\s+/).map((t) => t.replace(/^[`'"([{<]+/, "").replace(/[`'")\]}>,;:.]+$/, "").trim().toLowerCase()).filter(Boolean)
-  );
-  const namesLiveTarget = (e) => typeof e.agent_id === "string" && e.agent_id.trim().length >= 3 && pendingTokens.has(e.agent_id.trim().toLowerCase());
-  const pendingTargetLive = Boolean(pendingDetail) && liveDispatches.some(namesLiveTarget);
+  const pendingHeld = Boolean(pendingDetail) && liveDispatches.length > 0;
+  const pendingDeclId = (e) => JSON.stringify([e.at ?? null, e.detail]);
+  const graceSpentIds = (() => {
+    if (!existsSync6(nagMarker)) return /* @__PURE__ */ new Set();
+    try {
+      const m = JSON.parse(readFileSync5(nagMarker, "utf8"));
+      return new Set(Array.isArray(m?.capture_pending_spent) ? m.capture_pending_spent : []);
+    } catch {
+      return null;
+    }
+  })();
+  const pendingInGrace = graceSpentIds === null ? [] : capturePendingEvents.filter((e) => !graceSpentIds.has(pendingDeclId(e)));
+  const pendingLapsed = capturePendingEvents.filter((e) => !pendingInGrace.includes(e));
+  const spendPendingGrace = () => writeFileSync4(nagMarker, JSON.stringify({ at: now, capture_pending_spent: capturePendingEvents.map(pendingDeclId) }));
   const testRepairEvents = sessionEvents.filter((e) => e.kind === "test_repair" && e.detail && isValidAt(e.at));
   const coveredByTestRepair = (t) => isValidAt(t.at) && testRepairEvents.some((e) => String(e.detail).split(" \u2014 ")[0].trim() === t.path && e.at > t.at);
   const IMAGE_BINARY_EXT = /\.(png|jpe?g|gif|webp|pdf)$/i;
@@ -8881,6 +8909,26 @@ try {
   const hasCaptureDuty = activePaths.length > 0 || activeDebugEvents.length > 0;
   const owedKeys = activePaths.slice(0, 20);
   const clipped = activePaths.length > owedKeys.length ? ` (file list truncated: naming ${owedKeys.length} of ${activePaths.length} touched path(s))` : "";
+  const enqueuePendingDebt = (declarations) => {
+    for (const detail of [...new Set(declarations.map((e) => String(e.detail).trim()))]) {
+      store.enqueueSystemTodo({
+        id: randomUUID3(),
+        type: "todo",
+        created_at: now,
+        updated_at: now,
+        author: "system",
+        status: "active",
+        superseded_by: null,
+        links: [],
+        scope: "project",
+        stack_tags: [],
+        text: `capture owed: declared pending (${detail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped} [target ${JSON.stringify(detail)}]`,
+        source: "system",
+        system_reason: "capture_owed",
+        file_keys: owedKeys
+      });
+    }
+  };
   const hasResearchDuty = activeResearchEvents.length > 0;
   const hasConceptDuty = conceptFamilies.size > 0;
   const ownersSeen = /* @__PURE__ */ new Map();
@@ -9070,34 +9118,18 @@ try {
     releaseWithPressure();
   }
   if (pendingDetail && hasCaptureDuty && !captured && (!hasResearchDuty || researchSatisfied) && conceptSatisfied && !articleDemand) {
-    if (!existsSync6(nagMarker)) {
-      writeFileSync4(nagMarker, JSON.stringify({ at: now, capture_pending: pendingDetail }));
+    if (pendingHeld) {
+      rmSync3(nagMarker, { force: true });
       releaseTouchesClaim();
       releaseWithPressure();
     }
-    if (pendingTargetLive) {
+    if (pendingInGrace.length) {
+      enqueuePendingDebt(pendingLapsed);
+      spendPendingGrace();
       releaseTouchesClaim();
       releaseWithPressure();
     }
-    const openPending = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
-    if (!openPending) {
-      store.enqueueSystemTodo({
-        id: randomUUID3(),
-        type: "todo",
-        created_at: now,
-        updated_at: now,
-        author: "system",
-        status: "active",
-        superseded_by: null,
-        links: [],
-        scope: "project",
-        stack_tags: [],
-        text: `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close${clipped}`,
-        source: "system",
-        system_reason: "capture_owed",
-        file_keys: owedKeys
-      });
-    }
+    enqueuePendingDebt(capturePendingEvents);
     runSettlement();
     clearRegisters({ outstandingResearchEvents: outstandingDeferredResearchEvents });
     releaseWithPressure();
@@ -9214,7 +9246,9 @@ try {
     const dutyText = compact ? parts.join("\n\n") : `${H10_HEADER}
 ${parts.join("\n\n")}`;
     writeThenSpend(dutyText, [
-      () => writeFileSync4(nagMarker, JSON.stringify({ at: now })),
+      // A nag Stop on which declarations deferred the capture duty (not a hold)
+      // IS their grace Stop, so it records them as spent (pendingInGrace).
+      () => hasCaptureDuty && !captured && pendingDetail && !pendingHeld ? spendPendingGrace() : writeFileSync4(nagMarker, JSON.stringify({ at: now })),
       // FIX 2: never persist a sessionless duty-nagged marker — the reader
       // above (priorDutyNag) already refuses to compact without a session;
       // this is the matching guard on the WRITE side.
@@ -9225,7 +9259,10 @@ ${parts.join("\n\n")}`;
       spendDispatchUnknownKeys
     ]);
   }
-  if (hasCaptureDuty && !captured) {
+  const pendingDefersCapture = hasCaptureDuty && !captured && Boolean(pendingDetail) && (pendingHeld || pendingInGrace.length > 0);
+  if (hasCaptureDuty && !captured && pendingDetail) {
+    if (!pendingHeld) enqueuePendingDebt(pendingDefersCapture ? pendingLapsed : capturePendingEvents);
+  } else if (hasCaptureDuty && !captured) {
     const open = store.query({ types: ["todo"], cap: 1e3 }).some((t) => t.source === "system" && t.system_reason === "capture_owed");
     if (!open) {
       store.enqueueSystemTodo({
@@ -9239,7 +9276,7 @@ ${parts.join("\n\n")}`;
         links: [],
         scope: "project",
         stack_tags: [],
-        text: (pendingDetail ? `capture owed: declared pending (${pendingDetail}) but no durable write had landed by session release \u2014 verify the target landed its capture against HEAD, then close` : `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture`) + clipped,
+        text: `capture owed: direct-mode session touched ${activePaths.length} file(s) and ended without capture${clipped}`,
         source: "system",
         system_reason: "capture_owed",
         file_keys: owedKeys
@@ -9315,11 +9352,13 @@ ${parts.join("\n\n")}`;
       });
     }
   }
-  runSettlement();
+  if (!pendingDefersCapture) runSettlement();
   clearRegisters({
-    preservePendingDeclaration: Boolean(pendingDetail) && !hasCaptureDuty,
-    outstandingResearchEvents: outstandingDeferredResearchEvents
+    preservePendingDeclaration: Boolean(pendingDetail) && (!hasCaptureDuty || pendingDefersCapture),
+    outstandingResearchEvents: outstandingDeferredResearchEvents,
+    retainedCaptureEvents: pendingDefersCapture ? activeDebugEvents : null
   });
+  if (pendingDefersCapture && !pendingHeld) spendPendingGrace();
   releaseWithPressure();
 } catch (e) {
   if (e?.h10ReleaseInFlight === true) {

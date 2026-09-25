@@ -5534,6 +5534,22 @@ var JournalDemotionRefusedError = class extends Error {
     this.name = "JournalDemotionRefusedError";
   }
 };
+var DECLARED_CAPTURE_OWED_PREFIX = "capture owed: declared pending (";
+var DECLARED_CAPTURE_TARGET_TRAILER = " [target ";
+function declaredCaptureTarget(text) {
+  if (typeof text !== "string" || !text.startsWith(DECLARED_CAPTURE_OWED_PREFIX) || !text.endsWith('"]'))
+    return null;
+  const at = text.lastIndexOf(`${DECLARED_CAPTURE_TARGET_TRAILER}"`);
+  if (at < 0)
+    return null;
+  let target;
+  try {
+    target = JSON.parse(text.slice(at + DECLARED_CAPTURE_TARGET_TRAILER.length, -1));
+  } catch {
+    return null;
+  }
+  return typeof target === "string" && target.length > 0 ? target : null;
+}
 function buildReconcileText(owner, fileKeys) {
   const files = [...fileKeys].sort();
   return owner.type === "reference_material" ? `reconcile reference '${owner.title ?? ""}' \u2014 its document changed content in direct mode (settled): ${files.join(", ")}; refresh summary + source_date (\xA73.2.5)` : `reconcile article '${owner.slug ?? ""}' \u2014 owned file(s) changed content in direct mode (settled): ${files.join(", ")}`;
@@ -6413,6 +6429,9 @@ var SterlingStore = class _SterlingStore {
       throw new Error(`enqueueSystemTodo: a state_review item requires feature_link \u2014 this lane's identity IS the article, and without one two unrelated state_review mints could silently collapse. Pass feature_link: <article id>.`);
     }
     const keyOf = (t) => {
+      const declaredTarget = t.system_reason === "capture_owed" ? declaredCaptureTarget(t.text) : null;
+      if (declaredTarget !== null)
+        return JSON.stringify(["capture_owed", t.feature_link ?? "", [], `declared-target:${declaredTarget}`]);
       const files = t.system_reason === "state_review" ? [] : [...t.file_keys ?? []].sort();
       const identified = !!t.feature_link || files.length > 0;
       return JSON.stringify([t.system_reason ?? "", t.feature_link ?? "", files, identified ? "" : t.text ?? ""]);
