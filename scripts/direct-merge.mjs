@@ -27,10 +27,16 @@ import { inspectAttestations, readAttestationGlobs, attestationDisclosureLines, 
 const target = arg('--target') ?? process.cwd();
 if (!isGitRepo(target)) fail(`direct-merge: not a git repository: '${target}'`);
 
+// Pre-merge preflight: openProject fails loud on a missing store or malformed
+// config BEFORE anything lands (see the post-merge note below).
+openProject(target).store.close();
+
 // PROJECT MODE decides the flow, read ONLY through readProjectMode (a missing
 // key is hobby). An invalid value refuses before anything runs — the flow is
-// never guessed. Work-only preconditions are checked here too, cheap and
-// before the battery: --no-push cannot ship a PR, and gh must be usable.
+// never guessed. Read AFTER openProject, so a malformed config keeps its own
+// loud refusal (ruling e13f0fb5) and hobby behaviour is unchanged. Work-only
+// preconditions are checked here too, cheap and before the battery: --no-push
+// cannot ship a PR, and gh must be usable.
 let mode;
 try {
   mode = readProjectMode(target);
@@ -50,10 +56,6 @@ if (mode === 'work') {
   if (pre.refusal) fail(pre.refusal, 2);
   workRepo = pre.repo;
 }
-
-// Pre-merge preflight: openProject fails loud on a missing store or malformed
-// config BEFORE anything lands (see the post-merge note below).
-openProject(target).store.close();
 
 const into = arg('--into') ?? defaultBranch(target);
 const branch = arg('--branch') ?? currentBranch(target);
